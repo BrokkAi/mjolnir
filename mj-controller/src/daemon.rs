@@ -212,8 +212,12 @@ pub(crate) enum QuotaRefreshIntent {
     ReconcileSources,
     /// Probe these profiles once even though they sit outside the enabled
     /// batch (for `mj quota --with-disabled`); their reports stay served until
-    /// their identities change.
-    ProbeProfiles(Vec<crate::quota::QuotaRefreshRequest>),
+    /// their identities change. A forced probe answers now, off the profile's
+    /// schedule, even with a fresh report.
+    ProbeProfiles {
+        requests: Vec<crate::quota::QuotaRefreshRequest>,
+        forced: bool,
+    },
 }
 
 struct SurfaceNotice {

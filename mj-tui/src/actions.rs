@@ -2114,7 +2114,7 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::SessionUsageReport => {
-                self.begin_session_usage_report();
+                self.begin_session_usage_report(None);
                 DashboardAction::None
             }
             CommandId::NoticeLog => {

@@ -40,6 +40,8 @@ pub(super) struct Policy {
     credentials: CredentialSyncCoordinator,
     signals: CredentialSyncSignalTracker,
     notices: CredentialSyncNotices,
+    /// Sequence of the last named forced probe published in the batch.
+    next_forced_probe: u64,
 }
 
 #[derive(Default)]
@@ -238,6 +240,7 @@ impl Policy {
             credentials,
             signals: CredentialSyncSignalTracker::default(),
             notices: CredentialSyncNotices::default(),
+            next_forced_probe: 0,
         };
         policy.sync(false);
         policy
@@ -278,8 +281,8 @@ impl Policy {
             match intent {
                 crate::daemon::QuotaRefreshIntent::Force => force = true,
                 crate::daemon::QuotaRefreshIntent::ReconcileSources => reconcile = true,
-                crate::daemon::QuotaRefreshIntent::ProbeProfiles(requests) => {
-                    probes.extend(requests)
+                crate::daemon::QuotaRefreshIntent::ProbeProfiles { requests, forced } => {
+                    probes.extend(requests.into_iter().map(|request| (request, forced)))
                 }
             }
         }
@@ -294,11 +297,22 @@ impl Policy {
         }
     }
 
-    /// One-off probes for profiles outside the batch (a `mj quota
-    /// --with-disabled` read): each is probed once on arrival, and its
-    /// publication stays until the profile's identity changes.
-    fn probe_profiles(&mut self, requests: Vec<crate::quota::QuotaRefreshRequest>) {
-        for request in requests {
+    /// One-off probes: a plain one names a profile the asker wants read once
+    /// (a `mj quota --with-disabled` read of a disabled profile), and its
+    /// publication stays until the profile's identity changes. A forced one is
+    /// a person asking to refresh that row now: it probes even a fresh
+    /// in-batch report, and re-probes an extra it already answered.
+    fn probe_profiles(&mut self, requests: Vec<(crate::quota::QuotaRefreshRequest, bool)>) {
+        for (request, force) in requests {
+            if force {
+                // A new sequence per request, retained in the batch: the
+                // poller answers every sequence it has not seen, however many
+                // publishes the watch channel coalesced in between.
+                self.next_forced_probe += 1;
+                self.batch
+                    .forced_probes
+                    .insert(request.profile_id.clone(), self.next_forced_probe);
+            }
             if self
                 .batch
                 .profiles
