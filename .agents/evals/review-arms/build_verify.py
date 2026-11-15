@@ -71,6 +71,10 @@ if a.ready_jobs:
     jobs = json.loads(pathlib.Path(a.ready_jobs).read_text())
     pending = {j["bug"] for j in jobs if not (ROOT / "runs" / j["bug"] / j["arm"] / "done.json").exists()}
     ready = {j["bug"] for j in jobs} - pending
+# A selected arm listed in --ready-jobs is awaited only on the diffs where it has jobs
+# (review-arms stage 4 ran arms I and J on some diffs). A selected arm the file does not
+# list must finish on every diff, as without --ready-jobs.
+awaited = [arm for arm in arms if not (a.ready_jobs and arm in {j["arm"] for j in jobs})] if arms else []
 
 by_diff, key, unparsed, covered = {}, {}, [], []
 for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
@@ -80,12 +84,9 @@ for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
         continue
     if (arms is not None and done["arm"] not in arms) or (only is not None and done["bug"] not in only):
         continue
-    # With --arms and no --ready-jobs, a diff is batched only once every selected arm
-    # has finished on it; batching it earlier would leave the later arm out of its pool
-    # for good. A --ready-jobs file instead names each diff's jobs, so arms that ran on
-    # only some diffs (review-arms stage 4: I and J) do not hold the others back.
-    if arms is not None and ready is None and not all(
-            (ROOT / "runs" / done["bug"] / arm / "done.json").exists() for arm in arms):
+    # With --arms, a diff is batched only once every awaited arm has finished on it;
+    # batching it earlier would leave the later arm out of its pool for good.
+    if not all((ROOT / "runs" / done["bug"] / arm / "done.json").exists() for arm in awaited):
         continue
     for r in done["reviewers"]:
         if a.configs and f"{r['model']}:{r['effort']}" not in a.configs.split(","):
