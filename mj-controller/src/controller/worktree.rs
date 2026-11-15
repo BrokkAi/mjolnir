@@ -1218,14 +1218,11 @@ pub(super) fn raw_checkout_snapshot(
     git: &dyn mj_checkpoint::archive::GitCommandRunner,
     managed_clone: bool,
 ) -> Result<mj_checkpoint::archive::RepositorySnapshot> {
-    // Bundling "everything not on origin" only works when origin refs exist:
-    // every bundle prerequisite then sits on the remote the container clones.
-    mj_checkpoint::checkpoint::repair_origin_refs(git, checkout, repository_id)?;
+    let base = raw_checkout_base(git, checkout, repository_id)?;
     reject_dirty_submodules_for_move(git, checkout)?;
-    let boundary = origin_boundary_commit(git, checkout)?;
     let history = if managed_clone {
         mj_checkpoint::archive::GitHistoryMode::CloneFrom(
-            boundary
+            base.origin_boundary
                 .clone()
                 .context("managed clone has no origin boundary commit")?,
         )
@@ -1253,9 +1250,38 @@ pub(super) fn raw_checkout_snapshot(
         .map(|url| mj_checkpoint::archive::redact_origin_credentials(url))
         .collect::<Result<Vec<_>>>()?;
     snapshot.metadata.remote_workspace = true;
-    snapshot.metadata.base_commit =
-        boundary.unwrap_or_else(|| snapshot.metadata.head_commit.clone());
+    snapshot.metadata.base_commit = base.commit;
     Ok(snapshot)
+}
+
+pub(super) struct RawCheckoutBase {
+    origin_boundary: Option<String>,
+    pub(super) commit: String,
+}
+
+/// The existing host-to-workspace conversion boundary, shared by full
+/// repository snapshots and Move's metadata-only handoff.
+pub(super) fn raw_checkout_base(
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
+    checkout: &Path,
+    repository_id: &str,
+) -> Result<RawCheckoutBase> {
+    // A bundle's prerequisites must already be durable at the cloned origin.
+    mj_checkpoint::checkpoint::repair_origin_refs(git, checkout, repository_id)?;
+    let origin_boundary = origin_boundary_commit(git, checkout)?;
+    let commit = match &origin_boundary {
+        Some(boundary) => boundary.clone(),
+        None => git_runner_stdout(
+            git,
+            checkout,
+            ["rev-parse", "HEAD"],
+            "read durable checkout HEAD",
+        )?,
+    };
+    Ok(RawCheckoutBase {
+        origin_boundary,
+        commit,
+    })
 }
 
 /// The newest commit the checkout shares with `origin`, which is where a

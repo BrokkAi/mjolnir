@@ -283,6 +283,16 @@ pub fn capture(
             .filter_map(|line| line.split_whitespace().nth(1))
             .collect();
         bundle_args.extend(stash_hashes);
+        // A force push/reset can leave the immutable launch base unreachable
+        // from every ref, but the next checkpoint still needs that object.
+        let managed_base = match &repository.base_commit {
+            Some(base) => Some(base.clone()),
+            None => mj_checkpoint::archive::remote_workspace_base(
+                &mj_checkpoint::archive::SystemGit,
+                &root,
+            )?,
+        };
+        bundle_args.extend(managed_base.as_deref());
         git_file(&root, &bundle_args, &stage.join("git-output"))?;
         fs::remove_file(stage.join("git-output"))?;
         git_file(
@@ -672,6 +682,7 @@ mod tests {
         let stage = directory.path().join("move-stage");
         let manifest = capture(
             &[WorkspaceRepository {
+                base_commit: None,
                 id: "repo".into(),
                 root: source.clone(),
             }],
@@ -686,6 +697,7 @@ mod tests {
         restore(
             &stage,
             &[WorkspaceRepository {
+                base_commit: None,
                 id: "repo".into(),
                 root: target.clone(),
             }],
@@ -708,6 +720,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         init(directory.path());
         let repositories = [WorkspaceRepository {
+            base_commit: None,
             id: "repo".into(),
             root: directory.path().into(),
         }];
@@ -872,6 +885,7 @@ mod tests {
         fs::write(source.join(".env"), "private").unwrap();
         fs::write(source.join("config.json"), "{\"flow\":4}").unwrap();
         let repos = vec![WorkspaceRepository {
+            base_commit: None,
             id: "repo".into(),
             root: source.clone(),
         }];
@@ -931,6 +945,7 @@ fi
         restore(
             &stage,
             &[WorkspaceRepository {
+                base_commit: None,
                 id: "repo".into(),
                 root: target.clone(),
             }],

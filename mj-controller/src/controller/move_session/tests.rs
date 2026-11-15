@@ -2378,6 +2378,7 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
     assert_eq!(
         restored,
         [mj_core::move_workspace::WorkspaceRepository {
+            base_commit: None,
             // The transfer names the repository as the source captured it.
             id: HOST_CHECKOUT_REPOSITORY.into(),
             root: cloned[0].clone(),
@@ -2500,6 +2501,7 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
             .repositories
             .iter()
             .map(|repository| WorkspaceRepository {
+                base_commit: None,
                 id: repository.id.clone(),
                 root: container_checkout.clone(),
             })

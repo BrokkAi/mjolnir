@@ -12,6 +12,7 @@ fn repositories(
         .repositories
         .iter()
         .map(|repo| WorkspaceRepository {
+            base_commit: None,
             id: repo.id.clone(),
             root: mj_core::target_path::join(
                 Path::new(&layout.workspace_root),
@@ -19,6 +20,113 @@ fn repositories(
             ),
         })
         .collect()
+}
+
+fn move_handoff_base(
+    source: &mj_core::state::SessionRecord,
+    metadata: &mj_checkpoint::archive::RepositoryMetadata,
+) -> Result<String> {
+    if let Some(base) = source
+        .managed_worktree
+        .as_ref()
+        .and_then(|checkout| checkout.base_commit.as_ref())
+    {
+        return Ok(base.clone());
+    }
+    if metadata.remote_workspace {
+        return Ok(metadata.base_commit.clone());
+    }
+    if let Some(checkout) = source.checkout().project_directory() {
+        return Ok(super::super::worktree::raw_checkout_base(
+            &mj_checkpoint::archive::SystemGit,
+            checkout,
+            &metadata.id,
+        )?
+        .commit);
+    }
+    // Remote captures own their immutable base. Moves require an idle source,
+    // whose worker is upgraded before capture; do not infer a base at restore.
+    Ok(metadata.base_commit.clone())
+}
+
+fn record_move_handoff_bases(
+    source: &mj_core::state::SessionRecord,
+    handoff: &mj_core::state::CheckpointMetadata,
+) -> Result<mj_core::state::CheckpointMetadata> {
+    let archive = super::super::resume::verify_resume_checkpoint(&source.id, handoff)?;
+    let mut changed = Vec::new();
+    for repository in &archive.manifest.repositories {
+        let base = move_handoff_base(source, &repository.metadata)?;
+        let mut metadata = repository.metadata.clone();
+        metadata.base_commit = base;
+        if source.checkout().project_directory().is_some() {
+            metadata.remote_workspace = true;
+        }
+        if metadata != repository.metadata {
+            changed.push(metadata);
+        }
+    }
+    if changed.is_empty() {
+        return Ok(handoff.clone());
+    }
+    ensure!(
+        archive.manifest.repositories.len() == 1 && changed.len() == 1,
+        "a host Move handoff must contain its one repository"
+    );
+    let metadata = changed.pop().unwrap();
+    ensure!(
+        metadata.review_refs_metadata_only,
+        "Move handoff contains repository payloads"
+    );
+    let output = handoff
+        .archive_path
+        .parent()
+        .context("Move handoff has no parent")?
+        .join(format!(
+            "{}-{}-{}.hel.zip",
+            source.id,
+            handoff.event_frontier,
+            new_command_id("archive")?,
+        ));
+    super::super::resume::conversion_checkpoint(
+        &handoff.archive_path,
+        mj_checkpoint::archive::RepositorySnapshot {
+            metadata,
+            committed_bundle: Vec::new(),
+            staged_patch: Vec::new(),
+            unstaged_patch: Vec::new(),
+            untracked_tar: Vec::new(),
+            operation_payloads: None,
+        },
+        &output,
+    )
+}
+
+fn move_repository_base<'a>(
+    manifest: &'a mj_checkpoint::archive::ArchiveManifest,
+    id: &str,
+) -> Result<&'a str> {
+    let metadata = &manifest
+        .repositories
+        .iter()
+        .find(|entry| entry.metadata.id == id)
+        .with_context(|| format!("Move checkpoint repository {id} missing"))?
+        .metadata;
+    ensure!(
+        !metadata.base_commit.is_empty(),
+        "Move checkpoint repository {id} has no base"
+    );
+    Ok(&metadata.base_commit)
+}
+
+fn repositories_with_bases(
+    mut repositories: Vec<WorkspaceRepository>,
+    manifest: &mj_checkpoint::archive::ArchiveManifest,
+) -> Result<Vec<WorkspaceRepository>> {
+    for repository in &mut repositories {
+        repository.base_commit = Some(move_repository_base(manifest, &repository.id)?.to_owned());
+    }
+    Ok(repositories)
 }
 
 fn finalize_move_repositories(
@@ -29,18 +137,12 @@ fn finalize_move_repositories(
     manifest: &mj_checkpoint::archive::ArchiveManifest,
 ) -> Result<()> {
     for repository in repositories {
-        let metadata = &manifest
-            .repositories
-            .iter()
-            .find(|entry| entry.metadata.id == repository.id)
-            .with_context(|| format!("Move checkpoint repository {} missing", repository.id))?
-            .metadata;
         super::super::network_git::configure_workspace(
             executor,
             backend,
             id,
             &repository.root,
-            &metadata.base_commit,
+            move_repository_base(manifest, &repository.id)?,
         )?;
     }
     Ok(())
@@ -893,6 +995,25 @@ impl Controller {
             .clone();
         let layout = self.session_export_layout(id, executor)?;
         if transfer.phase == WorkspaceTransferPhase::Planned {
+            let destination = operation
+                .selection
+                .target_template_id
+                .as_deref()
+                .unwrap_or(&transfer.source.target_template_id);
+            let target = self
+                .config
+                .targets
+                .get(destination)
+                .context("Move target missing")?;
+            if !mj_core::config::is_bare_project_target(target) {
+                let handoff = operation.handoff.as_ref().context("Move handoff missing")?;
+                operation.handoff = Some(record_move_handoff_bases(&transfer.source, handoff)?);
+                crate::database::save_move_operation(operation)?;
+            }
+            let handoff = operation.handoff.as_ref().context("Move handoff missing")?;
+            let archive = super::super::resume::verify_resume_checkpoint(id, handoff)?;
+            let capture_repositories =
+                repositories_with_bases(repositories(&layout), &archive.manifest)?;
             // The target utility holds the stage's file lock before reusing
             // or replacing an incomplete capture, including after a lost ACK.
             utility(
@@ -900,7 +1021,7 @@ impl Controller {
                 &layout.backend,
                 id,
                 &WorkspaceCommand::Capture {
-                    repositories: repositories(&layout),
+                    repositories: capture_repositories,
                     selection: operation.selection.workspace.clone(),
                     destination: transfer.source_stage.clone(),
                 },
@@ -1022,6 +1143,7 @@ impl Controller {
             repositories(&layout)
                 .into_iter()
                 .map(|repository| WorkspaceRepository {
+                    base_commit: None,
                     id: source_id.clone(),
                     root: repository.root,
                 })
@@ -1031,6 +1153,7 @@ impl Controller {
                 .1
                 .into_iter()
                 .map(|(source_id, repository)| WorkspaceRepository {
+                    base_commit: None,
                     id: source_id,
                     root: mj_core::target_path::join(
                         Path::new(&layout.workspace_root),
@@ -1355,10 +1478,11 @@ mod tests {
     #[test]
     fn moved_bundle_exports_each_repository_with_its_original_base() {
         use crate::controller::test_support::{
-            checkpoint_archive_input, committed_repository, test_git,
+            checkpoint_archive_input, checkpoint_test_session, committed_repository, test_git,
         };
         use mj_checkpoint::archive::{
-            GitCollectionSpec, GitHistoryMode, SystemGit, collect_git_metadata_snapshot,
+            GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, SystemGit,
+            collect_git_metadata_snapshot,
         };
         use mj_checkpoint::checkpoint::{
             CHECKPOINT_EXPORT_PROTOCOL_VERSION, CheckpointExportSpec, CheckpointRepositoryCapture,
@@ -1372,7 +1496,11 @@ mod tests {
         for path in [&workspace, &relay, &home] {
             std::fs::create_dir_all(path).unwrap();
         }
-        let sources = [committed_repository(), committed_repository()];
+        let sources = [
+            committed_repository(),
+            committed_repository(),
+            committed_repository(),
+        ];
         let mut source_repositories = Vec::new();
         let mut destinations = Vec::new();
         let mut snapshots = Vec::new();
@@ -1383,13 +1511,26 @@ mod tests {
             // mixups and accidentally substituting the transferred HEAD.
             test_git(source.path(), &["commit", "--allow-empty", "-m", &id]);
             let base = test_git(source.path(), &["rev-parse", "HEAD"]);
-            test_git(source.path(), &["config", "mj.baseCommit", &base]);
-            test_git(source.path(), &["config", "mj.remoteWorkspace", "true"]);
+            if index == 1 {
+                test_git(source.path(), &["config", "mj.baseCommit", &base]);
+                test_git(source.path(), &["config", "mj.remoteWorkspace", "true"]);
+            }
+            if index != 2 {
+                // Both host and remote sessions can abandon the launch commit.
+                test_git(source.path(), &["reset", "--hard", "HEAD^"]);
+            }
             test_git(
                 source.path(),
                 &["commit", "--allow-empty", "-m", "later work"],
             );
-            let snapshot = collect_git_metadata_snapshot(
+            if index == 2 {
+                // An unmanaged host's local commit must remain in future bundles.
+                test_git(
+                    source.path(),
+                    &["update-ref", "refs/remotes/origin/master", &base],
+                );
+            }
+            let mut snapshot = collect_git_metadata_snapshot(
                 &SystemGit,
                 source.path(),
                 &GitCollectionSpec {
@@ -1400,17 +1541,66 @@ mod tests {
                 },
             )
             .unwrap();
+            let source_id = format!("move-source-{index}");
+            let mut source_record = checkpoint_test_session(&source_id);
+            if index != 1 {
+                source_record.project_directory = Some(source.path().into());
+            }
+            if index == 0 {
+                // A host worktree (or an older capture) reports HEAD as its
+                // metadata base; the controller's persisted launch base wins.
+                source_record.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+                    kind: mj_core::state::ManagedCheckoutKind::Worktree,
+                    source_project_directory: source.path().into(),
+                    source_repository: source.path().into(),
+                    worktree_root: source.path().into(),
+                    branch: "master".into(),
+                    target: mj_core::state::ManagedWorktreeTarget::Local,
+                    base_commit: Some(base.clone()),
+                }));
+            }
+            let mut handoff_input =
+                checkpoint_archive_input(&source_id, 0, vec![snapshot.clone()], Vec::new());
+            handoff_input.bundle.primary_repository = id.clone();
+            let handoff = crate::controller::test_support::write_checkpoint_archive_input(
+                &directory.path().join("handoffs"),
+                &source_id,
+                &handoff_input,
+            );
+            let handoff = record_move_handoff_bases(&source_record, &handoff).unwrap();
+            snapshot.metadata =
+                mj_checkpoint::archive::read_checkpoint_manifest(&handoff.archive_path)
+                    .unwrap()
+                    .repositories
+                    .remove(0)
+                    .metadata;
             snapshots.push(snapshot);
-            bases.push(base);
+            bases.push(base.clone());
             let destination = workspace.join(&id);
             test_git(
                 directory.path(),
                 &[
                     "clone",
+                    "--no-local",
                     source.path().to_str().unwrap(),
                     destination.to_str().unwrap(),
                 ],
             );
+            if index != 2 {
+                let probe = SystemGit
+                    .run(
+                        &destination,
+                        &GitCommand {
+                            arguments: vec!["cat-file".into(), "-e".into(), base.into()],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                assert_ne!(
+                    probe.status, 0,
+                    "the fresh clone must lack the abandoned base"
+                );
+            }
             test_git(
                 &destination,
                 &[
@@ -1426,22 +1616,16 @@ mod tests {
                     .is_none()
             );
             source_repositories.push(WorkspaceRepository {
+                base_commit: None,
                 id: id.clone(),
                 root: source.path().into(),
             });
             destinations.push(WorkspaceRepository {
+                base_commit: None,
                 id,
                 root: destination,
             });
         }
-        let stage = directory.path().join("transfer");
-        mj_worker::move_workspace::capture(
-            &source_repositories,
-            &WorkspaceSelection::default(),
-            &stage,
-        )
-        .unwrap();
-        mj_worker::move_workspace::restore(&stage, &destinations).unwrap();
         let mut input = checkpoint_archive_input("move-managed-bundle", 0, snapshots, Vec::new());
         input.bundle.primary_repository = "repo0".into();
         let checkpoint = crate::controller::test_support::write_checkpoint_archive_input(
@@ -1451,6 +1635,15 @@ mod tests {
         );
         let manifest =
             mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path).unwrap();
+        let source_repositories = repositories_with_bases(source_repositories, &manifest).unwrap();
+        let stage = directory.path().join("transfer");
+        mj_worker::move_workspace::capture(
+            &source_repositories,
+            &WorkspaceSelection::default(),
+            &stage,
+        )
+        .unwrap();
+        mj_worker::move_workspace::restore(&stage, &destinations).unwrap();
         finalize_move_repositories(
             &targets::ProcessExecutor,
             &targets::TargetLocator::LocalBare {
@@ -1561,6 +1754,30 @@ mod tests {
                 path: "excluded".into(),
             });
         operation.phase = MovePhase::ResumingDestination;
+        let snapshot = mj_checkpoint::archive::collect_git_metadata_snapshot(
+            &mj_checkpoint::archive::SystemGit,
+            source.path(),
+            &mj_checkpoint::archive::GitCollectionSpec {
+                id: "project".into(),
+                relative_destination: "project".into(),
+                history: mj_checkpoint::archive::GitHistoryMode::NoBundle,
+                origin_override: None,
+            },
+        )
+        .unwrap();
+        let archive_input = crate::controller::test_support::checkpoint_archive_input(
+            id,
+            0,
+            vec![snapshot],
+            Vec::new(),
+        );
+        operation.handoff = Some(
+            crate::controller::test_support::write_checkpoint_archive_input(
+                &mj_core::config::data_dir(),
+                id,
+                &archive_input,
+            ),
+        );
         let executor = Executor(std::sync::atomic::AtomicBool::new(true));
         let mut controller = Controller {
             config: resume_compatibility_config(),
@@ -1569,6 +1786,7 @@ mod tests {
         controller.state.sessions.insert(id.into(), session.clone());
         crate::database::save_session(&session).unwrap();
         let assessment = mj_worker::move_workspace::inspect(&[WorkspaceRepository {
+            base_commit: None,
             id: "project".into(),
             root: source.path().into(),
         }])
