@@ -1828,9 +1828,7 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
     assert_eq!(dashboard.selected_session().unwrap().id, "new-session");
 }
 
-/// A failed session has two reasonable answers to Enter, and recovery
-/// replaces the target, so the surface asks instead of guessing. The row
-/// is red before the key is ever pressed, so the dialog is not a surprise.
+/// A failed session offers both inspection and recovery.
 #[test]
 fn enter_on_a_failed_session_offers_recovery_and_the_transcript() {
     let mut session = stopped_session();
@@ -1882,12 +1880,11 @@ fn enter_on_a_failed_session_offers_recovery_and_the_transcript() {
     assert_eq!(dashboard.focus, Focus::Prompt);
 }
 
-/// Recovery is only on offer when there is a verified copy to recover
-/// from; without one the prompt says so rather than showing a button that
-/// cannot work.
+/// An absent environment with no archive cannot be recovered.
 #[test]
 fn a_failed_session_without_a_recovery_copy_is_not_offered_recovery() {
     let mut session = stopped_session();
+    session.target = None;
     session.state = SessionState::Error;
     session.checkpoint = None;
     session.last_error = Some("worker bootstrap failed".into());
@@ -1905,6 +1902,23 @@ fn a_failed_session_without_a_recovery_copy_is_not_offered_recovery() {
             recoverable: false,
         }
     );
+}
+
+// Hard-won: 94d7 resume: failed sessions could retain current work without an archive.
+#[test]
+fn a_failed_session_with_a_retained_target_offers_resume_without_an_archive() {
+    let mut session = stopped_session();
+    session.state = SessionState::Error;
+    session.checkpoint = None;
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/retained/session-1".into(),
+    }));
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(&dashboard.mode, Mode::Confirm(dialog)
+        if matches!(dialog.confirmation, Confirmation::RecoverFailed { recoverable: true, .. })));
+    dashboard.begin_resume_for("session-1");
+    assert!(matches!(dashboard.mode, Mode::Resume(_)));
 }
 
 /// Two running sessions in the active workspace, so a pane can be given one
