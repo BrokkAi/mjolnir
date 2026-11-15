@@ -556,9 +556,13 @@ pub(super) async fn run_session_actor(
                                         session_id = target.session_id,
                                         "automatic worker recovery suppressed by durable lifecycle or target change"
                                     );
-                                    // The desired-target refresher will remove or replace this
-                                    // stale actor. It must not reconnect in the meantime.
-                                    break;
+                                    // Suppression performed no probe. Retry recovery on
+                                    // the next backed-off reconnect when ownership permits.
+                                    last_recovery_probe = None;
+                                    // Only the desired-target owner retires this actor.
+                                    // Exiting here makes reconciliation respawn it with
+                                    // a fresh failure count, bypassing reconnect backoff.
+                                    schedule.after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::TargetMissing) => {
                                     let snapshot = view_tx.borrow().snapshot.clone();

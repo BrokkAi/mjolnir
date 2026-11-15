@@ -4611,3 +4611,100 @@ async fn next_policy_update(updates: &mut SessionManagerUpdates) -> SessionManag
     .await
     .unwrap()
 }
+
+#[cfg(unix)]
+// Hard-won: 94d7 container removal: relay hello retried ~10/s with no backoff after its container vanished
+#[tokio::test]
+async fn suppressed_recovery_preserves_hello_backoff() {
+    const CHILD: &str = "MJ_TEST_SUPPRESSED_HELLO_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(CHILD, "suppressed_recovery_preserves_hello_backoff");
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    // The durable target differs from this actor's stale recovery plan.
+    let root = tempfile::tempdir().unwrap();
+    let attempts = root.path().join("attempts");
+    let probed = root.path().join("probed");
+    let mut probe = CommandSpec::new("sh", ["-c", "touch \"$PROBED\"; printf starting"])
+        .purpose("record recovery probe");
+    probe
+        .env
+        .insert("PROBED".into(), probed.to_string_lossy().into_owned());
+    let mut spec = CommandSpec::new("sh", ["-c", "echo attempt >> \"$ATTEMPTS\"; exit 1"])
+        .purpose("failed relay hello");
+    spec.env
+        .insert("ATTEMPTS".into(), attempts.to_string_lossy().into_owned());
+    let target = RelaySessionTarget {
+        session_id: LEASED_RELAY_SESSION.into(),
+        spec,
+        worker_recovery: Some(WorkerRecoveryPlan {
+            source_target: recovery_source_target(),
+            target: None,
+            workspace: None,
+            exit_record: None,
+            liveness_probe: probe,
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: CommandPlan {
+                description: "unused restart".into(),
+                commands: vec![],
+            },
+        }),
+        project_memory: None,
+    };
+    let (_commands, commands_rx) = mpsc::channel(4);
+    let (_releases, releases_rx) = mpsc::unbounded_channel();
+    let (retirement, retirement_rx) = watch::channel(false);
+    let (view, mut views) = watch::channel(ManagedSessionView::default());
+    let (updates, _updates_rx) = coalesced_update_channel();
+    let actor = tokio::spawn(run_session_actor(
+        target,
+        commands_rx,
+        releases_rx,
+        retirement_rx,
+        view,
+        updates,
+    ));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            views.changed().await.unwrap();
+            if views.borrow_and_update().error.is_some() {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // Recovery suppression must retain the actor and its two-second delay.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !actor.is_finished(),
+        "suppression must not respawn a fresh reconnect owner"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&attempts).unwrap().lines().count(),
+        2
+    );
+    // Once eligible, recovery must not wait out a cooldown for a probe
+    // that suppression never performed.
+    let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    record.target = Some(Box::new(recovery_source_target()));
+    crate::database::save_session(&record).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !probed.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("suppression must not consume the recovery cooldown");
+    assert_eq!(
+        std::fs::read_to_string(&attempts).unwrap().lines().count(),
+        3
+    );
+    retirement.send(true).unwrap();
+    actor.await.unwrap();
+}
