@@ -141,10 +141,13 @@ def run_job(job):
         if (d / "launch-intent.json").exists():
             # A dispatched run may have finished, and been charged, after its CLI stopped:
             # fetch it instead of paying again. Only a cancelled or failed run is dispatched again.
-            # Only a run this launch created: one made after its intent was recorded.
-            since = json.loads((d / "launch-intent.json").read_text())["time_ns"] / 1e9
+            # Only a run this launch created: one absent from the runs saved before it.
+            # (Comparing local and server clocks would not show that.)
+            intent = json.loads((d / "launch-intent.json").read_text())
+            if "prior_runs" not in intent:
+                raise RuntimeError(f"{d}/launch-intent.json predates prior_runs; resolve this job by hand")
             live = [r for r in runs_for(bug["intro_commit"], bug["base_commit"])
-                    if iso_s(r["createdAt"]) >= since and r["status"] != "CANCELLED" and tier_of(r) == tier]
+                    if r["runId"] not in intent["prior_runs"] and r["status"] != "CANCELLED" and tier_of(r) == tier]
             if live:
                 finish(d, bug, tier, live[0]["runId"])
                 return "recovered"
@@ -153,14 +156,19 @@ def run_job(job):
         release(wt, branch)
         git("worktree", "add", "-q", "-b", branch, str(wt), bug["intro_commit"])
         assert git("rev-parse", "HEAD", cwd=wt).strip() == bug["intro_commit"]
-        save(d / "launch-intent.json", {"bug": bug["id"], "tier": tier, "branch": branch, "time_ns": time.time_ns()})
+        prior = [r["runId"] for r in runs_for(bug["intro_commit"], bug["base_commit"])]
+        save(d / "launch-intent.json", {"bug": bug["id"], "tier": tier, "branch": branch, "time_ns": time.time_ns(),
+                                        "prior_runs": prior})
         cmd = ["greptile", "review", "--branch", bug["base_commit"], "--json"] + (["--plus"] if tier == "plus" else [])
         r = subprocess.run(cmd, cwd=wt, env=ENV, capture_output=True, text=True)
         (d / "review.log").write_text(r.stderr)
         if r.returncode:
             raise RuntimeError(f"greptile exit {r.returncode}: {r.stderr[-800:]}")
-        # The newest run for this commit is ours: jobs on one commit never run at the same time.
-        finish(d, bug, tier, runs_for(bug["intro_commit"], bug["base_commit"])[0]["runId"], r.stderr)
+        # Jobs on one commit never run at the same time, so exactly one run is new.
+        new = [x["runId"] for x in runs_for(bug["intro_commit"], bug["base_commit"]) if x["runId"] not in prior]
+        if len(new) != 1:
+            raise RuntimeError(f"expected one new Greptile run for {bug['id']}/{tier}, found {new}")
+        finish(d, bug, tier, new[0], r.stderr)
         return "done"
     finally:
         # Every exit path releases the checkout, including leftovers of an interrupted run.
