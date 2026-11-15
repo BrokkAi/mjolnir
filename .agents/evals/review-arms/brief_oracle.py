@@ -106,6 +106,7 @@ def collect():
             norm = lambda t: " ".join((t or "").removeprefix("- ").split())
             item_file = json.loads((W / f"item-{bug}.json").read_text())
             digest = hashlib.sha256(final.encode()).hexdigest()
+            decision = decisions.get(bug)
             factcheck.append({"id": bug, "group": r["group"], "census_fact": item_file["census"]["fact"],
                               "contains": r["edit"]["contains"], "carrier_item": carrier_item(r),
                               "rewritten": len(r["leak"]) > 1, "brief_sha256": digest, "final_brief": final})
