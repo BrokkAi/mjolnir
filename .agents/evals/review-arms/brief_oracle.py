@@ -182,10 +182,13 @@ def blind_collect(path):
     out = json.loads(pathlib.Path(path).read_text())
     assert not out["missing"], out["missing"]
     s = sets()
+    # Every P and S blind brief needs the check before stage B; a subset run is not completion.
+    assert sorted(r["id"] for r in out["results"]) == sorted(s["P"] + s["S"]), \
+        "blind leak check must cover exactly the primary and secondary diffs"
     rejected, rows = [], []
     for r in out["results"]:
         bug = r["id"]
-        assert bug in s["P"] + s["S"] and r["edit"] is None, f"{bug}: blind leak check covers P and S only"
+        assert r["edit"] is None, f"{bug}: blind leak check runs without the editor"
         d = ROOT / "briefs/blind" / bug
         save(d / "blind-leak.json", r)
         rows.append({"id": bug, "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],

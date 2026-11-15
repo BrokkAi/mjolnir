@@ -77,6 +77,10 @@ for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
         continue
     if (arms is not None and done["arm"] not in arms) or (only is not None and done["bug"] not in only):
         continue
+    # With --arms, a diff is batched only once every selected arm has finished on it;
+    # batching it earlier would leave the later arm out of its pool for good.
+    if arms is not None and not all((ROOT / "runs" / done["bug"] / arm / "done.json").exists() for arm in arms):
+        continue
     for r in done["reviewers"]:
         covered.append(r["child"])
         text = (run / "reviewers" / r["child"][:12] / "output.md").read_text()
