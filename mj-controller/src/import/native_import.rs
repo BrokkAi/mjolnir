@@ -72,7 +72,10 @@ pub fn import_native_session(
         }
         let path = native_snapshot.path().join(index.to_string());
         {
-            let mut source = artifact.reader()?;
+            let mut source = CancellableRead {
+                inner: artifact.reader()?,
+                control,
+            };
             let mut target = fs::File::create(&path)?;
             std::io::copy(&mut source, &mut target)?;
         }
@@ -714,4 +717,20 @@ fn native_import_artifacts_match(
         }
     }
     Ok(true)
+}
+
+/// Checks import cancellation before every read, so cancelling stops a copy
+/// of an arbitrarily large native file instead of waiting for it to finish.
+struct CancellableRead<'a, 'b, R> {
+    inner: R,
+    control: Option<&'a ImportControl<'b>>,
+}
+
+impl<R: std::io::Read> std::io::Read for CancellableRead<'_, '_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(control) = self.control {
+            control.check_cancelled().map_err(std::io::Error::other)?;
+        }
+        self.inner.read(buffer)
+    }
 }
