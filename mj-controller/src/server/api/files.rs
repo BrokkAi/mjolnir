@@ -170,23 +170,30 @@ pub(super) async fn read_file(
     };
     let resolved: String = url::form_urlencoded::byte_serialize(fetched.path.as_bytes()).collect();
     let length = fetched.len();
-    let stream = futures::stream::try_unfold(fetched.reader(), |mut reader| async move {
-        tokio::task::spawn_blocking(move || {
-            // This is an I/O chunk, not a transfer size limit.
-            let mut chunk = vec![0; 64 * 1024];
-            let count = std::io::Read::read(&mut reader, &mut chunk)?;
-            chunk.truncate(count);
-            Ok::<_, std::io::Error>(if count == 0 {
-                None
-            } else {
-                Some((chunk, reader))
-            })
-        })
-        .await
-        .map_err(std::io::Error::other)?
+    let shutdown = state.shutdown.clone();
+    let stream = futures::stream::try_unfold(fetched.reader(), move |mut reader| {
+        let shutdown = shutdown.clone();
+        async move {
+            tokio::select! {
+                biased;
+                // EOF means the whole artifact was delivered. An interrupted
+                // stream must fail even if compression removes Content-Length.
+                () = shutdown.cancelled() => Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "daemon stopped during fetched payload delivery",
+                )),
+                result = async move {
+                    tokio::task::spawn_blocking(move || {
+                        // An I/O chunk, not a transfer size limit.
+                        let mut chunk = vec![0; 64 * 1024];
+                        let count = std::io::Read::read(&mut reader, &mut chunk)?;
+                        chunk.truncate(count);
+                        Ok::<_, std::io::Error>(if count == 0 { None } else { Some((chunk, reader)) })
+                    }).await.map_err(std::io::Error::other)?
+                } => result,
+            }
+        }
     });
-    use futures::StreamExt as _;
-    let stream = stream.take_until(state.shutdown.clone().cancelled_owned());
     Ok((
         [
             (CONTENT_TYPE, content_type.to_owned()),

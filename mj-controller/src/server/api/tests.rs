@@ -5049,6 +5049,7 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
     }
 }
 
+// Hard-won: #1544: normal EOF on shutdown could publish a truncated gzip download.
 #[tokio::test]
 async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_resolved_to() {
     use mj_checkpoint::archive::{FetchMode, FetchedKind, FetchedPath};
@@ -5095,7 +5096,17 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), b"file bytes");
 
-    let payload = vec![0x83; 256 * 1024];
+    // Incompressible input keeps the gzip encoder from reading the whole
+    // artifact before emitting its first frame.
+    let mut noise = 0x2545_f491_4f6c_dd1du64;
+    let payload: Vec<_> = (0..256 * 1024)
+        .map(|_| {
+            noise ^= noise << 13;
+            noise ^= noise >> 7;
+            noise ^= noise << 17;
+            noise as u8
+        })
+        .collect();
     let (large_app, _) = fetch(FetchedKind::File, "/tmp/large.bin", &payload);
     let response = get(large_app, "/tmp/large.bin").await;
     assert_eq!(
@@ -5122,15 +5133,44 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
         ..FakeBackend::default()
     });
     let (stream_app, ..) = api_app(streaming_backend, |_| {});
-    let response = get(stream_app, "/tmp/large.bin").await;
+    let response = stream_app
+        .oneshot(
+            bearer(
+                Request::get("/api/v1/sessions/session-1/files?path=/tmp/large.bin")
+                    .header(axum::http::header::ACCEPT_ENCODING, "gzip"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.headers()[axum::http::header::CONTENT_ENCODING],
+        "gzip"
+    );
+    assert!(
+        !response
+            .headers()
+            .contains_key(axum::http::header::CONTENT_LENGTH)
+    );
     let mut body = response.into_body().into_data_stream();
     use futures::StreamExt as _;
     let first = body.next().await.unwrap().unwrap();
     assert!(first.len() < payload.len());
     shutdown.cancel();
+    let failed = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(frame) = body.next().await {
+            if frame.is_err() {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap();
     assert!(
-        body.next().await.is_none(),
-        "shutdown must end the stream immediately"
+        failed,
+        "shutdown must fail a gzip body, not finish a partial download normally"
     );
 
     // Manual restart has no upgrade gate closure. An interrupted preparation

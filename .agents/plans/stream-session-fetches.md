@@ -16,7 +16,8 @@ A user can fetch a large file or directory without allocating its full payload i
 - [x] (2026-11-15) Stream HTTP response bodies and CLI downloads; cancel preparation and response delivery on daemon shutdown.
 - [x] (2026-11-15) Real CLI and MCP 64 MiB transfers retry after daemon restart; source/receiver peaks 20,443,136 / 20,004,864 bytes; restart 2.77 seconds. Existing archive, HTTP stream, and subprocess cancellation regressions passed. Post-fix checks are recorded below.
 - [x] (2026-11-15) Initial full validation and restart acceptance passed; committed and merged upstream.
-- [x] (2026-11-15) Review fixes passed focused fetch/pipe tests, real restart plus staging cleanup, full affected-crate suites with the isolated mailbox timing rerun, formatting, and workspace Clippy. Prepare the reviewed commits for publication.
+- [x] (2026-11-15) Review fixes passed focused fetch/pipe tests, real restart plus staging cleanup, full affected-crate suites with the isolated mailbox timing rerun, formatting, and workspace Clippy; independent review passed.
+- [x] (2026-11-15) Post-review gzip interruption regression and workspace Clippy passed. Prepare the final correction for publication.
 
 ## Surprises & Discoveries
 
@@ -109,3 +110,7 @@ Review fixes, 2026-11-15: the live restart fixture confirmed that a killed recei
 Review validation update, 2026-11-15: the extended real restart test passed: CLI and MCP each transferred 67,108,864 bytes, source/receiver peak RSS was 20,561,920 / 19,976,192 bytes, and restart took 0.493 seconds. The new assertion found no remaining payload staging files. Artifact root: `target/reliability-artifacts/fetch-restart-seed-1544-2616494`. Both file-output tests passed, including the real RLIMIT_FSIZE write failure with a producer that otherwise sleeps indefinitely. Workspace Clippy and focused fetch tests passed. The final full run passed checkpoint 176, controller 2,659, and core 653 tests; one unrelated worker mailbox test missed its two-second lease timing assumption and is being rerun alone while the remaining suites continue.
 
 Final review-fix validation, 2026-11-15: full suites completed with only `expired_mailbox_hook_lease_starts_idle_wake_without_another_request` missing its pre-existing two-second timing assumption; that exact case passed on isolated rerun. Every other suite, including CLI startup/PTY integration and doctests, passed. This accounts for checkpoint 176, controller 2,659, core 653, worker 852 library + 5 binary plus integrations, and CLI 257 plus integrations. No additional implementation or validation remains before review and push.
+
+Post-review protocol check, 2026-11-15: a normal EOF during shutdown is unsafe when HTTP compression removes Content-Length: gzip can finish a valid encoding of only the delivered prefix. The fetch body now returns ConnectionAborted on shutdown instead of normal EOF. The existing HTTP integration case negotiates gzip with incompressible input and verifies the interrupted body fails. This preserves compression and makes incomplete compressed downloads reliably trigger the replacement retry path.
+
+Compressed-transfer completion, 2026-11-15: the full HTTP middleware regression negotiated gzip, confirmed compression removed Content-Length, and observed a body error after shutdown rather than successful EOF. The focused affected-route test and workspace Clippy passed; previously completed full suites remain applicable to the unchanged components.
