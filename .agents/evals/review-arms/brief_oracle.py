@@ -190,6 +190,12 @@ def blind_collect(path):
         bug = r["id"]
         assert r["edit"] is None, f"{bug}: blind leak check runs without the editor"
         d = ROOT / "briefs/blind" / bug
+        # The verdict holds only for the text it judged: the writer's brief as build saved it.
+        judged = json.loads((ROOT / "briefs/oracle-work" / f"item-{bug}.json").read_text())["blind_brief"]
+        writer = d / "brief-original.md" if (d / "brief-original.md").exists() else d / "brief.md"
+        if writer.read_text().strip() != judged.strip():
+            rejected.append((bug, ["the judged brief differs from the writer's brief; rerun build and the check"]))
+            continue
         save(d / "blind-leak.json", r)
         rows.append({"id": bug, "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],
                      "rewritten": r["final_brief"] is not None})
