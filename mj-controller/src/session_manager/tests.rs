@@ -71,7 +71,7 @@ async fn recovery_allows_preparation_longer_than_the_previous_thirty_second_dead
 async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
     let (commands, mut requests) = mpsc::channel(1);
     let control = SessionManagerControl {
-        readiness_failure: Default::default(),
+        harness_failure: Default::default(),
         model_policies: watch::channel(BTreeMap::new()).0,
         commands,
         session_cpu: watch::channel(SessionCpuTable::new()).1,
@@ -4711,102 +4711,57 @@ async fn suppressed_recovery_preserves_hello_backoff() {
 }
 
 #[cfg(unix)]
-// Hard-won: b2b519c3f review: queued timeouts outlived readiness and rejected writes consumed the only report.
+// Hard-won: 07d2 handoff: a recent unrelated record write armed the readiness timer and a fresh daemon failed a live session
 #[tokio::test]
-async fn readiness_failure_is_applied_serially_and_retried_after_rejection() {
-    const CHILD: &str = "MJ_TEST_SERIAL_READINESS_FAILURE_CHILD";
+async fn a_fresh_actor_cannot_fail_a_worker_before_its_first_sync() {
+    const CHILD: &str = "MJ_TEST_UNSYNCED_READINESS_CHILD";
     if std::env::var_os(CHILD).is_none() {
         run_in_isolated_child(
             CHILD,
-            "readiness_failure_is_applied_serially_and_retried_after_rejection",
+            "a_fresh_actor_cannot_fail_a_worker_before_its_first_sync",
         );
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    fail_if_the_actor_stalls("serialized readiness failure stalled");
     register_leased_relay_session();
-    let relay_root = tempfile::tempdir().unwrap();
+    let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    record.updated_at = chrono::Utc::now().to_rfc3339();
+    crate::database::save_session(&record).unwrap();
+    let root = tempfile::tempdir().unwrap();
     let (commands, commands_rx) = mpsc::channel(4);
     let (_releases, releases_rx) = mpsc::unbounded_channel();
     let (retirement, retirement_rx) = watch::channel(false);
-    let (view_tx, mut views) = watch::channel(ManagedSessionView::default());
+    let (view_tx, _views) = watch::channel(ManagedSessionView::default());
     let (updates, _updates_rx) = coalesced_update_channel();
-    let (attempt_tx, mut attempts) = mpsc::unbounded_channel();
-    let attempt_number = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let release_write = Arc::new(tokio::sync::Notify::new());
-    let release_handler = release_write.clone();
-    let request_log = relay_root.path().join(RELAY_REQUEST_LOG);
-    assert!(
-        updates
-            .readiness_failure
-            .set(Arc::new(move |id, timeout| {
-                let attempt_tx = attempt_tx.clone();
-                let attempt_number = attempt_number.clone();
-                let release = release_handler.clone();
-                let request_log = request_log.clone();
-                Box::pin(async move {
-                    let attempt = attempt_number.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let syncs = std::fs::read_to_string(&request_log)
-                        .unwrap()
-                        .lines()
-                        .filter(|line| *line == "attach")
-                        .count();
-                    attempt_tx.send((attempt, syncs)).unwrap();
-                    match attempt {
-                        0 => return Ok(false), // A lifecycle/revision guard rejected the write.
-                        1 => anyhow::bail!("injected store write failure"),
-                        2 => release.notified().await,
-                        _ => anyhow::bail!("an accepted write must not be applied again"),
-                    }
-                    tokio::task::spawn_blocking(move || {
-                        let mut controller = crate::controller::Controller::load()?;
-                        controller.fail_unready_session(
-                            &id,
-                            &timeout.cause(),
-                            &timeout.observed_updated_at,
-                        )
-                    })
-                    .await
-                    .context("apply test readiness failure")?
-                })
-            }))
-            .is_ok()
-    );
+    let mut target = leased_relay_target(root.path());
+    // A live worker whose first exchange is still in flight across handoff.
+    // No protocol bytes arrive until the actor is retired.
+    let started = root.path().join("started");
+    target.spec = CommandSpec::new("sh", ["-c", "touch \"$STARTED\"; exec sleep 1000"]);
+    target
+        .spec
+        .env
+        .insert("STARTED".into(), started.to_string_lossy().into_owned());
     let actor = tokio::spawn(run_session_actor(
-        leased_relay_target(relay_root.path()),
+        target,
         commands_rx,
         releases_rx,
         retirement_rx,
         view_tx,
         updates,
     ));
-    views
-        .wait_for(|view| view.connected && view.snapshot.is_some())
-        .await
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the live worker must be waiting on its first sync");
     tokio::time::pause();
-    tokio::time::advance(super::readiness::HARNESS_READINESS_TIMEOUT + Duration::from_secs(1))
-        .await;
+    tokio::time::advance(mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT * 2).await;
     tokio::time::resume();
-    let mut previous_syncs = 0;
-    for expected in 0..3 {
-        let (attempt, syncs) = attempts.recv().await.unwrap();
-        assert_eq!(attempt, expected);
-        assert!(
-            syncs > previous_syncs,
-            "a retry requires a later successful worker sync"
-        );
-        previous_syncs = syncs;
-    }
-    // The third handler is waiting just before its store write. A new view
-    // cannot be observed or overtake that decision inside the actor loop.
-    let (reply, mut response) = oneshot::channel();
-    commands.send(ActorCommand::Sync { reply }).await.unwrap();
-    tokio::task::yield_now().await;
-    assert!(matches!(
-        response.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
     assert_eq!(
         crate::database::load_session_record(LEASED_RELAY_SESSION)
             .unwrap()
@@ -4814,17 +4769,153 @@ async fn readiness_failure_is_applied_serially_and_retried_after_rejection() {
             .state,
         mj_core::state::SessionState::Running
     );
-    release_write.notify_one();
-    response.await.unwrap().unwrap();
-    let record = crate::database::load_session_record(LEASED_RELAY_SESSION)
-        .unwrap()
-        .unwrap();
-    assert_eq!(record.state, mj_core::state::SessionState::Error);
-    assert!(record.last_error.unwrap().contains("Restart agent"));
     retirement.send(true).unwrap();
+    drop(commands);
     actor.await.unwrap();
-    assert!(
-        attempts.try_recv().is_err(),
-        "only the accepted write completes this wait"
-    );
+}
+
+#[cfg(unix)]
+// Hard-won: 0353d626b review: a daemon handoff lost worker-reported startup failures.
+#[tokio::test]
+async fn harness_failures_persist_legacy_expiry_and_worker_reports() {
+    const CHILD: &str = "MJ_TEST_REPORTED_HARNESS_FAILURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "harness_failures_persist_legacy_expiry_and_worker_reports",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    fail_if_the_actor_stalls("serialized readiness failure stalled");
+    for worker_deadline in [false, true] {
+        register_leased_relay_session();
+        let relay_root = tempfile::tempdir().unwrap();
+        if worker_deadline {
+            let failure = mj_core::relay::HarnessPreparation::Failed {
+                step: "session-open".into(),
+                error:
+                    "the harness did not open its session within 300s; use Restart agent to retry"
+                        .into(),
+                at_ms: 1,
+            };
+            std::fs::write(
+                relay_root.path().join("preparation.json"),
+                serde_json::to_vec(&failure).unwrap(),
+            )
+            .unwrap();
+        } else {
+            std::fs::write(
+                relay_root.path().join("memory-sync-protocol"),
+                (mj_core::relay::RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL - 1).to_string(),
+            )
+            .unwrap();
+        }
+        let (commands, commands_rx) = mpsc::channel(4);
+        let (_releases, releases_rx) = mpsc::unbounded_channel();
+        let (retirement, retirement_rx) = watch::channel(false);
+        let (view_tx, mut views) = watch::channel(ManagedSessionView::default());
+        let (updates, _updates_rx) = coalesced_update_channel();
+        let (attempt_tx, mut attempts) = mpsc::unbounded_channel();
+        let attempt_number = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release_write = Arc::new(tokio::sync::Notify::new());
+        let release_handler = release_write.clone();
+        let request_log = relay_root.path().join(RELAY_REQUEST_LOG);
+        assert!(
+            updates
+                .harness_failure
+                .set(Arc::new(move |id, timeout| {
+                    let attempt_tx = attempt_tx.clone();
+                    let attempt_number = attempt_number.clone();
+                    let release = release_handler.clone();
+                    let request_log = request_log.clone();
+                    Box::pin(async move {
+                        let attempt =
+                            attempt_number.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let syncs = std::fs::read_to_string(&request_log)
+                            .unwrap()
+                            .lines()
+                            .filter(|line| *line == "attach")
+                            .count();
+                        attempt_tx.send((attempt, syncs)).unwrap();
+                        match attempt {
+                            0 => return Ok(false), // A lifecycle/revision guard rejected the write.
+                            1 => anyhow::bail!("injected store write failure"),
+                            2 => release.notified().await,
+                            _ => anyhow::bail!("an accepted write must not be applied again"),
+                        }
+                        tokio::task::spawn_blocking(move || {
+                            let mut controller = crate::controller::Controller::load()?;
+                            controller.fail_unready_session(
+                                &id,
+                                &timeout.cause(),
+                                &timeout.observed_updated_at,
+                            )
+                        })
+                        .await
+                        .context("apply test readiness failure")?
+                    })
+                }))
+                .is_ok()
+        );
+        let actor = tokio::spawn(run_session_actor(
+            leased_relay_target(relay_root.path()),
+            commands_rx,
+            releases_rx,
+            retirement_rx,
+            view_tx,
+            updates,
+        ));
+        views
+            .wait_for(|view| view.connected && view.snapshot.is_some())
+            .await
+            .unwrap();
+        if !worker_deadline {
+            tokio::time::pause();
+            tokio::time::advance(
+                super::readiness::HARNESS_READINESS_TIMEOUT + Duration::from_secs(1),
+            )
+            .await;
+            tokio::time::resume();
+        }
+        let mut previous_syncs = 0;
+        for expected in 0..3 {
+            let (attempt, syncs) = attempts.recv().await.unwrap();
+            assert_eq!(attempt, expected);
+            assert!(
+                syncs > previous_syncs,
+                "a retry requires a later successful worker sync"
+            );
+            previous_syncs = syncs;
+        }
+        // The third handler is waiting just before its store write. A new view
+        // cannot be observed or overtake that decision inside the actor loop.
+        let (reply, mut response) = oneshot::channel();
+        commands.send(ActorCommand::Sync { reply }).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            crate::database::load_session_record(LEASED_RELAY_SESSION)
+                .unwrap()
+                .unwrap()
+                .state,
+            mj_core::state::SessionState::Running
+        );
+        release_write.notify_one();
+        response.await.unwrap().unwrap();
+        let record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, mj_core::state::SessionState::Error);
+        assert!(record.last_error.unwrap().contains("Restart agent"));
+        retirement.send(true).unwrap();
+        actor.await.unwrap();
+        assert!(
+            attempts.try_recv().is_err(),
+            "only the accepted write completes this wait"
+        );
+    }
 }

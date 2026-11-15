@@ -375,7 +375,10 @@ function selectedWorkspaceId() {
     if (session?.workspace_id) return session.workspace_id;
   }
 
-  return workspaces[0]?.id;
+  // The list is in name order; open the most recently opened workspace.
+  return workspaces.reduce((recent, workspace) =>
+    !recent || (workspace.last_opened_at || '') > (recent.last_opened_at || '') ? workspace : recent,
+  undefined)?.id;
 }
 
 function applyRoute() {
