@@ -478,11 +478,27 @@ impl Controller {
         // Reconcile it once while the checkpoint barrier keeps the harness
         // idle. Ordinary attach and polling deliberately never touch it.
         let memory_sync_cancel = tokio_util::sync::CancellationToken::new();
-        relay
-            .connection_mut()
-            .sync_project_memory(&self.config, memory_sync_cancel)
-            .await
-            .context("synchronize project memory for checkpoint")?;
+        {
+            let sync = relay
+                .connection_mut()
+                .sync_project_memory(&self.config, memory_sync_cancel.clone());
+            let cancelled = async {
+                loop {
+                    if executor.cancellation_requested() {
+                        memory_sync_cancel.cancel();
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            };
+            tokio::select! {
+                biased;
+                // Dropping sync closes an in-flight transfer's connection;
+                // the worker owns and releases its staging on that connection.
+                () = cancelled => bail!("project-memory synchronization for checkpoint was cancelled"),
+                result = sync => result.context("synchronize project memory for checkpoint")?,
+            }
+        }
         let cursor = barrier
             .operational
             .checkpoint_ready
