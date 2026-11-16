@@ -20,7 +20,10 @@ pub(crate) struct SessionCreateIntent {
 
 /// States in which a session's creation is still unfinished.
 fn is_creating(state: SessionState) -> bool {
-    matches!(state, SessionState::Provisioning | SessionState::Disconnected)
+    matches!(
+        state,
+        SessionState::Provisioning | SessionState::Disconnected
+    )
 }
 
 pub(super) fn insert_create_intent(
@@ -28,9 +31,13 @@ pub(super) fn insert_create_intent(
     session: &SessionRecord,
     remember_launch_choices: bool,
 ) -> Result<()> {
+    // Sessions registered already past creation (fixtures, imports) own none.
+    if !is_creating(session.state) {
+        return Ok(());
+    }
     let operation_id = crate::session_manager::new_command_id("create")?;
     tx.execute(
-        "INSERT INTO session_create_intents(session_id, operation_id, remember_launch_choices, created_at)
+        "INSERT OR IGNORE INTO session_create_intents(session_id, operation_id, remember_launch_choices, created_at)
          VALUES (?1, ?2, ?3, ?4)",
         params![
             session.id,
@@ -88,6 +95,28 @@ pub(crate) fn discard_session_create_intent(session_id: &str, operation_id: &str
         connection.execute(
             "DELETE FROM session_create_intents WHERE session_id = ?1 AND operation_id = ?2",
             params![session_id, operation_id],
+        )?;
+        Ok(())
+    })
+}
+
+/// A sub-agent's failed worker start that is retried stays the same create:
+/// the cleanup between the attempts moves the record out of the creating
+/// states and settles its intent, so the retry puts the intent back.
+pub(super) fn restore_create_intent_for_retry(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+) -> Result<()> {
+    insert_create_intent(tx, session, false)
+}
+
+/// Forget the worker boot an interrupted create left, once its worker is stopped.
+pub(crate) fn discard_worker_restart_intent(session_id: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    submit_database_write("discard_worker_restart_intent", move |connection| {
+        connection.execute(
+            "DELETE FROM worker_restart_intents WHERE session_id = ?1",
+            [&session_id],
         )?;
         Ok(())
     })

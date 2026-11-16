@@ -273,31 +273,31 @@ impl RuntimeState {
                     operation_id: operation_reference.clone(),
                     kind,
                 });
-                // A resumable create is safe to stop and starts again under the
-                // next daemon from its durable create intent, so it does not
-                // hold the handoff: the handoff interrupts it. Only its short
-                // commit write takes admission, under its own label.
-                let resumable = control.as_ref().is_some_and(LifecycleControl::is_resumable);
+                // A create is safe to stop and starts again under the next
+                // daemon from its durable create intent, so it does not hold
+                // the handoff: the handoff stops it. Only its short commit
+                // write takes admission, under its own label.
+                let resumable = kind == LifecycleKind::Create;
                 let admit = || -> Result<crate::upgrade::Work> {
                     Ok(if let Some(label) = deferrable_admission {
-                    crate::upgrade::activity_unless_draining_described(label, describer)?
-                } else if kind == LifecycleKind::StartupCleanup {
-                    crate::upgrade::activity_unless_draining_described(
-                        "failed startup cleanup",
-                        describer,
-                    )?
-                } else if kind == LifecycleKind::ForceDestroy {
-                    crate::upgrade::destroy_activity(&session_id)?
-                } else if kind == LifecycleKind::Unpark {
-                    crate::upgrade::activity_unless_draining_described(
-                        "subagent unpark admission",
-                        describer,
-                    )?
-                } else if child_close {
-                    crate::upgrade::activity_described("subagent close admission", describer)?
-                } else {
-                    crate::upgrade::activity_described("session lifecycle", describer)?
-                })
+                        crate::upgrade::activity_unless_draining_described(label, describer)?
+                    } else if kind == LifecycleKind::StartupCleanup {
+                        crate::upgrade::activity_unless_draining_described(
+                            "failed startup cleanup",
+                            describer,
+                        )?
+                    } else if kind == LifecycleKind::ForceDestroy {
+                        crate::upgrade::destroy_activity(&session_id)?
+                    } else if kind == LifecycleKind::Unpark {
+                        crate::upgrade::activity_unless_draining_described(
+                            "subagent unpark admission",
+                            describer,
+                        )?
+                    } else if child_close {
+                        crate::upgrade::activity_described("subagent close admission", describer)?
+                    } else {
+                        crate::upgrade::activity_described("session lifecycle", describer)?
+                    })
                 };
                 let admitted = if resumable { None } else { Some(admit()?) };
                 let upgrade_work = Arc::new(Mutex::new(admitted));
@@ -466,18 +466,12 @@ impl RuntimeState {
                         LifecycleKind::Suspend
                             | LifecycleKind::Restart
                             | LifecycleKind::UpgradeContainer
+                            | LifecycleKind::Create
                     ) && state
                         .owner()
                         .lifecycle
                         .get(&operation_session_id)
-                        .is_some_and(|active| active.control.stopped_for_shutdown())
-                        // A resumable create that shutdown interrupted before
-                        // it committed belongs to the next daemon too.
-                        || state
-                            .owner()
-                            .lifecycle
-                            .get(&operation_session_id)
-                            .is_some_and(|active| active.control.interrupted_for_shutdown());
+                        .is_some_and(|active| active.control.stopped_for_shutdown());
                     if let Err(error) = state.reload_controller().await {
                         let reload_error = format!(
                             "reload daemon state after lifecycle operation for {operation_session_id}: {error:#}"

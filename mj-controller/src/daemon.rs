@@ -94,10 +94,6 @@ pub struct LifecycleControl {
     state: Arc<AtomicU8>,
     pub cancelled: Arc<AtomicBool>,
     cancel_cause: Arc<Mutex<Option<&'static str>>>,
-    /// Set once, when a create is admitted: a daemon that stops while this
-    /// operation is uncommitted interrupts it rather than cancelling it, and
-    /// the next daemon finishes it from its durable create intent.
-    resumable: Arc<AtomicBool>,
 }
 
 const LIFECYCLE_OPEN: u8 = 0;
@@ -105,68 +101,13 @@ const LIFECYCLE_CANCELLED: u8 = 1;
 const LIFECYCLE_COMMITTED: u8 = 2;
 /// Cancelled because the daemon is stopping, not by a person or a close.
 const LIFECYCLE_CANCELLED_FOR_SHUTDOWN: u8 = 3;
-/// A resumable operation stopped by daemon shutdown before it committed. It
-/// is neither cancelled nor committed: it fails nothing and rolls nothing
-/// back, and the next daemon owns it. Reached only from `OPEN`, so a commit
-/// and a shutdown have one winner.
-const LIFECYCLE_INTERRUPTED_FOR_SHUTDOWN: u8 = 4;
 
 impl LifecycleControl {
     pub fn request_cancel(&self, cause: &'static str) -> bool {
         self.cancel_as(LIFECYCLE_CANCELLED, cause)
     }
 
-    /// Mark this operation resumable by the next daemon (see the field).
-    pub(crate) fn mark_resumable(&self) {
-        self.resumable.store(true, Ordering::Release);
-    }
-
-    /// Stop an operation a client action owns because the server is exiting.
-    /// A resumable create is interrupted, so the next daemon finishes it; any
-    /// other operation is cancelled as before.
-    pub(crate) fn stop_for_server_shutdown(&self) {
-        if self.is_resumable() {
-            self.interrupt_uncommitted_for_shutdown();
-        } else {
-            self.request_cancel("server shutdown");
-        }
-    }
-
-    fn is_resumable(&self) -> bool {
-        self.resumable.load(Ordering::Acquire)
-    }
-
-    /// Stop an uncommitted resumable operation for shutdown, if it is still
-    /// open. Its commands fail as cancelled; its failure paths see
-    /// [`Self::interrupted_for_shutdown`] and leave every record as it is.
-    fn interrupt_uncommitted_for_shutdown(&self) -> bool {
-        let mut cancel_cause = self
-            .cancel_cause
-            .lock()
-            .expect("lifecycle cancel cause poisoned");
-        let accepted = self
-            .state
-            .compare_exchange(
-                LIFECYCLE_OPEN,
-                LIFECYCLE_INTERRUPTED_FOR_SHUTDOWN,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok();
-        if accepted {
-            *cancel_cause = Some("server shutdown");
-            self.cancelled.store(true, Ordering::Release);
-        }
-        accepted
-    }
-
-    /// Whether shutdown interrupted this resumable operation before it
-    /// committed, so the next daemon owns whatever it left behind.
-    pub fn interrupted_for_shutdown(&self) -> bool {
-        self.state.load(Ordering::Acquire) == LIFECYCLE_INTERRUPTED_FOR_SHUTDOWN
-    }
-
-    fn cancel_for_shutdown(&self) -> bool {
+    pub(crate) fn cancel_for_shutdown(&self) -> bool {
         self.cancel_as(LIFECYCLE_CANCELLED_FOR_SHUTDOWN, "server shutdown")
     }
 
@@ -241,7 +182,7 @@ impl LifecycleControl {
     /// [`Self::interrupt`].
     pub fn stopped_for_shutdown(&self) -> bool {
         match self.state.load(Ordering::Acquire) {
-            LIFECYCLE_CANCELLED_FOR_SHUTDOWN | LIFECYCLE_INTERRUPTED_FOR_SHUTDOWN => true,
+            LIFECYCLE_CANCELLED_FOR_SHUTDOWN => true,
             LIFECYCLE_COMMITTED => self.cancelled.load(Ordering::Acquire),
             _ => false,
         }
@@ -413,7 +354,7 @@ impl RuntimeRevisions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LifecycleKind {
+pub(crate) enum LifecycleKind {
     Create,
     Suspend,
     Resume,
@@ -769,15 +710,10 @@ impl ActiveLifecycle {
     /// Stop this operation for daemon shutdown. An operation that can still be
     /// cancelled is cancelled. A committed one is interrupted, because the
     /// next daemon finishes it from its record, except a committed create,
-    /// whose caller now owns the new session and which no daemon resumes.
+    /// which is a moment from `Running` and finishes. An uncommitted create
+    /// is stopped without rolling back (see `stopped_for_shutdown`): its
+    /// create intent makes the next daemon finish it.
     fn interrupt_for_shutdown(&mut self) -> bool {
-        // A resumable create is interrupted, not cancelled, before it
-        // commits: its durable create intent makes the next daemon retire
-        // the partial environment and provision again, so nothing is rolled
-        // back here. A committed create is left to finish its short write.
-        if self.kind == LifecycleKind::Create && self.control.is_resumable() {
-            return self.control.interrupt_uncommitted_for_shutdown();
-        }
         if self.kind == LifecycleKind::UpgradeContainer
             && matches!(self.phase, LifecyclePhase::RetiringContainer)
         {

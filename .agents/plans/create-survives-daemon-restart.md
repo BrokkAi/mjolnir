@@ -20,11 +20,13 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 - [x] Milestone 4: startup recovery retires the partial environment and re-runs the create; waiting clients re-attach.
 - [x] Milestone 5: tests (rule test extended, migration compatibility, end-to-end daemon restart mid-create `tests/e2e/create_survives_restart.py`); full validation recorded in Outcomes.
 
+- [x] Milestone 6: sub-agent creates use the same durable intent and recovery as top-level creates; the `resumable` flag and the separate interrupted state are gone.
+
 
 ## Surprises & Discoveries
 
 - The server's REST/phone action control (`PhoneActionControl`, `server_runtime/run.rs`) also cancelled the create's `LifecycleControl` with "server shutdown" before the lifecycle registry interrupted it, so shutdown cancelled and rolled back creates started through `mj new`. Found by the end-to-end test; fixed with `LifecycleControl::stop_for_server_shutdown`, which interrupts a resumable create.
-- Top-level creates only: `save_new_session` is the registration of top-level sessions; sub-agents register through `save_subagent_session` and keep their caller-driven replay, so they get no intent and their Create keeps the cancel-for-shutdown rule (the control is marked resumable only by `start_create_lifecycle`).
+- (Superseded by Milestone 6.) Sub-agents first kept caller replay and had no intent; they now register an intent in `register_subagent_with_startup` and recover like top-level creates.
 - Rollback writes `StartupCleanup` first, and every session write outside Provisioning/Disconnected settles the intent, so an intent only ever coexists with a creating session; recovery re-admits only those and discards any other leftover.
 
 
@@ -36,10 +38,13 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 - Decision: the intent is settled by every session write (`insert_session`, `update_lifecycle_fields`, `mark_session_worker_connected`) rather than by a SQL trigger, because later migrations that rebuild `sessions` would silently drop a trigger. Date: 2026-11-16.
 - Decision: waiting for creates at shutdown is rejected (the user: "not acceptable, it's too slow"). Create stops holding the non-deferrable "session lifecycle" handoff admission while it provisions. Date: 2026-11-16.
 
+- Decision: a create stopped by shutdown uses the existing `CANCELLED_FOR_SHUTDOWN` state and `stopped_for_shutdown()`; the extra `INTERRUPTED_FOR_SHUTDOWN` state, `interrupted_for_shutdown()`, and the `resumable` flag were removed. Whether a lifecycle is resumable is decided by `kind == LifecycleKind::Create` (lifecycle.rs admission and handed-off check) and, for the server's action control, by the action's `LifecycleKind` (`PhoneActionControl::kind`). Rationale: one predicate per fact. Date: 2026-11-16.
+- Decision: a recovered sub-agent create (`start_subagent_create_lifecycle(.., recovering = true)`) stops the worker the stopped attempt started, discards its worker restart intent, and launches again on the parent's target. It is admitted with the child's own request key, so a replayed spawn joins it instead of starting a second one, and a shutdown no longer records "spawn the sub-agent again". Migration 134 needed no schema change (the intent table already keys on session id); it stays classified compatible. Date: 2026-11-16.
+
 
 ## Outcomes & Retrospective
 
-Implemented in four commits. The end-to-end test `tests/e2e/create_survives_restart.py` passes: `mj daemon restart` with a create held after its target exists returns in about 1.3 s, the next daemon logs "resuming a session creation interrupted by a daemon restart", and the session reaches running with no error and no leftover intent. Validation: workspace clippy clean; controller and CLI suites pass except four tests that look unrelated (three quota/spawn tests in `server_runtime::api::tests`, `push_review_delivers_each_verdict_without_holding_or_prompting_the_primary` which hangs, and `review_start_fails_with_the_reason_the_daemon_refused_it` whose message lacks a suffix); none were checked against the baseline. Limitations: recovery redoes the clone, sub-agent creates keep caller replay, other target kinds (Docker, SSH, Nitro) were not exercised end to end.
+Implemented in four commits. The end-to-end test `tests/e2e/create_survives_restart.py` passes: `mj daemon restart` with a create held after its target exists returns in about 1.3 s, the next daemon logs "resuming a session creation interrupted by a daemon restart", and the session reaches running with no error and no leftover intent. Validation: workspace clippy clean; controller and CLI suites pass except four tests that look unrelated (three quota/spawn tests in `server_runtime::api::tests`, `push_review_delivers_each_verdict_without_holding_or_prompting_the_primary` which hangs, and `review_start_fails_with_the_reason_the_daemon_refused_it` whose message lacks a suffix); all four plus the CLI one fail identically at baseline a78ea5196. Limitations: recovery redoes the clone, sub-agent creates are recovered by the same mechanism (e2e: `tests/e2e/delegation.py --create-restart-only`), a child whose startup was already in the retry cleanup window when the daemon stopped still fails, other target kinds (Docker, SSH, Nitro) were not exercised end to end.
 
 
 ## Context and Orientation

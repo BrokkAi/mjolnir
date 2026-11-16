@@ -262,6 +262,54 @@ impl Controller {
         .await
     }
 
+    /// Finish a sub-agent launch that an earlier daemon's shutdown stopped:
+    /// stop the worker that attempt may have started, forget its boot, and
+    /// launch the child again on the parent's target.
+    pub async fn recover_interrupted_subagent_create(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        stopped_for_shutdown: impl Fn() -> bool + Send + Sync,
+    ) -> Result<()> {
+        crate::worker_lifecycle::run(
+            session_id,
+            "recover interrupted sub-agent create",
+            executor,
+            async {
+                let session = self
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .with_context(|| format!("unknown session {session_id}"))?
+                    .clone();
+                ensure!(
+                    session.state == SessionState::Provisioning,
+                    "session {session_id} is {}, not an unfinished create",
+                    session.state.as_str()
+                );
+                if let Some(locator) = &session.target {
+                    let backend = backend_locator(locator, &session, &self.config)?;
+                    let root = targets::worker_root(&backend, session_id)?;
+                    super::worker_binary::stop_worker(
+                        &crate::worker_lifecycle::require(session_id)?,
+                        &super::failed_launch_cleanup_executor(),
+                        &backend,
+                        &root,
+                    )
+                    .context("stop the interrupted attempt's worker")?;
+                }
+                crate::database::discard_worker_restart_intent(session_id)?;
+                self.provision_subagent_session_controlled(
+                    session_id,
+                    executor,
+                    stopped_for_shutdown,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
     fn reset_interrupted_create(&mut self, session_id: &str) -> Result<()> {
         let session = self
             .state
@@ -304,8 +352,8 @@ impl Controller {
     /// Start a child worker inside an already-provisioned parent target.
     /// Repository, target, and mount setup belong exclusively to the parent.
     ///
-    /// `stopped_for_shutdown` says whether daemon shutdown cancelled the
-    /// launch, so the recorded failure can name that cause.
+    /// `stopped_for_shutdown` says whether daemon shutdown stopped the launch,
+    /// in which case nothing is recorded and the next daemon finishes it.
     pub async fn provision_subagent_session_controlled(
         &mut self,
         session_id: &str,
@@ -355,17 +403,17 @@ impl Controller {
                     } else {
                         error
                     };
-                    // An explicit daemon stop does not wait for a launch, and
-                    // the executor reports only that it was cancelled. Without
-                    // the cause, the parent cannot tell a restart from a fault
-                    // on the target (#1321).
-                    let error = if stopped_for_shutdown() {
-                        error.context(
-                            "the Mjolnir daemon stopped during this launch; spawn the sub-agent again",
-                        )
-                    } else {
-                        error
-                    };
+                    // A launch the daemon's shutdown stopped is not a failure:
+                    // its create intent makes the next daemon retire the
+                    // worker this attempt started and launch the child again.
+                    if stopped_for_shutdown() {
+                        tracing::info!(
+                            session_id,
+                            error = format!("{error:#}"),
+                            "sub-agent launch interrupted by daemon shutdown; the next daemon finishes it"
+                        );
+                        return Err(error.context("the Mjolnir daemon stopped during this launch"));
+                    }
                     let diagnostic = note_new_session_launch_failure(session_id, &error);
                     let previous = self
                         .state
@@ -533,23 +581,30 @@ impl Controller {
                     )
                     .and_then(|()| self.prepare_subagent_report_dir(session_id, &backend, syncing));
                 let result = match prepared {
-                    Ok(()) => {
-                        // Held across the harness startup wait, which is the
-                        // part that does not survive a crowd.
-                        let gate = container_start_gate(&backend);
-                        let _admitted = match &gate {
-                            Some(gate) => admit_container_start(gate, executor).await,
-                            None => None,
-                        };
-                        self.connect_and_start_worker(
-                            session_id,
-                            executor,
-                            &backend,
-                            &worker_root,
-                            false,
-                        )
-                        .await
-                    }
+                    // Holds a child launch before its worker starts, so a test can
+                    // restart the daemon in the middle of it.
+                    Ok(()) => match mj_core::test_hooks::reach_test_hook(
+                        "subagent_create_before_worker_start",
+                    ) {
+                        Err(error) => Err(error),
+                        Ok(()) => {
+                            // Held across the harness startup wait, which is the
+                            // part that does not survive a crowd.
+                            let gate = container_start_gate(&backend);
+                            let _admitted = match &gate {
+                                Some(gate) => admit_container_start(gate, executor).await,
+                                None => None,
+                            };
+                            self.connect_and_start_worker(
+                                session_id,
+                                executor,
+                                &backend,
+                                &worker_root,
+                                false,
+                            )
+                            .await
+                        }
+                    },
                     Err(error) => Err(error),
                 };
                 (result, Some((backend, worker_root)))

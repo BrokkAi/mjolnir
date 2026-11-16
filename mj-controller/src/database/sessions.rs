@@ -181,6 +181,7 @@ pub(crate) fn register_subagent_with_startup(
             &session,
             Some(&subagent.parent_session_id),
         )?;
+        super::session_create::insert_create_intent(&tx, &session, false)?;
         super::usage::record_child_accounting(&tx, &subagent)?;
         tx.execute(
             "INSERT INTO subagent_sessions(
@@ -1649,6 +1650,10 @@ pub(crate) fn save_startup_cleanup_outcome(session: &SessionRecord, archive: boo
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         update_lifecycle_fields(&tx, &session)?;
+        if session.state == SessionState::Provisioning {
+            // A retried child start continues its create.
+            super::session_create::restore_create_intent_for_retry(&tx, &session)?;
+        }
         if archive {
             tx.execute(
                 "UPDATE sessions SET archived=1 WHERE session_id=?1",

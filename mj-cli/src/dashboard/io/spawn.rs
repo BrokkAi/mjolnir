@@ -1516,7 +1516,11 @@ async fn await_daemon_creation(
             Err(error) => error,
         };
         let Some(refusal) = error.downcast_ref::<mj_client::daemon::DaemonRefusal>() else {
-            tracing::info!(session_id, error = format!("{error:#}"), "lost the daemon while a session was being created; waiting again");
+            tracing::info!(
+                session_id,
+                error = format!("{error:#}"),
+                "lost the daemon while a session was being created; waiting again"
+            );
             tokio::time::sleep(RETRY_DELAY).await;
             continue;
         };

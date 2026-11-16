@@ -1200,14 +1200,26 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
         "released work is still named: {released:?}"
     );
 
-    // Four lifecycles hold the handoff; the notice names the oldest three.
+    // Four lifecycles hold the handoff; the notice names the oldest three. A
+    // running Create holds nothing: the handoff stops it and the next daemon
+    // finishes it from its create intent.
+    let create_release = Arc::new(tokio::sync::Notify::new());
+    let create = state
+        .start_or_join_lifecycle("e5dfbd99-create".into(), LifecycleKind::Create, {
+            let create_release = create_release.clone();
+            move |_, _, _| async move {
+                create_release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
     let sessions = ["e5dfbd99-a", "e5dfbd99-b", "e5dfbd99-c", "e5dfbd99-d"];
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let operations = sessions
         .map(|session| {
             let release = release.clone();
             state
-                .start_or_join_lifecycle(session.into(), LifecycleKind::Create, {
+                .start_or_join_lifecycle(session.into(), LifecycleKind::Resume, {
                     move |_, _, _| async move {
                         drop(release.acquire().await.unwrap());
                         Ok(DaemonLifecycleResult::Done)
@@ -1225,8 +1237,8 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
     };
     let blocker = lifecycle_blocker().await;
     assert!(
-        blocker.starts_with("session lifecycle x4: create e5dfbd99 (")
-            && blocker.matches("create e5dfbd99 (").count() == 3
+        blocker.starts_with("session lifecycle x4: resume e5dfbd99 (")
+            && blocker.matches("resume e5dfbd99 (").count() == 3
             && blocker.ends_with("; and 1 more"),
         "{blocker}"
     );
@@ -1244,12 +1256,14 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
     executor.stage_started(ProvisionStage::Syncing);
     let blocker = lifecycle_blocker().await;
     assert!(
-        blocker.starts_with("session lifecycle x4: create e5dfbd99 (Clone + Sync, "),
+        blocker.starts_with("session lifecycle x4: resume e5dfbd99 (Clone + Sync, "),
         "{blocker}"
     );
     executor.stage_finished(ProvisionStage::Cloning);
     executor.stage_finished(ProvisionStage::Syncing);
     release.add_permits(sessions.len());
+    create_release.notify_one();
+    RuntimeState::wait_lifecycle_result(create).await.unwrap();
     for operation in operations {
         RuntimeState::wait_lifecycle_result(operation)
             .await
@@ -1285,7 +1299,7 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
     let shutdown = CancellationToken::new();
     let release = Arc::new(tokio::sync::Notify::new());
     let operation = state
-        .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Create, {
+        .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Resume, {
             let release = release.clone();
             move |_, _, cancelled| async move {
                 release.notified().await;
@@ -2899,22 +2913,6 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     assert!(control.grant_commit());
     assert!(operation(LifecycleKind::Suspend, control.clone()).interrupt_for_shutdown());
     assert!(control.stopped_for_shutdown());
-
-    // A resumable create is interrupted, not cancelled: a person's cancel and
-    // a commit both lose to it, and its failure paths see that the next
-    // daemon owns it. Once it committed, shutdown leaves it alone.
-    let control = LifecycleControl::default();
-    control.mark_resumable();
-    assert!(operation(LifecycleKind::Create, control.clone()).interrupt_for_shutdown());
-    assert!(control.interrupted_for_shutdown() && control.stopped_for_shutdown());
-    assert!(control.cancelled.load(Ordering::Acquire));
-    assert!(!control.request_cancel("person cancellation"));
-    assert!(!control.grant_commit());
-    let control = LifecycleControl::default();
-    control.mark_resumable();
-    assert!(control.grant_commit());
-    assert!(!operation(LifecycleKind::Create, control.clone()).interrupt_for_shutdown());
-    assert!(!control.interrupted_for_shutdown());
 }
 
 #[tokio::test]

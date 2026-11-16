@@ -5475,7 +5475,10 @@ mod reader_tests {
         drop(old);
         let writer = open_writer(&path).unwrap();
         assert_eq!(read_schema_state(&writer).unwrap().revision, SCHEMA_VERSION);
-        assert_eq!(read_schema_state(&writer).unwrap().minimum_compatible, Some(132));
+        assert_eq!(
+            read_schema_state(&writer).unwrap().minimum_compatible,
+            Some(132)
+        );
         drop(writer);
         let intents = |path: &Path| -> Vec<String> {
             let connection = Connection::open(path).unwrap();

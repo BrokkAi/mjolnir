@@ -170,6 +170,19 @@ impl RuntimeState {
         if !needs_provisioning {
             return Ok(());
         }
+        self.start_subagent_create_lifecycle(relation, false)
+    }
+
+    /// Admit the Create lifecycle of a registered child. `recovering` is set
+    /// when a restarted daemon re-admits a launch its predecessor's shutdown
+    /// stopped; that run first stops the worker the stopped attempt started.
+    /// A replayed spawn carries the same request key and so joins this
+    /// lifecycle instead of starting a second one.
+    pub(super) fn start_subagent_create_lifecycle(
+        self: &Arc<Self>,
+        relation: &mj_core::subagent::SubagentRecord,
+        recovering: bool,
+    ) -> Result<()> {
         let session_id = relation.child_session_id.clone();
         let parent_session_id = relation.parent_session_id.clone();
         let control = LifecycleControl::default();
@@ -199,12 +212,17 @@ impl RuntimeState {
                     state.clone(),
                     session_id.clone(),
                 );
-                if let Err(error) = controller
-                    .provision_subagent_session_controlled(&session_id, &executor, || {
-                        control.stopped_for_shutdown()
-                    })
-                    .await
-                {
+                let interrupted = || control.stopped_for_shutdown();
+                let provisioned = if recovering {
+                    controller
+                        .recover_interrupted_subagent_create(&session_id, &executor, interrupted)
+                        .await
+                } else {
+                    controller
+                        .provision_subagent_session_controlled(&session_id, &executor, interrupted)
+                        .await
+                };
+                if let Err(error) = provisioned {
                     drop(controller);
                     state.reload_controller().await?;
                     if let Err(prompt_error) = state
@@ -631,7 +649,6 @@ impl RuntimeState {
         remember_launch_choices: bool,
         recovery_operation: Option<String>,
     ) -> Result<()> {
-        control.mark_resumable();
         let recovering = recovery_operation.is_some();
         let scheduled_at = std::time::Instant::now();
         self.start_or_join_lifecycle_controlled(
@@ -686,7 +703,7 @@ impl RuntimeState {
                         Err(error) => {
                             // The daemon is being replaced: the next one owns
                             // this create, which has not committed.
-                            control.interrupt_uncommitted_for_shutdown();
+                            control.cancel_for_shutdown();
                             return Err(error);
                         }
                     };
@@ -699,7 +716,7 @@ impl RuntimeState {
                         .unwrap_or_else(PoisonError::into_inner) = Some(admission);
                     Ok(())
                 };
-                let interrupted = || control.interrupted_for_shutdown();
+                let interrupted = || control.stopped_for_shutdown();
                 let provision = if recovering {
                     controller
                         .recover_interrupted_create(
@@ -776,6 +793,12 @@ impl RuntimeState {
                 continue;
             }
             tracing::info!(session_id = %intent.session_id, "resuming a session creation interrupted by a daemon restart");
+            let child = crate::database::load_subagent(&intent.session_id)?;
+            if let Some(relation) = child {
+                self.start_subagent_create_lifecycle(&relation, true)?;
+                owned.insert(intent.session_id);
+                continue;
+            }
             self.start_create_lifecycle(
                 intent.session_id.clone(),
                 LifecycleControl::default(),
