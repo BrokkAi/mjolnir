@@ -28,7 +28,7 @@ local         local, podman  12%  45% (14.0G/31.0G)
         "ec2"
       ],
       "kind": "aws_fleet",
-      "machines": 2,
+      "fleet_instances": 2,
       "has_reading": true,
       "cpu_percent": null,
       "memory_used_bytes": 15032385536,

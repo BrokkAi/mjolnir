@@ -4991,7 +4991,7 @@ mod tests {
             host: id.into(),
             target_ids: targets.iter().map(|id| (*id).to_owned()).collect(),
             kind,
-            machines: 1,
+            fleet_instances: None,
             has_reading: true,
             cpu_percent: Some(12),
             memory_used_bytes: 14 * GIB,
@@ -5025,7 +5025,7 @@ mod tests {
             StorageCondition::Full,
         )];
         let mut fleet = row("ec2-fleet", DeploymentCapacityKind::AwsFleet, &["ec2"]);
-        fleet.machines = 2;
+        fleet.fleet_instances = Some(2);
         fleet.cpu_percent = None;
         fleet.logical_cores = 96;
         fleet.memory_total_bytes = 384 * GIB;
@@ -5046,7 +5046,7 @@ mod tests {
             ),
         ];
         let mut idle = row("ec2-idle", DeploymentCapacityKind::AwsFleet, &["ec2-spare"]);
-        idle.machines = 0;
+        idle.fleet_instances = Some(0);
         idle.has_reading = false;
         idle.on_demand = true;
         // The fleet last answered empty, then its probe failed: the size is
@@ -5056,7 +5056,7 @@ mod tests {
             DeploymentCapacityKind::AwsFleet,
             &["ec2-broken"],
         );
-        failed_idle.machines = 0;
+        failed_idle.fleet_instances = Some(0);
         failed_idle.has_reading = false;
         failed_idle.probe_error = Some("describe-instances: access denied".into());
         let mut fresh = row("new.example", DeploymentCapacityKind::Host, &["new"]);

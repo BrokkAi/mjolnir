@@ -117,8 +117,10 @@ pub struct HostCapacityRow {
     /// The configured targets that deploy to this host or fleet.
     pub target_ids: Vec<String>,
     pub kind: DeploymentCapacityKind,
-    /// Machines probed: one per live instance for a fleet.
-    pub machines: usize,
+    /// How many instances a fleet is running. A host is one machine and has
+    /// no count; its probes are alternative connections to that machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_instances: Option<usize>,
     /// No reading has arrived, or only an empty fleet answered.
     pub has_reading: bool,
     pub cpu_percent: Option<u8>,
@@ -156,7 +158,8 @@ impl HostCapacityRow {
             host: target.host.clone(),
             target_ids: target.target_ids.clone(),
             kind: target.kind,
-            machines: target.probes.len(),
+            fleet_instances: (target.kind == DeploymentCapacityKind::AwsFleet)
+                .then_some(target.probes.len()),
             has_reading: usage.is_some(),
             cpu_percent: usage.and_then(|usage| usage.cpu_percent),
             memory_used_bytes: usage.map_or(0, |usage| usage.memory_used_bytes),
@@ -195,7 +198,7 @@ impl HostCapacityRow {
     }
 
     pub fn fleet_machines_label(&self) -> String {
-        counted(self.machines, "VM", "VMs")
+        counted(self.fleet_instances.unwrap_or(0), "VM", "VMs")
     }
 
     /// The CPU and RAM cells.
