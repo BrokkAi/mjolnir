@@ -18,9 +18,19 @@ To see it working: in an isolated Mjolnir instance, spawn a child with the instr
 
 - [x] (2026-11-16 05:40Z) Diagnosis, measurements, and mapping (see Surprises & Discoveries and Decision Log).
 - [x] (2026-11-16 06:10Z) Shared definitions added on master: `mj_core::work_facts::WorkLiveness`, `mj_core::subagent::HOLD_GIVE_UP_MS`, `mj_core::subagent::HoldFollowUpKind`.
-- [ ] Milestone 1: worker publishes work-process liveness; relay protocol 67 (owner: relay implementer).
-- [ ] Milestone 2: the report rule learns the hold; reminder names processes; follow-up prompts (owner: daemon implementer).
-- [ ] Milestone 3: the daemon holds, wakes, gives up, and delays parks by one parent turn (owner: daemon implementer).
+- [x] (2026-11-16 07:05Z) Milestone 1: worker publishes work-process liveness; relay protocol 67. Commits 625d43fee (interfaces, prompt texts) and 041c3ba66 (watcher) in the child-hold-relay worktree; `RelayOperationalState` also carries `work_liveness` and `undelivered_mailbox_event_keys` for the daemon.
+- [x] (2026-11-16 08:10Z) Milestone 2: the report rule learns the hold; reminder names processes; follow-up prompts. Commits 35fa23280 and later in the child-hold-daemon worktree.
+- [x] (2026-11-16 08:10Z) Milestone 3: the daemon holds, wakes, gives up, and delays parks by one parent turn. Head 3a0f5b122, fast-forwarded onto local master with both relay commits.
+- [x] (2026-11-16 09:30Z) Integrated review (`.mj/agents/cc1b124b3cbf2eca4b861fe4528b8740/REVIEW.md`) and round-1 fixes, commit d66562ff2 on local master.
+- [x] (2026-11-16 10:05Z) Milestone 4 live run against 3a0f5b122 (real Claude Code, isolated instance `child-hold-e2e`): hold and wake, give-up with the parent-turn grace (including a parent "continue"), and a daemon restart during a hold all passed; evidence in `.mj/agents/a7ac8fa39e300c356cbadf1ef408ca58/EVIDENCE.md`.
+- [x] (2026-11-16 10:40Z) Round-2 fix 215ee42ed: once the park gate is open, the daemon stops the child's stoppable harness background tasks through the worker's existing per-task stop, then parks. Tasks the harness marks unstoppable are left, so such a child still retries its park as before.
+- [x] (2026-11-16 11:05Z) Round 3 fix 534aeb391: the live recheck showed that stopping a Claude task on an idle child opened a harness turn that never settled. The worker's stop-acknowledgement match required the bare `**Task stopped by user:** ` prefix, but the adapter wraps notices in a blockquote (`\n\n› **Task stopped by user:** …`). The match now accepts that shape. The bug predates this change: a user's `mj stop-task` on an idle Claude session hit the same stuck turn.
+- [x] (2026-11-16 11:25Z) Live recheck on 534aeb391: give-up, handback during the parent's turn, park held until that turn ended, then `stopped … stopped=1` and `park finished outcome=Parked` 2.4 s later with the process gone and no harness turn opened. Hold and wake rechecked on 215ee42ed.
+- [x] (2026-11-16 12:20Z) Review of rounds 1-3 (`.mj/agents/b05d45905d3d6663ca62da206b490289/REVIEW.md`) and round-4 fixes, d5e71c007.
+- [x] (2026-11-16 12:00Z) Full suites on 534aeb391: mj-core passed, mj-worker 854 passed (one review-hook test hung in a local `git push` under load and passed alone), mj-controller 2,674 passed. Workspace clippy clean on d66562ff2 and on every later round.
+- [x] (2026-11-16 12:55Z) Full controller suite on d5e71c007 (2,675 passed) and live recheck on d5e71c007: give-up park (task stopped, `outcome=Parked` 2.5 s later, process gone, no harness turn) and the parent "continue" variant (no stop or park after the first parent turn; parked only after the second) both passed; evidence `.mj/agents/e849d939cb90fc35fd39a5193164545c/EVIDENCE.md`.
+- [ ] Push and install.
+- [ ] Final full validation (in progress on d66562ff2), live rerun of the give-up park on the final build.
 - [ ] Milestone 4: end-to-end check in an isolated instance with a real harness.
 - [ ] Integrated review, full validation, commit and push.
 
@@ -35,6 +45,15 @@ To see it working: in an isolated Mjolnir instance, spawn a child with the instr
 - Observation: the top-level end-of-turn classifier (GLiDE) detects these waits only when told the truth about background work. Run as the worker would run it today it caught 12 of 49 real waits, because the runtime facts say "background commands: 0" for harnesses whose background work Mjolnir cannot see; with "unknown, judge from the transcript" it caught 49 of 49 with 1 false Wait in 71 (and that one had already called handback). This plan does not use the classifier; the result is recorded so a later change can.
 
 - Observation: an idle Antigravity session never starts a turn by itself when a background task finishes; its "Task … finished" message reaches the model only with the next prompt. Its `schedule` tool (a timer prompt) was called in 13 of 17 sessions and never fired before Mjolnir parked the child. So Mjolnir must send the wake prompt.
+
+- Observation: `RelayCommand` is `deny_unknown_fields`, so a protocol-66 worker rejects a `HandbackReminder` that carries `running`. The field is skipped when empty and `minimum_protocol` is 67 only when it is non-empty, so older workers keep receiving the plain reminder.
+  Evidence: relay implementer's decode check, `.mj/agents/afbc9028d45d722ad01a6bc51c9af751/NOTES.md`.
+
+- Observation: in the live run, a park after the grace never completed for a Claude child whose own background Bash task was still tracked: park admission (`IdleWorkspaceLease::acquire_for_upgrade`) refuses while harness background commands run, so the child retried `Busy` every 30 seconds indefinitely. This predates the change, but it defeats the give-up.
+  Evidence: live run m2, child 5cb774eec25c6e6ddd3f3d94f126622d, daemon log "an idle worker is not replaced … background commands are running".
+
+- Observation: processes Claude's Bash tool backgrounds are reparented to init, so work facts list them "detached from the harness". The liveness watcher still counts them (they carry the session marker), but a park stops only the worker's process tree, so a detached process survives the park, as the finish report already warns. Claude Code's own transient `ps -o command= -p <pid>` helpers also show up in `waiting_on` for a moment.
+  Evidence: `.mj/agents/a7ac8fa39e300c356cbadf1ef408ca58/raw/list-agents-s1-1.txt`.
 
 - Observation: measured durations of background work the agent waited for, 1057 tasks since 2026-11-01: median 7 minutes, 90th percentile 30 minutes, 99th percentile 115 minutes, longest 129 minutes (Antigravity alone: 99th percentile 18 minutes, longest 38 minutes). About 100 never-ending poll loops (`until grep -q …`, `while … sleep`) were still running at finish or park; most were legitimate watchers, the leftovers were things like detached `sleep 1000`.
 
@@ -78,9 +97,32 @@ To see it working: in an isolated Mjolnir instance, spawn a child with the instr
   Date/Author: 2026-11-16, coordinator.
 
 
+- Decision: deviations taken during implementation. (1) The daemon reads worker state through `RelayOperationalState`, not `RelaySnapshot`, so `work_liveness` and `undelivered_mailbox_event_keys` (pending plus hook-leased mailbox events) were added there. (2) The park gate does not read a delivery ordinal from `delivered_mailbox_event_keys` (a 512-entry map not worth publishing on every change). It opens when the report's outbox row is accepted, the parent's snapshot has reached that `accepted_ordinal`, the report key is no longer undelivered, and the parent is idle with nothing queued: idle with the event delivered means the turn that received it has ended. (3) Store-based surfaces get liveness by re-asking `report_state` with the live worker's `work_liveness` inside `observe_child_resolution`, the funnel every child read passes through. (4) `remind_subagent_to_hand_back` returns `ReportNudge { NotOwed, Pending, Holding }` and sends the reminder or the due follow-up from one `report_state` evaluation, and the loop evaluates every reminder turn again on liveness changes and at the give-up time.
+  Rationale: see `.mj/agents/17d9d8561ee828a3999d9cd4cc351b57/NOTES.md` in the coordinator's clone; each keeps one owner per fact.
+  Date/Author: 2026-11-16, daemon implementer, accepted by coordinator pending review.
+
+
+- Decision: review round 1. A failed follow-up submit is retried with the delegation loop's backoff unless the worker refuses it as stale (the completion is no longer current); the worker's guard now separates that permanent refusal from a retryable "cannot take a prompt now". `report_state` takes `Liveness { Unknown, Known(Option<WorkLiveness>) }`: a caller without a connected worker view passes `Unknown`, which on a reminder turn is not final (running, no report, not handed back); a connected worker at protocol 66 or older publishes nothing and is `Known(None)`, keeping today's behaviour. `ChildProgress` is built with its liveness so its report is never read before liveness applies. `work_liveness` is cleared when the next prompt starts, not when it is queued, so a dropped follow-up leaves the child held rather than parked with live processes.
+  Rationale: the review found that any non-stale submit failure stranded a held child forever, and that "worker not reachable" was read as "no processes" by the stopped-child notice and the session wait.
+  Date/Author: 2026-11-16, coordinator.
+
+- Decision: accepted without change: the 5-second liveness scan also runs for a child that already handed back while it keeps processes (it is parked after the parent's grace turn, which ends the scan); a journal write happens under the relay lock on a tokio task, like the relay's other writes; on a remote worker the give-up time mixes the worker's `completed_at_ms` with the daemon's clock, so skew shifts it by the skew; a follow-up the user removes from the queue on purpose leaves the child held until it receives input (a dropped wake still reaches the give-up).
+  Rationale: each is bounded or visible, and fixing it would add machinery for an unobserved failure.
+  Date/Author: 2026-11-16, coordinator.
+
+
+- Decision: review round 4. The session wait derives a child's liveness through the same `live_work` function as the store paths (a parked child is `Known(None)` everywhere). The task stop runs inside the park's lifecycle operation, after the undelivered parent-to-child outbox check and before the idle reservation, so a parent "continue" sent during the grace turn can never lose a harness-tracked task, and the stop is bounded by the park's timeout; a task that already ended is not an error and one failed stop does not skip the rest. Each delegation job carries the observation versions it judged, and a newer observation published while it ran makes the loop judge the child again at once instead of waiting (no lost wake-up). `submit_actor_command` no longer reconnects on a retryable `InvalidState` refusal ("not now"): reconnecting changes nothing about the worker's state and can drop a checkpoint barrier the connection owns; the caller retries the same command id.
+  Rationale: the second review found two predicates for a parked child's liveness, a check-then-act task stop outside the park's serialized decision, and a window in which a liveness change could be missed for up to the 30-minute give-up.
+  Date/Author: 2026-11-16, coordinator.
+
+- Decision: accepted without change: a refusal from a worker started only to make a checkpoint (`checkpoint_only`) is classified as stale, so a held child in that state falls back. Harness tasks marked unstoppable are not stopped, so such a child keeps retrying its park as before this change.
+  Rationale: both are rare, visible in `list_agents`, and no worse than before.
+  Date/Author: 2026-11-16, coordinator.
+
+
 ## Outcomes & Retrospective
 
-Not started.
+(2026-11-16) A child that ends its turn while processes it started are still running is now held instead of reported and parked: the reminder names the processes, the child is woken when they exit, and it is asked to hand back after 30 minutes. A park that would stop live processes waits for the parent turn that received the report, and a parent message in that turn cancels it. Detection uses the worker's existing work facts for every harness, so no per-harness inventory was built; live runs with real Claude Code showed the hold, the wake, the give-up, the grace (including a parent "continue") and a daemon restart each behaving exactly once. Two pre-existing defects surfaced on the way and were fixed: a park never completed for a child whose harness still tracked a background task, and Claude's blockquote-wrapped "Task stopped by user" acknowledgement opened a turn that never settled on an idle session (which also affected a user's `mj stop-task`). Remaining limits: a process the harness detaches from the worker's tree (Claude's `cmd &`) holds the child but survives the park; harness tasks marked unstoppable still block the park; Antigravity's own background-task timer is never used, because Mjolnir's wake replaces it. Lesson: measure the shape of the failure first; the classifier study showed the detection signal was already available and only the runtime facts fed to it were wrong.
 
 
 ## Context and Orientation
