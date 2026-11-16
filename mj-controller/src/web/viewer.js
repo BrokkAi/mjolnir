@@ -5271,8 +5271,10 @@ function quotaResetText(now, window) {
 // the last good one, so this text is a note on the row, not a replacement.
 function quotaHoldText(now, quota) {
   const until = quota?.rate_limited_until_epoch_seconds;
-  if (!Number.isSafeInteger(until) || until <= now) return '';
-  return `rate limited · retry in ${Math.ceil((until - now) / 60)} min`;
+  if (!Number.isSafeInteger(until)) return '';
+  const next = Math.max(until, quota.next_check_at_epoch_seconds ?? 0);
+  if (next <= now) return '';
+  return `quota check refused · next in ${Math.ceil((next - now) / 60)} min`;
 }
 
 function updateQuotaClocks() {

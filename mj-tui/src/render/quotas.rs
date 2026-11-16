@@ -123,7 +123,7 @@ pub(crate) fn minimized_quota_line(
             if quota.is_some_and(|quota| quota.rate_limit_label(now).is_some()) {
                 return Some(SummaryReading {
                     name: row.label(),
-                    value: "rate limited".into(),
+                    value: "check refused".into(),
                     color: None,
                 });
             }

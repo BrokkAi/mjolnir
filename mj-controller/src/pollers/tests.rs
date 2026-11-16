@@ -439,6 +439,7 @@ fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
         error: None,
         refreshed_at_epoch_seconds: epoch_seconds() - age_seconds,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -733,6 +734,34 @@ async fn a_forced_profile_probe_answers_now_and_only_once() {
     ));
     assert_eq!(next_update_report(&mut updates).await, "extra");
     assert_quiet(&mut updates).await;
+}
+
+#[test]
+fn a_short_hold_on_an_old_reading_waits_a_full_interval_from_the_refused_attempt() {
+    // The good reading is long past its interval; the provider's hold (60 s)
+    // is over a minute after the refused attempt. Scheduling on the hold
+    // would re-probe every minute for as long as the provider keeps refusing.
+    let interval = QUOTA_REFRESH_INTERVAL.as_secs();
+    let now = epoch_seconds();
+    let good = stored_report("a", interval + 3_600);
+    let (until, next_check) =
+        crate::quota::refused_check_schedule(now, Some(Duration::from_secs(30)));
+    let mut refused = stored_report("a", 0);
+    refused.windows.clear();
+    refused.error = Some("rate limited".into());
+    refused.refreshed_at_epoch_seconds = now;
+    refused.rate_limited_until_epoch_seconds = Some(until);
+    refused.next_check_at_epoch_seconds = Some(next_check);
+    // What the poller publishes: the old good reading, with the refusal's schedule.
+    let held = crate::quota::hold_report(Some(&good), refused);
+    assert_eq!(
+        held.refreshed_at_epoch_seconds,
+        good.refreshed_at_epoch_seconds
+    );
+    assert_eq!(next_probe_at(Some(&held)), now + interval);
+    // The hold stays the provider's own; a forced probe is allowed past it.
+    assert!(super::quota::on_hold(Some(&held), now));
+    assert!(!super::quota::on_hold(Some(&held), now + 61));
 }
 
 #[tokio::test]

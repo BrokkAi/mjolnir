@@ -1164,6 +1164,9 @@ pub struct ViewerQuota {
     /// the last good reading, taken at `refreshed_at_epoch_seconds`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limited_until_epoch_seconds: Option<u64>,
+    /// When the next check runs after a refused one; at least the hold's end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check_at_epoch_seconds: Option<u64>,
     /// Error state only. Raw vendor errors may contain paths or account data
     /// and remain on the controller.
     pub has_error: bool,

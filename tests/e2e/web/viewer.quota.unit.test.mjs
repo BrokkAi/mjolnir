@@ -49,8 +49,8 @@ test('a rate limited profile reads the retry time in minutes and stops when the 
   const context = vm.createContext({});
   vm.runInContext(helpers, context);
   const quota = { rate_limited_until_epoch_seconds: 1000 + 5 * 60 };
-  assert.equal(context.quotaHoldText(1000, quota), 'rate limited · retry in 5 min');
-  assert.equal(context.quotaHoldText(1000 + 5 * 60 - 1, quota), 'rate limited · retry in 1 min');
+  assert.equal(context.quotaHoldText(1000, quota), 'quota check refused · next in 5 min');
+  assert.equal(context.quotaHoldText(1000 + 5 * 60 - 1, quota), 'quota check refused · next in 1 min');
   assert.equal(context.quotaHoldText(1000 + 5 * 60, quota), '');
   assert.equal(context.quotaHoldText(1000, {}), '');
   assert.equal(context.quotaHoldText(1000, undefined), '');

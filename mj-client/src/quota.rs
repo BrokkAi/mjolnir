@@ -133,6 +133,11 @@ pub struct ProfileQuota {
     /// when it was taken.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limited_until_epoch_seconds: Option<u64>,
+    /// With a hold: when the daemon next asks the provider, one regular
+    /// interval after the refused attempt or the end of the hold, whichever is
+    /// later. Readers that predate it fall back to the hold's end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check_at_epoch_seconds: Option<u64>,
 }
 
 /// Provider-native paid funds usable after included subscription quota ends.
@@ -197,14 +202,18 @@ impl ProfileQuota {
         }
     }
 
-    /// `rate limited · retry in N min` while the provider's hold lasts.
+    /// `quota check refused · next in N min` from a refused check until the
+    /// next one runs. The provider refused the check, not the account; the
+    /// windows beside it are the last good reading.
     pub fn rate_limit_label(&self, now: u64) -> Option<String> {
-        let until = self
-            .rate_limited_until_epoch_seconds
-            .filter(|until| *until > now)?;
+        self.rate_limited_until_epoch_seconds?;
+        let next = self
+            .next_check_at_epoch_seconds
+            .max(self.rate_limited_until_epoch_seconds)
+            .filter(|next| *next > now)?;
         Some(format!(
-            "rate limited · retry in {} min",
-            (until - now).div_ceil(60)
+            "quota check refused · next in {} min",
+            (next - now).div_ceil(60)
         ))
     }
 
@@ -578,11 +587,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             quota.rate_limit_label(1000).as_deref(),
-            Some("rate limited · retry in 15 min")
+            Some("quota check refused · next in 15 min")
         );
         assert_eq!(
             quota.rate_limit_label(1000 + 15 * 60 - 1).as_deref(),
-            Some("rate limited · retry in 1 min")
+            Some("quota check refused · next in 1 min")
         );
         assert_eq!(quota.rate_limit_label(1000 + 15 * 60), None);
         quota.rate_limited_until_epoch_seconds = None;
