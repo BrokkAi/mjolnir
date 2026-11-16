@@ -1372,6 +1372,8 @@ pub(super) struct TestRemoteManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
     pub(super) publisher: RemoteSessionPublisher,
+    /// Background tasks the daemon asked a worker to stop, in order.
+    pub(super) stopped_tasks: Vec<String>,
     _shutdown: SessionManagerShutdown,
     _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
 }
@@ -1407,6 +1409,7 @@ impl TestRemoteManager {
             control: channels.control,
             requests: channels.requests,
             publisher: channels.publisher,
+            stopped_tasks: Vec::new(),
             _shutdown: channels.shutdown,
             _targets: channels.targets,
         };
@@ -1461,6 +1464,14 @@ impl TestRemoteManager {
                     None => Ok(99),
                 });
                 accepted.push((session_id, command_id, command));
+            } else if let crate::session_manager::RemoteSessionRequest::StopBackgroundTask {
+                background_task_id,
+                reply,
+                ..
+            } = request
+            {
+                self.stopped_tasks.push(background_task_id);
+                let _ = reply.send(Ok(()));
             }
         }
         accepted

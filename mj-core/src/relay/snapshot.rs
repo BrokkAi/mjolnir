@@ -201,8 +201,10 @@ fn process_lines(running: &[String]) -> String {
         .join("\n")
 }
 
-fn hold_minutes() -> i64 {
-    crate::subagent::HOLD_GIVE_UP_MS / 60_000
+/// The hold's length for prompt text: "30 minutes", "1 minute".
+fn hold_minutes() -> String {
+    let minutes = crate::subagent::HOLD_GIVE_UP_MS / 60_000;
+    format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
 }
 
 /// The reminder prompt: fixed when nothing is running, otherwise it names the
@@ -212,7 +214,7 @@ pub fn handback_reminder_text(running: &[String]) -> String {
         return crate::subagent::HANDBACK_REMINDER_TEXT.to_owned();
     }
     format!(
-        "[handback reminder] Your turn ended without delivering a report, and commands you started are still running:\n{}\nIf your assigned task is finished, call the mj-agents handback tool now with your full report, then stop. If you are waiting for these commands to finish, you may end your turn: Mjolnir will prompt you when they have all exited, or after {} minutes. Otherwise continue working, and hand back when the task is done.",
+        "[handback reminder] Your turn ended without delivering a report, and commands you started are still running:\n{}\nIf your assigned task is finished, call the mj-agents handback tool now with your full report, then stop. If you are waiting for these commands to finish, you may end your turn: Mjolnir will prompt you when they have all exited, or after {}. Otherwise continue working, and hand back when the task is done.",
         process_lines(running),
         hold_minutes()
     )
@@ -224,7 +226,7 @@ pub fn hold_follow_up_text(kind: crate::subagent::HoldFollowUpKind, running: &[S
     match kind {
         crate::subagent::HoldFollowUpKind::ProcessesExited => "[background work finished] The commands you were waiting for have exited. Check their results, continue your assigned task, and call the mj-agents handback tool when it is done.".to_owned(),
         crate::subagent::HoldFollowUpKind::GiveUp => format!(
-            "[background wait ended] You have waited {} minutes and these commands are still running:\n{}\nCall the mj-agents handback tool now with what you have: what finished, what is still running, and what your parent needs to decide. Your parent can tell you to keep waiting; Mjolnir leaves these commands running until your parent's next turn ends.",
+            "[background wait ended] You have waited {} and these commands are still running:\n{}\nCall the mj-agents handback tool now with what you have: what finished, what is still running, and what your parent needs to decide. Your parent can tell you to keep waiting; Mjolnir leaves these commands running until your parent's next turn ends.",
             hold_minutes(),
             process_lines(running)
         ),

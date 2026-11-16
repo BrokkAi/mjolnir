@@ -2272,6 +2272,48 @@ impl ApiBackend {
         ))
     }
 
+    /// Stop the background tasks an idle child's harness still tracks, so its
+    /// park, which refuses while any run, can proceed. The worker stops its own
+    /// tasks (the capability behind `mj stop-task`) and the park asks the same
+    /// idle question afterwards. Nothing is stopped while a turn runs or a
+    /// prompt is queued: the child has work then, and the park is refused for
+    /// that reason. Returns how many tasks were asked to stop.
+    pub async fn stop_idle_background_tasks(&self, child_session_id: &str) -> Result<usize> {
+        let Some(handle) = self.session_handle(child_session_id.to_owned()).await? else {
+            return Ok(0);
+        };
+        let tasks = {
+            let view = handle.view();
+            let Some(snapshot) = view.snapshot.as_ref().filter(|_| view.connected) else {
+                return Ok(0);
+            };
+            if !matches!(
+                snapshot.materialized.execution,
+                MaterializedExecutionState::Idle
+            ) || snapshot.materialized.active_turn.is_some()
+                || !snapshot.materialized.queued_prompts.is_empty()
+            {
+                return Ok(0);
+            }
+            snapshot
+                .operational
+                .background_commands
+                .iter()
+                .filter(|command| command.can_stop)
+                .map(|command| command.id.clone())
+                .collect::<Vec<_>>()
+        };
+        for task in &tasks {
+            handle
+                .stop_background_task(task.clone())
+                .await
+                .with_context(|| {
+                    format!("stop background task {task} of sub-agent {child_session_id}")
+                })?;
+        }
+        Ok(tasks.len())
+    }
+
     /// Return the worker's atomic idle reservation outcome. The coordinator
     /// retains a busy park separately from the already delivered notice.
     pub async fn park_subagent(

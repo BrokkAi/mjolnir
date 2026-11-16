@@ -627,6 +627,13 @@ async fn settle_child(
     let Ok(_work) = crate::upgrade::activity_unless_draining("delegation child park") else {
         return Ok(ChildCompletion::Draining);
     };
+    // The park is refused while the harness tracks background commands. The
+    // gate is open (the parent was told and its grace turn is over, or nothing
+    // is alive), so the child's own worker is asked to stop them.
+    let stopped = backend.stop_idle_background_tasks(&child_id).await?;
+    if stopped > 0 {
+        tracing::info!(child_session_id = %child_id, stopped, "stopped a told sub-agent's background tasks before its park");
+    }
     match backend.park_subagent(&child_id).await? {
         crate::controller::ParkOutcome::Busy => Ok(ChildCompletion::RetryPark),
         crate::controller::ParkOutcome::Parked | crate::controller::ParkOutcome::NotRunning => {
@@ -1408,11 +1415,34 @@ mod tests {
 
         /// The child idle after `turn`, as its worker published it.
         async fn child_ended(&self, turn: &mj_core::state::MaterializedTurnOutcome) {
+            self.child_ended_with(turn, Vec::new(), false).await;
+        }
+
+        /// The child idle after `turn` with the harness tracking `tasks`, and a
+        /// prompt queued behind it when `queued`.
+        async fn child_ended_with(
+            &self,
+            turn: &mj_core::state::MaterializedTurnOutcome,
+            tasks: Vec<mj_core::relay::BackgroundCommand>,
+            queued: bool,
+        ) {
             let mut view = crate::daemon::tests::ready_startup_view();
             let snapshot = view.snapshot.as_mut().unwrap();
             snapshot.materialized.last_turn_outcome = Some(turn.clone());
+            if queued {
+                snapshot.materialized.queued_prompts.push(
+                    mj_core::state::MaterializedQueuedPrompt {
+                        command_id: "next".into(),
+                        kind: Default::default(),
+                        content: Vec::new(),
+                        queued_at_ms: 1,
+                        accepted_ordinal: Some(turn.completed_ordinal + 1),
+                    },
+                );
+            }
             // The journal position marks which publication the actor serves.
             let mut operational = (*snapshot.operational).clone();
+            operational.background_commands = tasks;
             operational.latest_ordinal = turn.completed_ordinal;
             snapshot.operational = operational.into();
             self.manager
@@ -1855,6 +1885,59 @@ mod tests {
         let (done, _) = held.settle(liveness(10, 1), &turn).await;
         assert!(matches!(done, ChildCompletion::Settled));
         assert_eq!(parked(&held), 1);
+    }
+
+    // The park refuses while the harness tracks a background command, so once
+    // the gate is open the child's own worker is asked to stop its tasks and
+    // the park follows. A child with work queued is left alone.
+    // Hard-won: review round 2: a told child with a harness background command was never parked.
+    #[tokio::test]
+    async fn a_told_child_with_a_background_command_has_its_tasks_stopped_before_its_park() {
+        if !isolated(
+            "a_told_child_with_a_background_command_has_its_tasks_stopped_before_its_park",
+            "delegation-stop-background-tasks",
+        ) {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut held = HeldChild::new("stop tasks").await;
+        let turn = turn_at("turn", 10, 1, None);
+        assert!(
+            crate::database::record_subagent_handback(
+                "child",
+                &mj_core::subagent::SubagentHandback {
+                    command_id: "turn".into(),
+                    message: "done".into(),
+                    recorded_at_ms: 1,
+                },
+            )
+            .unwrap()
+        );
+        let task = |id: &str, can_stop| mj_core::relay::BackgroundCommand {
+            id: id.into(),
+            started_at_ms: 1,
+            command: "sleep 1000".into(),
+            can_stop,
+        };
+
+        // A prompt is queued: the child has work, nothing is stopped.
+        held.child_ended_with(&turn, vec![task("task-1", true)], true)
+            .await;
+        held.settle(None, &turn).await;
+        assert!(held.manager.stopped_tasks.is_empty());
+
+        // Idle: every task the worker can stop is stopped, then the park runs.
+        held.child_ended_with(
+            &turn,
+            vec![task("task-1", true), task("task-2", false)],
+            false,
+        )
+        .await;
+        let parked = held.parks.parks.load(Ordering::SeqCst);
+        let (done, _) = held.settle(None, &turn).await;
+        assert!(matches!(done, ChildCompletion::Settled));
+        assert_eq!(held.manager.stopped_tasks, ["task-1"]);
+        assert_eq!(held.parks.parks.load(Ordering::SeqCst), parked + 1);
     }
 
     // Control: nothing alive, nothing to wait for; and a parent that is no
