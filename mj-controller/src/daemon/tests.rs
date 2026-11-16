@@ -8451,7 +8451,7 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     let hel = worker_root.join("hel");
     std::fs::write(
         &hel,
-        "#!/bin/sh\ncat >/dev/null\necho 'No space left on device' >&2\nexit 1\n",
+        "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\ncat >/dev/null\necho 'No space left on device' >&2\nexit 1\n",
     )
     .unwrap();
     std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -8678,6 +8678,7 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
         &hel,
         format!(
             "#!/bin/sh\n\
+             [ \"$2\" = stop ] && exit 0\n\
              [ \"$1 $2\" = 'worker export-checkpoint' ] || \
              {{ echo \"the stand-in worker only exports: $*\" >&2; exit 2; }}\n\
              {STAND_IN_EXPORT}=1 '{program}' --exact '{test}' --nocapture | grep '^{{'\n",
@@ -9596,7 +9597,7 @@ fn parked_child(root: &Path, child_id: &str, parent_id: &str, workspace_id: &str
     std::fs::write(
         &hel,
         format!(
-            "#!/bin/sh\necho started >> {}\n",
+            "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\necho started >> {}\n",
             root.join("started").display()
         ),
     )
@@ -10260,7 +10261,7 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
     seed_live_session(root.path(), &child_root);
     use std::os::unix::fs::PermissionsExt;
     let proxy = child_root.join("hel");
-    std::fs::write(&proxy, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::write(&proxy, "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\nexit 1\n").unwrap();
     std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
     let last_event = "journal-only child output ".repeat(4096);
     let mut journal =

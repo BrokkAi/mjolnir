@@ -30,7 +30,7 @@ use mj_core::state::{
 };
 
 /// Release installed by Mjolnir when a user installs or upgrades host mbx.
-pub(crate) const MBX_VERSION: &str = "1.30.0";
+pub const MBX_VERSION: &str = "1.30.0";
 
 const MBX_COPY_RELATIVE: &str = ".mjolnir/bin/mbx";
 /// mbx's running totals, relative to the cache directory.

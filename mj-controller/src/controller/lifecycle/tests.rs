@@ -1047,9 +1047,10 @@ async fn close_child_with_partial_root(
     let worker_root = directory.path().join(session_id);
     std::fs::create_dir_all(&worker_root).unwrap();
     // A worker binary that exits at once: its relay proxy disconnects during
-    // hello, which is how a dead worker looks from the controller.
+    // hello, which is how a dead worker looks from the controller. Stopping the
+    // dead worker is a no-op that succeeds, as the real `hel worker stop` is.
     let hel = worker_root.join("hel");
-    std::fs::write(&hel, b"#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::write(&hel, b"#!/bin/sh\n[ \"$2\" = stop ] && exit 0\nexit 1\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

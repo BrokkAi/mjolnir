@@ -162,7 +162,12 @@ pub const RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL: u32 = 66;
 /// `HandbackReminder`. Older workers publish no liveness, so the daemon neither
 /// holds nor delays the park of their children.
 pub const RELAY_WORK_LIVENESS_PROTOCOL: u32 = 67;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_WORK_LIVENESS_PROTOCOL;
+/// 68 carries a managed child's work facts on the settlement of a turn the
+/// harness started on its own, and sets `work_liveness` from them as it does
+/// for a prompted turn. The settlement's bytes change, so an older reader would
+/// fail the event's digest.
+pub const RELAY_HARNESS_TURN_FACTS_PROTOCOL: u32 = 68;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_HARNESS_TURN_FACTS_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
