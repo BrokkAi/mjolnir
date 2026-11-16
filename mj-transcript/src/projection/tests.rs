@@ -1356,6 +1356,7 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: first_harness,
                 stop_reason: "end_turn".into(),
+                work_facts: None,
             }),
             origin: None,
             prompt_in_flight: false,
@@ -1410,6 +1411,7 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: start,
                 stop_reason: "end_turn".into(),
+                work_facts: None,
             }),
             origin: None,
             prompt_in_flight: false,
@@ -1695,6 +1697,7 @@ fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: 1,
                 stop_reason: "end_turn".into(),
+                work_facts: None,
             }),
             origin: Some("task-notification".into()),
             prompt_in_flight: false,
@@ -1751,6 +1754,7 @@ fn native_tail_preserves_prompt_outcome_and_autonomous_error_is_retained() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: 1,
                 stop_reason: "error".into(),
+                work_facts: None,
             }),
         },
     );
@@ -1947,6 +1951,7 @@ fn cancelling_a_codex_native_tail_preserves_the_prompt_outcome() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: 1,
                 stop_reason: "end_turn".into(),
+                work_facts: None,
             }),
             origin: None,
             prompt_in_flight: false,
@@ -2255,6 +2260,7 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
         autonomous: Some(mj_core::relay::SettledHarnessTurn {
             start_ordinal: started_at,
             stop_reason: "cancelled".into(),
+            work_facts: None,
         }),
         origin: None,
         prompt_in_flight: false,
@@ -3837,4 +3843,31 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
     assert_eq!(restored.transcript[0].position, 2);
     assert_eq!(restored.unread_agent_messages_after(1), 1);
     assert_eq!(restored, session);
+}
+
+// The controller reads an autonomous turn's work facts from the outcome this
+// projection builds; the settlement is their only source.
+#[test]
+fn an_autonomous_turn_settlement_carries_its_work_facts_into_the_outcome() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 35 },
+    );
+    let start = session.applied_event_ordinal;
+    let facts = mj_core::work_facts::WorkFacts::unavailable("under test");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: start,
+                stop_reason: "end_turn".into(),
+                work_facts: Some(Box::new(facts.clone())),
+            }),
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    let outcome = session.last_turn_outcome.as_ref().unwrap();
+    assert_eq!(outcome.work_facts.as_ref(), Some(&facts));
 }
