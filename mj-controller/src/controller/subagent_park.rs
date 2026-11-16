@@ -592,6 +592,7 @@ mod tests {
                 guardian_review_model: None,
                 codex_profile: None,
                 legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)

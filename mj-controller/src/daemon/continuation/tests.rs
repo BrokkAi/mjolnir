@@ -826,6 +826,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 guardian_review_model: None,
                 codex_profile: None,
                 legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, PathBuf::default())
@@ -860,6 +861,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 efforts: vec![],
                 observed_at: 1,
             },
+            may_consume_credits: true,
             quota: match id {
                 "api" => CandidateQuota::UsagePriced,
                 "unknown" => CandidateQuota::Unknown,

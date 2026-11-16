@@ -6276,6 +6276,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             models: Default::default(),
