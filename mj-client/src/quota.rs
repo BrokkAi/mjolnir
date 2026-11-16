@@ -202,15 +202,18 @@ impl ProfileQuota {
         }
     }
 
+    /// After a refused check: when the daemon checks again. A daemon that
+    /// predates `next_check_at_epoch_seconds` checks again when the hold ends.
+    pub fn next_check_at(&self) -> Option<u64> {
+        let until = self.rate_limited_until_epoch_seconds?;
+        Some(self.next_check_at_epoch_seconds.unwrap_or(until).max(until))
+    }
+
     /// `quota check refused · next in N min` from a refused check until the
     /// next one runs. The provider refused the check, not the account; the
     /// windows beside it are the last good reading.
     pub fn rate_limit_label(&self, now: u64) -> Option<String> {
-        self.rate_limited_until_epoch_seconds?;
-        let next = self
-            .next_check_at_epoch_seconds
-            .max(self.rate_limited_until_epoch_seconds)
-            .filter(|next| *next > now)?;
+        let next = self.next_check_at().filter(|next| *next > now)?;
         Some(format!(
             "quota check refused · next in {} min",
             (next - now).div_ceil(60)
@@ -578,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_limit_hold_reads_as_minutes_until_the_retry_and_ends_with_the_hold() {
+    fn a_refused_check_reads_as_minutes_until_the_next_check_and_ends_with_it() {
         let mut quota: ProfileQuota = serde_json::from_value(serde_json::json!({
             "profile_id": "claude", "harness": "claude", "windows": [],
             "extra": null, "error": null, "refreshed_at_epoch_seconds": 0,
@@ -594,7 +597,17 @@ mod tests {
             Some("quota check refused · next in 1 min")
         );
         assert_eq!(quota.rate_limit_label(1000 + 15 * 60), None);
+        // A short hold inside the regular interval: the label lasts until the
+        // next check, not until the hold ends.
+        quota.rate_limited_until_epoch_seconds = Some(1000 + 60);
+        quota.next_check_at_epoch_seconds = Some(1000 + 10 * 60);
+        assert_eq!(
+            quota.rate_limit_label(1000 + 61).as_deref(),
+            Some("quota check refused · next in 9 min")
+        );
+        assert_eq!(quota.rate_limit_label(1000 + 10 * 60), None);
         quota.rate_limited_until_epoch_seconds = None;
+        assert_eq!(quota.next_check_at(), None);
         assert!(
             serde_json::to_value(&quota)
                 .unwrap()

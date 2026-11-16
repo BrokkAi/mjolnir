@@ -120,7 +120,9 @@ pub(crate) fn minimized_quota_line(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            if quota.is_some_and(|quota| quota.rate_limit_label(now).is_some()) {
+            if quota
+                .is_some_and(|quota| quota.error.is_some() && quota.rate_limit_label(now).is_some())
+            {
                 return Some(SummaryReading {
                     name: row.label(),
                     value: "check refused".into(),
@@ -433,17 +435,20 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                     )
                 } else {
                     match quota {
-                        // The provider said to wait. The daemon keeps the last
-                        // good reading and its age; the row says when the
-                        // next probe is allowed.
-                        Some(quota) if quota.rate_limit_label(now).is_some() => (
-                            Line::raw(quota.rate_limit_label(now).unwrap_or_default()),
-                            String::new(),
-                            Line::default(),
-                            String::new(),
-                            false,
-                            false,
-                        ),
+                        // The provider refused the check and there is no good
+                        // reading to show: the row says when the next check runs.
+                        Some(quota)
+                            if quota.error.is_some() && quota.rate_limit_label(now).is_some() =>
+                        {
+                            (
+                                Line::raw(quota.rate_limit_label(now).unwrap_or_default()),
+                                String::new(),
+                                Line::default(),
+                                String::new(),
+                                false,
+                                false,
+                            )
+                        }
                         Some(quota) if quota.error.is_none() => {
                             let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
                             let mut weekly = quota_bar(quota.summary_window());
@@ -458,6 +463,13 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                                 weekly.spans.push(Span::raw(format!(" ({fable}%)")));
                             }
                             let five_hour = five_hour_quota_bar(quota);
+                            // A refused check keeps the last good reading on
+                            // screen; the note says when the next check runs.
+                            let five_hour_reset = match quota.rate_limit_label(now) {
+                                Some(label) if five_hour_reset.is_empty() => label,
+                                Some(label) => format!("{five_hour_reset} · {label}"),
+                                None => five_hour_reset,
+                            };
                             let weekly_chart = !weekly.spans.is_empty();
                             let five_hour_chart = !five_hour.spans.is_empty();
                             (

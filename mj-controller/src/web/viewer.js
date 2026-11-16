@@ -5270,10 +5270,8 @@ function quotaResetText(now, window) {
 // The provider said to wait before the next probe. The reading beside it is
 // the last good one, so this text is a note on the row, not a replacement.
 function quotaHoldText(now, quota) {
-  const until = quota?.rate_limited_until_epoch_seconds;
-  if (!Number.isSafeInteger(until)) return '';
-  const next = Math.max(until, quota.next_check_at_epoch_seconds ?? 0);
-  if (next <= now) return '';
+  const next = quota?.next_check_at_epoch_seconds;
+  if (!Number.isSafeInteger(next) || next <= now) return '';
   return `quota check refused · next in ${Math.ceil((next - now) / 60)} min`;
 }
 

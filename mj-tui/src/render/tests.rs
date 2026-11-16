@@ -1401,8 +1401,11 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
 
 #[test]
 fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
+    // A short hold inside the regular interval: the note lasts until the next
+    // check, and the last good reading stays on screen beside it.
     let mut held = weekly_quota("claude-1", 63);
-    held.rate_limited_until_epoch_seconds = Some(now_seconds() + 5 * 60);
+    held.rate_limited_until_epoch_seconds = Some(now_seconds() + 60);
+    held.next_check_at_epoch_seconds = Some(now_seconds() + 5 * 60);
     // No good reading behind the hold: the report itself is the rate limit.
     let mut only_limited = weekly_quota("codex-1", 0);
     only_limited.windows.clear();
@@ -1425,6 +1428,7 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
             .unwrap_or_else(|| panic!("a rate limited row for {id}: {lines:#?}"));
         assert!(row.contains("quota check refused · next in"), "{row:?}");
         assert!(!row.contains("unavailable"), "{row:?}");
+        assert_eq!(row.contains("63%"), id == "claude-1", "{row:?}");
     }
 
     minimize_all_panes(&mut dashboard);
@@ -1432,7 +1436,7 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
         .into_iter()
         .find(|line| line.contains("─ Profiles ──"))
         .expect("the minimized Profiles row");
-    assert!(row.contains("claude-1 check refused"), "{row:?}");
+    assert!(row.contains("claude-1 63%"), "{row:?}");
     assert!(row.contains("codex-1 check refused"), "{row:?}");
 }
 
