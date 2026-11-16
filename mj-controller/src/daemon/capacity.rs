@@ -78,10 +78,11 @@ impl Drop for ContainerCapacityLease {
 /// What the capacity service shares with the surfaces that show capacity.
 pub(crate) struct CapacityFeed {
     pub(crate) targets: tokio::sync::watch::Receiver<Vec<crate::targets::DeploymentCapacityTarget>>,
-    pub(crate) updates: tokio::sync::broadcast::Sender<crate::pollers::CapacityPollUpdate>,
-    latest: tokio::sync::watch::Receiver<BTreeMap<String, crate::targets::DeploymentCapacityUsage>>,
-    /// When each target was last sampled and whether its latest probe failed.
-    status: tokio::sync::watch::Receiver<BTreeMap<String, crate::targets::CapacityProbeStatus>>,
+    /// The one owner of each target's last good reading, sample time, latest
+    /// failure and empty-fleet answer. The poller updates an entry in a single
+    /// `send_modify`, so every reader sees a whole entry.
+    pub(crate) states:
+        tokio::sync::watch::Receiver<BTreeMap<String, crate::targets::TargetCapacityState>>,
     refresh: tokio::sync::mpsc::Sender<()>,
 }
 
@@ -103,7 +104,7 @@ impl CapacityFeed {
             .iter()
             .find(|target| target.target_ids.iter().any(|id| id == target_id))?
             .clone();
-        let usage = self.latest.borrow().get(&target.id)?.clone();
+        let usage = self.states.borrow().get(&target.id)?.usage.clone()?;
         Some((target, usage))
     }
 
@@ -132,16 +133,14 @@ impl CapacityFeed {
     /// already holds; it never probes.
     pub(crate) fn host_rows(&self) -> Vec<crate::targets::HostCapacityRow> {
         let storage = crate::target_storage::views();
-        let latest = self.latest.borrow();
-        let status = self.status.borrow();
+        let states = self.states.borrow();
         self.targets
             .borrow()
             .iter()
             .map(|target| {
                 crate::targets::HostCapacityRow::new(
                     target,
-                    latest.get(&target.id),
-                    &status.get(&target.id).cloned().unwrap_or_default(),
+                    &states.get(&target.id).cloned().unwrap_or_default(),
                     &storage,
                 )
             })
@@ -649,13 +648,13 @@ impl ContainerCapacityProjection {
         let hosts = state
             .capacity_feed()
             .map(|feed| {
-                let latest = feed.latest.borrow();
+                let states = feed.states.borrow();
                 feed.targets
                     .borrow()
                     .iter()
                     .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
                     .filter_map(|target| {
-                        let usage = latest.get(&target.id)?;
+                        let usage = states.get(&target.id)?.usage.as_ref()?;
                         Some((
                             target.id.clone(),
                             ContainerCapacityInput {
@@ -708,18 +707,13 @@ pub(super) fn spawn_capacity_service(
         .active_controller_projection()
         .deployment_capacity_targets();
     targets_tx.send_replace(initial);
-    let (latest_tx, latest_rx) = tokio::sync::watch::channel(BTreeMap::<
+    let (states_tx, states_rx) = tokio::sync::watch::channel(BTreeMap::<
         String,
-        crate::targets::DeploymentCapacityUsage,
+        crate::targets::TargetCapacityState,
     >::new());
-    let (status_tx, status_rx) =
-        tokio::sync::watch::channel(BTreeMap::<String, crate::targets::CapacityProbeStatus>::new());
-    let (updates, _) = tokio::sync::broadcast::channel(64);
     let feed = CapacityFeed {
         targets: targets_tx.subscribe(),
-        updates: updates.clone(),
-        latest: latest_rx,
-        status: status_rx,
+        states: states_rx,
         refresh,
     };
     if state.capacity.set(feed).is_err() {
@@ -744,15 +738,10 @@ pub(super) fn spawn_capacity_service(
                     let targets = state
                         .active_controller_projection()
                         .deployment_capacity_targets();
-                    latest_tx.send_if_modified(|latest| {
-                        let before = latest.len();
-                        latest.retain(|id, _| targets.iter().any(|target| target.id == *id));
-                        latest.len() != before
-                    });
-                    status_tx.send_if_modified(|status| {
-                        let before = status.len();
-                        status.retain(|id, _| targets.iter().any(|target| target.id == *id));
-                        status.len() != before
+                    states_tx.send_if_modified(|states| {
+                        let before = states.len();
+                        states.retain(|id, _| targets.iter().any(|target| target.id == *id));
+                        states.len() != before
                     });
                     targets_tx.send_if_modified(|current| {
                         if *current == targets {
@@ -776,32 +765,21 @@ pub(super) fn spawn_capacity_service(
                         tracing::error!("the daemon capacity poller stopped");
                         break;
                     };
-                    status_tx.send_modify(|status| {
-                        let entry = status.entry(reading.target_id.clone()).or_default();
-                        match &reading.result {
-                            Ok(usage) => {
-                                entry.on_demand = usage.is_none();
-                                entry.sampled_at_epoch_seconds =
-                                    Some(reading.sampled_at_epoch_seconds);
-                                entry.probe_error = None;
-                            }
-                            Err(error) => entry.probe_error = Some(error.clone()),
-                        }
+                    states_tx.send_modify(|states| {
+                        states
+                            .entry(reading.target_id.clone())
+                            .or_default()
+                            .apply(&reading.result, reading.sampled_at_epoch_seconds);
                     });
                     if let Ok(Some(usage)) = &reading.result {
                         crate::target_storage::record_samples(
                             &usage.storage,
                             reading.sampled_at_epoch_seconds,
                         );
-                        latest_tx.send_modify(|latest| {
-                            latest.insert(reading.target_id.clone(), usage.clone());
-                        });
-                        // The runtime feed carries this reservation-adjusted
-                        // headroom to terminal surfaces.
-                        state.publish_revision();
                     }
-                    // No subscriber is not an error: the web viewer may be off.
-                    let _ = updates.send(reading);
+                    // The runtime feed carries the reservation-adjusted
+                    // headroom to terminal surfaces.
+                    state.publish_revision();
                 }
             }
         }
@@ -944,18 +922,20 @@ mod tests {
             storage: Vec::new(),
         };
         let (targets, _) = tokio::sync::watch::channel(vec![target]);
-        let (updates, _) = tokio::sync::broadcast::channel(1);
-        let (_latest, latest) =
-            tokio::sync::watch::channel(BTreeMap::from([("local".into(), usage)]));
+        let (_states, states) = tokio::sync::watch::channel(BTreeMap::from([(
+            "local".to_owned(),
+            crate::targets::TargetCapacityState {
+                usage: Some(usage),
+                ..Default::default()
+            },
+        )]));
         let (refresh, _) = tokio::sync::mpsc::channel(1);
         assert!(
             state
                 .capacity
                 .set(CapacityFeed {
                     targets: targets.subscribe(),
-                    updates,
-                    latest,
-                    status: tokio::sync::watch::channel(BTreeMap::new()).1,
+                    states,
                     refresh
                 })
                 .is_ok()
@@ -1465,18 +1445,20 @@ mod tests {
             storage: Vec::new(),
         };
         let (targets, _targets_rx) = tokio::sync::watch::channel(vec![target]);
-        let (updates, _) = tokio::sync::broadcast::channel(1);
-        let (latest, latest_rx) =
-            tokio::sync::watch::channel(BTreeMap::from([("local".to_owned(), usage)]));
+        let (latest, latest_rx) = tokio::sync::watch::channel(BTreeMap::from([(
+            "local".to_owned(),
+            crate::targets::TargetCapacityState {
+                usage: Some(usage),
+                ..Default::default()
+            },
+        )]));
         let (refresh, _) = tokio::sync::mpsc::channel(1);
         assert!(
             state
                 .capacity
                 .set(CapacityFeed {
                     targets: targets.subscribe(),
-                    updates,
-                    latest: latest_rx,
-                    status: tokio::sync::watch::channel(BTreeMap::new()).1,
+                    states: latest_rx,
                     refresh,
                 })
                 .is_ok()
@@ -1550,7 +1532,15 @@ mod tests {
             mj_core::state::SessionState::Stopped;
         let stopped = publisher.project(&state, &sessions.sessions);
         assert_eq!(stopped["local"].capacity.committed.cpus, 0);
-        latest.send_modify(|readings| readings.get_mut("local").unwrap().logical_cores = 12);
+        latest.send_modify(|readings| {
+            readings
+                .get_mut("local")
+                .unwrap()
+                .usage
+                .as_mut()
+                .unwrap()
+                .logical_cores = 12
+        });
         let resized = publisher.project(&state, &sessions.sessions);
         assert_eq!(resized["local"].capacity.remaining.cpus, 12);
         targets.send_modify(|targets| targets.clear());

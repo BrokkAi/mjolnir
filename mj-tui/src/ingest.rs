@@ -1171,7 +1171,11 @@ impl DashboardState {
                     detail.sampled_at_epoch_seconds = Some(sampled_at_epoch_seconds);
                     detail.probe_error = None;
                 }
-                Err(error) => detail.probe_error = Some(error),
+                Err(error) => {
+                    // The fleet's size is unknown after a failed probe, not zero.
+                    detail.on_demand = false;
+                    detail.probe_error = Some(error);
+                }
             }
             detail.target.target_ids.clone()
         };

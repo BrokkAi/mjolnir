@@ -5048,12 +5048,22 @@ mod tests {
         idle.machines = 0;
         idle.has_reading = false;
         idle.on_demand = true;
+        // The fleet last answered empty, then its probe failed: the size is
+        // unknown, so the row must not claim "0 VMs".
+        let mut failed_idle = row(
+            "ec2-failed",
+            DeploymentCapacityKind::AwsFleet,
+            &["ec2-broken"],
+        );
+        failed_idle.machines = 0;
+        failed_idle.has_reading = false;
+        failed_idle.probe_error = Some("describe-instances: access denied".into());
         let mut fresh = row("new.example", DeploymentCapacityKind::Host, &["new"]);
         fresh.has_reading = false;
         fresh.sampled_at_epoch_seconds = None;
         // The rows travel from the daemon as JSON.
         let rows: Vec<HostCapacityRow> = serde_json::from_value(
-            serde_json::to_value(vec![local, build, fleet, idle, fresh]).unwrap(),
+            serde_json::to_value(vec![local, build, fleet, idle, failed_idle, fresh]).unwrap(),
         )
         .unwrap();
         let mut output = String::from("=== mj hosts ===\n");

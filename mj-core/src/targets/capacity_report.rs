@@ -41,15 +41,47 @@ pub fn capacity_staleness(
     )
 }
 
-/// What the capacity service last learned about one probe target, besides the
-/// reading itself.
+/// Everything the capacity service knows about one probe target. One value
+/// owns the last good reading, when it was taken, the latest failure and
+/// whether the fleet answered empty, so no reader can pair a fresh sample time
+/// with an older reading. Writers change it only through [`Self::apply`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CapacityProbeStatus {
+pub struct TargetCapacityState {
+    /// The last good reading. A failed probe leaves it in place.
+    pub usage: Option<DeploymentCapacityUsage>,
+    /// When `usage` (or the empty-fleet answer) was taken.
     pub sampled_at_epoch_seconds: Option<u64>,
-    /// The latest probe failed; the last good reading stays beside it.
+    /// The latest probe failed.
     pub probe_error: Option<String>,
-    /// The fleet answered and has no instances running.
+    /// The fleet answered and has no instances running. Cleared by a failed
+    /// probe: after a failure the fleet's size is unknown, not zero.
     pub on_demand: bool,
+    /// How many probe results have been applied. A surface that nudges the
+    /// poller compares it to learn that a result has since arrived.
+    pub results: u64,
+}
+
+impl TargetCapacityState {
+    /// Fold one probe result into the state.
+    pub fn apply(
+        &mut self,
+        result: &Result<Option<DeploymentCapacityUsage>, String>,
+        sampled_at_epoch_seconds: u64,
+    ) {
+        self.results += 1;
+        match result {
+            Ok(usage) => {
+                self.on_demand = usage.is_none();
+                self.usage.clone_from(usage);
+                self.sampled_at_epoch_seconds = Some(sampled_at_epoch_seconds);
+                self.probe_error = None;
+            }
+            Err(error) => {
+                self.on_demand = false;
+                self.probe_error = Some(error.clone());
+            }
+        }
+    }
 }
 
 /// One filesystem Mjolnir writes to on a host, with the storage verdict.
@@ -88,10 +120,10 @@ pub struct HostCapacityRow {
 impl HostCapacityRow {
     pub fn new(
         target: &DeploymentCapacityTarget,
-        usage: Option<&DeploymentCapacityUsage>,
-        status: &CapacityProbeStatus,
+        state: &TargetCapacityState,
         storage: &[TargetStorageView],
     ) -> Self {
+        let usage = state.usage.as_ref();
         let hosts = capacity_storage_hosts(target, usage);
         let filesystems = views_for(storage, &hosts)
             .into_iter()
@@ -117,9 +149,9 @@ impl HostCapacityRow {
             memory_total_bytes: usage.map_or(0, |usage| usage.memory_total_bytes),
             logical_cores: usage.map_or(0, |usage| usage.logical_cores),
             filesystems,
-            sampled_at_epoch_seconds: status.sampled_at_epoch_seconds,
-            probe_error: status.probe_error.clone(),
-            on_demand: status.on_demand,
+            sampled_at_epoch_seconds: state.sampled_at_epoch_seconds,
+            probe_error: state.probe_error.clone(),
+            on_demand: state.on_demand,
         }
     }
 

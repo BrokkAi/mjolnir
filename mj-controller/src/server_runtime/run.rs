@@ -105,7 +105,7 @@ pub(crate) async fn run_server(
         .capacity_feed()
         .context("the daemon capacity service is not running")?;
     let mut capacity_targets_rx = capacity_feed.targets.clone();
-    let mut capacity_updates_rx = capacity_feed.updates.subscribe();
+    let mut capacity_states_rx = capacity_feed.states.clone();
     track_capacity_targets(
         &capacity_targets_rx.borrow_and_update(),
         &mut capacity_state,
@@ -127,7 +127,11 @@ pub(crate) async fn run_server(
             project_sources: &project_sources,
             operations: &operations,
             move_recoveries: &move_recoveries,
-            capacity: &viewer_capacity(&capacity_state, &container_capacities),
+            capacity: &viewer_capacity(
+                &capacity_state,
+                &capacity_states_rx.borrow(),
+                &container_capacities,
+            ),
             launch_failures: &launch_failures,
             reviews: &review_views(&daemon_runtime),
         },
@@ -381,7 +385,11 @@ pub(crate) async fn run_server(
                         project_sources: &project_sources,
                         operations: &operations,
                         move_recoveries: &move_recoveries,
-                        capacity: &viewer_capacity(&capacity_state, &container_capacities),
+                        capacity: &viewer_capacity(
+                &capacity_state,
+                &capacity_states_rx.borrow(),
+                &container_capacities,
+            ),
                         launch_failures: &launch_failures,
                         reviews: &review_views(&daemon_runtime),
                     },
@@ -499,38 +507,12 @@ pub(crate) async fn run_server(
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
-                update = capacity_updates_rx.recv() => {
-                    let update = match update {
-                        Ok(update) => update,
-                        // Readings are latest-wins; a skipped one is replaced
-                        // by the next poll.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::debug!(skipped, "phone server skipped capacity readings");
-                            continue;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
-                            break;
-                        }
-                    };
-                    if let Some(entry) = capacity_state.get_mut(&update.target_id) {
-                        entry.refreshing = false;
-                        entry.sampled_at_epoch_seconds = Some(update.sampled_at_epoch_seconds);
-                        match update.result {
-                            Ok(usage) => {
-                                // A fleet with nothing running reports no
-                                // figures, and that is an answer rather than a
-                                // failure.
-                                entry.on_demand = usage.is_none();
-                                entry.usage = usage;
-                                entry.failed = false;
-                            }
-                            // The last good reading stays on screen beside the
-                            // failure: one failed probe is not a reason to
-                            // forget what the machine was doing.
-                            Err(_) => entry.failed = true,
-                        }
+                changed = capacity_states_rx.changed() => {
+                    if changed.is_err() {
+                        failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
+                        break;
                     }
+                    capacity_states_rx.borrow_and_update();
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
@@ -1168,11 +1150,16 @@ pub(crate) async fn run_server(
                                 tracing::warn!("phone capacity refresh rejected: poller stopped");
                             }
                             if known {
+                                let after_results = capacity_states_rx
+                                    .borrow()
+                                    .get(target_id)
+                                    .map_or(0, |state| state.results);
                                 if let Some(entry) = capacity_state.get_mut(target_id) {
-                                    entry.refreshing = accepted;
-                                    if !accepted {
-                                        entry.failed = true;
-                                    }
+                                    entry.refresh = if accepted {
+                                        PhoneRefresh::Waiting { after_results }
+                                    } else {
+                                        PhoneRefresh::Rejected { after_results }
+                                    };
                                 }
                                 revision = daemon_runtime.allocate_revision();
                                 publish_snapshot!('control, revision);
