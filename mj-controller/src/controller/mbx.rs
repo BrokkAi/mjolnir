@@ -296,6 +296,10 @@ pub fn preview_build_cache(
     Ok(Some(preview))
 }
 
+pub(crate) fn machine_cache_host_key(machine: &mj_core::config::Machine) -> Option<String> {
+    CacheHost::for_machine(machine).map(|host| host.key())
+}
+
 /// Apply one machine's desired policy. Both provisioning and the daemon use
 /// the same compare-and-replace operation; native settings are only read.
 pub(crate) fn apply_machine_build_cache(

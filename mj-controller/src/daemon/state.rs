@@ -119,6 +119,7 @@ impl RuntimeState {
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(inactivity),
             inactivity_changed: tokio::sync::Notify::new(),
+            mbx_install_wake: crate::controller::mbx::service::InstallWake::default(),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
             profile_catalog,
             recovery_observer,
@@ -856,6 +857,16 @@ impl RuntimeState {
 
     pub fn revisions(&self) -> tokio::sync::watch::Receiver<u64> {
         self.revisions.subscribe()
+    }
+
+    pub(crate) fn mbx_install_wake(&self) -> &crate::controller::mbx::service::InstallWake {
+        &self.mbx_install_wake
+    }
+
+    pub(crate) fn notify_mbx_installed(&self, machine: &mj_core::config::Machine) {
+        if let Some(host_key) = crate::controller::mbx::machine_cache_host_key(machine) {
+            self.mbx_install_wake.wake_host(host_key);
+        }
     }
 
     /// Read the config the daemon serves right now. A task on a schedule reads
