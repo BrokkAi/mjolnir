@@ -247,6 +247,8 @@ def form_problem(r, brief, secs, longest):
     if r.get("kind") not in range(1, 7):
         return f"kind {r.get('kind')!r} is not 1 to 6"
     after = r.get("after_line", "missing")
+    if after != "missing" and after is not None and not isinstance(after, str):
+        return f"after_line {after!r} is not a line of the brief or null"
     if after != "missing" and after is not None:
         hits = [l for l in secs.get(r["section"], []) if l == after.rstrip()]
         if len(hits) != 1:
@@ -269,7 +271,9 @@ def form_check():
         failed = []
         for r in rows:
             reason = form_problem(r, brief, secs, longest)
-            rows_out.append({"id": r["sibling_id"], "ok": reason is None, "reason": reason})
+            # Bound to the row's content: sibling ids are reused when the editor is rerun.
+            rows_out.append({"id": r["sibling_id"], "ok": reason is None, "reason": reason,
+                             "row_sha256": row_sha(r)})
             by_kind[r.get("kind")] += reason is None
             if reason:
                 failed.append({"id": r["sibling_id"], "reason": reason})
@@ -290,14 +294,21 @@ def load_jsonl(path):
     return [json.loads(l) for l in open(path) if l.strip()]
 
 
+def row_sha(r):
+    """Hash of a siblings.jsonl row as the editor wrote it (without the id the reader assigns)."""
+    return sha(json.dumps({k: v for k, v in r.items() if k != "sibling_id"}, sort_keys=True))
+
+
 def form_ok_siblings(bug):
-    """Rows of the diff whose form check passed (form.jsonl must be current)."""
-    ok = {r["id"]: r["ok"] for r in load_jsonl(WORK / "form.jsonl")}
+    """Rows of the diff whose form check passed. form.jsonl must have checked this exact row text;
+    a row the editor rewrote under a reused id counts as unchecked."""
+    checked = {r["id"]: r for r in load_jsonl(WORK / "form.jsonl")}
     rows = read_siblings(bug)
-    stale = [r["sibling_id"] for r in rows if r["sibling_id"] not in ok]
+    stale = [r["sibling_id"] for r in rows
+             if checked.get(r["sibling_id"], {}).get("row_sha256") != row_sha(r)]
     if stale:
-        raise SystemExit(f"form.jsonl does not cover {stale}: rerun form-check")
-    return [r for r in rows if ok[r["sibling_id"]]]
+        raise SystemExit(f"form.jsonl did not check the current text of {stale}: rerun form-check")
+    return [r for r in rows if checked[r["sibling_id"]]["ok"]]
 
 
 # One verifier checks at most this many siblings: the largest list of the other nine diffs is 174,
