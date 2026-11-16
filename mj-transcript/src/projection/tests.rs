@@ -3844,3 +3844,30 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
     assert_eq!(restored.unread_agent_messages_after(1), 1);
     assert_eq!(restored, session);
 }
+
+// The controller reads an autonomous turn's work facts from the outcome this
+// projection builds; the settlement is their only source.
+#[test]
+fn an_autonomous_turn_settlement_carries_its_work_facts_into_the_outcome() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 35 },
+    );
+    let start = session.applied_event_ordinal;
+    let facts = mj_core::work_facts::WorkFacts::unavailable("under test");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: start,
+                stop_reason: "end_turn".into(),
+                work_facts: Some(Box::new(facts.clone())),
+            }),
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    let outcome = session.last_turn_outcome.as_ref().unwrap();
+    assert_eq!(outcome.work_facts.as_ref(), Some(&facts));
+}
