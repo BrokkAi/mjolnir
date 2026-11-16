@@ -177,3 +177,78 @@ fn named_instance_settings_preserve_the_default_and_explicit_web_listener() {
         assert_eq!(saved.keys.prefix, "ctrl+]");
     }
 }
+
+#[test]
+fn subagents_settings_reuses_cached_efforts_across_reopens_and_model_switches() {
+    use mj_core::profile_capabilities::{
+        CapabilityState, ProfileCapabilities, ProfileCapabilitiesSnapshot,
+    };
+    use mj_core::worker_launch::ProfileConfig;
+
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+        value: value.into(),
+        name: value.into(),
+        description: None,
+    };
+    let profiles = dashboard
+        .config
+        .enabled_profiles()
+        .map(|(id, profile)| {
+            (
+                profile.capabilities_key(id),
+                ProfileCapabilities {
+                    choices: CapabilityState::Ready(ProfileConfig {
+                        model: Some("fast".into()),
+                        models: vec![choice("fast"), choice("smart")],
+                        efforts: vec![],
+                        observed_at: 1,
+                    }),
+                    efforts: std::collections::BTreeMap::from([
+                        ("fast".into(), CapabilityState::Ready(vec![choice("low")])),
+                        (
+                            "smart".into(),
+                            CapabilityState::Ready(vec![choice("high"), choice("max")]),
+                        ),
+                    ]),
+                },
+            )
+        })
+        .collect();
+    dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot { profiles });
+
+    // Opening the subagents dialog populates options from the process cache immediately.
+    dashboard.begin_settings_section("subagents", None);
+    assert_eq!(dashboard.take_profile_hydration(), None);
+    let model_path = vec!["subagents".into(), "straightforward".into(), "model".into()];
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .focus_path(&model_path);
+    dashboard.handle_key(key(KeyCode::Enter));
+    select_choice(&mut dashboard, "smart");
+    assert_eq!(dashboard.take_profile_hydration(), None);
+
+    let effort_path = vec![
+        "subagents".into(),
+        "straightforward".into(),
+        "effort".into(),
+    ];
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .focus_path(&effort_path);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let (efforts, _) = open_choices(setup_dialog_mut(&mut dashboard.mode).unwrap());
+    assert_eq!(efforts, vec![Value::Null, json!("high"), json!("max")]);
+
+    // Closing and reopening preserves the cached model and effort options.
+    dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.begin_settings_section("subagents", None);
+    assert_eq!(dashboard.take_profile_hydration(), None);
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .focus_path(&model_path);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let (models, _) = open_choices(setup_dialog_mut(&mut dashboard.mode).unwrap());
+    assert_eq!(models, vec![Value::Null, json!("fast"), json!("smart")]);
+}
