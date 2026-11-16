@@ -8131,9 +8131,16 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     .await
     .unwrap()
     .unwrap_err();
-    assert!(format!("{error:#}").contains("stop sub-agent"));
+    let message = format!("{error:#}");
+    assert!(message.contains("stop sub-agent"), "{message}");
+    assert!(message.contains(stuck_id), "{message}");
+    assert!(message.contains(oracle_id), "{message}");
 
     let stored = crate::database::load_state().unwrap();
+    assert!(
+        !stored.sessions.contains_key(finished_id) && !stored.subagents.contains_key(finished_id),
+        "a succeeded child stop still settles and removes the child when siblings fail"
+    );
     assert_ne!(stored.sessions[parent_id].state, SessionState::Stopped);
     for child in [stuck_id, oracle_id] {
         assert!(
@@ -9279,6 +9286,108 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
             .sessions
             .contains_key(WORKING_CHILD)
     );
+    recovery.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_parent_close() {
+    const NAME: &str =
+        "suspending_a_parent_stops_sub_agents_concurrently_before_finishing_parent_close";
+    const CHILD: &str = "MJ_TEST_SUSPEND_CONCURRENT_SUBAGENTS";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Concurrent sub-agent stop").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_a = "44444444444444444444444444444444";
+    let child_b = "55555555555555555555555555555555";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    }));
+    crate::database::save_session(&parent).unwrap();
+    for child_id in [child_a, child_b] {
+        let mut child = runtime_test_session(child_id, &workspace.id, SessionState::Running);
+        child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.path().join(child_id),
+        }));
+        crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
+            .unwrap();
+    }
+
+    let mut state = test_runtime_state_loading_the_store();
+    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
+    Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
+    let attempt_a = state.recovery_observer.gate.try_start(child_a).unwrap();
+    let attempt_b = state.recovery_observer.gate.try_start(child_b).unwrap();
+
+    let mut suspend = tokio::spawn({
+        let state = state.clone();
+        async move { state.suspend_session(parent_id.to_owned()).await }
+    });
+
+    // Both children must enter StopSubagent concurrently while each is held.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let active = state.active_lifecycles();
+            let has_a = active.iter().any(|view| view.session_id == child_a);
+            let has_b = active.iter().any(|view| view.session_id == child_b);
+            if has_a && has_b {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both sub-agent stops must be in flight concurrently");
+
+    drop(attempt_a);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if !crate::database::load_state()
+                .unwrap()
+                .sessions
+                .contains_key(child_a)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first child stop should settle while sibling is still held");
+
+    // Parent suspend must not complete while child_b is still in flight.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut suspend)
+            .await
+            .is_err(),
+        "parent suspend must wait for every in-flight sub-agent stop"
+    );
+    assert_ne!(
+        crate::database::load_state().unwrap().sessions[parent_id].state,
+        SessionState::Stopped
+    );
+
+    drop(attempt_b);
+    tokio::time::timeout(Duration::from_secs(60), suspend)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
+    assert!(!stored.sessions.contains_key(child_b));
     recovery.shutdown().await.unwrap();
 }
 

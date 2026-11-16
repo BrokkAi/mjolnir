@@ -250,17 +250,25 @@ impl RuntimeState {
             not_handed_back,
             "stopping sub-agents before suspending their parent"
         );
-        for child in stopped {
+        let results = futures::future::join_all(stopped.into_iter().map(|child| {
             let child_id = child.child_session_id;
-            // A sub-agent borrows its parent's worker and owns no branch.
-            Box::pin(self.force_destroy_indexed_session(
-                child_id.clone(),
-                BranchDisposition::Keep,
-                LifecycleKind::StopSubagent,
-            ))
-            .await
-            .with_context(|| format!("stop sub-agent {child_id} before suspending its parent"))?;
-        }
+            async move {
+                // A sub-agent borrows its parent's worker and owns no branch.
+                Box::pin(self.force_destroy_indexed_session(
+                    child_id.clone(),
+                    BranchDisposition::Keep,
+                    LifecycleKind::StopSubagent,
+                ))
+                .await
+                .with_context(|| format!("stop sub-agent {child_id} before suspending its parent"))
+            }
+        }))
+        .await;
+        let failures: Vec<String> = results
+            .into_iter()
+            .filter_map(|result| result.err().map(|error| format!("{error:#}")))
+            .collect();
+        ensure!(failures.is_empty(), "{}", failures.join("; "));
         Ok(())
     }
 
