@@ -968,8 +968,7 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
     )
     .await
     .expect("probe the disabled profile");
-    let Some(QuotaRefreshIntent::ProbeProfiles { requests, forced }) = woken.try_recv().ok()
-    else {
+    let Some(QuotaRefreshIntent::ProbeProfiles { requests, forced }) = woken.try_recv().ok() else {
         panic!("the poller receives the probe");
     };
     assert!(forced, "the force flag reaches the poller");
@@ -8186,6 +8185,73 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     );
 }
 
+/// A finished reviewer is destroyed, not left as a stopped sub-agent of the
+/// session that asked for the review (the shape the earlier suspend-only close
+/// left behind). Its usage stays in the accounting table.
+#[cfg(unix)]
+#[tokio::test]
+async fn destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting() {
+    const NAME: &str = "destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting";
+    const CHILD: &str = "MJ_TEST_DESTROY_FINISHED_REVIEWER";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .env(
+            mj_core::config::SESSION_INDEX_ENV,
+            directory.path().join("sessionwiki"),
+        )
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Reviewer destroy").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let reviewer_id = "44444444444444444444444444444444";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    }));
+    crate::database::save_session(&parent).unwrap();
+    let reviewer = runtime_test_session(reviewer_id, &workspace.id, SessionState::Stopped);
+    let mut relation = runtime_test_subagent(reviewer_id, parent_id);
+    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+    relation.task_name = "review".into();
+    crate::database::save_subagent_session(&reviewer, &relation).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.destroy_reviewer_child(reviewer_id.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert!(!stored.sessions.contains_key(reviewer_id));
+    assert!(!stored.subagents.contains_key(reviewer_id));
+    assert!(stored.sessions.contains_key(parent_id));
+    let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+    let accounted: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM subagent_accounting WHERE child_session_id=?1 AND task_name='review'",
+            [reviewer_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(accounted, 1);
+}
+
 /// Marks the isolated child a [`live_parent_with_a_working_sub_agent`] test
 /// runs in.
 #[cfg(unix)]
@@ -9975,9 +10041,10 @@ async fn exercise_child_close_with_a_nested_workspace(
     if failed_reviewer {
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
+                // A failed reviewer is destroyed once its role has failed.
                 if crate::database::load_session_record(LATCH_RELAY_SESSION)
                     .unwrap()
-                    .is_some_and(|child| child.state == SessionState::Stopped)
+                    .is_none()
                 {
                     break;
                 }
@@ -9985,7 +10052,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             }
         })
         .await
-        .expect("startup closes a failed reviewer without any manual suspension");
+        .expect("startup destroys a failed reviewer without any manual suspension");
         assert!(
             crate::database::try_commit_container_upgrade(parent_id, "upgrade-after-failed-review")
                 .unwrap()
@@ -10013,13 +10080,15 @@ async fn exercise_child_close_with_a_nested_workspace(
     }
     channels.shutdown.shutdown().await.unwrap();
     let stored = crate::database::load_state().unwrap();
-    let closed = &stored.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(closed.state, SessionState::Stopped);
-    assert!(closed.target.is_none() && closed.checkpoint.is_none());
-    assert!(
-        worker_root.exists(),
-        "private roots remain owned until the environment retires"
-    );
+    if !failed_reviewer {
+        let closed = &stored.sessions[LATCH_RELAY_SESSION];
+        assert_eq!(closed.state, SessionState::Stopped);
+        assert!(closed.target.is_none() && closed.checkpoint.is_none());
+        assert!(
+            worker_root.exists(),
+            "private roots remain owned until the environment retires"
+        );
+    }
     assert_eq!(stored.sessions[parent_id], parent);
     assert_eq!(
         std::fs::read_to_string(parent_root.join("private")).unwrap(),
@@ -10033,19 +10102,23 @@ async fn exercise_child_close_with_a_nested_workspace(
         std::fs::read_to_string(reports.join("result.txt")).unwrap(),
         "child report"
     );
-    let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
-        .unwrap()
-        .unwrap();
-    assert!(
-        serde_json::to_string(&history)
+    if failed_reviewer {
+        assert!(!stored.subagents.contains_key(LATCH_RELAY_SESSION));
+    } else {
+        let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
             .unwrap()
-            .contains(&conversation)
-    );
-    assert_eq!(
-        history.execution,
-        mj_core::state::MaterializedExecutionState::Closed
-    );
-    assert!(stored.subagents.contains_key(LATCH_RELAY_SESSION));
+            .unwrap();
+        assert!(
+            serde_json::to_string(&history)
+                .unwrap()
+                .contains(&conversation)
+        );
+        assert_eq!(
+            history.execution,
+            mj_core::state::MaterializedExecutionState::Closed
+        );
+        assert!(stored.subagents.contains_key(LATCH_RELAY_SESSION));
+    }
 }
 
 // Hard-won: #1444: an unreachable Closing child could lose its final journal when cleanup skipped relay recovery.

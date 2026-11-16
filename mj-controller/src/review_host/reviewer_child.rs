@@ -15,6 +15,9 @@ const CLOSE_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(300)
 pub(super) struct CloseAttempts {
     failures: u32,
     last_failure: Option<String>,
+    /// The restart sweep started this close, and its first result starts the
+    /// next swept child.
+    advances_sweep: bool,
 }
 
 impl CloseAttempts {
@@ -354,6 +357,28 @@ impl HostState {
         }
     }
 
+    /// Starts the close of the next child the restart sweep queued, if any.
+    pub(super) fn close_next_swept_child(&mut self) {
+        while let Some(child) = self.sweep_queue.pop_front() {
+            if self
+                .child_closure_owners
+                .values()
+                .any(|(id, _)| id == &child)
+            {
+                continue;
+            }
+            self.spawn_child_close(
+                child,
+                std::time::Duration::ZERO,
+                CloseAttempts {
+                    advances_sweep: true,
+                    ..CloseAttempts::default()
+                },
+            );
+            return;
+        }
+    }
+
     pub(super) fn close_child(&mut self, child: String) {
         if self
             .child_closure_owners
@@ -393,6 +418,9 @@ impl HostState {
             .child_closure_owners
             .remove(&id)
             .expect("a supervised child close has an owner");
+        if std::mem::take(&mut attempts.advances_sweep) {
+            self.close_next_swept_child();
+        }
         let failure = match result {
             Ok((_, Ok(()))) => {
                 if attempts.failures > 0 {

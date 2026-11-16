@@ -718,6 +718,15 @@ impl RuntimeState {
             .await
     }
 
+    /// Destroys one finished reviewer child the way a parent's suspend stops
+    /// its sub-agents. The review host's closer owns the decision that the
+    /// review is over and retries this with backoff; a child already gone is
+    /// the caller's business, not an error here.
+    pub(crate) async fn destroy_reviewer_child(self: &Arc<Self>, child: String) -> Result<()> {
+        self.stop_subagents(vec![child], LifecycleKind::StopSubagent, None)
+            .await
+    }
+
     /// Destroy a parent's sub-agents, each with its own subtree, all at once.
     /// Each child has its own lifecycle entry, worker and record, so nothing
     /// orders them; one after another, a tree of a few hundred descendants

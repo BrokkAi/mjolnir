@@ -307,6 +307,11 @@ pub(super) struct HostState {
     pub(super) child_closures: tokio::task::JoinSet<Result<(), String>>,
     pub(super) child_closure_owners:
         BTreeMap<tokio::task::Id, (String, super::reviewer_child::CloseAttempts)>,
+    /// Reviewer children a restart found finished, closed one at a time. An
+    /// old store holds tens of thousands (19,196 in the live one), and each
+    /// close loads the whole store, so closing them all at once would starve
+    /// the daemon. A close that fails retries on its own, outside this queue.
+    pub(super) sweep_queue: std::collections::VecDeque<String>,
     pub(super) reviews: BTreeMap<String, ReviewSlot>,
     /// Sessions whose review is being prepared. Preparation is asynchronous,
     /// so without this an automatic trigger and a manual `/review` racing each

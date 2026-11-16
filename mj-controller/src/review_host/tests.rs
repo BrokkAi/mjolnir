@@ -248,6 +248,9 @@ struct FakeEnvironment {
     /// While set, every close fails, and each attempt is counted.
     close_fails: std::sync::atomic::AtomicBool,
     close_attempts: std::sync::atomic::AtomicUsize,
+    /// Closes running now, and the most that ever ran together.
+    closes_in_flight: std::sync::atomic::AtomicUsize,
+    most_closes_in_flight: std::sync::atomic::AtomicUsize,
     start_error: Mutex<Option<String>>,
     /// What the store says about each reviewer child; absent means live with
     /// no handback.
@@ -340,6 +343,8 @@ impl FakeEnvironment {
             close_error: Mutex::new(None),
             close_fails: std::sync::atomic::AtomicBool::new(false),
             close_attempts: std::sync::atomic::AtomicUsize::new(0),
+            closes_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            most_closes_in_flight: std::sync::atomic::AtomicUsize::new(0),
             start_error: Mutex::new(None),
             standings: Mutex::new(std::collections::BTreeMap::new()),
             standing_errors: Mutex::new(std::collections::BTreeMap::new()),
@@ -534,6 +539,14 @@ impl ReviewEnvironment for FakeEnvironment {
         Box::pin(async move {
             self.close_attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let running = self
+                .closes_in_flight
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.most_closes_in_flight
+                .fetch_max(running, std::sync::atomic::Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            let _done = scopeguard_decrement(&self.closes_in_flight);
             if self.close_fails.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("worker restart queue is full".into());
             }
@@ -2214,6 +2227,60 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
     .expect("only the role still awaiting an outcome survives startup");
     host.shutdown().await.unwrap();
     assert!(environment.state().active.is_some());
+}
+
+struct DecrementOnDrop<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for DecrementOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn scopeguard_decrement(counter: &std::sync::atomic::AtomicUsize) -> DecrementOnDrop<'_> {
+    DecrementOnDrop(counter)
+}
+
+// A restart finds every finished reviewer of an old store at once (19,196 in
+// the live one). The sweep closes them one at a time, and a close that fails
+// retries on its own instead of holding the rest of the queue behind it.
+#[tokio::test]
+async fn startup_sweep_closes_finished_reviewers_one_at_a_time_past_a_failing_one() {
+    let session = session_id("sweep-many");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    for index in 0..40 {
+        environment
+            .child_relations
+            .lock()
+            .unwrap()
+            .push(ReviewerChildRelation {
+                parent_session_id: session.clone(),
+                request_key: format!("reviewer:old-{index}"),
+                child_session_id: format!("old-child-{index}"),
+            });
+    }
+    *environment.close_error.lock().unwrap() = Some("worker unreachable".into());
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while environment.closed.lock().unwrap().len() < 40 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("every finished reviewer is closed, the failed one on its retry");
+    assert_eq!(
+        environment
+            .most_closes_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the sweep never closes two children at once"
+    );
+    host.shutdown().await.unwrap();
 }
 
 /// A group restored from the store with one busy child per role, as a new
