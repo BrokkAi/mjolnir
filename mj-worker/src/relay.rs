@@ -1158,6 +1158,58 @@ impl DurableRelay {
         self.suppress_child_assessment()
     }
 
+    /// The latest finished turn's work processes while some may still be
+    /// alive, with the identities the worker's watcher recounts.
+    pub(crate) fn watched_work(
+        &self,
+    ) -> Option<(
+        mj_core::work_facts::WorkLiveness,
+        Vec<mj_core::work_facts::ProcessIdentity>,
+    )> {
+        use mj_core::work_facts::Observed;
+        let liveness = self
+            .snapshot
+            .work_liveness
+            .as_ref()
+            .filter(|l| l.alive > 0)?;
+        let completion = self
+            .snapshot
+            .turn_completion
+            .as_ref()
+            .filter(|turn| turn.completed_ordinal == liveness.completed_ordinal)?;
+        let Some(RelayCommandOutcome::Prompt {
+            work_facts: Some(facts),
+            ..
+        }) = self
+            .snapshot
+            .handled_commands
+            .get(&completion.command_id)
+            .and_then(|handled| handled.outcome.as_ref())
+        else {
+            return None;
+        };
+        match &facts.processes {
+            Observed::Known(processes) => Some((liveness.clone(), processes.identities.clone())),
+            Observed::Unavailable { .. } => None,
+        }
+    }
+
+    /// Publish a recount, unless the turn it counts is no longer the current
+    /// one or the count has not changed. Returns whether it was recorded.
+    pub(crate) fn record_work_liveness(
+        &mut self,
+        liveness: mj_core::work_facts::WorkLiveness,
+    ) -> Result<bool> {
+        let changed = self.snapshot.work_liveness.as_ref().is_some_and(|current| {
+            current.completed_ordinal == liveness.completed_ordinal
+                && current.alive != liveness.alive
+        });
+        if changed {
+            self.record_observation(RelayObservation::WorkLivenessChanged { liveness })?;
+        }
+        Ok(changed)
+    }
+
     pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {
         self.verdict_harness = Some(harness);
         if self.turn_context.decision_log().is_none() {

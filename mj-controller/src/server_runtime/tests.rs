@@ -713,6 +713,8 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         open_request: None,
         continuation: Default::default(),
         person_input_through: 0,
+        work_liveness: None,
+        undelivered_mailbox_event_keys: Vec::new(),
         assessment_context: None,
         turn_completion: None,
         relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
