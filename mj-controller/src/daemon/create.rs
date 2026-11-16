@@ -814,15 +814,36 @@ impl RuntimeState {
     pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
         let result = {
             let lifecycle_owner = self.owner();
-            let lifecycle = &lifecycle_owner.lifecycle;
-            let active = lifecycle
-                .get(session_id)
-                .with_context(|| format!("no create operation exists for session {session_id}"))?;
-            ensure!(
-                active.kind == LifecycleKind::Create,
-                "session {session_id} is no longer being created"
-            );
-            active.result.clone()
+            match lifecycle_owner.lifecycle.get(session_id) {
+                Some(active) => {
+                    ensure!(
+                        active.kind == LifecycleKind::Create,
+                        "session {session_id} is no longer being created"
+                    );
+                    Some(active.result.clone())
+                }
+                None => None,
+            }
+        };
+        let Some(result) = result else {
+            // No create is running: its outcome is already recorded. Every
+            // create, including one a restart interrupted, is admitted before
+            // the daemon serves clients, so the record says how it ended.
+            let id = session_id.to_owned();
+            let record = blocking(move || crate::database::load_session_record(&id)).await?;
+            let record = record.with_context(|| format!("unknown session {session_id}"))?;
+            return match record.state {
+                mj_core::state::SessionState::Error => Err(anyhow::anyhow!(
+                    record
+                        .last_error
+                        .unwrap_or_else(|| "session creation failed".to_owned())
+                )),
+                mj_core::state::SessionState::Provisioning
+                | mj_core::state::SessionState::Disconnected => Err(anyhow::anyhow!(
+                    "no create operation exists for session {session_id}"
+                )),
+                _ => Ok(()),
+            };
         };
         let channel = result.clone();
         let outcome = Self::wait_lifecycle_result(result).await;

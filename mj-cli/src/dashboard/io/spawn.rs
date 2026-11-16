@@ -1515,32 +1515,20 @@ async fn await_daemon_creation(
             Ok(()) => return Ok(LifecycleSuccess::Created),
             Err(error) => error,
         };
-        let Some(refusal) = error.downcast_ref::<mj_client::daemon::DaemonRefusal>() else {
-            tracing::info!(
-                session_id,
-                error = format!("{error:#}"),
-                "lost the daemon while a session was being created; waiting again"
-            );
-            tokio::time::sleep(RETRY_DELAY).await;
-            continue;
-        };
-        if !refusal.0.contains("no create operation exists") {
+        // A refusal is the daemon's answer, including the real failure of a
+        // create that has ended; only a lost connection means "ask again".
+        if error
+            .downcast_ref::<mj_client::daemon::DaemonRefusal>()
+            .is_some()
+        {
             return Err(error);
         }
-        // The daemon holds no create for this session: the record says how it
-        // ended, or that a restarting daemon has not admitted it yet.
-        let record = daemon.session_record(session_id.to_owned()).await?;
-        match record.map(|record| (record.state, record.last_error)) {
-            Some((mj_core::state::SessionState::Provisioning, _))
-            | Some((mj_core::state::SessionState::Disconnected, _)) => {
-                tokio::time::sleep(RETRY_DELAY).await;
-            }
-            Some((mj_core::state::SessionState::Error, reason)) => {
-                bail!(reason.unwrap_or_else(|| "session creation failed".to_owned()))
-            }
-            Some(_) => return Ok(LifecycleSuccess::Created),
-            None => return Err(error),
-        }
+        tracing::info!(
+            session_id,
+            error = format!("{error:#}"),
+            "lost the daemon while a session was being created; waiting again"
+        );
+        tokio::time::sleep(RETRY_DELAY).await;
     }
 }
 

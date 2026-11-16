@@ -41,6 +41,9 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 - Decision: a create stopped by shutdown uses the existing `CANCELLED_FOR_SHUTDOWN` state and `stopped_for_shutdown()`; the extra `INTERRUPTED_FOR_SHUTDOWN` state, `interrupted_for_shutdown()`, and the `resumable` flag were removed. Whether a lifecycle is resumable is decided by `kind == LifecycleKind::Create` (lifecycle.rs admission and handed-off check) and, for the server's action control, by the action's `LifecycleKind` (`PhoneActionControl::kind`). Rationale: one predicate per fact. Date: 2026-11-16.
 - Decision: a recovered sub-agent create (`start_subagent_create_lifecycle(.., recovering = true)`) stops the worker the stopped attempt started, discards its worker restart intent, and launches again on the parent's target. It is admitted with the child's own request key, so a replayed spawn joins it instead of starting a second one, and a shutdown no longer records "spawn the sub-agent again". Migration 134 needed no schema change (the intent table already keys on session id); it stays classified compatible. Date: 2026-11-16.
 
+- Decision: `wait_create_session` answers from the daemon when no create is running: the stored record gives the real failure (`Error`), success (any non-creating state), or a refusal naming an unowned create. The CLI waiter no longer reads session state; it retries only a lost connection. Rationale: one owner for "is this create still going". No protocol change. Date: 2026-11-16.
+- Decision: `reset_interrupted_create` removes no checkout when no environment exists, because planning only records `managed_worktree` and `execute_repository_setup` creates the checkout after the environment is reserved; the rollback helper would also fail there (it requires a durable environment). Date: 2026-11-16.
+
 
 ## Outcomes & Retrospective
 

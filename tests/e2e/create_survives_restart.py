@@ -69,6 +69,12 @@ def main():
         before = record(session)
         assert before["state"] != "running", before
 
+        # A waiter attached before the restart spans it and must receive the
+        # real outcome from the next daemon.
+        waiter = subprocess.Popen([str(args.mj.resolve()), "--instance", args.instance,
+                                   "wait", "--session", session, "--json", "--timeout", str(WAIT)],
+                                  env=environment(), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
         started = time.monotonic()
         restart = subprocess.Popen([str(args.mj.resolve()), "--instance", args.instance,
                                     "daemon", "restart"], env=environment(),
@@ -80,18 +86,21 @@ def main():
         stdout, stderr = restart.communicate(timeout=WAIT)
         assert restart.returncode == 0, (stdout, stderr)
         restart_seconds = time.monotonic() - started
-
-        # A TUI-style waiter attaches to the recovered create.
-        waiter = subprocess.run([str(args.mj.resolve()), "--instance", args.instance,
-                                 "wait", "--session", session, "--json"],
-                                env=environment(), capture_output=True, text=True, timeout=WAIT)
+        # The hook holds the create for the 1.0 s above. A restart that waited
+        # for the create would also wait for its clone and worker install, which
+        # take far longer than the few seconds of daemon exit and start-up
+        # allowed here on top of the hold.
+        assert restart_seconds < 1.0 + 5.0, f"the restart waited for the create: {restart_seconds:.1f}s"
 
         def running():
             current = record(session)
             assert not current.get("has_error"), current
             return current["state"] == "running"
         wait_for(running, "the recovered session to run")
-        assert waiter.returncode in (0, 1, 2), (waiter.stdout, waiter.stderr)
+        waiter_out, waiter_err = waiter.communicate(timeout=WAIT)
+        # Exit 0 is `finished`; an error, stop or timeout exits non-zero.
+        assert waiter.returncode == 0, (waiter.returncode, waiter_out, waiter_err)
+        assert json.loads(waiter_out)["outcome"] == "finished", waiter_out
 
         database = sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True)
         intents = database.execute("SELECT count(*) FROM session_create_intents").fetchone()[0]

@@ -6210,6 +6210,50 @@ async fn report_candidates_follow_committed_child_lifecycle_without_losing_faile
     assert_eq!(state.subagent_report_parent_ids(), [parent.id]);
 }
 
+/// With no create running, the daemon answers a create wait from the stored
+/// record, so a client never infers "still creating" from session state.
+#[tokio::test]
+async fn waiting_for_a_create_with_no_lifecycle_is_answered_from_the_record() {
+    const NAME: &str = "waiting_for_a_create_with_no_lifecycle_is_answered_from_the_record";
+    const CHILD: &str = "MJ_TEST_WAIT_CREATE_FROM_RECORD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Wait create").unwrap();
+    for (id, state, reason) in [
+        ("wait-failed", SessionState::Error, Some("clone refused")),
+        ("wait-running", SessionState::Running, None),
+        ("wait-creating", SessionState::Provisioning, None),
+    ] {
+        let mut record = runtime_test_session(id, &workspace.id, state);
+        record.last_error = reason.map(str::to_owned);
+        crate::database::save_session(&record).unwrap();
+    }
+    let state = test_runtime_state_loading_the_store();
+    let failed = state.wait_create_session("wait-failed").await.unwrap_err();
+    assert!(
+        format!("{failed:#}").contains("clone refused"),
+        "{failed:#}"
+    );
+    state.wait_create_session("wait-running").await.unwrap();
+    let creating = state
+        .wait_create_session("wait-creating")
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{creating:#}").contains("no create operation exists"),
+        "{creating:#}"
+    );
+}
+
 #[cfg(unix)]
 // Hard-won: a5eed2e0: synchronous checkpoint database I/O blocked unrelated pings and timers.
 #[tokio::test]

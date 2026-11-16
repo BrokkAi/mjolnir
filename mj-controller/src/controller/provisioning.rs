@@ -338,6 +338,10 @@ impl Controller {
             )
             .context("retire the interrupted attempt's environment")?;
         }
+        // With no environment there is no checkout to remove: planning only
+        // records `managed_worktree`, and `execute_repository_setup` creates
+        // the checkout after the environment is reserved. Forgetting the plan
+        // is therefore enough when the stop came before the reservation.
         let record = self.state.sessions.get_mut(session_id).unwrap();
         if let Some(managed) = record.managed_worktree.take() {
             record.project_directory = Some(managed.source_project_directory.clone());
