@@ -451,6 +451,25 @@ fn antigravity_owned_mcp_servers_are_granted_in_its_project_file() {
     // Every worker start stages again.
     stage_antigravity_grants(&spec).unwrap();
     assert_eq!(std::fs::read_to_string(&project).unwrap(), staged);
+    // A later launch of this profile with another home replaces the earlier
+    // home's grant rather than leaving both homes readable.
+    let other_home = home.path().join("other-home");
+    spec.environment
+        .insert(home_variable.into(), other_home.to_str().unwrap().into());
+    stage_antigravity_grants(&spec).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&project).unwrap(),
+        staged.replace(
+            &serde_json::to_string(&format!("read_file({})", user_home.join("").display()))
+                .unwrap(),
+            &serde_json::to_string(&format!("read_file({})", other_home.join("").display()))
+                .unwrap(),
+        )
+    );
+    spec.environment
+        .insert(home_variable.into(), user_home.to_str().unwrap().into());
+    stage_antigravity_grants(&spec).unwrap();
+    assert_eq!(std::fs::read_to_string(&project).unwrap(), staged);
     // The worker itself answers nothing for agy.
     let request = RequestPermissionRequest::new(
         "native",

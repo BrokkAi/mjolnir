@@ -528,25 +528,60 @@ pub(super) fn stage_antigravity_grants(spec: &LaunchSpec) -> Result<()> {
                 .with_context(|| format!("read Antigravity project file {}", path.display()));
         }
     };
+    // Every home read rule a launch has staged into this profile, so a later
+    // launch with another home removes the earlier rule instead of keeping
+    // both homes readable. It is written before the project file, so a rule
+    // can never reach the project file without being recorded here first.
+    // It lives outside agy's config directory, which agy reads as its own.
+    let staged_path = home.join("mj-home-read-grants.json");
+    let mut staged_reads: Vec<String> = match std::fs::read(&staged_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse {}", staged_path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", staged_path.display()));
+        }
+    };
+    let read_rule = home_read_rule(&user_home)?;
+    if !staged_reads.contains(&read_rule) {
+        staged_reads.push(read_rule.clone());
+        let mut bytes = serde_json::to_vec_pretty(&staged_reads)
+            .context("serialize the staged home read grants")?;
+        bytes.push(b'\n');
+        mj_core::config::atomic_write(&staged_path, &bytes)
+            .with_context(|| format!("write {}", staged_path.display()))?;
+    }
     let servers = owned_acp_mcp_tools(spec)
         .into_iter()
         .map(|(server, _)| server)
         .collect::<Vec<_>>();
-    let mut project = with_antigravity_grants(existing, &servers, &user_home)
+    let mut project = with_antigravity_grants(existing, &servers, &read_rule, &staged_reads)
         .with_context(|| format!("update Antigravity project file {}", path.display()))?;
     project.push(b'\n');
     mj_core::config::atomic_write(&path, &project)
         .with_context(|| format!("write Antigravity project file {}", path.display()))
 }
 
+/// agy's rule for reads below `user_home`. The trailing separator keeps
+/// same-prefix siblings such as `/home/al2` outside a grant for `/home/al`.
+fn home_read_rule(user_home: &Path) -> Result<String> {
+    Ok(format!(
+        "read_file({})",
+        user_home
+            .join("")
+            .to_str()
+            .context("Antigravity home is not UTF-8")?
+    ))
+}
+
 /// agy's project file with `mcp(<server>/*)` allowed for `servers` and for no
-/// other Mjolnir server, plus reads below `user_home`. Other project entries
-/// and grants are preserved. Historical home read rules cannot be distinguished
-/// from the person's own rules, so only the current rule is deduplicated.
+/// other Mjolnir server, plus `read_rule` and none of the earlier
+/// `staged_reads`. Other project entries and grants are preserved.
 fn with_antigravity_grants(
     existing: Option<serde_json::Value>,
     servers: &[String],
-    user_home: &Path,
+    read_rule: &str,
+    staged_reads: &[String],
 ) -> Result<Vec<u8>> {
     fn object<'a>(
         parent: &'a mut serde_json::Map<String, serde_json::Value>,
@@ -570,25 +605,20 @@ fn with_antigravity_grants(
         .or_insert_with(|| serde_json::Value::Array(Vec::new()))
         .as_array_mut()
         .context("allow is not a JSON array")?;
-    let directory_prefix = user_home.join("");
-    let read_rule = format!(
-        "read_file({})",
-        directory_prefix
-            .to_str()
-            .context("Antigravity home is not UTF-8")?
-    );
     let owned = OWNED_MCP_SERVERS.map(rule);
     allow.retain(|entry| {
-        !entry
-            .as_str()
-            .is_some_and(|rule| rule == read_rule || owned.iter().any(|owned| owned == rule))
+        !entry.as_str().is_some_and(|rule| {
+            rule == read_rule
+                || staged_reads.iter().any(|staged| staged == rule)
+                || owned.iter().any(|owned| owned == rule)
+        })
     });
     allow.extend(
         servers
             .iter()
             .map(|server| serde_json::Value::String(rule(server))),
     );
-    allow.push(serde_json::Value::String(read_rule));
+    allow.push(serde_json::Value::String(read_rule.to_owned()));
     serde_json::to_vec_pretty(&project).context("serialize the project file")
 }
 
