@@ -14,31 +14,18 @@ pub(crate) fn fleet_vm_label(detail: &CapacityDetail) -> String {
     crate::widgets::counted(count, "VM", "VMs")
 }
 
-/// A reading older than this stopped tracking the host: the poller samples
-/// every 30 seconds, so three missed rounds mean the number on screen is no
-/// longer what the host is doing.
-pub(crate) const CAPACITY_SAMPLE_STALE_AFTER_SECONDS: u64 = 90;
+pub(crate) use mj_core::targets::CAPACITY_SAMPLE_STALE_AFTER_SECONDS;
 
-/// Why the row's reading cannot be trusted, if it cannot: a probe that failed,
-/// or a sample that stopped refreshing. `None` means the reading is current.
+/// Why the row's reading cannot be trusted, if it cannot.
 pub(crate) fn capacity_staleness(
     detail: &CapacityDetail,
     now_epoch_seconds: u64,
 ) -> Option<String> {
-    if let Some(error) = &detail.probe_error {
-        // A probe that never produced a reading already shows "unavailable"
-        // in the capacity column; only say more when stale numbers are still
-        // on screen and could be mistaken for current.
-        return detail.usage.is_some().then(|| format!("stale: {error}"));
-    }
-    let sampled_at = detail.sampled_at_epoch_seconds?;
-    (now_epoch_seconds.saturating_sub(sampled_at) > CAPACITY_SAMPLE_STALE_AFTER_SECONDS).then(
-        || {
-            format!(
-                "stale: sampled {}",
-                refresh_age(now_epoch_seconds, sampled_at)
-            )
-        },
+    mj_core::targets::capacity_staleness(
+        detail.usage.is_some(),
+        detail.probe_error.as_deref(),
+        detail.sampled_at_epoch_seconds,
+        now_epoch_seconds,
     )
 }
 
@@ -195,14 +182,7 @@ fn storage_condition_style(condition: mj_core::targets::storage::StorageConditio
     }
 }
 
-fn storage_condition_flag(condition: mj_core::targets::storage::StorageCondition) -> &'static str {
-    use mj_core::targets::storage::StorageCondition;
-    match condition {
-        StorageCondition::Full => " full",
-        StorageCondition::Low => " low",
-        StorageCondition::Ok => "",
-    }
-}
+use mj_core::targets::storage_condition_flag;
 
 /// Filesystem details for the dropdown, styled like the former expanded rows.
 pub(crate) fn capacity_disks_menu_lines(

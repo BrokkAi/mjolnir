@@ -1,0 +1,59 @@
+=== mj hosts ===
+HOST / FLEET   TARGETS        CPU                RAM
+local          local, podman  12%                45% (14.0G/31.0G)
+  / 300.0G free of 900.0G
+  /mnt/optane 3.0G free of 400.0G low
+build.example  build          unavailable        45% (14.0G/31.0G)
+  /srv 512.0M free of 200.0G full
+  stale: ssh: connection timed out
+ec2-fleet      ec2            96 cores on 2 VMs  384.0G
+  i-0a1 /mnt/ebs 80.0G free of 100.0G
+  i-0b2 /mnt/ebs 60.0G free of 100.0G
+ec2-idle       ec2-spare      0 VMs
+new.example    new            unavailable
+=== mj hosts --host podman ===
+HOST / FLEET  TARGETS        CPU  RAM
+local         local, podman  12%  45% (14.0G/31.0G)
+  / 300.0G free of 900.0G
+  /mnt/optane 3.0G free of 400.0G low
+=== mj hosts --host ec2-fleet --json ===
+{
+  "now_epoch_seconds": 1700000000,
+  "hosts": [
+    {
+      "id": "ec2-fleet",
+      "host": "ec2-fleet",
+      "target_ids": [
+        "ec2"
+      ],
+      "kind": "aws_fleet",
+      "machines": 2,
+      "has_reading": true,
+      "cpu_percent": null,
+      "memory_used_bytes": 15032385536,
+      "memory_total_bytes": 412316860416,
+      "logical_cores": 96,
+      "filesystems": [
+        {
+          "host": "i-0a1",
+          "mount": "/mnt/ebs",
+          "available_bytes": 85899345920,
+          "total_bytes": 107374182400,
+          "condition": "ok"
+        },
+        {
+          "host": "i-0b2",
+          "mount": "/mnt/ebs",
+          "available_bytes": 64424509440,
+          "total_bytes": 107374182400,
+          "condition": "ok"
+        }
+      ],
+      "sampled_at_epoch_seconds": 1699999980,
+      "probe_error": null,
+      "on_demand": false
+    }
+  ]
+}
+=== mj hosts --host missing ===
+no host or target "missing"; known names: build, build.example, ec2, ec2-fleet, ec2-idle, ec2-spare, local, new, new.example, podman

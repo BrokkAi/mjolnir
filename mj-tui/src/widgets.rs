@@ -26,24 +26,7 @@ pub(crate) fn popup_height(
     nominal.max(wrapped)
 }
 
-pub(crate) fn format_resource_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    const TIB: f64 = GIB * 1024.0;
-
-    if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}K", bytes as f64 / KIB)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1}M", bytes as f64 / MIB)
-    } else if bytes < 1024_u64.pow(4) {
-        format!("{:.1}G", bytes as f64 / GIB)
-    } else {
-        format!("{:.1}T", bytes as f64 / TIB)
-    }
-}
+pub(crate) use mj_core::text::format_resource_bytes;
 
 /// `count` and the noun that agrees with it. It lives in mj-core so the
 /// daemon's and the CLI's messages use it too (launch finding R5-10).

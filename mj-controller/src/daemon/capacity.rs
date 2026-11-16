@@ -80,6 +80,8 @@ pub(crate) struct CapacityFeed {
     pub(crate) targets: tokio::sync::watch::Receiver<Vec<crate::targets::DeploymentCapacityTarget>>,
     pub(crate) updates: tokio::sync::broadcast::Sender<crate::pollers::CapacityPollUpdate>,
     latest: tokio::sync::watch::Receiver<BTreeMap<String, crate::targets::DeploymentCapacityUsage>>,
+    /// When each target was last sampled and whether its latest probe failed.
+    status: tokio::sync::watch::Receiver<BTreeMap<String, crate::targets::CapacityProbeStatus>>,
     refresh: tokio::sync::mpsc::Sender<()>,
 }
 
@@ -123,6 +125,27 @@ impl CapacityFeed {
         target_id: &str,
     ) -> Option<crate::targets::DeploymentCapacityUsage> {
         self.reading_for_target(target_id).map(|(_, usage)| usage)
+    }
+
+    /// Every host and fleet with its latest reading and storage verdicts, in
+    /// the order the capacity service lists them. Reads what the service
+    /// already holds; it never probes.
+    pub(crate) fn host_rows(&self) -> Vec<crate::targets::HostCapacityRow> {
+        let storage = crate::target_storage::views();
+        let latest = self.latest.borrow();
+        let status = self.status.borrow();
+        self.targets
+            .borrow()
+            .iter()
+            .map(|target| {
+                crate::targets::HostCapacityRow::new(
+                    target,
+                    latest.get(&target.id),
+                    &status.get(&target.id).cloned().unwrap_or_default(),
+                    &storage,
+                )
+            })
+            .collect()
     }
 
     /// Ask for a new reading of every host. A request that arrives while one
@@ -689,11 +712,14 @@ pub(super) fn spawn_capacity_service(
         String,
         crate::targets::DeploymentCapacityUsage,
     >::new());
+    let (status_tx, status_rx) =
+        tokio::sync::watch::channel(BTreeMap::<String, crate::targets::CapacityProbeStatus>::new());
     let (updates, _) = tokio::sync::broadcast::channel(64);
     let feed = CapacityFeed {
         targets: targets_tx.subscribe(),
         updates: updates.clone(),
         latest: latest_rx,
+        status: status_rx,
         refresh,
     };
     if state.capacity.set(feed).is_err() {
@@ -723,6 +749,11 @@ pub(super) fn spawn_capacity_service(
                         latest.retain(|id, _| targets.iter().any(|target| target.id == *id));
                         latest.len() != before
                     });
+                    status_tx.send_if_modified(|status| {
+                        let before = status.len();
+                        status.retain(|id, _| targets.iter().any(|target| target.id == *id));
+                        status.len() != before
+                    });
                     targets_tx.send_if_modified(|current| {
                         if *current == targets {
                             false
@@ -745,6 +776,18 @@ pub(super) fn spawn_capacity_service(
                         tracing::error!("the daemon capacity poller stopped");
                         break;
                     };
+                    status_tx.send_modify(|status| {
+                        let entry = status.entry(reading.target_id.clone()).or_default();
+                        match &reading.result {
+                            Ok(usage) => {
+                                entry.on_demand = usage.is_none();
+                                entry.sampled_at_epoch_seconds =
+                                    Some(reading.sampled_at_epoch_seconds);
+                                entry.probe_error = None;
+                            }
+                            Err(error) => entry.probe_error = Some(error.clone()),
+                        }
+                    });
                     if let Ok(Some(usage)) = &reading.result {
                         crate::target_storage::record_samples(
                             &usage.storage,
@@ -912,6 +955,7 @@ mod tests {
                     targets: targets.subscribe(),
                     updates,
                     latest,
+                    status: tokio::sync::watch::channel(BTreeMap::new()).1,
                     refresh
                 })
                 .is_ok()
@@ -1432,6 +1476,7 @@ mod tests {
                     targets: targets.subscribe(),
                     updates,
                     latest: latest_rx,
+                    status: tokio::sync::watch::channel(BTreeMap::new()).1,
                     refresh,
                 })
                 .is_ok()
