@@ -124,6 +124,7 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -140,6 +141,7 @@ fn usage_priced(profile_id: &str) -> ProfileQuota {
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 

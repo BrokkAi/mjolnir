@@ -310,6 +310,15 @@ pub(crate) fn rate_limit_hold(retry_after: Option<Duration>) -> Duration {
         .clamp(Duration::from_secs(60), Duration::from_secs(6 * 3600))
 }
 
+/// For a check refused at `attempt`: when the provider's hold ends, and when
+/// the next check runs. A refused check does not shorten the regular cadence:
+/// the next one is an interval after this attempt, or the hold's end if later.
+pub(crate) fn refused_check_schedule(attempt: u64, retry_after: Option<Duration>) -> (u64, u64) {
+    let until = attempt + rate_limit_hold(retry_after).as_secs();
+    let next_check = until.max(attempt + crate::pollers::QUOTA_REFRESH_INTERVAL.as_secs());
+    (until, next_check)
+}
+
 /// What to publish after a probe was rate limited: the last good reading with
 /// the hold attached, so its numbers and age stay visible. With no good
 /// reading to keep, the rate-limit report itself.
@@ -317,6 +326,7 @@ pub(crate) fn hold_report(previous: Option<&ProfileQuota>, limited: ProfileQuota
     match previous.filter(|previous| previous.error.is_none()) {
         Some(good) => ProfileQuota {
             rate_limited_until_epoch_seconds: limited.rate_limited_until_epoch_seconds,
+            next_check_at_epoch_seconds: limited.next_check_at_epoch_seconds,
             ..good.clone()
         },
         None => limited,
@@ -376,6 +386,7 @@ impl QuotaReportPublication {
             error: None,
             refreshed_at_epoch_seconds: mj_core::clock::epoch_seconds(),
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         });
         report.error = Some(error.clone());
         Some(report)
@@ -536,13 +547,16 @@ impl QuotaManager {
 /// keeps failing the same way is logged once, not on every refresh.
 fn log_quota_change(previous: Option<&ProfileQuota>, report: &ProfileQuota) {
     if let Some(until) = report.rate_limited_until_epoch_seconds {
-        // A hold is logged once, when it starts: the profile is not probed
-        // again until it ends.
+        // A hold is logged once, when it starts. The provider's hold and the
+        // next scheduled check differ when the hold is shorter than the
+        // regular interval.
         if previous.and_then(|previous| previous.rate_limited_until_epoch_seconds) != Some(until) {
+            let now = mj_core::clock::epoch_seconds();
             tracing::info!(
                 profile_id = %report.profile_id,
                 harness = report.harness.display_name(),
-                retry_in_seconds = until.saturating_sub(mj_core::clock::epoch_seconds()),
+                provider_hold_seconds = until.saturating_sub(now),
+                next_check_in_seconds = report.next_check_at().unwrap_or(until).saturating_sub(now),
                 "the provider rate limited the quota probe; holding this profile's probes"
             );
         }
@@ -803,6 +817,7 @@ async fn refresh_profile_with_cache_root(
         error: None,
         refreshed_at_epoch_seconds,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     };
     // A harness that never shares its quota has nothing to probe and nothing
     // that failed, so it says `n/a` instead of reading as unavailable.
@@ -844,6 +859,7 @@ async fn refresh_profile_with_cache_root(
                         error: None,
                         refreshed_at_epoch_seconds,
                         rate_limited_until_epoch_seconds: None,
+                        next_check_at_epoch_seconds: None,
                     })
             }
             CodexQuotaSource::Provider(_) | CodexQuotaSource::UsagePriced { .. } => {
@@ -948,6 +964,7 @@ async fn refresh_profile_with_cache_root(
                         error: None,
                         refreshed_at_epoch_seconds,
                         rate_limited_until_epoch_seconds: None,
+                        next_check_at_epoch_seconds: None,
                     }),
                     CodexUsageStatus::Unavailable(error) => Err(anyhow::anyhow!(error)),
                 }
@@ -1035,6 +1052,7 @@ async fn refresh_profile_with_cache_root(
                     error: None,
                     refreshed_at_epoch_seconds,
                     rate_limited_until_epoch_seconds: None,
+                    next_check_at_epoch_seconds: None,
                 })
                 .map_err(|error| match error {
                     claude_usage::ClaudeUsageError::RateLimited(retry_after) => {
@@ -1057,6 +1075,7 @@ async fn refresh_profile_with_cache_root(
                     error: None,
                     refreshed_at_epoch_seconds,
                     rate_limited_until_epoch_seconds: None,
+                    next_check_at_epoch_seconds: None,
                 })
         }
         // Grok Build publishes no HTTP quota endpoint. Its own usage view polls
@@ -1091,6 +1110,7 @@ async fn refresh_profile_with_cache_root(
                     error: None,
                     refreshed_at_epoch_seconds,
                     rate_limited_until_epoch_seconds: None,
+                    next_check_at_epoch_seconds: None,
                 })
                 .map_err(|error| anyhow::anyhow!(error.to_string()))
         }
@@ -1120,6 +1140,7 @@ async fn refresh_profile_with_cache_root(
                 error: None,
                 refreshed_at_epoch_seconds,
                 rate_limited_until_epoch_seconds: None,
+                next_check_at_epoch_seconds: None,
             }),
         // OpenCode reads no allowance from any provider: rate-limit headers
         // reach it only on failed requests. A profile signed in through an
@@ -1146,21 +1167,26 @@ async fn refresh_profile_with_cache_root(
                 error: None,
                 refreshed_at_epoch_seconds,
                 rate_limited_until_epoch_seconds: None,
+                next_check_at_epoch_seconds: None,
             }),
     };
-    let report = result.unwrap_or_else(|error| ProfileQuota {
-        paid_credits: None,
-        monthly_price_usd: None,
-        banked_resets: None,
-        profile_id,
-        harness,
-        windows: Vec::new(),
-        extra: None,
-        error: Some(error.to_string()),
-        refreshed_at_epoch_seconds,
-        rate_limited_until_epoch_seconds: error.downcast_ref::<RateLimited>().map(|limited| {
-            refreshed_at_epoch_seconds + rate_limit_hold(limited.retry_after).as_secs()
-        }),
+    let report = result.unwrap_or_else(|error| {
+        let schedule = error
+            .downcast_ref::<RateLimited>()
+            .map(|limited| refused_check_schedule(refreshed_at_epoch_seconds, limited.retry_after));
+        ProfileQuota {
+            paid_credits: None,
+            monthly_price_usd: None,
+            banked_resets: None,
+            profile_id,
+            harness,
+            windows: Vec::new(),
+            extra: None,
+            error: Some(error.to_string()),
+            refreshed_at_epoch_seconds,
+            rate_limited_until_epoch_seconds: schedule.map(|(until, _)| until),
+            next_check_at_epoch_seconds: schedule.map(|(_, next_check)| next_check),
+        }
     });
     // Only refresh attempts reach this point, not reports adopted from the
     // daemon's reset cache. A reader can still reuse its recent provider data.

@@ -87,6 +87,7 @@ mod tests {
             error: None,
             refreshed_at_epoch_seconds: 1,
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         };
         let mut observed = vec![report.clone()];
         save_report(&mut connection, "account-a", &report).unwrap();

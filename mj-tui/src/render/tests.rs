@@ -1024,6 +1024,7 @@ fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
         error: None,
         refreshed_at_epoch_seconds: now_seconds(),
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -1058,6 +1059,7 @@ fn api_quota(profile_id: &str) -> ProfileQuota {
         error: None,
         refreshed_at_epoch_seconds: now_seconds(),
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -1398,9 +1400,12 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
 }
 
 #[test]
-fn a_rate_limited_profile_reads_the_retry_time_not_unavailable() {
+fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
+    // A short hold inside the regular interval: the note lasts until the next
+    // check, and the last good reading stays on screen beside it.
     let mut held = weekly_quota("claude-1", 63);
-    held.rate_limited_until_epoch_seconds = Some(now_seconds() + 5 * 60);
+    held.rate_limited_until_epoch_seconds = Some(now_seconds() + 60);
+    held.next_check_at_epoch_seconds = Some(now_seconds() + 5 * 60);
     // No good reading behind the hold: the report itself is the rate limit.
     let mut only_limited = weekly_quota("codex-1", 0);
     only_limited.windows.clear();
@@ -1419,10 +1424,11 @@ fn a_rate_limited_profile_reads_the_retry_time_not_unavailable() {
     for id in ["claude-1", "codex-1"] {
         let row = lines
             .iter()
-            .find(|line| line.contains(id) && line.contains("rate limited"))
+            .find(|line| line.contains(id) && line.contains("quota check refused"))
             .unwrap_or_else(|| panic!("a rate limited row for {id}: {lines:#?}"));
-        assert!(row.contains("rate limited · retry in"), "{row:?}");
+        assert!(row.contains("quota check refused · next in"), "{row:?}");
         assert!(!row.contains("unavailable"), "{row:?}");
+        assert_eq!(row.contains("63%"), id == "claude-1", "{row:?}");
     }
 
     minimize_all_panes(&mut dashboard);
@@ -1430,8 +1436,8 @@ fn a_rate_limited_profile_reads_the_retry_time_not_unavailable() {
         .into_iter()
         .find(|line| line.contains("─ Profiles ──"))
         .expect("the minimized Profiles row");
-    assert!(row.contains("claude-1 rate limited"), "{row:?}");
-    assert!(row.contains("codex-1 rate limited"), "{row:?}");
+    assert!(row.contains("claude-1 63%"), "{row:?}");
+    assert!(row.contains("codex-1 check refused"), "{row:?}");
 }
 
 /// An exhausted profile reads 0%, the same as the open pane's bar. Showing
@@ -3684,6 +3690,7 @@ fn golden_dashboard_resource_panels() {
                 error: Some("offline".into()),
                 refreshed_at_epoch_seconds: 0,
                 rate_limited_until_epoch_seconds: None,
+                next_check_at_epoch_seconds: None,
             },
         )]),
     );
@@ -3711,6 +3718,7 @@ fn golden_dashboard_resource_panels() {
                 error: Some("login expired".into()),
                 refreshed_at_epoch_seconds: 0,
                 rate_limited_until_epoch_seconds: None,
+                next_check_at_epoch_seconds: None,
             },
         )]),
     );
@@ -3822,6 +3830,7 @@ fn golden_dashboard_resource_panels() {
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     };
     let mut claude_reports = BTreeMap::from([
         ("claude-1".into(), claude_quota("claude-1", Some(17))),
@@ -3885,6 +3894,7 @@ fn golden_dashboard_resource_panels() {
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     };
     let mut dashboard = DashboardState::new(
         config(),
@@ -3931,6 +3941,7 @@ fn golden_dashboard_resource_panels() {
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     };
     let mut dashboard = DashboardState::new(
         config(),

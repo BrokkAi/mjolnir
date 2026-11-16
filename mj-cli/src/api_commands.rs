@@ -4875,6 +4875,7 @@ mod tests {
             error: error.map(str::to_owned),
             refreshed_at_epoch_seconds: now - age,
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         };
         let mut config = mj_core::config::Config::default();
         for (id, kind, enabled) in [

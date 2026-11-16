@@ -1473,6 +1473,7 @@ fn golden_phone_session_snapshot() {
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     };
     let quota_reports = BTreeMap::from([
         (
@@ -2269,6 +2270,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
                 error: None,
                 refreshed_at_epoch_seconds: now - age.as_secs(),
                 rate_limited_until_epoch_seconds: Some(now + 600),
+                next_check_at_epoch_seconds: Some(now + 600),
             },
         )]);
         let projected = viewer_snapshot(
