@@ -83,6 +83,10 @@ Context budget (bytes)
 
 Optional positive byte limit for transcript compaction. Leave blank for the default.
 
+Load balancing may consume credits
+
+When this subscription profile has used up its quota for a model, let load balancing still pick it and spend its paid credits. Off: it is skipped until the quota resets. Does not affect a session you pin to this profile.
+
 Claude permission mode
 Default (Auto)
 Auto
@@ -101,6 +105,7 @@ control Enabled: checked
 control Type: Claude Code
 control Account directory: "<home>" (text, placeholder "Not set")
 control Context budget (bytes): "" (text, placeholder "262144 (256 KiB)")
+control Load balancing may consume credits: unchecked
 control Claude permission mode: Default (Auto)
 layout: {"overflowsSideways":false,"savebar":false,"saveEnabled":false,"menu":"Settings","hash":"#settings/profiles/claude"}
 === an accepted edit leaves the draft unsaved (390x844) ===
