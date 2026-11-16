@@ -1356,6 +1356,7 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: first_harness,
                 stop_reason: "end_turn".into(),
+                work_facts: None,
             }),
             origin: None,
             prompt_in_flight: false,
@@ -1410,6 +1411,7 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: start,
                 stop_reason: "end_turn".into(),
+                work_facts: None,
             }),
             origin: None,
             prompt_in_flight: false,
@@ -1695,6 +1697,7 @@ fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: 1,
                 stop_reason: "end_turn".into(),
+                work_facts: None,
             }),
             origin: Some("task-notification".into()),
             prompt_in_flight: false,
@@ -1751,6 +1754,7 @@ fn native_tail_preserves_prompt_outcome_and_autonomous_error_is_retained() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: 1,
                 stop_reason: "error".into(),
+                work_facts: None,
             }),
         },
     );
@@ -1947,6 +1951,7 @@ fn cancelling_a_codex_native_tail_preserves_the_prompt_outcome() {
             autonomous: Some(mj_core::relay::SettledHarnessTurn {
                 start_ordinal: 1,
                 stop_reason: "end_turn".into(),
+                work_facts: None,
             }),
             origin: None,
             prompt_in_flight: false,
@@ -2255,6 +2260,7 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
         autonomous: Some(mj_core::relay::SettledHarnessTurn {
             start_ordinal: started_at,
             stop_reason: "cancelled".into(),
+            work_facts: None,
         }),
         origin: None,
         prompt_in_flight: false,

@@ -444,10 +444,32 @@ fn run_relay_coordinator(
                 }
                 _ = tokio::time::sleep_until(stop_at), if stop_timer.is_some() && !held => {
                     let (turn, _) = stop_timer.take().expect("guarded stop timer");
-                    relay
-                        .lock()
-                        .expect("relay state lock poisoned")
-                        .end_unanswered_harness_turn_stop(turn)?;
+                    // Ending the turn is a managed child's turn ending like any
+                    // other: observe its work first, then replay what arrived.
+                    let mut deferred = std::collections::VecDeque::new();
+                    let facts = match capture.as_ref() {
+                        Some(observer) => Some(capture_while_open(
+                            &mut Capture { observer, wakes: &mut dispatch_wakes },
+                            &relay,
+                            &mut events,
+                            &mut deferred,
+                        ).await),
+                        None => None,
+                    };
+                    {
+                        let mut state = relay.lock().expect("relay state lock poisoned");
+                        state.offer_settle_facts(facts);
+                        let ended = state.end_unanswered_harness_turn_stop(turn);
+                        state.offer_settle_facts(None);
+                        ended?;
+                    }
+                    if record_deferred(
+                        &relay, &mut in_flight, deferred, &mut session_configured,
+                        &mut user_shells, &mut kimi_tasks, startup.as_mut(),
+                    ).await? {
+                        verdict_tasks.shutdown().await;
+                        return Ok(());
+                    }
                     // A checkpoint barrier may have been waiting for this turn.
                     dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
                 }
@@ -656,7 +678,13 @@ async fn record_one_runtime_event(
     mut startup: Option<&mut HarnessStartup>,
 ) -> Result<bool> {
     let mut deferred = std::collections::VecDeque::new();
-    let finishing_prompt = matches!(event, RuntimeEvent::PromptFinished { .. });
+    // One rule for "a managed child's turn ended": a prompt of ours finishing,
+    // or the harness ending a turn it started on its own.
+    let finishing_prompt = matches!(event, RuntimeEvent::PromptFinished { .. })
+        || relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .event_settles_autonomous_turn(&event);
     let work_facts = match capture.filter(|_| finishing_prompt) {
         Some(capture) => {
             let (prepared, facts) = tokio::join!(
@@ -682,8 +710,29 @@ async fn record_one_runtime_event(
     )? {
         return Ok(true);
     }
-    // What arrived during the observation, in the order it arrived, now that the
-    // outcome it followed is recorded.
+    record_deferred(
+        relay,
+        in_flight,
+        deferred,
+        session_configured,
+        user_shells,
+        kimi_tasks,
+        startup,
+    )
+    .await
+}
+
+/// Record what arrived during an observation, in the order it arrived, now
+/// that the outcome it followed is recorded.
+async fn record_deferred(
+    relay: &Arc<RelayCell>,
+    in_flight: &mut BTreeMap<String, RelayCommand>,
+    mut deferred: std::collections::VecDeque<RuntimeEvent>,
+    session_configured: &mut bool,
+    user_shells: &mut crate::user_shell::UserShellRegistry,
+    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    mut startup: Option<&mut HarnessStartup>,
+) -> Result<bool> {
     while let Some(mut event) = deferred.pop_front() {
         prepare_kimi_runtime_event(kimi_tasks, relay, &mut event).await?;
         track_user_shell_completion(user_shells, &event);
@@ -876,6 +925,16 @@ pub(crate) fn record_runtime_event_with_facts(
 ) -> Result<bool> {
     let stopped = matches!(event, RuntimeEvent::Stopped);
     let mut relay = relay.lock().expect("relay state lock poisoned");
+    // A prompt's facts ride in its own outcome below; for any other event they
+    // are what a settlement of an autonomous turn takes. Every event replaces
+    // them, so none outlives the event it was observed for.
+    let work_facts = if matches!(event, RuntimeEvent::PromptFinished { .. }) {
+        relay.offer_settle_facts(None);
+        work_facts
+    } else {
+        relay.offer_settle_facts(work_facts);
+        None
+    };
     // Whether this event can wait behind a ready checkpoint barrier is the
     // relay's decision, made where it journals (`append_relay_event`). An
     // event that journals nothing leaves the cut held.
@@ -1206,6 +1265,8 @@ pub(crate) fn record_runtime_event_with_facts(
             }
         }
     }
+    // An event that settled nothing leaves the observation unused.
+    relay.offer_settle_facts(None);
     Ok(stopped)
 }
 

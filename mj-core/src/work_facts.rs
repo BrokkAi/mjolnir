@@ -136,6 +136,22 @@ pub struct WorkLiveness {
     pub checked_at_ms: u64,
 }
 
+impl WorkLiveness {
+    /// The one rule for starting to watch a finished turn's work: facts that
+    /// list live process identities, however the turn was started.
+    pub fn from_turn_facts(completed_ordinal: u64, facts: Option<&WorkFacts>) -> Option<Self> {
+        let facts = facts?;
+        match &facts.processes {
+            Observed::Known(processes) if !processes.identities.is_empty() => Some(Self {
+                completed_ordinal,
+                alive: u32::try_from(processes.identities.len()).unwrap_or(u32::MAX),
+                checked_at_ms: facts.observed_at_ms,
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl WorkFacts {
     /// Facts when nothing could be observed, with the reason for both parts.
     pub fn unavailable(reason: impl Into<String>) -> Self {

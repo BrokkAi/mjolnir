@@ -5171,6 +5171,55 @@ async fn a_failed_turn_says_the_child_is_still_usable_but_an_errored_child_does_
     assert!(child.get("promptable").is_none(), "{child}");
 }
 
+/// A turn the harness started on its own ends a child like a prompted turn
+/// does: its reminder names the processes the worker found at that turn's end.
+#[tokio::test]
+async fn a_reminder_after_an_autonomous_turn_names_the_running_processes() {
+    if std::env::var_os(HANDBACK_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_reminder_after_an_autonomous_turn_names_the_running_processes",
+            ),
+        )
+        .env(HANDBACK_TEST_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 1,
+            submitted: submitted_tx,
+            view: Some(ready_view("model")),
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    );
+    let mut turn = finished_turn(&mj_core::continuation::harness_turn_id(3));
+    turn.work_facts = Some(observed_work());
+    backend
+        .remind_subagent_to_hand_back(
+            "child-1",
+            true,
+            &turn,
+            &mj_core::subagent::Liveness::Known(None),
+            &[],
+        )
+        .await
+        .unwrap();
+    let (_, command) = submitted.recv().await.unwrap();
+    let RelayCommand::HandbackReminder { running, .. } = command else {
+        panic!("expected a handback reminder: {command:?}");
+    };
+    assert_eq!(running.len(), 1, "{running:?}");
+    assert!(running[0].contains("sleep 600"), "{running:?}");
+}
+
 fn observed_work() -> mj_core::work_facts::WorkFacts {
     use mj_core::work_facts::*;
     WorkFacts {

@@ -866,7 +866,7 @@ pub(super) fn project_observation(
                         .is_some_and(|turn| turn.command_id == command_id)
                     {
                         mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
-                            work_facts: None,
+                            work_facts: turn.work_facts.as_deref().cloned(),
                             answered_through: None,
                             command_id,
                             accepted_ordinal: None,
