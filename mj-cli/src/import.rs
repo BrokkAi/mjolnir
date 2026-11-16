@@ -398,18 +398,16 @@ fn import_native(
     Ok(Some(imported.session_id))
 }
 
+/// The choice is stored as requested; the automatic rules apply at every
+/// launch, and this reports what they do to this one.
 fn import_review(
     config: &Config,
     review: Option<mj_core::config::SessionReview>,
 ) -> (Option<mj_core::config::SessionReview>, Option<&'static str>) {
-    if mj_core::review::settings::no_reviewers_turns_review_off(config, review.as_ref()) {
-        (
-            Some(mj_core::config::SessionReview::Off),
-            Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF),
-        )
-    } else {
-        (review, None)
-    }
+    let notice =
+        mj_core::review::settings::automatic_review_off(&config.review, review.as_ref(), false)
+            .map(mj_core::review::settings::AutomaticReviewOff::notice);
+    (review, notice)
 }
 
 #[cfg(test)]
@@ -423,7 +421,10 @@ mod import_review_tests {
             &config,
             Some(mj_core::config::SessionReview::Push { reviewers: None }),
         );
-        assert_eq!(review, Some(mj_core::config::SessionReview::Off));
+        assert_eq!(
+            review,
+            Some(mj_core::config::SessionReview::Push { reviewers: None })
+        );
         assert_eq!(
             notice,
             Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF)

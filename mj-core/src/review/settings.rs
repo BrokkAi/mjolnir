@@ -92,106 +92,152 @@ fn model_matches_family(id: &str, family: &str) -> bool {
     id.split(['-', '_', '.', '/']).any(|part| part == family)
 }
 
-/// Whether a review can choose a reviewer for a session with `session`'s
-/// review choice, so its launch should take a review baseline. Every
-/// reviewer is load-balanced across enabled profiles, so any enabled profile
-/// may serve; this performs no network or quota discovery.
-pub fn can_review(
-    config: &crate::config::Config,
-    _session: Option<&crate::config::SessionReview>,
-) -> bool {
-    config.enabled_profiles().next().is_some()
-}
-
 /// What every surface says about a session whose folder has no Git commits.
 pub const PLAIN_DIRECTORY_REVIEW_OFF: &str = "Code review is off for this session: its folder has no Git commits, and review finds changes through Git history.";
 
 pub const NO_REVIEWERS_REVIEW_OFF: &str = "Review is off for this session: no reviewers are configured. Choose reviewers in Settings › Code Review, or pass --reviewer.";
 
-/// A session that asked for review but would run with no reviewers is created
-/// with review off. An omitted list means the global list (empty and not legacy
-/// here), and an explicitly empty list means no reviewers whatever the global
-/// list is. Legacy Auto is resolved during review preparation.
-pub fn no_reviewers_turns_review_off(
-    config: &crate::config::Config,
-    session: Option<&crate::config::SessionReview>,
-) -> bool {
-    use crate::config::{ReviewTrigger, SessionReview};
-    match session {
-        Some(SessionReview::Push { reviewers }) => match reviewers {
-            Some(reviewers) => reviewers.is_empty(),
-            None => !config.review.is_legacy() && config.review.reviewers.is_empty(),
-        },
-        Some(SessionReview::Inherit {
-            reviewers: Some(reviewers),
-        }) => reviewers.is_empty() && config.review.trigger() != ReviewTrigger::Off,
-        _ => false,
+/// Why Mjolnir itself, not the user, turns review off for a launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomaticReviewOff {
+    NoReviewers,
+    PlainDirectory,
+}
+
+impl AutomaticReviewOff {
+    /// What every surface tells the user about this rule.
+    pub fn notice(self) -> &'static str {
+        match self {
+            Self::NoReviewers => NO_REVIEWERS_REVIEW_OFF,
+            Self::PlainDirectory => PLAIN_DIRECTORY_REVIEW_OFF,
+        }
     }
 }
 
-/// Whether a session created in a folder without a committed Git checkout
-/// gets review turned off. Review cannot run there, so the session is created
-/// with review off rather than refused. The answer is no when review would
-/// not have run anyway.
-pub fn plain_directory_turns_review_off(
-    config: &crate::config::Config,
-    session: Option<&crate::config::SessionReview>,
-) -> bool {
-    config.review.for_session(session).trigger() != crate::config::ReviewTrigger::Off
-        && can_review(config, session)
+/// The one place the automatic rules live. They are never stored in the
+/// session's review choice: every launch, reviewer selection and projection
+/// evaluates them again against the current `[review]`, so reviewers added
+/// later take effect on the next launch.
+///
+/// - An explicit Push choice, or an Inherit choice with its own list, whose
+///   reviewer list resolves empty has no reviewers. An omitted list means the
+///   global list; an explicitly empty list means none whatever the global list
+///   is. Legacy Auto is resolved during review preparation.
+/// - A session whose folder has no Git commits cannot be reviewed, because
+///   review finds changes through Git history. This applies only when review
+///   would have run anyway.
+pub fn automatic_review_off(
+    review: &crate::config::ReviewConfig,
+    choice: Option<&crate::config::SessionReview>,
+    plain_directory: bool,
+) -> Option<AutomaticReviewOff> {
+    use crate::config::{ReviewTrigger, SessionReview};
+    let no_reviewers = match choice {
+        Some(SessionReview::Push { reviewers }) => match reviewers {
+            Some(reviewers) => reviewers.is_empty(),
+            None => !review.is_legacy() && review.reviewers.is_empty(),
+        },
+        Some(SessionReview::Inherit {
+            reviewers: Some(reviewers),
+        }) => reviewers.is_empty() && review.trigger() != ReviewTrigger::Off,
+        _ => false,
+    };
+    if no_reviewers {
+        Some(AutomaticReviewOff::NoReviewers)
+    } else if plain_directory && review.for_session(choice).trigger() != ReviewTrigger::Off {
+        Some(AutomaticReviewOff::PlainDirectory)
+    } else {
+        None
+    }
+}
+
+/// The review configuration that governs a launch: the current global
+/// `[review]` under the session's stored choice, then the automatic rules.
+/// Every reader of a session's effective review asks this.
+pub fn effective_review_config(
+    review: &crate::config::ReviewConfig,
+    choice: Option<&crate::config::SessionReview>,
+    plain_directory: bool,
+) -> crate::config::ReviewConfig {
+    let mut effective = review.for_session(choice);
+    if automatic_review_off(review, choice, plain_directory).is_some() {
+        effective.disabled = true;
+    }
+    effective
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ReviewTrigger, SessionReview};
+    use crate::config::{ReviewConfig, ReviewTrigger, SessionReview, SubagentChoice};
+
+    fn reviewer() -> SubagentChoice {
+        SubagentChoice {
+            model: "gpt-6-astra".into(),
+            effort: None,
+        }
+    }
 
     #[test]
     fn explicit_session_review_without_global_reviewers_turns_off_only_that_session() {
-        let mut config = crate::config::Config::default();
-        assert!(no_reviewers_turns_review_off(
-            &config,
-            Some(&SessionReview::Push { reviewers: None })
-        ));
-        assert!(!no_reviewers_turns_review_off(&config, None));
-        assert!(no_reviewers_turns_review_off(
-            &config,
-            Some(&SessionReview::Push {
-                reviewers: Some(vec![])
-            })
-        ));
-        assert!(!no_reviewers_turns_review_off(
-            &config,
-            Some(&SessionReview::Inherit {
-                reviewers: Some(vec![])
-            })
-        ));
-        config.review.reviewers = vec![crate::config::SubagentChoice {
-            model: "gpt-6-astra".into(),
-            effort: None,
-        }];
-        assert_eq!(config.review.trigger(), ReviewTrigger::Push);
-        assert!(no_reviewers_turns_review_off(
-            &config,
-            Some(&SessionReview::Push {
-                reviewers: Some(vec![])
-            })
-        ));
-        assert!(no_reviewers_turns_review_off(
-            &config,
-            Some(&SessionReview::Inherit {
-                reviewers: Some(vec![])
-            })
-        ));
-        assert!(!no_reviewers_turns_review_off(
-            &config,
-            Some(&SessionReview::Push { reviewers: None })
-        ));
-        config.review.reviewers.clear();
-        config.review = crate::config::ReviewConfig::legacy_default();
-        assert!(!no_reviewers_turns_review_off(
-            &config,
-            Some(&SessionReview::Push { reviewers: None })
-        ));
+        let mut review = ReviewConfig::default();
+        let push = SessionReview::Push { reviewers: None };
+        let no_reviewers = Some(AutomaticReviewOff::NoReviewers);
+        assert_eq!(
+            automatic_review_off(&review, Some(&push), false),
+            no_reviewers
+        );
+        assert_eq!(automatic_review_off(&review, None, false), None);
+        let empty_push = SessionReview::Push {
+            reviewers: Some(vec![]),
+        };
+        let empty_inherit = SessionReview::Inherit {
+            reviewers: Some(vec![]),
+        };
+        assert_eq!(
+            automatic_review_off(&review, Some(&empty_push), false),
+            no_reviewers
+        );
+        assert_eq!(
+            automatic_review_off(&review, Some(&empty_inherit), false),
+            None
+        );
+        review.reviewers = vec![reviewer()];
+        assert_eq!(review.trigger(), ReviewTrigger::Push);
+        assert_eq!(
+            automatic_review_off(&review, Some(&empty_push), false),
+            no_reviewers
+        );
+        assert_eq!(
+            automatic_review_off(&review, Some(&empty_inherit), false),
+            no_reviewers
+        );
+        assert_eq!(automatic_review_off(&review, Some(&push), false), None);
+        review = ReviewConfig::legacy_default();
+        assert_eq!(automatic_review_off(&review, Some(&push), false), None);
+    }
+
+    // The rule is evaluated at every launch, never stored: a session created
+    // with an explicit push choice while no reviewers existed reviews once
+    // reviewers are configured, and an explicit Off stays Off.
+    #[test]
+    fn automatic_rules_follow_the_current_review_configuration() {
+        let mut review = ReviewConfig::default();
+        let push = SessionReview::Push { reviewers: None };
+        let off = SessionReview::Off;
+        let launch = |review: &ReviewConfig, choice, plain| {
+            effective_review_config(review, choice, plain).trigger()
+        };
+        assert_eq!(launch(&review, Some(&push), false), ReviewTrigger::Off);
+        review.reviewers = vec![reviewer()];
+        assert_eq!(launch(&review, Some(&push), false), ReviewTrigger::Push);
+        assert_eq!(launch(&review, None, false), ReviewTrigger::Push);
+        assert_eq!(launch(&review, Some(&off), false), ReviewTrigger::Off);
+        assert_eq!(launch(&review, None, true), ReviewTrigger::Off);
+        assert_eq!(
+            automatic_review_off(&review, None, true),
+            Some(AutomaticReviewOff::PlainDirectory)
+        );
+        assert_eq!(automatic_review_off(&review, Some(&off), true), None);
     }
 }
