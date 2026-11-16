@@ -111,6 +111,13 @@ The burst sessions sent no shared content and started in roughly half the time. 
 
 One regression: the first launch on a host with an empty store took about 8 s longer (20.4 s against 12.5 s for the transfer). On the host, per-file process starts measured 1.3 s for the per-file digest check over 725 files, against 0.02 s for one `sha256sum` call over all of them, and 2.2 s for the per-file copy loop. That accounts for about 3.5 s; the rest is unexplained with one sample of each, and network variation is possible. The same copy loop is most of the roughly 3 s `send profile content` time in burst sessions. A follow-up could verify digests in one call and reduce per-file process starts in materialization.
 
+Regression fix measured (2026-11-16) on a second m7i.xlarge in us-east-1, build `3e2ad1314`, with the same method:
+
+    warm-up   94.9 s, 54 cmds, query 0.3 s + send 14.4 s (11,573,528 B, 725 stored files)
+    burst     16.8-23.0 s each, 43 cmds each, query 0.2-0.3 s + send 0.4-0.5 s (about 110 KB, 0 stored files)
+
+Burst sessions now spend under a second on the profile transfer, against 3.6-4.5 s before the fix and 10-32 s with the old build. The first launch on an empty store spent 14.7 s on the transfer, against 20.7 s before the fix and 12.5 s with the old build. The remaining 2 s gap is within what one run per build on different hosts can show. Burst archives grew from about 73 KB to about 110 KB, because each placeholder link now carries a relative path.
+
 ## Context and Orientation
 
 The daemon (`mj daemon-run`, crate `mj-controller`) creates sessions. A session runs a worker process (crate `mj-worker`) next to a harness (the coding agent CLI, such as Claude Code). A target is where the worker runs. An `ssh-podman` target is a remote Linux host reached over SSH, where each session gets its own Podman container. EC2 machines created with `mj ec2 create` are registered as `ssh-podman` targets. An `ssh-bare` target runs the worker directly on a remote host, without a container. The controller is the machine running the daemon.
@@ -239,3 +246,5 @@ Plan update (2026-11-15, Milestone 2): recorded batching implementation, preserv
 Plan update (2026-11-16, parent): recorded the Milestone 3 live measurement and the cold-store regression.
 
 Plan update (2026-11-16, parent): replaced per-file process starts in the install script after the measured empty-store regression.
+
+Plan update (2026-11-16, parent): recorded the measurement of the regression fix; work complete.
