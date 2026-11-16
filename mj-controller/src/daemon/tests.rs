@@ -968,8 +968,7 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
     )
     .await
     .expect("probe the disabled profile");
-    let Some(QuotaRefreshIntent::ProbeProfiles { requests, forced }) = woken.try_recv().ok()
-    else {
+    let Some(QuotaRefreshIntent::ProbeProfiles { requests, forced }) = woken.try_recv().ok() else {
         panic!("the poller receives the probe");
     };
     assert!(forced, "the force flag reaches the poller");

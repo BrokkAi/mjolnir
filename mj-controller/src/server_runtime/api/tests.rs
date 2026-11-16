@@ -1780,6 +1780,7 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
         RelayCommand::HandbackReminder {
             completed_command_id: "task".into(),
             completed_ordinal: turn.completed_ordinal,
+            running: Vec::new(),
         }
     );
     let recorded = crate::database::load_subagent_report("child-1").unwrap();

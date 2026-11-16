@@ -479,6 +479,7 @@ fn handback_request(relay: &DurableRelay) -> RelayCommand {
     RelayCommand::HandbackReminder {
         completed_command_id: turn.command_id.clone(),
         completed_ordinal: turn.completed_ordinal,
+        running: Vec::new(),
     }
 }
 

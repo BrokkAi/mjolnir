@@ -1423,6 +1423,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         RelayCommand::ClearContext => Some(CommandRequest::ClearContext { request_id }),
         command @ (RelayCommand::Prompt { .. }
         | RelayCommand::HandbackReminder { .. }
+        | RelayCommand::HoldFollowUp { .. }
         | RelayCommand::MailboxWake { .. }
         | RelayCommand::ContinueAuthorizedWork { .. }
         | RelayCommand::ResumeAfterQuota { .. }) => {

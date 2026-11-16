@@ -194,28 +194,34 @@ pub(crate) fn spawn_workspace_management_load(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
     let names_updates = updates.clone();
-    spawn_workspace_management_operation(generation, "loading workspaces", updates, None, async move {
-        let mut daemon = daemon::connect_or_start().await?;
-        let mut entries = workspace_management_listings(&mut daemon).await?;
-        // Names first: the dialog opens on this answer while the drafts
-        // query runs. The supervised task's own answer carries the details.
-        let _ = names_updates.send(DashboardIoUpdate::WorkspaceManagement {
-            generation,
-            result: Ok(WorkspaceManagementResult {
-                entries: entries.clone(),
+    spawn_workspace_management_operation(
+        generation,
+        "loading workspaces",
+        updates,
+        None,
+        async move {
+            let mut daemon = daemon::connect_or_start().await?;
+            let mut entries = workspace_management_listings(&mut daemon).await?;
+            // Names first: the dialog opens on this answer while the drafts
+            // query runs. The supervised task's own answer carries the details.
+            let _ = names_updates.send(DashboardIoUpdate::WorkspaceManagement {
+                generation,
+                result: Ok(WorkspaceManagementResult {
+                    entries: entries.clone(),
+                    select_workspace: None,
+                    deleted_workspace_id: None,
+                    details_pending: true,
+                }),
+            });
+            fill_workspace_management_drafts(&mut daemon, &mut entries).await?;
+            Ok(WorkspaceManagementResult {
+                entries,
                 select_workspace: None,
                 deleted_workspace_id: None,
-                details_pending: true,
-            }),
-        });
-        fill_workspace_management_drafts(&mut daemon, &mut entries).await?;
-        Ok(WorkspaceManagementResult {
-            entries,
-            select_workspace: None,
-            deleted_workspace_id: None,
-            details_pending: false,
-        })
-    })
+                details_pending: false,
+            })
+        },
+    )
 }
 
 /// Reads layouts for workspace ids discovered after the dashboard opened.

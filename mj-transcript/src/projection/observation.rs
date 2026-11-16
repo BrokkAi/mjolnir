@@ -926,6 +926,7 @@ pub(super) fn project_observation(
             mutation.execution = Some(MaterializedExecutionState::Closed);
         }
         RelayObservation::ManagedSubagentConfigured { .. }
+        | RelayObservation::WorkLivenessChanged { .. }
         | RelayObservation::RetryAssessmentStarted { .. }
         | RelayObservation::HandbackCheckStarted { .. }
         | RelayObservation::QuestionTargetUpdated { .. }

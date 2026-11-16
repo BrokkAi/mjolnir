@@ -791,6 +791,12 @@ impl DurableRelay {
         if let RelayCommand::HandbackReminder {
             completed_command_id,
             completed_ordinal,
+            ..
+        }
+        | RelayCommand::HoldFollowUp {
+            completed_command_id,
+            completed_ordinal,
+            ..
         } = &command
         {
             let current = self.snapshot.turn_completion.as_ref().is_some_and(|turn| {
@@ -817,7 +823,7 @@ impl DurableRelay {
             {
                 return Ok(Err(relay_protocol_error(
                     RelayErrorCode::InvalidState,
-                    "handback reminder completion is stale or the worker has accepted newer input",
+                    "handback reminder or hold follow-up completion is stale or the worker has accepted newer input",
                     false,
                     None,
                 )));

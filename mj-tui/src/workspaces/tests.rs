@@ -128,7 +128,9 @@ fn golden_workspace_manager_drafts() {
             entry("default", "Default"),
             alpha.clone(),
             beta.clone(),
-        ]), false);
+        ]),
+        false,
+    );
     let lines = drawn(&mut dashboard, 110, 32);
     append_workspace_state(&mut output, "workspace manager list", &lines);
     let action = click_workspace_label(&mut dashboard, &lines, "Drafts");
@@ -151,7 +153,9 @@ fn golden_workspace_manager_drafts() {
     beta.drafts.clear();
     dashboard.finish_workspace_management(
         generation,
-        Ok(vec![entry("default", "Default"), alpha, beta]), false);
+        Ok(vec![entry("default", "Default"), alpha, beta]),
+        false,
+    );
     append_workspace_state(
         &mut output,
         "draft recovery completed",
@@ -297,7 +301,9 @@ fn manager_ignores_stale_results_and_selects_workspace_on_enter() {
     };
     dashboard.finish_workspace_management(
         generation.wrapping_sub(1),
-        Ok(vec![entry("stale", "Stale")]), false);
+        Ok(vec![entry("stale", "Stale")]),
+        false,
+    );
     assert!(matches!(
         &dashboard.mode,
         Mode::WorkspaceManager(manager) if manager.loading
@@ -484,7 +490,11 @@ fn manager_views_keep_rename_identity_across_reordered_refresh() {
     else {
         panic!("load");
     };
-    dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "A"), entry("b", "B")]), false);
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![entry("a", "A"), entry("b", "B")]),
+        false,
+    );
     if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
         manager.form.get_mut().focus(WorkspaceControl::Rename);
     }
@@ -499,7 +509,9 @@ fn manager_views_keep_rename_identity_across_reordered_refresh() {
     ));
     dashboard.finish_workspace_management(
         generation,
-        Ok(vec![entry("b", "B"), entry("a", "A renamed")]), false);
+        Ok(vec![entry("b", "B"), entry("a", "A renamed")]),
+        false,
+    );
     assert!(matches!(
         &dashboard.mode,
         Mode::WorkspaceManager(manager)
@@ -558,12 +570,17 @@ fn workspace_shortcuts_load_the_active_workspace_and_ignore_stale_replies() {
     else {
         panic!("load");
     };
-    dashboard
-        .finish_workspace_management(generation.wrapping_sub(1), Ok(vec![entry("b", "Wrong")]), false);
+    dashboard.finish_workspace_management(
+        generation.wrapping_sub(1),
+        Ok(vec![entry("b", "Wrong")]),
+        false,
+    );
     assert!(matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.loading));
     dashboard.finish_workspace_management(
         generation,
-        Ok(vec![entry("a", "Other"), entry("b", "Rename me")]), false);
+        Ok(vec![entry("a", "Other"), entry("b", "Rename me")]),
+        false,
+    );
     assert!(
         matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if matches!(&manager.view, WorkspaceManagerView::Rename { workspace_id } if workspace_id == "b") && manager.name.value() == "Rename me")
     );
@@ -801,7 +818,11 @@ fn a_close_opened_by_shortcut_returns_to_the_dashboard_when_it_finishes() {
     };
     let mut workspace = entry("a", "Example");
     workspace.workspace.session_count = 1;
-    dashboard.finish_workspace_management(generation, Ok(vec![workspace, entry("b", "Other")]), false);
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![workspace, entry("b", "Other")]),
+        false,
+    );
     if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
         manager.sync_form();
         manager.form.get_mut().focus(WorkspaceControl::ConfirmClose);
@@ -885,7 +906,11 @@ fn the_list_delete_button_acts_at_once_only_for_an_empty_workspace() {
     };
     let mut busy = entry("busy", "Busy");
     busy.workspace.session_count = 1;
-    dashboard.finish_workspace_management(generation, Ok(vec![busy, entry("empty", "Empty")]), false);
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![busy, entry("empty", "Empty")]),
+        false,
+    );
     let press_delete = |dashboard: &mut DashboardState, index: usize| {
         if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
             manager.select(index);

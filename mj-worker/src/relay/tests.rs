@@ -7165,6 +7165,7 @@ fn a_turn_verdict_keeps_the_completion_identity_a_handback_reminder_names() {
         let reminder = RelayCommand::HandbackReminder {
             completed_command_id: "first-command".into(),
             completed_ordinal: completed,
+            running: Vec::new(),
         };
         assert!(
             relay
@@ -8378,6 +8379,7 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
             RelayCommand::HandbackReminder {
                 completed_command_id: "harness-turn-0".into(),
                 completed_ordinal: completion.completed_ordinal,
+                running: Vec::new(),
             },
         )
         .unwrap();
@@ -8388,6 +8390,7 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
         RelayCommand::HandbackReminder {
             completed_command_id: id,
             completed_ordinal: completion.completed_ordinal,
+            running: Vec::new(),
         },
     );
 }
