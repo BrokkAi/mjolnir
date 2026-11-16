@@ -614,6 +614,39 @@ async fn processes_in(program: &str, name: &str) -> Result<Option<usize>> {
     ))
 }
 
+/// Create the data volume unless it already exists. The volume outlives the
+/// container — removing the container while its volume remains is safe and
+/// the next start mounts the same volume — so creation must be idempotent.
+async fn ensure_volume(program: &str, volume: &str) -> Result<()> {
+    let inspected = engine(program, ["volume", "inspect", volume], QUERY_TIMEOUT).await?;
+    if inspected.status.success() {
+        return Ok(());
+    }
+    let created = engine(program, ["volume", "create", volume], QUERY_TIMEOUT).await?;
+    if created.status.success() {
+        return Ok(());
+    }
+    // A concurrent creator may win the race between inspect and create.
+    if is_volume_exists_error(&created.stderr) {
+        return Ok(());
+    }
+    Err(failure(
+        program,
+        &format!("create data volume {volume}"),
+        &created,
+    ))
+}
+
+fn is_volume_exists_error(stderr: &[u8]) -> bool {
+    // Podman reports "already exists"; Docker may report "volume exists" or
+    // "already exists" depending on version. Accept either phrasing for a
+    // volume.
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    text.contains("already exists")
+        || text.contains("volume exists")
+        || text.contains("volume already")
+}
+
 async fn ensure_running(program: &str, spec: &ContainerSpec) -> Result<()> {
     let state = engine(
         program,
@@ -632,14 +665,7 @@ async fn ensure_running(program: &str, spec: &ContainerSpec) -> Result<()> {
         tracing::info!(container = %spec.name, "restarted the daemon container");
         return Ok(());
     }
-    let volume = engine(program, ["volume", "create", &spec.volume], QUERY_TIMEOUT).await?;
-    if !volume.status.success() {
-        return Err(failure(
-            program,
-            &format!("create data volume {}", spec.volume),
-            &volume,
-        ));
-    }
+    ensure_volume(program, &spec.volume).await?;
     let created = engine(program, spec.run_command(), QUERY_TIMEOUT).await?;
     if !created.status.success() {
         return Err(failure(program, &format!("create {}", spec.name), &created));
@@ -738,5 +764,21 @@ mod tests {
             metadata.placement,
             DaemonPlacement::Container { .. }
         ));
+    }
+
+    // Hard-won: the daemon volume outlives its container. Removing the
+    // container and starting again must reuse the volume, not fail when
+    // `podman volume create` reports it already exists.
+    #[test]
+    fn an_existing_volume_is_not_a_creation_failure() {
+        let podman =
+            b"Error: volume with name mj-d8cb183694cb-data already exists: volume already exists";
+        let docker = b"docker: Error response from daemon: volume exists";
+        let other = b"some other failure";
+
+        assert!(is_volume_exists_error(podman));
+        assert!(is_volume_exists_error(docker));
+        assert!(!is_volume_exists_error(other));
+        assert!(!is_volume_exists_error(b""));
     }
 }
