@@ -187,8 +187,8 @@ impl RuntimeState {
     ///
     /// A child's durable output is the report it hands back, so a child is
     /// stopped and removed the way a destroy removes one, with no checkpoint
-    /// of its own; its conversation is put into SessionWiki first, so it stays
-    /// searchable. The children are listed on the parent's record before any
+    /// of its own; sub-agents are excluded from SessionWiki. The children are
+    /// listed on the parent's record before any
     /// of them is stopped, so the parent's model can be told about them when
     /// the parent resumes, or at once when the close fails after this and
     /// leaves the parent live.
@@ -250,9 +250,6 @@ impl RuntimeState {
             not_handed_back,
             "stopping sub-agents before suspending their parent"
         );
-        // One pass indexes the parent's whole tree, so each child is
-        // destroyed below without indexing it again.
-        self.index_before_destroy(parent_session_id).await;
         for child in stopped {
             let child_id = child.child_session_id;
             // A sub-agent borrows its parent's worker and owns no branch.
