@@ -4951,6 +4951,7 @@ async fn settings_request(
 /// the viewer is sent for a draft holding literal secrets, a page, an
 /// accepted and a refused edit, and the save. The recorded exchange is also
 /// the fixture the browser test replays, so both sides agree on its shape.
+// Hard-won: isolated children inherited MJ_INSTANCE from the test process, which moved the default viewer port in the golden.
 #[tokio::test]
 async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model() {
     if !in_isolated_store("settings_routes_hide_literal_secrets_and_save_through_the_shared_model")
