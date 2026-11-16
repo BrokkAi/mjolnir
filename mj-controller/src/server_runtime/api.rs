@@ -2073,7 +2073,9 @@ impl ApiBackend {
                     completed_command_id: last_turn.command_id.clone(),
                     completed_ordinal: last_turn.completed_ordinal,
                     // Only a worker that knows the field may be sent it.
-                    running: self.reminder_running_lines(child_session_id, last_turn).await,
+                    running: self
+                        .reminder_running_lines(child_session_id, last_turn)
+                        .await,
                 },
             ),
             ReportState::Pending { remind: false } => return Ok(ReportNudge::Pending),
@@ -2620,7 +2622,11 @@ impl ChildProgress {
         let Some(inputs) = &self.report_inputs else {
             return;
         };
-        let in_flight = inputs.in_flight.iter().map(String::as_str).collect::<Vec<_>>();
+        let in_flight = inputs
+            .in_flight
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         self.report = mj_core::subagent::report_state(
             inputs.handback_tool,
             &inputs.recorded,

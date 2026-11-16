@@ -27,11 +27,15 @@ enum ChildCompletion {
     /// The child ended its reminder turn waiting for processes it started: no
     /// report, no park. Judged again at `give_up_at_ms`, or sooner when the
     /// worker publishes that the processes exited.
-    Held { give_up_at_ms: i64 },
+    Held {
+        give_up_at_ms: i64,
+    },
     /// The parent was told, but the child's processes are still running, so
     /// the park waits until the parent's turn that received the report ends.
     /// Judged again when the parent's observation changes.
-    ParkAfterParentTurn { parent: String },
+    ParkAfterParentTurn {
+        parent: String,
+    },
 }
 
 /// First wait after a child completion fails or finds the child busy.
@@ -253,9 +257,9 @@ async fn run(
                 };
                 if noticed.get(child) == Some(&outcome.completed_ordinal)
                     || completion_ids.values().any(|(id, _)| id == child)
-                    || retry.get(child).is_some_and(|retry| {
-                        retry.holds(outcome.completed_ordinal, Instant::now())
-                    })
+                    || retry
+                        .get(child)
+                        .is_some_and(|retry| retry.holds(outcome.completed_ordinal, Instant::now()))
                 {
                     continue;
                 }
@@ -1378,7 +1382,34 @@ mod tests {
 
         /// The child idle after `turn`, as its worker published it.
         async fn child_ended(&self, turn: &mj_core::state::MaterializedTurnOutcome) {
-            publish_idle_child(&self.manager, turn).await;
+            let mut view = crate::daemon::tests::ready_startup_view();
+            let snapshot = view.snapshot.as_mut().unwrap();
+            snapshot.materialized.last_turn_outcome = Some(turn.clone());
+            // The journal position marks which publication the actor serves.
+            let mut operational = (*snapshot.operational).clone();
+            operational.latest_ordinal = turn.completed_ordinal;
+            snapshot.operational = operational.into();
+            self.manager
+                .publisher
+                .publish("child".into(), view)
+                .await
+                .unwrap();
+            let handle = self
+                .state
+                .session_manager
+                .client()
+                .session("child".to_owned())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while handle.view().snapshot.as_ref().is_none_or(|snapshot| {
+                    snapshot.operational.latest_ordinal != turn.completed_ordinal
+                }) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the child's view is served");
         }
 
         /// What the delegation loop does with the child's ended turn, and the
@@ -1428,7 +1459,13 @@ mod tests {
                 .publish("parent".into(), view)
                 .await
                 .unwrap();
-            let handle = self.state.session_manager.client().session("parent".to_owned()).await.unwrap();
+            let handle = self
+                .state
+                .session_manager
+                .client()
+                .session("parent".to_owned())
+                .await
+                .unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while handle
                     .view()
@@ -1542,7 +1579,10 @@ mod tests {
         assert_eq!(held.parks.parks.load(Ordering::SeqCst), 0);
         assert_eq!(held.told(), 0);
         assert_eq!(
-            crate::database::load_subagent("child").unwrap().unwrap().noticed_turn,
+            crate::database::load_subagent("child")
+                .unwrap()
+                .unwrap()
+                .noticed_turn,
             None
         );
 
@@ -1572,7 +1612,9 @@ mod tests {
         let (done, sent) = held.settle(None, &woken).await;
         assert!(matches!(done, ChildCompletion::Settled));
         assert_eq!(
-            sent.iter().map(|(_, id, _)| id.as_str()).collect::<Vec<_>>(),
+            sent.iter()
+                .map(|(_, id, _)| id.as_str())
+                .collect::<Vec<_>>(),
             ["handback-reminder-30"]
         );
 
@@ -1603,7 +1645,18 @@ mod tests {
         let gave_up = turn_at("hold-give-up-40", 50, now, None);
         held.child_ended(&gave_up).await;
         let (done, sent) = held.settle(None, &gave_up).await;
-        assert!(matches!(done, ChildCompletion::Settled));
+        assert!(
+            matches!(done, ChildCompletion::Settled),
+            "{}",
+            match done {
+                ChildCompletion::RetryPark => "RetryPark",
+                ChildCompletion::Held { .. } => "Held",
+                ChildCompletion::ParkAfterParentTurn { .. } => "ParkAfterParentTurn",
+                ChildCompletion::AwaitingReview => "AwaitingReview",
+                ChildCompletion::Draining => "Draining",
+                ChildCompletion::Settled => "Settled",
+            }
+        );
         assert!(sent.is_empty(), "{sent:?}");
         assert_eq!(held.told(), 1, "the parent hears of it once");
         assert_eq!(held.parks.parks.load(Ordering::SeqCst), 1);
@@ -1639,7 +1692,8 @@ mod tests {
         let parked = |held: &HeldChild| held.parks.parks.load(Ordering::SeqCst);
 
         // The parent is still in the turn that will receive the report.
-        held.parent_view(Running { started_at_ms: 1 }, 1, Vec::new()).await;
+        held.parent_view(Running { started_at_ms: 1 }, 1, Vec::new())
+            .await;
         let (done, _) = held.settle(liveness(10, 1), &turn).await;
         assert!(matches!(
             done,
@@ -1692,7 +1746,8 @@ mod tests {
             )
             .unwrap()
         );
-        held.parent_view(Running { started_at_ms: 1 }, 1, Vec::new()).await;
+        held.parent_view(Running { started_at_ms: 1 }, 1, Vec::new())
+            .await;
         let (done, _) = held.settle(liveness(10, 0), &turn).await;
         assert!(matches!(done, ChildCompletion::Settled));
         assert_eq!(held.parks.parks.load(Ordering::SeqCst), 1);
