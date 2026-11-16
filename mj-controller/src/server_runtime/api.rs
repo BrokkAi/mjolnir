@@ -1652,13 +1652,16 @@ impl ApiBackend {
     }
 
     /// A child whose turn failed on a login that has since been renewed did
-    /// not fail for anything its parent can fix: the daemon pushes the current
-    /// login the moment the failure is reported, and the worker resubmits the
-    /// turn. Until then the child is not finished, so it is neither reported
-    /// nor parked. A failure on the profile's current token stays a failure.
-    /// This is the one classification of a finished child turn's login
-    /// failure; it decides with [`mj_core::credentials::classify_authentication_failure`],
-    /// like the credential sync does.
+    /// not fail for anything its parent can fix, as long as its worker is
+    /// waiting to resubmit the turn once the new login reaches it. The two
+    /// facts have two owners: the worker says it is waiting (it alone knows
+    /// whether a driver, a question, a goal state or a barrier forbids the
+    /// retry), and this daemon says whether the failed token is still the
+    /// profile's current one, deciding with
+    /// [`mj_core::credentials::classify_authentication_failure`] like the
+    /// credential sync. The child is held unfinished only while both hold, so
+    /// it is neither reported nor parked before the pushed login can arrive.
+    /// A worker that publishes nothing (an older one) never holds a child.
     async fn settle_renewed_login_failures(
         &self,
         children: &mut [(
@@ -1679,12 +1682,12 @@ impl ApiBackend {
             else {
                 continue;
             };
-            // Only a child with a connected worker receives the push.
-            if self
-                .exports
-                .session_record(id)
-                .is_none_or(|record| record.state != SessionState::Running)
-            {
+            let waiting = self
+                .session_handle(id.clone())
+                .await?
+                .and_then(|handle| handle.view().snapshot.clone())
+                .and_then(|snapshot| snapshot.operational.authentication_retry_waiting.clone());
+            if waiting.as_deref() != Some(failed.as_str()) {
                 continue;
             }
             let config = self.profile_catalog.live()?;
@@ -1700,7 +1703,7 @@ impl ApiBackend {
                 tracing::info!(
                     session_id = %id,
                     %profile_id,
-                    "a child's turn failed on a login that was renewed since; waiting for the pushed login instead of reporting a failure"
+                    "a child's turn failed on a login that was renewed since; its worker is waiting for the pushed login, so no failure is reported"
                 );
                 progress.login_failure = None;
                 progress.failed_turn = None;

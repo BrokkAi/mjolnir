@@ -3773,6 +3773,7 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         goal: Default::default(),
         capacity_retry: None,
         retry_assessment_pending: false,
+        authentication_retry_waiting: None,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,
         store_id: None,

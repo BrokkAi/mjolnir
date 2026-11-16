@@ -180,8 +180,9 @@ impl CredentialSyncNotices {
             routine: false,
         };
         let advice = setup_token_advice(&result.profile_id, harness);
-        // Completed event-triggered syncs always speak: the upstream
-        // per-session cooldown, not this dedup, is what keeps them rare.
+        // Completed event-triggered syncs always speak. An authentication
+        // failure is handled once per failed turn; only an empty response
+        // waits out the per-session cooldown upstream.
         if let Some(trigger) = &result.trigger {
             let session_id = &trigger.session_id;
             let session = state.session_notice_name(session_id);
@@ -220,7 +221,7 @@ impl CredentialSyncNotices {
                             == Some(AuthenticationVerdict::LoginRenewed) =>
                     {
                         format!(
-                            "Auth failure on profile {} (session {}): the login was renewed; pushed the current login and the turn continues automatically. If it repeats run `mj login --profile {}`{advice}.",
+                            "Auth failure on profile {} (session {}): the login was renewed and the current login was pushed. If it repeats run `mj login --profile {}`{advice}.",
                             result.profile_id, session, result.profile_id
                         )
                     }
@@ -233,7 +234,7 @@ impl CredentialSyncNotices {
                             == Some(AuthenticationVerdict::LoginRenewed) =>
                     {
                         format!(
-                            "Auth failure on profile {} (session {}): the login was renewed and the session already holds the current login; the turn continues automatically. If it repeats run `mj login --profile {}`{advice}.",
+                            "Auth failure on profile {} (session {}): the login was renewed and the session already holds the current login. If it repeats run `mj login --profile {}`{advice}.",
                             result.profile_id, session, result.profile_id
                         )
                     }

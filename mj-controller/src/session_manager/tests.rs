@@ -966,6 +966,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 goal: Default::default(),
                 capacity_retry: None,
                 retry_assessment_pending: false,
+                authentication_retry_waiting: None,
                 activity_turn_started_at_ms: None,
                 store_id: None,
                 idle_since_ms: None,

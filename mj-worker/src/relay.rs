@@ -936,6 +936,11 @@ impl DurableRelay {
         state.task_settled_at_ms = facts.task_settled_at_ms;
         state.background_needed = facts.background_needed;
         state.activity = Some(mj_core::activity::classify(&facts));
+        // The worker alone decides whether it will resubmit a failed turn once
+        // its login changes; the daemon only reads the answer.
+        state.authentication_retry_waiting = self
+            .authentication_retry_identity()
+            .map(|(_, rejected)| rejected.to_owned());
         state
     }
 

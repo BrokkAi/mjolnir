@@ -681,6 +681,12 @@ pub struct RelayOperationalState {
     pub capacity_retry: Option<CapacityRetry>,
     #[serde(default)]
     pub retry_assessment_pending: bool,
+    /// Worker-published (process-local): the access-token hash of the failed
+    /// turn this worker will resubmit once a login with a different token is
+    /// installed. Present exactly while the worker's own retry rule allows
+    /// that; absent from older workers, which never resubmit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_retry_waiting: Option<String>,
     pub session_id: String,
     /// Start of the latest turn, retained until its background work settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1825,6 +1831,7 @@ impl RelaySnapshot {
                     crate::assessment::Status::Pending | crate::assessment::Status::Failed
                 )
             }) || self.retry_assessment.is_some(),
+            authentication_retry_waiting: None,
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
             session_id: self.session_id.clone(),

@@ -43,6 +43,14 @@ fn authentication_recovery_survives_restart_and_never_retries_the_same_login() {
         let (ordinal, _) = relay
             .authentication_retry_identity()
             .expect("auth failure is recoverable");
+        // The worker publishes that it is waiting for a different login.
+        assert_eq!(
+            relay
+                .operational_state()
+                .authentication_retry_waiting
+                .as_deref(),
+            Some("old-access-hash")
+        );
         assert!(
             !relay
                 .submit_authentication_retry(ordinal, "old-access-hash")
@@ -155,6 +163,12 @@ fn authentication_recovery_yields_to_new_input_cancellation_and_checkpoints() {
             !relay
                 .submit_authentication_retry(ordinal, "new-access-hash")
                 .unwrap(),
+            "{intervention}"
+        );
+        // The worker stops publishing it the moment the retry is no longer its to make.
+        assert_eq!(
+            relay.operational_state().authentication_retry_waiting,
+            None,
             "{intervention}"
         );
         if intervention == "checkpoint" {

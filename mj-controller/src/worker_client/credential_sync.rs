@@ -2364,7 +2364,15 @@ pub(super) async fn reconcile_on(
                 )
                 .await
                 {
-                    Ok(snapshot) => *unchanged_login = snapshot,
+                    Ok(snapshot) => {
+                        *unchanged_login = snapshot;
+                        // A pull made the session's copy the profile's, so the
+                        // login read above is no longer the profile's: the
+                        // verdict is unknown, never "renewed" or "refused".
+                        if actions.contains(&CredentialSyncAction::Pulled) {
+                            *current_access_token = None;
+                        }
+                    }
                     Err(error) => note(
                         SyncStep::HarnessLogin,
                         "harness login",
