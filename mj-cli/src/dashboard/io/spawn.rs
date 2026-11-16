@@ -1505,6 +1505,20 @@ async fn await_daemon_creation(
     session_id: &str,
     cancelled: &AtomicBool,
 ) -> Result<LifecycleSuccess> {
+    follow_create_wait(session_id, cancelled, daemon::connect_or_start).await
+}
+
+/// The loop of [`await_daemon_creation`], with the way it reaches a daemon
+/// given, so a test can answer it from a fake daemon.
+async fn follow_create_wait<Connect, Connecting>(
+    session_id: &str,
+    cancelled: &AtomicBool,
+    connect: Connect,
+) -> Result<LifecycleSuccess>
+where
+    Connect: Fn() -> Connecting,
+    Connecting: std::future::Future<Output = Result<mj_client::daemon::DaemonClient>>,
+{
     const RETRY_DELAY: Duration = Duration::from_millis(250);
     // Every wait below, including the connection and the backoff, is watched
     // beside this, so a cancel ends the follow promptly.
@@ -1514,11 +1528,12 @@ async fn await_daemon_creation(
         }
     };
     loop {
-        // A failure to connect is a lost connection too, as in a handoff
-        // window: the request is the read-only wait, so ask again.
+        // One attempt, with no reconnect inside the client: a daemon that is
+        // stopping answers "ask again", and this loop starts the next daemon
+        // through `connect`, as it does for a dropped connection.
         let attempt = async {
-            let mut daemon = daemon::connect_or_start().await?;
-            daemon.wait_create_session(session_id.to_owned()).await
+            let mut daemon = connect().await?;
+            daemon.wait_create_session_once(session_id.to_owned()).await
         };
         let error = tokio::select! {
             outcome = attempt => match outcome {
@@ -1527,13 +1542,17 @@ async fn await_daemon_creation(
             },
             () = cancellation() => bail!("operation cancelled"),
         };
-        // Only a connection that dropped after the wait was sent means "ask
-        // again". A refusal, a failure to connect or start a daemon (which
-        // waits out a handoff before it fails) and a protocol mismatch are
-        // real answers and end the follow with their own error.
+        // Only a daemon that is stopping, or a connection that dropped after
+        // the wait was sent, means "ask again". A refusal, a failure to
+        // connect or start a daemon (which waits out a handoff before it
+        // fails) and a protocol mismatch are real answers and end the follow
+        // with their own error.
         if error
             .downcast_ref::<mj_client::daemon::DaemonTransportLost>()
             .is_none()
+            && error
+                .downcast_ref::<mj_client::daemon::DaemonUpgradePending>()
+                .is_none()
         {
             return Err(error);
         }
@@ -1958,5 +1977,93 @@ mod wiki_search_tests {
             assert_eq!(slow, Some(Duration::from_secs(30)));
             assert_eq!(fast, Some(Duration::ZERO));
         }
+    }
+}
+
+#[cfg(test)]
+mod create_wait_tests {
+    use super::*;
+    use mj_client::daemon::{
+        DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
+        RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
+    };
+
+    fn metadata(address: std::net::SocketAddr) -> DaemonMetadata {
+        DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address,
+            token: "create-wait-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        }
+    }
+
+    /// A fake daemon that serves one scripted answer per connection: `None`
+    /// reads the request and drops the connection.
+    async fn serve(
+        script: Vec<Option<std::result::Result<DaemonReply, String>>>,
+    ) -> (DaemonMetadata, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = metadata(listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for answer in script {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(
+                    request.action,
+                    DaemonAction::WaitCreateSession { .. }
+                ));
+                if let Some(result) = answer {
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: request.protocol_version,
+                            request_id: request.request_id,
+                            result,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        (metadata, server)
+    }
+
+    /// A stopping daemon, then a dropped connection, then the answer: the wait
+    /// reconnects each time and ends Finished.
+    #[tokio::test]
+    async fn the_create_wait_reconnects_after_a_stopping_daemon_and_a_dropped_connection() {
+        let (metadata, server) = serve(vec![
+            Some(Ok(DaemonReply::UpgradePending)),
+            None,
+            Some(Ok(DaemonReply::Done)),
+        ])
+        .await;
+        let cancelled = AtomicBool::new(false);
+        let outcome = follow_create_wait("session-1", &cancelled, || {
+            DaemonClient::connect(metadata.clone())
+        })
+        .await
+        .unwrap();
+        assert!(matches!(outcome, LifecycleSuccess::Created));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refusal_ends_the_create_wait_with_its_reason() {
+        let (metadata, server) = serve(vec![Some(Err("clone refused".to_owned()))]).await;
+        let cancelled = AtomicBool::new(false);
+        let error = follow_create_wait("session-1", &cancelled, || {
+            DaemonClient::connect(metadata.clone())
+        })
+        .await
+        .err()
+        .expect("a refusal ends the wait");
+        assert!(format!("{error:#}").contains("clone refused"), "{error:#}");
+        server.await.unwrap();
     }
 }

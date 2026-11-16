@@ -52,6 +52,8 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 
 - Decision: one function, `RuntimeState::wait_create_outcome`, turns the end of a create into `Finished | Failed(reason) | OwedToNextDaemon`; the dashboard wait (`daemon/actions.rs`) and the phone New action (`server_runtime/actions.rs`, `phone_create_result`) only map it, and `wait_create_session` is gone. The phone reports no failure for `OwedToNextDaemon` (it ends Ok, and the next daemon updates the record the phone shows), so no phone protocol change. `remove_completed_lifecycle` keeps a shutdown-stopped Create's entry until exit, so every waiter reads the same answer from the same entry; an intent with no entry therefore stays a visible anomaly. Date: 2026-11-16.
 
+- Decision: the dashboard's create wait makes single attempts (`DaemonClient::wait_create_session_once`, marker `DaemonUpgradePending`) and treats a stopping daemon like a dropped connection: go round the loop, `connect_or_start()`, ask again. `DaemonClient::request` is unchanged for other callers; it only polls `connect_existing`, which would wait forever after a plain `mj daemon stop`. The loop is `follow_create_wait`, taking its connector as a parameter so `create_wait_tests` answer it from a fake daemon. `create_survives_restart.py`'s `mj wait` is documented as a turn wait that shows the session settles, not as proof of the create wait. Date: 2026-11-16.
+
 
 ## Outcomes & Retrospective
 

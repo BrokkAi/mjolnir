@@ -7,8 +7,10 @@ instance; no host instance is touched. The daemon holds the create at the
 before its worker starts, which makes the restart land in the middle of the
 create every time. The test then checks that the restart does not wait for the
 create, that the next daemon retires the partial attempt and provisions again,
-that a waiter attached after the restart receives the outcome, and that the
-session ends up running with no error.
+and that the session ends up running with no error. A `mj wait` started before
+the restart follows the session's turns, not the create wait; it only shows
+that the session settles without error across the restart. The dashboard's
+create wait is covered by `create_wait_tests` in mj-cli.
 """
 import argparse
 import json
@@ -69,8 +71,9 @@ def main():
         before = record(session)
         assert before["state"] != "running", before
 
-        # A waiter attached before the restart spans it and must receive the
-        # real outcome from the next daemon.
+        # `mj wait` uses the turn-wait API, not WaitCreateSession. Started
+        # before the restart, it shows only that the session settles without
+        # error across the restart.
         waiter = subprocess.Popen([str(args.mj.resolve()), "--instance", args.instance,
                                    "wait", "--session", session, "--json", "--timeout", str(WAIT)],
                                   env=environment(), stdout=subprocess.PIPE,
@@ -98,7 +101,7 @@ def main():
             return current["state"] == "running"
         wait_for(running, "the recovered session to run")
         waiter_out, waiter_err = waiter.communicate(timeout=WAIT)
-        # Exit 0 is `finished`; an error, stop or timeout exits non-zero.
+        # Exit 0 is `finished`: the session settled without error.
         assert waiter.returncode == 0, (waiter.returncode, waiter_out, waiter_err)
         assert json.loads(waiter_out)["outcome"] == "finished", waiter_out
 

@@ -1273,6 +1273,21 @@ impl std::fmt::Display for DaemonTransportLost {
 
 impl std::error::Error for DaemonTransportLost {}
 
+/// The daemon answered a request with its non-acceptance (it is stopping or
+/// draining, or the work is owed to the next daemon) instead of acting on it.
+/// `request` retries that itself on an existing daemon; a caller that must
+/// start the next daemon uses a single attempt and sees this.
+#[derive(Debug)]
+pub struct DaemonUpgradePending;
+
+impl std::fmt::Display for DaemonUpgradePending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the daemon is stopping and did not accept the request")
+    }
+}
+
+impl std::error::Error for DaemonUpgradePending {}
+
 /// Mark a failure of the established stream as a lost transport. An error that
 /// did not come from the socket (an oversized frame, an undecodable reply)
 /// stays as it is.
@@ -3369,6 +3384,21 @@ impl DaemonClient {
         {
             DaemonReply::RegisteredSession(registered) => Ok(*registered),
             reply => bail!("unexpected start-create reply {reply:?}"),
+        }
+    }
+
+    /// One attempt at the read-only create wait, with no internal reconnect:
+    /// a daemon that is stopping answers [`DaemonUpgradePending`], and a
+    /// dropped connection carries [`DaemonTransportLost`], so the caller can
+    /// start the next daemon and ask again.
+    pub async fn wait_create_session_once(&mut self, session_id: String) -> Result<()> {
+        match self
+            .request_once(DaemonAction::WaitCreateSession { session_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            DaemonReply::UpgradePending => Err(anyhow::Error::new(DaemonUpgradePending)),
+            reply => bail!("unexpected wait-create reply {reply:?}"),
         }
     }
 
