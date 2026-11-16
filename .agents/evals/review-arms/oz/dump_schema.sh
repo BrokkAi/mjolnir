@@ -10,8 +10,9 @@ WT="$HOME/Projects/bifrost-dev-wt/h1-schema"
 git -C "$CLONE" fetch origin
 mkdir -p "$(dirname "$WT")"
 git -C "$CLONE" worktree add --detach "$WT" origin/master
-# Remove the worktree and the build log on every exit, so a failed build can be rerun.
-trap 'rm -f "$OUT/.schema-build.log"; git -C "$CLONE" worktree remove --force "$WT"' EXIT
+# Remove the worktree on every exit, so a failed build can be rerun. On failure, print the
+# build log's tail first: cargo's output goes only to that file.
+trap 'st=$?; if [ "$st" -ne 0 ] && [ -f "$OUT/.schema-build.log" ]; then tail -n 60 "$OUT/.schema-build.log" >&2; fi; rm -f "$OUT/.schema-build.log"; git -C "$CLONE" worktree remove --force "$WT"' EXIT
 COMMIT="$(git -C "$WT" rev-parse HEAD)"
 cat > "$WT/crates/bifrost-tools/tests/h1_schema_dump.rs" <<'RS'
 use brokk_bifrost_tools::site_context::SiteContextView;

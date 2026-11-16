@@ -5,10 +5,10 @@ Usage (REVIEW_ARMS_DIR holds the data):
   python3 brief_dilution.py editor-items  # briefs/bifrost-diluted-work/<diff>/{item.json,INSTRUCTIONS.md}
   (run the editors: verify_driver.py briefs/bifrost-diluted-work --kind task --output siblings.jsonl ...)
   python3 brief_dilution.py form-check    # form.jsonl + form-summary.json in the work dir; ids <diff>:<n>
-  python3 brief_dilution.py truth-items   # briefs/bifrost-diluted-check/truth/<diff>/ blind verifier units
+  python3 brief_dilution.py truth-items   # briefs/bifrost-diluted-check/truth/<diff>[--NN]/ blind verifier units
   (run them with --kind task --output truth.jsonl on briefs/bifrost-diluted-check/truth)
-  python3 brief_dilution.py dup-items     # briefs/bifrost-diluted-check/dup/ duplicate-judge unit
-  (run it with --kind task --output dup.jsonl on briefs/bifrost-diluted-check)
+  python3 brief_dilution.py dup-items     # briefs/bifrost-diluted-check/dup/<diff>[--NN]/ duplicate-judge units
+  (run them with --kind task --output dup.jsonl on briefs/bifrost-diluted-check/dup)
   python3 brief_dilution.py build [--drop ID=STEP ...] [--allow-false-share DIFF ...]
       arm D's brief plus the kept siblings -> briefs/bifrost-diluted/<diff>/{brief.md,meta.json}, summary.json
   python3 brief_dilution.py check-items   # briefs/bifrost-diluted-check/{contains,leak}/, bound to brief hashes
@@ -323,6 +323,20 @@ def write_unit_siblings(unit, payload, labels):
     save(old, payload)
 
 
+def retire_other_units(root, bug, names):
+    """Move this diff's unit directories that the current split does not produce (a list that
+    changed length changes the unit count) to stale/, so read_truth and read_dup never read
+    labels from an earlier split beside the current ones."""
+    for d in sorted(root.glob(f"{bug}*")):
+        if d.is_dir() and (d.name == bug or d.name.startswith(f"{bug}--")) and d.name not in names:
+            stale = root / "stale"
+            stale.mkdir(parents=True, exist_ok=True)
+            d.rename(stale / f"{d.name}-{time.strftime('%Y%m%dT%H%M%S')}")
+            for f in (root / "out" / f"task-{d.name}.json", root / "sessions" / f"batch-{d.name}.json"):
+                if f.exists():
+                    f.rename(stale / f"{f.stem}-{time.strftime('%Y%m%dT%H%M%S')}{f.suffix}")
+
+
 def truth_units(bug):
     return sorted(d for d in (CHECK / "truth").glob(f"{bug}*")
                   if d.is_dir() and (d.name == bug or d.name.startswith(f"{bug}--")))
@@ -336,8 +350,10 @@ def truth_items():
             continue
         intro, base = commits(bug)
         chunks = [rows[i:i + TRUTH_UNIT] for i in range(0, len(rows), TRUTH_UNIT)]
+        names = [bug if len(chunks) == 1 else f"{bug}--{n:02d}" for n in range(len(chunks))]
+        retire_other_units(CHECK / "truth", bug, names)
         for n, chunk in enumerate(chunks):
-            d = CHECK / "truth" / (bug if len(chunks) == 1 else f"{bug}--{n:02d}")
+            d = CHECK / "truth" / names[n]
             d.mkdir(parents=True, exist_ok=True)
             write_unit_siblings(d, {"intro": intro, "base": base,
                                     "siblings": [{"sibling_id": r["sibling_id"], "item": r["item"].strip()}
@@ -381,8 +397,10 @@ def dup_items():
         item = json.loads((ROOT / f"briefs/bifrost-contains/item-{bug}.json").read_text())
         item.pop("brief", None)
         chunks = [sibs[i:i + TRUTH_UNIT] for i in range(0, len(sibs), TRUTH_UNIT)] or [[]]
+        names = [bug if len(chunks) == 1 else f"{bug}--{n:02d}" for n in range(len(chunks))]
+        retire_other_units(root, bug, names)
         for n, chunk in enumerate(chunks):
-            d = root / (bug if len(chunks) == 1 else f"{bug}--{n:02d}")
+            d = root / names[n]
             d.mkdir(parents=True, exist_ok=True)
             save(d / f"census-{bug}.json", item)
             write_unit_siblings(d, {bug: chunk}, "dup.jsonl")
