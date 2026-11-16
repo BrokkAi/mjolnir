@@ -147,7 +147,7 @@ def run(batch_path, judge=None):
     out_path = V / "out" / (f"verify-out-{n}.json" if judge is None else f"verdicts-{tag}.json")
     rec_path = V / "sessions" / f"batch-{tag}.json"
     if out_path.exists():
-        return n, "done"
+        return tag, "done"
     if rec_path.exists():
         rec = json.loads(rec_path.read_text())
         sid = rec["session_id"]
