@@ -1765,8 +1765,8 @@ mod settled_task_tests {
         relay.set_acp_ready(true);
         submit_relay(&mut relay, "deploy-turn", prompt("Deploy it."));
         relay.claim_pending_commands(true).unwrap();
+        // The answer arrives mid-turn, and the chunks carry no message id.
         reply(&mut relay, "Should I deploy?");
-        finish_prompt(&mut relay, "deploy-turn");
         relay
             .record_observation(RelayObservation::ElicitationResolved {
                 elicitation_id: "form".into(),
@@ -1775,6 +1775,7 @@ mod settled_task_tests {
             })
             .unwrap();
         reply(&mut relay, "Deployed.");
+        finish_prompt(&mut relay, "deploy-turn");
         drop(relay);
         std::fs::remove_file(dir.path().join(RELAY_STATE_FILE)).unwrap();
         let relay = claude_relay(dir.path());

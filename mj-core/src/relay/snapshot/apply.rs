@@ -510,7 +510,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     }
                     snapshot.person_input_through = event.ordinal;
                     if let Some(context) = &mut snapshot.assessment_context {
-                        Arc::make_mut(context).set_aside_replies();
+                        Arc::make_mut(context).set_aside_replies(false);
                     }
                 }
                 RelayCommand::SeedAssessmentContext { context, .. } => {
@@ -2034,7 +2034,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             if reply.is_some() {
                 snapshot.person_input_through = event.ordinal;
                 if let Some(context) = &mut snapshot.assessment_context {
-                    Arc::make_mut(context).set_aside_replies();
+                    Arc::make_mut(context).set_aside_replies(true);
                 }
             }
         }

@@ -596,17 +596,25 @@ impl ContextHistory {
         });
     }
 
-    /// The person set aside every assistant message written so far, except
-    /// one still being streamed: its later text is a reply after the
-    /// dismissal or answer.
-    pub fn set_aside_replies(&mut self) {
+    /// The person set aside every assistant message written so far.
+    /// A dismissal belongs to a completed turn, so a message still being
+    /// streamed (`through_open` false) is a later turn's text and stays
+    /// visible. An answered elicitation arrives mid-turn and ends the current
+    /// reply (`through_open` true): the open message is set aside too and
+    /// closed, so text after the answer starts a new message.
+    pub fn set_aside_replies(&mut self, through_open: bool) {
+        let open = self.open_assistant_id.clone();
+        let skip = if through_open { None } else { open.as_ref() };
         if let Some(message) = self
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == "assistant" && Some(&m.id) != self.open_assistant_id.as_ref())
+            .find(|m| m.role == "assistant" && Some(&m.id) != skip)
         {
             self.set_aside_through = Some(message.id.clone());
+        }
+        if through_open {
+            self.open_assistant_id = None;
         }
     }
 
