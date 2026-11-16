@@ -1629,14 +1629,14 @@ pub(crate) fn confirmation_body(
             lines.push(Line::raw(""));
             if *recoverable {
                 lines.push(Line::raw(
-                    "Recover restores the session onto a fresh target from its recovery copy.",
+                    "Recover repairs the existing environment, or restores its recovery copy if absent.",
                 ));
                 lines.push(Line::raw(
                     "Its transcript is readable either way; opening it changes nothing.",
                 ));
             } else {
                 lines.push(Line::raw(
-                    "There is no verified recovery copy, so this session cannot be resumed.",
+                    "There is no retained environment or verified recovery copy to resume.",
                 ));
                 lines.push(Line::raw("Its transcript is still readable."));
             }

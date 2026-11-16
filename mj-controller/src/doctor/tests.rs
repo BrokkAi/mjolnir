@@ -1659,9 +1659,11 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
 /// and could leave a scratch index behind. Doctor tells the user what is there
 /// and how to remove it, and changes nothing itself.
 // Hard-won: #1065: interrupted review captures left large refs and scratch indexes in the user’s repository.
+// Hard-won: #1542: doctor cleanup must retain the managed base's GC root.
 #[test]
 fn review_leftovers_are_reported_and_left_alone() {
-    let repository = tempfile::tempdir().unwrap();
+    use crate::controller::test_support::{committed_repository, test_git};
+    let repository = committed_repository();
     let git_dir = repository.path().join(".git");
     std::fs::create_dir_all(git_dir.join("refs/hel/worktrees/gone")).unwrap();
     std::fs::write(git_dir.join("refs/hel/review-capture"), "a".repeat(41)).unwrap();
@@ -1680,6 +1682,12 @@ fn review_leftovers_are_reported_and_left_alone() {
     let mut packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap();
     packed.push_str(&format!("{} refs/mj/reviewed/tree\n", "e".repeat(40)));
     std::fs::write(git_dir.join("packed-refs"), packed).unwrap();
+    let base_ref = mj_core::targets::HistoryCutoff::BASE_REF;
+    std::fs::write(git_dir.join(base_ref), "f".repeat(41)).unwrap();
+    std::fs::write(git_dir.join(format!("{base_ref}-extra")), "e".repeat(41)).unwrap();
+    let mut packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap();
+    packed.push_str(&format!("{} {base_ref}\n", "f".repeat(40)));
+    std::fs::write(git_dir.join("packed-refs"), packed).unwrap();
     let scratch = git_dir.join("hel-review-index-AbCdEf");
     std::fs::write(&scratch, b"scratch").unwrap();
 
@@ -1691,9 +1699,49 @@ fn review_leftovers_are_reported_and_left_alone() {
             "refs/hel/review-baseline",
             "refs/hel/review-capture",
             "refs/hel/worktrees/gone/review-baseline",
+            "refs/mj/base",
+            "refs/mj/base-extra",
             "refs/mj/review-baseline",
             "refs/mj/reviewed/tree"
         ]
+    );
+    // Both markers are required; an incomplete managed marker is residue too.
+    test_git(repository.path(), &["config", "mj.remoteWorkspace", "true"]);
+    assert_eq!(
+        crate::doctor::review_residue(repository.path()).refs,
+        residue.refs
+    );
+    test_git(
+        repository.path(),
+        &["config", "mj.baseCommit", &"f".repeat(40)],
+    );
+    let managed = crate::doctor::review_residue(repository.path());
+    assert_eq!(
+        managed.refs,
+        residue
+            .refs
+            .iter()
+            .filter(|name| *name != base_ref)
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        git_dir.join(base_ref).exists(),
+        "doctor leaves the managed pin alone"
+    );
+    // Packed-only base pins obey the same ownership rule.
+    std::fs::remove_file(git_dir.join(base_ref)).unwrap();
+    assert_eq!(
+        crate::doctor::review_residue(repository.path()).refs,
+        managed.refs
+    );
+    test_git(
+        repository.path(),
+        &["config", "mj.remoteWorkspace", "false"],
+    );
+    assert_eq!(
+        crate::doctor::review_residue(repository.path()).refs,
+        residue.refs
     );
     assert_eq!(residue.scratch_indexes, std::slice::from_ref(&scratch));
     assert!(

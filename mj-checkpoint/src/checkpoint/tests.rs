@@ -4457,3 +4457,220 @@ fn artifact_bytes(artifact: &NativeArtifact) -> Vec<u8> {
     artifact.reader().unwrap().read_to_end(&mut bytes).unwrap();
     bytes
 }
+
+// Hard-won: 055d8a772 review: parent runtime loss must not rewind a retained checkout or child state.
+#[cfg(unix)]
+#[test]
+fn missing_parent_restore_preserves_current_components_and_retries_partial_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let native_relative = PathBuf::from(format!("sessions/2026/08/09/rollout-{NATIVE}.jsonl"));
+    let archived_native = vec![b'n'; 128 * 1024];
+    fs::write(spec.harness_home.join(&native_relative), &archived_native).unwrap();
+    export_checkpoint(&spec).unwrap();
+    let checkout = spec.workspace_root.join("app");
+    let current = checkout.join("README.md");
+    fs::write(&current, b"current work after checkpoint").unwrap();
+    let index = git(&checkout, &["ls-files", "--stage"]);
+    let child_report = spec.workspace_root.join(".mj/agents/child/report.txt");
+    fs::create_dir_all(child_report.parent().unwrap()).unwrap();
+    fs::write(&child_report, b"current child report").unwrap();
+    let restore = CheckpointRestoreSpec {
+        archive_path: spec.output_path.clone(),
+        workspace_root: spec.workspace_root.clone(),
+        report_root: Some(spec.workspace_root.join(".mj/agents")),
+        relay_root: temp.path().join("recovered-parent"),
+        harness_home: temp.path().join("recovered-native"),
+        restore_repositories: false,
+        restore_native: true,
+        queue_policy: QueueRestorePolicy::Restore,
+        primary_repository_root: Some(checkout.clone()),
+    };
+    fs::create_dir_all(&restore.relay_root).unwrap();
+    let seed = restore
+        .relay_root
+        .join(mj_core::relay::RESTORED_RELAY_SEED_FILE);
+    let mut current_projection = spec.canonical_session.clone();
+    current_projection.event_frontier = 27;
+    current_projection.event_frontier_digest = "b".repeat(64);
+    current_projection.queued_prompts.clear();
+    let current_seed =
+        relay_seed_for_restore(&current_projection, true, QueueRestorePolicy::Restore).unwrap();
+    std::os::unix::fs::symlink(&current, &seed).unwrap();
+    assert!(
+        restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(&current).unwrap(),
+        b"current work after checkpoint"
+    );
+    assert_eq!(
+        fs::read(restore.harness_home.join(&native_relative)).unwrap(),
+        archived_native
+    );
+    fs::remove_file(&seed).unwrap();
+    // Hard-won: 98a60381e: a leftover seed must not replay completed work after journal loss.
+    fs::write(
+        &seed,
+        serde_json::to_vec(
+            &relay_seed_for_restore(&spec.canonical_session, true, QueueRestorePolicy::Restore)
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let retry =
+        restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
+            .unwrap();
+    assert!(!retry.native_restored);
+    assert!(retry.relay_restored);
+    let recovered_seed: mj_core::relay::RestoredRelaySeed =
+        serde_json::from_slice(&fs::read(&seed).unwrap()).unwrap();
+    assert_eq!(recovered_seed.event_frontier, 27);
+    assert!(
+        recovered_seed.queued_prompts.is_empty(),
+        "the archive must not replay already completed queued work"
+    );
+    fs::write(
+        restore.harness_home.join(&native_relative),
+        b"newer native history",
+    )
+    .unwrap();
+    let relay = restore.relay_root.join(mj_core::relay::RELAY_STATE_FILE);
+    fs::write(&relay, b"current relay state").unwrap();
+    let repeated =
+        restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
+            .unwrap();
+    assert!(!repeated.native_restored && !repeated.relay_restored);
+    assert_eq!(fs::read(&relay).unwrap(), b"current relay state");
+    assert_eq!(
+        fs::read(restore.harness_home.join(&native_relative)).unwrap(),
+        b"newer native history"
+    );
+    assert_eq!(
+        fs::read(&current).unwrap(),
+        b"current work after checkpoint"
+    );
+    assert_eq!(fs::read(&child_report).unwrap(), b"current child report");
+    assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
+    let mut from_store = restore.clone();
+    from_store.archive_path = temp.path().join("no-recovery-archive");
+    from_store.relay_root = temp.path().join("runtime-from-store");
+    from_store.restore_native = false;
+    let result = restore_missing_parent_checkpoint(
+        &from_store,
+        &NoNativeCheckpointState,
+        Some(&current_seed),
+    )
+    .unwrap();
+    assert!(result.relay_restored && !result.native_restored);
+    assert_eq!(
+        fs::read(from_store.harness_home.join(&native_relative)).unwrap(),
+        b"newer native history"
+    );
+}
+
+// Hard-won: bd6363001 review: publishing a SQLite database before its WAL made retry silently lose conversation rows.
+#[cfg(unix)]
+#[test]
+fn missing_sqlite_recovery_publishes_a_complete_wal_snapshot_before_other_artifact_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    export_checkpoint(&spec).unwrap();
+    let original = read_archive_verified(&spec.output_path).unwrap();
+    let source = temp.path().join("legacy.db");
+    let live = rusqlite::Connection::open(&source).unwrap();
+    live.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE conversation(id TEXT PRIMARY KEY, body TEXT); PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    let body = "conversation only in WAL ".repeat(8192);
+    live.execute("INSERT INTO conversation VALUES ('wal-only', ?1)", [&body])
+        .unwrap();
+    let wal = fs::read(temp.path().join("legacy.db-wal")).unwrap();
+    assert!(wal.len() > 64 * 1024);
+    let mut session = original.manifest.session.clone();
+    session.harness_kind = HarnessKind::OpenCode;
+    let relative = PathBuf::from(".data/opencode/opencode.db");
+    let legacy = temp.path().join("legacy.hel.zip");
+    write_archive_hashed(
+        &legacy,
+        &ArchiveInput {
+            session,
+            target: original.manifest.target.clone(),
+            bundle: original.manifest.bundle.clone(),
+            canonical_session: original.canonical_session().unwrap(),
+            repositories: original
+                .manifest
+                .repositories
+                .iter()
+                .map(|repository| archived_repository_snapshot(&original, repository).unwrap())
+                .collect(),
+            native_artifacts: vec![
+                NativeArtifact {
+                    relative_path: relative.clone(),
+                    data: fs::read(&source).unwrap().into(),
+                    mode: 0o600,
+                },
+                NativeArtifact {
+                    relative_path: PathBuf::from(".data/opencode/opencode.db-wal"),
+                    data: wal.into(),
+                    mode: 0o600,
+                },
+                NativeArtifact {
+                    relative_path: PathBuf::from("blocked/late-artifact"),
+                    data: b"last artifact".to_vec().into(),
+                    mode: 0o600,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    drop(live);
+    let home = temp.path().join("recovered-home");
+    fs::create_dir_all(&home).unwrap();
+    let current = temp.path().join("current-files");
+    fs::create_dir(&current).unwrap();
+    std::os::unix::fs::symlink(&current, home.join("blocked")).unwrap();
+    let restore = CheckpointRestoreSpec {
+        archive_path: legacy,
+        workspace_root: spec.workspace_root.clone(),
+        report_root: None,
+        relay_root: temp.path().join("recovered-relay"),
+        harness_home: home.clone(),
+        restore_repositories: false,
+        restore_native: true,
+        queue_policy: QueueRestorePolicy::Discard,
+        primary_repository_root: Some(spec.workspace_root.join("app")),
+    };
+    assert!(restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, None).is_err());
+    assert!(home.join(&relative).is_file());
+    assert!(!home.join(".data/opencode/opencode.db-wal").exists());
+    assert!(!home.join(".data/opencode/opencode.db-shm").exists());
+    let database = rusqlite::Connection::open(home.join(&relative)).unwrap();
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT body FROM conversation WHERE id='wal-only'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        body
+    );
+    drop(database);
+    fs::remove_file(home.join("blocked")).unwrap();
+    restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, None).unwrap();
+    let database = rusqlite::Connection::open(home.join(&relative)).unwrap();
+    database
+        .execute("UPDATE conversation SET body='newer conversation'", [])
+        .unwrap();
+    drop(database);
+    restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, None).unwrap();
+    let database = rusqlite::Connection::open(home.join(&relative)).unwrap();
+    assert_eq!(
+        database
+            .query_row("SELECT body FROM conversation", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "newer conversation"
+    );
+}

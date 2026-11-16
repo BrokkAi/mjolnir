@@ -31,6 +31,33 @@ pub fn provision_on_locator_plan(
     })
 }
 
+/// Reconstruct repositories without creating or retiring their target.
+pub(crate) fn recover_checkout_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+    bundle: &ProjectBundleSpec,
+    workspace: &str,
+    github_token: Option<&str>,
+    existing_repositories: &std::collections::BTreeSet<String>,
+) -> Result<CommandPlan> {
+    bundle.validate()?;
+    verify_locator(locator, session_id)?;
+    ensure!(
+        !is_borrowed(locator),
+        "recover the owning session's checkout first"
+    );
+    let mut missing = bundle.clone();
+    missing
+        .repositories
+        .retain(|repository| !existing_repositories.contains(&repository.destination));
+    Ok(CommandPlan {
+        description: "reconstruct missing checkout in staging".into(),
+        commands: clone_commands(&missing, workspace, github_token, |args| {
+            locator_command(locator, args)
+        }),
+    })
+}
+
 pub fn reconnect_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
     verify_locator(locator, session_id)?;
     let root = worker_root(locator, session_id)?;

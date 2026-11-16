@@ -495,6 +495,7 @@ pub fn verify_archive_streaming_cancellable(
         len: file.metadata()?.len(),
         file: std::sync::Arc::new(file),
         position: 0,
+        start: 0,
         cancelled: Some(cancelled),
     };
     Ok(VerifiedArchiveMetadata {
@@ -1140,12 +1141,14 @@ fn write_zip(
         &mut Cursor::new(&manifest_bytes),
         &digest_bytes(&manifest_bytes),
     )?;
-    let mut spool_builder = tempfile::Builder::new();
+    let spool_builder = tempfile::Builder::new();
     #[cfg(unix)]
-    {
+    let spool_builder = {
         use std::os::unix::fs::PermissionsExt;
-        spool_builder.permissions(fs::Permissions::from_mode(0o700));
-    }
+        let mut builder = spool_builder;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+        builder
+    };
     let spool = spool_builder
         .tempdir_in(spool_parent)
         .context("create ZIP compression spool")?;
@@ -1390,6 +1393,7 @@ fn open_archive_cancellable(
         file: std::sync::Arc::new(file),
         len,
         position: 0,
+        start: 0,
         cancelled,
     })
     .context("open Mjolnir archive ZIP")
@@ -1403,6 +1407,7 @@ struct ArchiveFile {
     file: std::sync::Arc<File>,
     len: u64,
     position: u64,
+    start: u64,
 }
 
 impl Read for ArchiveFile {
@@ -1414,10 +1419,18 @@ impl Read for ArchiveFile {
         {
             return Err(std::io::Error::other("archive verification cancelled"));
         }
+        let count = usize::try_from(self.len.saturating_sub(self.position))
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        let offset = self
+            .start
+            .checked_add(self.position)
+            .ok_or_else(|| std::io::Error::other("file read offset overflow"))?;
         #[cfg(unix)]
-        let read = std::os::unix::fs::FileExt::read_at(&*self.file, buf, self.position)?;
+        let read = std::os::unix::fs::FileExt::read_at(&*self.file, &mut buf[..count], offset)?;
         #[cfg(windows)]
-        let read = std::os::windows::fs::FileExt::seek_read(&*self.file, buf, self.position)?;
+        let read =
+            std::os::windows::fs::FileExt::seek_read(&*self.file, &mut buf[..count], offset)?;
         self.position += read as u64;
         Ok(read)
     }
@@ -2370,8 +2383,8 @@ pub fn read_session_file(root: &Path, relative: &Path) -> Result<Vec<u8>, Sessio
 
 mod fetch;
 pub use fetch::{
-    FetchMode, FetchedKind, FetchedPath, ListedEntry, ListedKind, MAX_FETCHED_DIRECTORY_BYTES,
-    SavedFetch, SessionListing, fetch_session_path,
+    FetchMode, FetchedKind, FetchedPath, ListedEntry, ListedKind, SavedFetch, SessionListing,
+    create_fetch_spool, fetch_session_path,
 };
 mod file_input;
 pub use file_input::{read_session_file_input, write_session_file};
@@ -2385,11 +2398,11 @@ pub use git::{
     ReviewPoint, SessionDiff, SessionExportError, SystemGit, UntrackedFiles, capture_paths,
     capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
     collect_git_snapshot_with_progress, collect_plain_directory_snapshot, diff_between_trees,
-    empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref, numstat_between_trees,
-    pin_review_tree, push_branch, push_review_base_ref, read_head_reflog, read_review_point,
-    record_overridden_tree, record_review_point, record_reviewed_tree, remote_workspace_base,
-    restore_git_snapshot, session_diff, session_diff_details, session_start_scope,
-    tree_without_paths, validate_symlink_target,
+    empty_tree_id, has_origin_refs, managed_base_is_available, merge_trees, migrate_review_ref,
+    numstat_between_trees, pin_review_tree, push_branch, push_review_base_ref, read_head_reflog,
+    read_review_point, record_overridden_tree, record_review_point, record_reviewed_tree,
+    remote_workspace_base, restore_git_snapshot, session_diff, session_diff_details,
+    session_start_scope, tree_without_paths, validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

@@ -24,9 +24,8 @@ use mj_checkpoint::archive::{
 };
 use mj_core::config::{Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
 #[cfg(unix)]
-use mj_core::state::{
-    CheckpointMetadata, MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition,
-};
+use mj_core::state::CheckpointMetadata;
+use mj_core::state::{MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition};
 #[cfg(unix)]
 use mj_core::test_hooks::install_fake_command;
 
@@ -1644,7 +1643,6 @@ fn ssh_bare_targets_share_an_environment_only_on_the_same_connection() {
     ));
 }
 
-#[cfg(unix)]
 pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
         quota_stop_reason: None,
@@ -2378,6 +2376,7 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
     assert_eq!(
         restored,
         [mj_core::move_workspace::WorkspaceRepository {
+            base_commit: None,
             // The transfer names the repository as the source captured it.
             id: HOST_CHECKOUT_REPOSITORY.into(),
             root: cloned[0].clone(),
@@ -2500,6 +2499,7 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
             .repositories
             .iter()
             .map(|repository| WorkspaceRepository {
+                base_commit: None,
                 id: repository.id.clone(),
                 root: container_checkout.clone(),
             })

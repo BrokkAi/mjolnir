@@ -1901,6 +1901,7 @@ impl DashboardContext {
         dashboard.set_workspace_names(workspace_names);
         dashboard.set_launch_recency(launch_recency);
         dashboard.set_session_attention(bootstrap.projection.metadata.session_attention.clone());
+        dashboard.set_form_holders(bootstrap.projection.metadata.form_holders.clone());
         dashboard.set_unread_frontiers(bootstrap.projection.metadata.unread_frontiers.clone());
         dashboard.set_notification_dismissals(
             bootstrap

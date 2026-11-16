@@ -99,10 +99,7 @@ impl DashboardState {
                 .map(|child| child.parent_session_id.as_str());
             let level = match parent {
                 Some(_)
-                    if self
-                        .session_details
-                        .get(id)
-                        .is_some_and(|detail| !detail.pending_elicitations.is_empty())
+                    if self.form_holders.get(id) == Some(id)
                         && self.attention_level(id) == AttentionLevel::Waiting =>
                 {
                     AttentionLevel::Waiting

@@ -369,9 +369,11 @@ impl ActionOutcome {
             ),
             Self::Failed { reference } => Some(ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "the controller could not start this action; \
-                     the daemon log records the reason under reference {reference}"
+                crate::daemon::lifecycle_failure_message(
+                    "the controller could not start this action",
+                    None,
+                    None,
+                    reference,
                 ),
             )),
         }

@@ -34,7 +34,11 @@ pub(crate) fn native_fixture(fixture: &str) -> String {
 /// summaries beside the assistant turn, and `search_replace` tool calls
 /// paired with their results.
 pub(crate) fn grok_session(directory: &Path, cwd: &str, history: &str) -> PathBuf {
-    let session = directory.join("sessions/%2Fwork%2Fapp/01a00c3a-553f-71e0-95ab-aa04396d3ad7");
+    // Join components so the seeded index key matches native directory discovery.
+    let session = directory
+        .join("sessions")
+        .join("%2Fwork%2Fapp")
+        .join("01a00c3a-553f-71e0-95ab-aa04396d3ad7");
     fs::create_dir_all(&session).unwrap();
     fs::write(
         session.join("summary.json"),
@@ -55,14 +59,14 @@ pub(crate) fn grok_session(directory: &Path, cwd: &str, history: &str) -> PathBu
 /// A Kimi Code session directory with the `session_index.jsonl` entry that
 /// makes it visible, its `state.json` metadata and one agent wire log.
 pub(crate) fn kimi_session(home: &Path, id: &str, cwd: &str, title: &str, wire: &str) -> PathBuf {
-    let session = home.join("sessions/project").join(id);
-    fs::create_dir_all(session.join("agents/main")).unwrap();
+    let session = home.join("sessions").join("project").join(id);
+    fs::create_dir_all(session.join("agents").join("main")).unwrap();
     fs::write(
         session.join("state.json"),
         json!({"workDir": cwd, "customTitle": title}).to_string(),
     )
     .unwrap();
-    fs::write(session.join("agents/main/wire.jsonl"), wire).unwrap();
+    fs::write(session.join("agents").join("main").join("wire.jsonl"), wire).unwrap();
     fs::write(
         home.join("session_index.jsonl"),
         json!({"sessionId": id, "sessionDir": session, "workDir": cwd}).to_string(),

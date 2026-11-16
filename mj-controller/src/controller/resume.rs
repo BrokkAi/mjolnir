@@ -123,6 +123,9 @@ impl Controller {
         target_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
+        if let Some(receipt) = self.repair_preflight_receipt(session_id, target_id, executor)? {
+            return Ok(ResumeRepositorySourcePreflight::Ready(receipt));
+        }
         let github_token = self
             .github_token_for_repository_preflight(session_id)
             .await?;
@@ -147,6 +150,44 @@ impl Controller {
         self.preflight_repository_sources(session_id, target_id, true, github_token, executor)
     }
 
+    /// Retained placements can repair without repository credentials or an
+    /// archive, but a raw conversion still needs its preview and confirmation.
+    fn repair_preflight_receipt(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<Option<ResumeRepositorySourceReceipt>> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("session missing")?;
+        if session.state != SessionState::Error || session.target.is_none() {
+            return Ok(None);
+        }
+        let checkout = self.state.checkout(session_id)?;
+        let plan = resume_compatibility_with_checkout(session, &checkout, &self.config, target_id)
+            .map_err(|reason| anyhow::anyhow!(reason))?;
+        if plan == ResumePlan::RawToWorkspace {
+            return Ok(None);
+        }
+        // Advisory only: the lifecycle owner reclassifies under its permit.
+        // Unknown evidence is not permission to demand archive credentials.
+        if matches!(
+            super::environment::resume_checkout_available(self, session_id, executor),
+            Ok(false)
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(ResumeRepositorySourceReceipt {
+            session_id: session_id.to_owned(),
+            bundle_id: session.bundle_id.clone(),
+            checkpoint_sha256: String::new(),
+            repositories: Vec::new(),
+        }))
+    }
+
     /// `describe_conversion` buys the conversion preview with a read of the
     /// checkout and a question to its remote. The resume itself only needs to
     /// know whether a configured source moved, and the person has already
@@ -164,10 +205,16 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        if describe_conversion
+            && let Some(receipt) = self.repair_preflight_receipt(session_id, target_id, executor)?
+        {
+            return Ok(ResumeRepositorySourcePreflight::Ready(receipt));
+        }
         let checkpoint = session
             .checkpoint
             .as_ref()
             .context("session has no checkpoint")?;
+
         let checkout = self.state.checkout(session_id)?;
         let plan = resume_compatibility_with_checkout(session, &checkout, &self.config, target_id)
             .map_err(|reason| anyhow::anyhow!(reason))?;
@@ -994,8 +1041,8 @@ impl Controller {
                     profile.kind,
                 )
                 .await?;
-                let owner = crate::worker_lifecycle::require(session_id)?;
-                crate::database::finish_worker_restart(session_id, owner.operation_id())?;
+                // Keep the boot owner until Running is durable. The restored
+                // relay can already accept queued work before publication.
                 Ok::<_, anyhow::Error>((relay, native_session_id))
             }
             .await;
@@ -1102,6 +1149,8 @@ impl Controller {
                 }
             }
             self.mark_worker_connected(session_id, Some(native_session_id))?;
+            let owner = crate::worker_lifecycle::require(session_id)?;
+            crate::database::finish_worker_restart(session_id, owner.operation_id())?;
             let materialized = relay.sync().await?.materialized;
             if !stopped_subagents.is_empty() {
                 let delivered = stopped_subagents
@@ -1606,6 +1655,54 @@ impl Controller {
         {
             bail!("session {session_id} is not stopped, lost, or retryable");
         }
+        if !transferring_workspace && previous.state == SessionState::Error && previous.target.is_some() {
+            use super::environment::{ResumeEnvironment, classify_resume_environment};
+            let condition = classify_resume_environment(self, session_id, executor);
+            if !matches!(&condition, ResumeEnvironment::Absent | ResumeEnvironment::Unknown(_)) {
+                ensure!(profile_id == previous.last_profile && target_id == previous.target_template_id,
+                    "Resume repairs the existing environment; resume with its current profile and target, then use Move to change them");
+                if additional_mounts.as_ref().is_some_and(|mounts| mounts != &previous.additional_mounts)
+                    || resource_allocation.as_ref().is_some_and(|allocation| Some(allocation) != previous.resource_allocation.as_ref()) {
+                    executor.notify_notice("Resume keeps the existing container resources and attached directories. Use Move after repair to change them.");
+                }
+            }
+            match condition {
+                condition @ (ResumeEnvironment::LiveWorker | ResumeEnvironment::WorkerMissing) => {
+                    on_accepted();
+                    return self.repair_existing_environment(session_id, if matches!(condition, ResumeEnvironment::LiveWorker) { RetainedWorker::Live } else { RetainedWorker::Missing }, discard_queue, executor).await;
+                }
+                ResumeEnvironment::ParentDataMissing => {
+                    on_accepted();
+                    return self.recover_missing_parent_data(session_id, discard_queue, executor).await;
+                }
+                ResumeEnvironment::RetainedContainerMissing => {
+                    on_accepted();
+                    self.recover_removed_resume_container(session_id, discard_queue, executor).await?;
+                    return crate::database::load_materialized_session(session_id)?.context("restored parent projection is missing");
+                }
+                ResumeEnvironment::CheckoutMissing => {
+                    on_accepted();
+                    return self.recover_missing_checkout(session_id, discard_queue, executor).await;
+                }
+                ResumeEnvironment::Unknown(error) => {
+                    bail!("Could not establish the existing environment for session {session_id}: {error:#}. Everything was kept. Retry Resume when the target is reachable.");
+                }
+                ResumeEnvironment::Absent => {
+                    if previous.checkpoint.is_none() {
+                        let record = self.state.sessions.get_mut(session_id).context("session disappeared")?;
+                        // Presentation loses the absent target; the environment
+                        // ledger retains all physical ownership for explicit Destroy.
+                        record.target = None;
+                        record.state = SessionState::Lost;
+                        record.updated_at = now();
+                        let reason = format!("The target is confirmed absent and this session has no checkpoint. Run `mj destroy --session {session_id}` to clean its remaining resources, or restore another recovery archive.");
+                        record.last_error = Some(reason.clone());
+                        crate::database::save_lifecycle_session(record)?;
+                        bail!("{reason}");
+                    }
+                },
+            }
+        }
         let checkpoint = move_operation
             .and_then(|op| op.handoff.as_ref())
             .or(previous.checkpoint.as_deref())
@@ -1724,13 +1821,6 @@ impl Controller {
         targets::validate_additional_mounts(&additional_mounts)?;
         let history_host = mount_history_host(&target_template);
         let history_mounts = additional_mounts.clone();
-        if !transferring_workspace
-            && previous.state == SessionState::Error
-            && previous.target.is_some()
-        {
-            super::environment::remove_runtime_preserving_workspace(&previous,&self.config,executor)
-                .context("clean up target from failed resume")?;
-        }
         let mut resume_notices = Vec::new();
         // The raw-to-workspace notice is written where the conversion snapshot
         // is taken, because it reports the branch the container arrives on.
@@ -2121,6 +2211,9 @@ impl Controller {
                 Ok(materialized)
             }
             Err(error) => {
+                if move_operation.is_none() && self.resume_runtime_has_boot_owner(session_id)? {
+                    return Err(self.keep_started_resume_after_failure(session_id, error)?);
+                }
                 // The rollback puts back a record that names the previous
                 // archive, so the conversion's archive is nothing but litter.
                 if let Some(written) = &conversion_checkpoint_written
@@ -2157,6 +2250,41 @@ impl Controller {
         }).await
     }
 
+    fn resume_runtime_has_boot_owner(&self, session_id: &str) -> Result<bool> {
+        let record = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("resume session disappeared")?;
+        Ok(record.state == SessionState::Running
+            || crate::database::load_worker_restart(session_id)?
+                .is_some_and(|intent| record.target.as_deref() == Some(&intent.target)))
+    }
+
+    fn keep_started_resume_after_failure(
+        &mut self,
+        session_id: &str,
+        error: anyhow::Error,
+    ) -> Result<anyhow::Error> {
+        // The durable boot owner is admitted before launch. An unacknowledged
+        // start can already be serving work, so its files are no longer a
+        // disposable archive reconstruction, even before Running is published.
+        let detail = format!(
+            "Resume failed after parent startup: {}. The current environment and history were kept; retry Resume to reconnect it.",
+            super::worker_binary::failure_line(&error)
+        );
+        let record = self
+            .state
+            .sessions
+            .get_mut(session_id)
+            .context("resume session disappeared")?;
+        record.state = SessionState::Error;
+        record.updated_at = now();
+        record.last_error = Some(detail.clone());
+        crate::database::save_lifecycle_session(record)?;
+        Ok(error.context(detail))
+    }
+
     pub(super) fn rollback_failed_resume(
         &mut self,
         session_id: &str,
@@ -2166,19 +2294,35 @@ impl Controller {
         error: anyhow::Error,
         _executor: &impl CommandExecutor,
     ) -> Result<anyhow::Error> {
+        if self.resume_runtime_has_boot_owner(session_id)? {
+            return self.keep_started_resume_after_failure(session_id, error);
+        }
         let current = self
             .state
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        // An environment that still has its original runtime is not owned by
+        // this attempt. A new generation or a previously empty placement is.
         let cleanup = match current.target.as_ref() {
-            Some(_) => super::environment::remove_runtime_preserving_workspace(
-                &current,
-                &self.config,
-                &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
-            ),
-            None => Ok(()),
+            Some(_)
+                if source_environment.is_none_or(|source| {
+                    source.placement.target.is_none()
+                        || source.phase == crate::database::EnvironmentPhase::Reclaimed
+                }) || current.target != previous.target
+                    || crate::database::session_environment(session_id)?
+                        .as_ref()
+                        .map(|e| &e.id)
+                        != source_environment.map(|e| &e.id) =>
+            {
+                super::environment::remove_runtime_preserving_workspace(
+                    &current,
+                    &self.config,
+                    &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+                )
+            }
+            _ => Ok(()),
         };
         // A failed target teardown may leave its harness writing. Keep its
         // checkout intact until a later retry proves the process is stopped.
@@ -2371,7 +2515,7 @@ fn conversion_notice(
 /// The snapshot carries network provenance, so this archive is what lets the
 /// destination clone a real remote and later checkpoint like any other
 /// isolated session.
-fn conversion_checkpoint(
+pub(super) fn conversion_checkpoint(
     previous_archive: &Path,
     snapshot: mj_checkpoint::archive::RepositorySnapshot,
     output: &Path,
@@ -2832,7 +2976,9 @@ async fn utility_handoff_while_cancellable(
 }
 
 mod in_place;
+mod repair;
 pub(crate) use in_place::InPlaceRestartError;
+pub(super) use repair::RetainedWorker;
 
 #[cfg(test)]
 mod tests;

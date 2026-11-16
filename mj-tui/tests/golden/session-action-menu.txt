@@ -669,6 +669,47 @@ dismissal failure: Some("Could not dismiss notification: Worker disconnected")
 Notification dismissed.
 publication before acknowledgement: Some("Notification dismissed.")
 unread dismissed: Some("Notification dismissed.")
+=== row context menu, sub-agent approval (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
+│ ╭Session──────────────────────────╮x…││                                                                              │
+│ │Open sub-agent question          │  ││                                                                              │
+│ │Copy session ID                  │  ││                                                                              │
+│ │New session with these settings  │  ││                               ✦  M J O L N I R                               │
+│ ╰─────────────────────────────────╯  ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === sub-agent question menu (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default ?1                         ≡ ││                                                                              │
@@ -680,7 +721,7 @@ unread dismissed: Some("Notification dismissed.")
 │  ? Sub-agent   ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
 │  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
-│                │  Sub-agents Native · 0 of 1 working                                                │                │
+│                │  Sub-agents Native · 1 of 1 working                                                │                │
 │                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │

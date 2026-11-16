@@ -949,7 +949,7 @@
     "destroy": true,
     "rename": true,
     "dismiss_notification": false,
-    "resume": true,
+    "resume": false,
     "move_session": false,
     "set_config": false,
     "set_plan_mode": false,
@@ -994,10 +994,10 @@
     "pending_elicitation_count": 0,
     "detail": false,
     "queued_prompt_count": 0,
-    "capabilities_ref": "5b2a10f6d8b19574"
+    "capabilities_ref": "bbd99780d6bb7308"
   },
   "interned": {
-    "5b2a10f6d8b19574": {
+    "bbd99780d6bb7308": {
       "clear_context": false,
       "open": false,
       "read_history": false,
@@ -1009,7 +1009,7 @@
       "destroy": true,
       "rename": true,
       "dismiss_notification": false,
-      "resume": true,
+      "resume": false,
       "move_session": false,
       "set_config": false,
       "set_plan_mode": false,

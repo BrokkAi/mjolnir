@@ -1159,8 +1159,13 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
                 ));
             }
             HarnessKind::Muse => {
+                // Share the import root, including native Windows separators.
                 adapters.push(Box::new(
-                    sessionwiki::adapters::Muse::in_home(home).keep_configured_paths(),
+                    sessionwiki::adapters::Muse::in_sessions_root(
+                        mj_checkpoint::native::muse_sessions_root(&home)
+                            .expect("Muse always has a nested data directory"),
+                    )
+                    .keep_configured_paths(),
                 ));
             }
             HarnessKind::Dsh => {

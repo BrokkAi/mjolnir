@@ -533,6 +533,13 @@ impl DashboardState {
                 .insert(session_id.to_owned(), attention);
         }
     }
+    pub fn set_form_holders(
+        &mut self,
+        holders: mj_core::snapshot_map::SnapshotMap<String, String>,
+    ) {
+        self.form_holders = holders;
+    }
+
     pub fn set_unread_frontiers(
         &mut self,
         frontiers: mj_core::snapshot_map::SnapshotMap<String, u64>,

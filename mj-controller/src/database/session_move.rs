@@ -219,6 +219,31 @@ pub(super) fn load_move_operation_with(
     Ok(json.and_then(|json| decode_move_operation(session_id, &json)))
 }
 
+/// Release only the cancelled Move's restore authority. Placement ownership
+/// has already been settled; do not adopt or recreate it while resolving.
+pub(super) fn resolve_cancelled_move_for_close_with(
+    connection: &Connection,
+    session_id: &str,
+    operation_id: &str,
+    updated_at: &str,
+) -> Result<()> {
+    let mut operation = load_move_operation_with(connection, session_id)?
+        .context("superseded Move disappeared before close publication")?;
+    ensure!(
+        operation.operation_id == operation_id
+            && operation.phase == mj_core::state::MovePhase::Cancelled
+            && !operation.queue_admission_started,
+        "superseded Move no longer permits close settlement"
+    );
+    operation.queue_admission_finished = true;
+    operation.updated_at = updated_at.to_owned();
+    connection.execute(
+        "UPDATE session_moves SET operation_json=?2, close_requested_operation_id=NULL WHERE session_id=?1",
+        params![session_id, serde_json::to_string(&operation)?],
+    )?;
+    Ok(())
+}
+
 /// Decode one stored move intent, or `None` when it no longer decodes.
 ///
 /// A move intent recorded before a harness was removed keeps that harness in
@@ -249,6 +274,64 @@ pub fn load_move_operations() -> Result<Vec<MoveOperation>> {
     }
     let connection = open_reader(&database_path())?;
     load_move_operations_with(&connection)
+}
+
+/// Read Move and close intent together; an unmatched/stale close ID is inert.
+pub(super) fn exact_move_close_intent(
+    decoded_id: &str,
+    row_id: &str,
+    close_id: Option<&str>,
+) -> bool {
+    decoded_id == row_id && close_id == Some(row_id)
+}
+
+/// The durable owner of an interrupted Move, shared by startup and intent GC.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoveRecoveryOwner {
+    Move,
+    Close,
+}
+
+pub(crate) fn move_recovery_owner(
+    state: Option<SessionState>,
+    exact_close_intent: bool,
+) -> Option<MoveRecoveryOwner> {
+    if exact_close_intent {
+        Some(MoveRecoveryOwner::Close)
+    } else if matches!(
+        state,
+        Some(SessionState::Closing | SessionState::Destroying)
+    ) {
+        Some(MoveRecoveryOwner::Move)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn load_move_recovery() -> Result<(Vec<MoveOperation>, BTreeSet<String>)> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare("SELECT session_id, operation_id, operation_json, close_requested_operation_id FROM session_moves ORDER BY session_id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut operations = Vec::new();
+    let mut closes = BTreeSet::new();
+    for row in rows {
+        let (session_id, operation_id, json, close_id) = row?;
+        if let Some(operation) = decode_move_operation(&session_id, &json) {
+            if exact_move_close_intent(&operation.operation_id, &operation_id, close_id.as_deref())
+            {
+                closes.insert(operation_id);
+            }
+            operations.push(operation);
+        }
+    }
+    Ok((operations, closes))
 }
 
 pub(super) fn load_move_operations_with(connection: &Connection) -> Result<Vec<MoveOperation>> {
@@ -302,6 +385,23 @@ pub fn reap_finished_move_intents() -> Result<usize> {
 pub(super) fn reap_finished_move_intents_with(connection: &Connection) -> Result<usize> {
     let mut reaped = 0;
     for operation in load_move_operations_with(connection)? {
+        let (state, close_id): (Option<String>, Option<String>) = connection.query_row(
+            "SELECT s.state, m.close_requested_operation_id FROM session_moves m LEFT JOIN sessions s ON s.session_id=m.session_id WHERE m.session_id=?1 AND m.operation_id=?2",
+            params![operation.selection.session_id, operation.operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if move_recovery_owner(
+            state.as_deref().map(stored_session_state),
+            exact_move_close_intent(
+                &operation.operation_id,
+                &operation.operation_id,
+                close_id.as_deref(),
+            ),
+        )
+        .is_some()
+        {
+            continue;
+        }
         if (operation.phase != mj_core::state::MovePhase::Completed
             && operation
                 .prepared_destination

@@ -3791,8 +3791,9 @@ impl ReviewResidue {
 /// Releases before this one staged the whole working tree into the user's own
 /// object store and pinned it with two refs, and a capture that was killed
 /// partway left its scratch index behind. Linked worktrees pin their baselines
-/// under `refs/mj/worktrees/` (formerly `refs/hel/worktrees/`). All of it is the user's to remove, so this
-/// only reads.
+/// under `refs/mj/worktrees/` (formerly `refs/hel/worktrees/`). Review
+/// residue is the user's to remove, so this only reads. The managed base is
+/// retained state and must stay rooted for Git GC.
 pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     let mut residue = ReviewResidue::default();
     let git_dir = repository.join(".git");
@@ -3822,6 +3823,22 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
                 residue.scratch_indexes.push(entry.path());
             }
         }
+    }
+    if residue
+        .refs
+        .iter()
+        .any(|reference| reference == mj_core::targets::HistoryCutoff::BASE_REF)
+        && matches!(
+            mj_checkpoint::archive::remote_workspace_base(
+                &mj_checkpoint::archive::SystemGit,
+                repository
+            ),
+            Ok(Some(_))
+        )
+    {
+        residue
+            .refs
+            .retain(|reference| reference != mj_core::targets::HistoryCutoff::BASE_REF);
     }
     residue.refs.sort();
     residue.scratch_indexes.sort();

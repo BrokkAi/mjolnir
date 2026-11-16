@@ -205,6 +205,9 @@ pub fn collect_git_metadata_snapshot(
     validate_archive_relative_path(&spec.relative_destination)?;
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
     let saved_refs = collect_review_refs(runner, repository)?;
+    // Move handoffs omit workspace payloads but still own the immutable base
+    // needed to finalize the independently transferred destination checkout.
+    let managed_base = remote_workspace_base(runner, repository)?;
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
             // Every capture here is metadata only, whether or not it carries
@@ -224,9 +227,9 @@ pub fn collect_git_metadata_snapshot(
             checkout_subdirectory: None,
             origin: identity.origin,
             push_urls: identity.push_urls,
-            remote_workspace: false,
+            remote_workspace: managed_base.is_some(),
             plain_directory: false,
-            base_commit: identity.head_commit.clone(),
+            base_commit: managed_base.unwrap_or_else(|| identity.head_commit.clone()),
             head_commit: identity.head_commit,
             branch: identity.branch,
         },
@@ -429,6 +432,31 @@ pub fn remote_workspace_base(
         "managed workspace is marked true but mj.baseCommit is empty"
     );
     Ok(Some(base))
+}
+
+/// Whether the recorded managed base is an available commit in this checkout.
+/// A missing legacy object is distinct from a Git execution/storage failure.
+pub fn managed_base_is_available(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: &str,
+) -> Result<bool> {
+    let output = run_git(
+        runner,
+        repository,
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base}^{{commit}}"),
+        ],
+        &[],
+    )?;
+    match output.status {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(git_failure("inspect managed base object", &output)),
+    }
 }
 
 fn merge_base(
@@ -2274,31 +2302,31 @@ fn restore_remote_workspace_configuration(
             "restore Git push URL",
         )?;
     }
-    for (key, value) in [
-        ("mj.remoteWorkspace", "true"),
-        ("mj.baseCommit", metadata.base_commit.as_str()),
-        ("push.default", "current"),
-        ("push.autoSetupRemote", "true"),
-        ("remote.pushDefault", "origin"),
-        ("remote.origin.mirror", "false"),
-    ] {
-        git_success(
-            runner,
-            repository,
-            GitCommand {
-                arguments: vec![
-                    "config".into(),
-                    "--local".into(),
-                    "--replace-all".into(),
-                    key.into(),
-                    value.into(),
-                ],
-                stdin: Vec::new(),
-                env: Vec::new(),
-            },
-            "restore managed Git configuration",
-        )?;
+    // Older archives could retain the recorded base without carrying its
+    // object. Adding a GC root must not turn those existing restores into
+    // failures; their marker/config behavior remains unchanged.
+    let retain_base = managed_base_is_available(runner, repository, &metadata.base_commit)?;
+    if !retain_base {
+        tracing::warn!(repository = %repository.display(), base_commit = %metadata.base_commit,
+            "legacy checkpoint base object is absent; preserving its recorded base without a GC ref");
     }
+    mj_core::remote_git::finalize_managed_checkout(
+        &metadata.base_commit,
+        retain_base,
+        |arguments| {
+            git_success(
+                runner,
+                repository,
+                GitCommand {
+                    arguments: arguments.iter().map(OsString::from).collect(),
+                    stdin: Vec::new(),
+                    env: Vec::new(),
+                },
+                "restore managed Git configuration",
+            )?;
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 

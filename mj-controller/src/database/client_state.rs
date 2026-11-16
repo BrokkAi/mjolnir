@@ -468,6 +468,41 @@ pub fn list_detached_drafts(workspace_id: &str) -> Result<Vec<DetachedDraft>> {
     list_detached_drafts_at(&database_path(), workspace_id)
 }
 
+/// A detached draft as the workspace manager lists it. The text stays in the
+/// store: the manager shows source and time without reading it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedDraftListing {
+    pub id: String,
+    pub workspace_id: String,
+    pub session_id: Option<String>,
+    pub source: String,
+    pub owner_pid: Option<u32>,
+    pub saved_at: String,
+}
+
+/// Every workspace's unrecovered detached drafts, newest first within each
+/// workspace.
+pub fn list_all_detached_drafts() -> Result<Vec<DetachedDraftListing>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT draft_id, workspace_id, session_id, source, owner_pid, saved_at
+           FROM detached_drafts
+          WHERE recovered_at IS NULL AND text <> ''
+          ORDER BY workspace_id, saved_at DESC, draft_id DESC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(DetachedDraftListing {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            session_id: row.get(2)?,
+            source: row.get(3)?,
+            owner_pid: row.get(4)?,
+            saved_at: row.get(5)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
 pub(super) fn list_detached_drafts_at(
     path: &Path,
     workspace_id: &str,
