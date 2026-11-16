@@ -253,7 +253,9 @@ impl HostState {
                     }
                 }
                 self.sweep_queue = abandoned_children.into();
-                self.close_next_swept_child();
+                for _ in 0..super::reviewer_child::SWEEP_CLOSE_WIDTH {
+                    self.close_next_swept_child();
+                }
                 self.startup_ready = true;
                 for (session_id, handback) in std::mem::take(&mut self.deferred_handbacks) {
                     self.reviewer_finished(

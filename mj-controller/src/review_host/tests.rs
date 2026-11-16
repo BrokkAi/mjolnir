@@ -2242,14 +2242,15 @@ fn scopeguard_decrement(counter: &std::sync::atomic::AtomicUsize) -> DecrementOn
 }
 
 // A restart finds every finished reviewer of an old store at once (19,196 in
-// the live one). The sweep closes them one at a time, and a close that fails
-// retries on its own instead of holding the rest of the queue behind it.
+// the live one). The sweep closes them concurrently up to its measured width,
+// and a close that fails retries on its own instead of holding the queue.
 #[tokio::test]
-async fn startup_sweep_closes_finished_reviewers_one_at_a_time_past_a_failing_one() {
+async fn startup_sweep_closes_finished_reviewers_concurrently_within_its_width_past_a_failing_one()
+{
     let session = session_id("sweep-many");
     let manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
-    for index in 0..40 {
+    for index in 0..200 {
         environment
             .child_relations
             .lock()
@@ -2267,18 +2268,18 @@ async fn startup_sweep_closes_finished_reviewers_one_at_a_time_past_a_failing_on
         environment.clone(),
     );
     tokio::time::timeout(Duration::from_secs(10), async {
-        while environment.closed.lock().unwrap().len() < 40 {
+        while environment.closed.lock().unwrap().len() < 200 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .expect("every finished reviewer is closed, the failed one on its retry");
-    assert_eq!(
-        environment
-            .most_closes_in_flight
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "the sweep never closes two children at once"
+    let most = environment
+        .most_closes_in_flight
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        most > 1 && most <= super::reviewer_child::SWEEP_CLOSE_WIDTH,
+        "the sweep closes concurrently but never past its width: {most}"
     );
     host.shutdown().await.unwrap();
 }
