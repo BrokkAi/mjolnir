@@ -781,12 +781,7 @@ impl RuntimeState {
                 .sessions
                 .get(&intent.session_id)
                 .is_some_and(|record| {
-                    !record.archived
-                        && matches!(
-                            record.state,
-                            mj_core::state::SessionState::Provisioning
-                                | mj_core::state::SessionState::Disconnected
-                        )
+                    !record.archived && crate::database::is_creating(record.state)
                 });
             if !creating {
                 crate::database::discard_session_create_intent(
@@ -851,18 +846,18 @@ impl RuntimeState {
             let id = session_id.to_owned();
             let record = blocking(move || crate::database::load_session_record(&id)).await?;
             let record = record.with_context(|| format!("unknown session {session_id}"))?;
-            return match record.state {
-                mj_core::state::SessionState::Error => Err(anyhow::anyhow!(
+            if record.state == mj_core::state::SessionState::Error {
+                return Err(anyhow::anyhow!(
                     record
                         .last_error
                         .unwrap_or_else(|| "session creation failed".to_owned())
-                )),
-                mj_core::state::SessionState::Provisioning
-                | mj_core::state::SessionState::Disconnected => Err(anyhow::anyhow!(
-                    "no create operation exists for session {session_id}"
-                )),
-                _ => Ok(CreateWait::Finished),
-            };
+                ));
+            }
+            ensure!(
+                !crate::database::is_creating(record.state),
+                "no create operation exists for session {session_id}"
+            );
+            return Ok(CreateWait::Finished);
         };
         let channel = result.clone();
         let outcome = Self::wait_lifecycle_result(result).await;

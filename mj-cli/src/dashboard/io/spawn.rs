@@ -1506,24 +1506,26 @@ async fn await_daemon_creation(
     cancelled: &AtomicBool,
 ) -> Result<LifecycleSuccess> {
     const RETRY_DELAY: Duration = Duration::from_millis(250);
-    loop {
-        if cancelled.load(Ordering::Acquire) {
-            bail!("operation cancelled");
+    // Every wait below, including the connection and the backoff, is watched
+    // beside this, so a cancel ends the follow promptly.
+    let cancellation = || async {
+        while !cancelled.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        let mut daemon = daemon::connect_or_start().await?;
-        // The wait blocks for the whole create, so the cancellation is
-        // watched beside it rather than between iterations.
-        let cancellation = async {
-            while !cancelled.load(Ordering::Acquire) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+    };
+    loop {
+        // A failure to connect is a lost connection too, as in a handoff
+        // window: the request is the read-only wait, so ask again.
+        let attempt = async {
+            let mut daemon = daemon::connect_or_start().await?;
+            daemon.wait_create_session(session_id.to_owned()).await
         };
         let error = tokio::select! {
-            outcome = daemon.wait_create_session(session_id.to_owned()) => match outcome {
+            outcome = attempt => match outcome {
                 Ok(()) => return Ok(LifecycleSuccess::Created),
                 Err(error) => error,
             },
-            () = cancellation => bail!("operation cancelled"),
+            () = cancellation() => bail!("operation cancelled"),
         };
         // A refusal is the daemon's answer, including the real failure of a
         // create that has ended; only a lost connection means "ask again".
@@ -1538,7 +1540,10 @@ async fn await_daemon_creation(
             error = format!("{error:#}"),
             "lost the daemon while a session was being created; waiting again"
         );
-        tokio::time::sleep(RETRY_DELAY).await;
+        tokio::select! {
+            () = tokio::time::sleep(RETRY_DELAY) => {}
+            () = cancellation() => bail!("operation cancelled"),
+        }
     }
 }
 

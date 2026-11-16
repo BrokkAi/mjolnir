@@ -18,8 +18,10 @@ pub(crate) struct SessionCreateIntent {
     pub remember_launch_choices: bool,
 }
 
-/// States in which a session's creation is still unfinished.
-fn is_creating(state: SessionState) -> bool {
+/// States in which a session's creation is still unfinished. The one
+/// definition: registration, settlement, recovery and the create wait all ask
+/// it.
+pub(crate) fn is_creating(state: SessionState) -> bool {
     matches!(
         state,
         SessionState::Provisioning | SessionState::Disconnected

@@ -46,6 +46,8 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 
 - Decision: a create wait answers `UpgradePending` (the non-acceptance a draining daemon gives, which `DaemonClient::request` already retries on a fresh connection) when the create was stopped for shutdown, decided by `stopped_for_shutdown()` in `wait_create_outcome`. A create stopped before its phone publication completes is not `interrupted`, so it takes the ordinary rollback (record kept as Error, intent settled, no target work) instead of being resumed. The dashboard follow loop selects the wait against its cancellation. Date: 2026-11-16.
 
+- Decision: `database::is_creating` is the one definition of "creation unfinished"; recovery, the create wait and the reset all call it. The sub-agent checks for `Provisioning` alone ask a different question (a child stays Provisioning until its worker connects) and keep it. The dashboard follow loop treats a failed connection as a lost connection and retries it with the fixed quarter-second backoff, cancellable throughout. Date: 2026-11-16.
+
 
 ## Outcomes & Retrospective
 

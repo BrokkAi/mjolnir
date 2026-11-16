@@ -318,10 +318,7 @@ impl Controller {
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
         ensure!(
-            matches!(
-                session.state,
-                SessionState::Provisioning | SessionState::Disconnected
-            ),
+            crate::database::is_creating(session.state),
             "session {session_id} is {}, not an unfinished create",
             session.state.as_str()
         );
