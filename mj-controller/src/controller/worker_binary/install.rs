@@ -1192,8 +1192,10 @@ content="$tree/.mj-content"
 if [ -d "$content" ]; then
     case $(uname -s) in Darwin) sum='shasum -a 256';; *) sum=sha256sum;; esac
     # One digest pass; the count check catches files a partial run skipped.
-    expected=$(find "$content" -type f | wc -l)
-    find "$content" -type f -exec $sum -- {} + > "$work/sums"
+    # Relative names (./<hex key>) keep the staging path out of the output,
+    # where sha256sum would escape a backslash or newline in it.
+    expected=$(cd "$content" && find . -type f | wc -l)
+    (cd "$content" && find . -type f -exec $sum -- {} +) > "$work/sums"
     verified=$(awk '{ key = $0; sub(/.*\//, "", key); digest = key; sub(/\.x$/, "", digest);
         if ($1 != digest) { print "profile content digest mismatch: " key > "/dev/stderr"; bad = 1 } n++ }
         END { if (bad) exit 1; print n + 0 }' "$work/sums")
