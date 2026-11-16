@@ -42,16 +42,14 @@ pub type QuotaCacheLoader =
     Arc<dyn Fn(&QuotaRefreshRequest) -> Option<crate::quota::ProfileQuota> + Send + Sync>;
 
 /// When a profile is next due for a probe, in epoch seconds: one interval
-/// after its last report, or the end of a rate-limit hold when that is later.
-/// A refused probe keeps the last good reading and its age, so the report
-/// carries the refused attempt's own schedule (`next_check_at_epoch_seconds`,
-/// an interval after the attempt): a short hold must not re-probe once the
-/// old reading is past its interval. A profile with no report is due at once.
+/// after its last report, or the refused check's own next check
+/// (`ProfileQuota::next_check_at`) when that is later. A refused probe keeps
+/// the last good reading and its age, so a short hold must not re-probe once
+/// the old reading is past its interval. A profile with no report is due at once.
 pub(super) fn next_probe_at(report: Option<&crate::quota::ProfileQuota>) -> u64 {
     report.map_or(0, |report| {
         (report.refreshed_at_epoch_seconds + QUOTA_REFRESH_INTERVAL.as_secs())
-            .max(report.rate_limited_until_epoch_seconds.unwrap_or(0))
-            .max(report.next_check_at_epoch_seconds.unwrap_or(0))
+            .max(report.next_check_at().unwrap_or(0))
     })
 }
 
