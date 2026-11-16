@@ -1438,9 +1438,13 @@ impl TestRemoteManager {
     /// Accepts every command the daemon submits until none arrives for a
     /// moment, and returns them with the session each went to. Run it beside
     /// the call under test, which waits for each acceptance.
-    pub(super) async fn accept_submissions(
+    /// The first submissions fail with `failures`, in order, before the worker
+    /// accepts anything.
+    pub(super) async fn answer_submissions(
         &mut self,
+        failures: Vec<mj_client::session::SubmitFailure>,
     ) -> Vec<(String, String, mj_core::relay::RelayCommand)> {
+        let mut failures = failures.into_iter();
         let mut accepted = Vec::new();
         while let Ok(Some(request)) =
             tokio::time::timeout(Duration::from_millis(300), self.requests.recv()).await
@@ -1452,7 +1456,10 @@ impl TestRemoteManager {
                 reply,
             } = request
             {
-                let _ = reply.send(Ok(99));
+                let _ = reply.send(match failures.next() {
+                    Some(failure) => Err(failure),
+                    None => Ok(99),
+                });
                 accepted.push((session_id, command_id, command));
             }
         }
@@ -9412,7 +9419,13 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     // No handback tool and no finished turn on record: only being parked
     // says this child's parent already has what it will get from it.
     parked_child(root.path(), child_id, parent_id, &workspace.id);
-    assert!(crate::controller::subagent_has_handed_back(child_id, None).unwrap());
+    assert!(
+        crate::controller::subagent_has_handed_back(
+            child_id,
+            &mj_core::subagent::Liveness::Known(None)
+        )
+        .unwrap()
+    );
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();

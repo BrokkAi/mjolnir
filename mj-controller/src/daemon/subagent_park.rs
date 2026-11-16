@@ -35,26 +35,25 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// Whether the processes a session's last finished turn left running are
-    /// still alive, as its live worker published it. `None` for a session
-    /// that is not live or whose worker publishes nothing.
-    pub(crate) async fn work_liveness(
-        &self,
-        session_id: &str,
-    ) -> Option<mj_core::work_facts::WorkLiveness> {
+    /// What a session's live worker says about the processes its last
+    /// finished turn left running. A session that may be running but has no
+    /// connected worker view is `Unknown`, not empty.
+    pub(crate) async fn work_liveness(&self, session_id: &str) -> mj_core::subagent::Liveness {
+        if self
+            .session_record(session_id)
+            .is_none_or(|record| !crate::server_runtime::api::record_may_be_running(record.state))
+        {
+            return mj_core::subagent::Liveness::Known(None);
+        }
         let handle = self
             .session_manager
             .client()
             .session(session_id.to_owned())
             .await
-            .ok()?;
-        handle
-            .view()
-            .snapshot
-            .as_ref()?
-            .operational
-            .work_liveness
-            .clone()
+            .ok();
+        crate::server_runtime::api::liveness_of(
+            handle.as_ref().map(|handle| handle.view()).as_ref(),
+        )
     }
 
     /// Park a sub-agent whose turn ended and whose parent was told. A child

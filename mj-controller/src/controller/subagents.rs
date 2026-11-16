@@ -637,7 +637,7 @@ fn slot_refusal(live: &[LiveSubagent], maximum: usize) -> String {
 /// that has never finished a turn, has not.
 pub fn subagent_has_handed_back(
     child_session_id: &str,
-    liveness: Option<&mj_core::work_facts::WorkLiveness>,
+    liveness: &mj_core::subagent::Liveness,
 ) -> Result<bool> {
     let Some(relation) = crate::database::load_subagent(child_session_id)? else {
         return Ok(false);
@@ -670,7 +670,7 @@ pub fn subagent_has_handed_back(
 pub fn stopped_subagent(
     state: &mj_core::state::State,
     child_session_id: &str,
-    liveness: Option<&mj_core::work_facts::WorkLiveness>,
+    liveness: &mj_core::subagent::Liveness,
 ) -> Result<mj_core::subagent::StoppedSubagent> {
     let relation = state
         .subagents

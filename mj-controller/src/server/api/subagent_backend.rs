@@ -172,19 +172,19 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async move {
             let liveness = self.subagent_work_liveness(child_session_id.clone()).await;
             tokio::task::spawn_blocking(move || {
-                crate::controller::subagent_has_handed_back(&child_session_id, liveness.as_ref())
+                crate::controller::subagent_has_handed_back(&child_session_id, &liveness)
             })
             .await?
         })
     }
     /// Whether the processes a child's last turn left are still alive, as its
     /// worker published it. The store does not carry it, so a backend without
-    /// live sessions has none.
+    /// live sessions publishes none.
     fn subagent_work_liveness(
         &self,
         _child_session_id: String,
-    ) -> BoxFuture<'_, Option<mj_core::work_facts::WorkLiveness>> {
-        Box::pin(async { None })
+    ) -> BoxFuture<'_, mj_core::subagent::Liveness> {
+        Box::pin(async { mj_core::subagent::Liveness::Known(None) })
     }
     fn read_context_file(
         &self,

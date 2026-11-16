@@ -387,6 +387,15 @@ pub(super) fn build_observation(
         capacity_retry: session.capacity_retry.as_deref().cloned(),
         quota_recovery: session.quota_recovery.as_deref().cloned(),
         start_status,
+        // A session that may be running but has no connected worker view
+        // cannot say whether its child still waits; one that cannot be
+        // running has nothing to wait for.
+        work_liveness: match session.lifecycle {
+            ViewerLifecycleCategory::Live | ViewerLifecycleCategory::Starting => {
+                mj_core::subagent::Liveness::Unknown
+            }
+            _ => mj_core::subagent::Liveness::Known(None),
+        },
         ..WaitObservation::default()
     };
     if let Some(view) = live
@@ -395,7 +404,8 @@ pub(super) fn build_observation(
     {
         observation.background_work = Some(ApiBackgroundWork::from(&*snapshot.operational));
         observation.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
-        observation.work_liveness = snapshot.operational.work_liveness.clone();
+        observation.work_liveness =
+            mj_core::subagent::Liveness::Known(snapshot.operational.work_liveness.clone());
     }
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
         // Use activity and turn facts from the same actor snapshot. The viewer

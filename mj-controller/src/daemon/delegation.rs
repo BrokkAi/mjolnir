@@ -30,6 +30,9 @@ enum ChildCompletion {
     Held {
         give_up_at_ms: i64,
     },
+    /// A hold follow-up was sent or is queued. Judged again at the child's
+    /// next observation, which is how a follow-up the queue dropped is seen.
+    FollowUpSent,
     /// The parent was told, but the child's processes are still running, so
     /// the park waits until the parent's turn that received the report ends.
     /// Judged again when the parent's observation changes.
@@ -52,6 +55,8 @@ struct CompletionRetry {
     ordinal: u64,
     /// When to try again; `None` waits for an observation that clears it.
     at: Option<Instant>,
+    /// Any new observation of the child ends the wait.
+    until_observed: bool,
     failures: u32,
     last_failure: Option<String>,
 }
@@ -84,6 +89,7 @@ impl CompletionRetry {
             Self {
                 ordinal,
                 at: Some(now + delay),
+                until_observed: false,
                 failures,
                 last_failure,
             },
@@ -97,6 +103,7 @@ impl CompletionRetry {
         Self {
             ordinal,
             at,
+            until_observed: true,
             failures: 0,
             last_failure: None,
         }
@@ -288,9 +295,7 @@ async fn run(
                 for child in waiting_on_it {
                     retry.remove(&child);
                 }
-                if observation.as_ref().map(|o| &o.work_liveness)
-                    != observations.get(&id).map(|o| &o.work_liveness)
-                {
+                if retry.get(&id).is_some_and(|waiting| waiting.until_observed) {
                     retry.remove(&id);
                 }
                 if let Some(observation) = observation {
@@ -368,6 +373,9 @@ async fn run(
                             parked_behind.remove(&id);
                             let (next, _) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), None);
                             retry.insert(id, next);
+                        }
+                        Ok(ChildCompletion::FollowUpSent) => {
+                            retry.insert(id, CompletionRetry::waiting(ordinal, None));
                         }
                         Ok(ChildCompletion::Held { give_up_at_ms }) => {
                             let remaining = u64::try_from(give_up_at_ms.saturating_sub(mj_core::clock::epoch_millis())).unwrap_or(0);
@@ -537,10 +545,13 @@ async fn settle_child(
                 &child_id,
                 relation.handback_tool,
                 &outcome,
-                liveness.as_ref(),
+                &mj_core::subagent::Liveness::Known(liveness.clone()),
                 &in_flight,
             )
             .await?;
+        if nudge == crate::server_runtime::api::ReportNudge::FollowUpSent {
+            return Ok(ChildCompletion::FollowUpSent);
+        }
         if let crate::server_runtime::api::ReportNudge::Holding { give_up_at_ms } = nudge {
             return Ok(ChildCompletion::Held { give_up_at_ms });
         }
@@ -1437,6 +1448,20 @@ mod tests {
             ChildCompletion,
             Vec<(String, String, mj_core::relay::RelayCommand)>,
         ) {
+            let (done, sent) = self.settle_failing(liveness, outcome, Vec::new()).await;
+            (done.unwrap(), sent)
+        }
+
+        /// [`Self::settle`] with the worker failing the first submissions.
+        async fn settle_failing(
+            &mut self,
+            liveness: Option<mj_core::work_facts::WorkLiveness>,
+            outcome: &mj_core::state::MaterializedTurnOutcome,
+            failures: Vec<mj_client::session::SubmitFailure>,
+        ) -> (
+            Result<ChildCompletion>,
+            Vec<(String, String, mj_core::relay::RelayCommand)>,
+        ) {
             let stored = crate::database::load_subagent("child").unwrap().unwrap();
             let (done, sent) = tokio::join!(
                 settle_child(
@@ -1451,9 +1476,9 @@ mod tests {
                     outcome.clone(),
                     false,
                 ),
-                self.manager.accept_submissions()
+                self.manager.answer_submissions(failures)
             );
-            (done.unwrap(), sent)
+            (done, sent)
         }
 
         /// The parent's view with the given facts, waited for until the
@@ -1605,7 +1630,7 @@ mod tests {
 
         // The processes exited: one wake prompt, still no report or park.
         let (done, sent) = held.settle(liveness(20, 0), &turn).await;
-        assert!(matches!(done, ChildCompletion::Settled));
+        assert!(matches!(done, ChildCompletion::FollowUpSent));
         assert_eq!(
             sent,
             vec![(
@@ -1642,7 +1667,7 @@ mod tests {
         let turn = turn_at(&reminder, 40, stale, Some(one_running_process()));
         held.child_ended(&turn).await;
         let (done, sent) = held.settle(liveness(40, 1), &turn).await;
-        assert!(matches!(done, ChildCompletion::Settled));
+        assert!(matches!(done, ChildCompletion::FollowUpSent));
         let [(_, id, command)] = sent.as_slice() else {
             panic!("exactly one give-up prompt: {sent:?}");
         };
@@ -1668,6 +1693,7 @@ mod tests {
             match done {
                 ChildCompletion::RetryPark => "RetryPark",
                 ChildCompletion::Held { .. } => "Held",
+                ChildCompletion::FollowUpSent => "FollowUpSent",
                 ChildCompletion::ParkAfterParentTurn { .. } => "ParkAfterParentTurn",
                 ChildCompletion::AwaitingReview => "AwaitingReview",
                 ChildCompletion::Draining => "Draining",
@@ -1677,6 +1703,100 @@ mod tests {
         assert!(sent.is_empty(), "{sent:?}");
         assert_eq!(held.told(), 1, "the parent hears of it once");
         assert_eq!(held.parks.parks.load(Ordering::SeqCst), 1);
+    }
+
+    fn failure(unconfirmed: bool, refused: bool) -> mj_client::session::SubmitFailure {
+        mj_client::session::SubmitFailure {
+            message: "the worker said no".into(),
+            unconfirmed,
+            refused,
+        }
+    }
+
+    // A follow-up that did not reach the worker decided nothing: the child stays
+    // held and the loop retries the same command, whether the worker could not
+    // take it yet, the session was not reachable or the acknowledgement was
+    // lost. Only the worker's own refusal of a completion that is no longer
+    // current ends the hold.
+    // Hard-won: review round 1: a failed HoldFollowUp stranded a held child as sent.
+    #[tokio::test]
+    async fn a_follow_up_that_did_not_arrive_is_retried_and_only_a_stale_refusal_settles() {
+        if !isolated(
+            "a_follow_up_that_did_not_arrive_is_retried_and_only_a_stale_refusal_settles",
+            "delegation-follow-up-failure",
+        ) {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut held = HeldChild::new("follow up failure").await;
+        let now = mj_core::clock::epoch_millis();
+        let reminder = mj_core::subagent::handback_reminder_command_id(10);
+        let turn = turn_at(&reminder, 20, now, Some(one_running_process()));
+        held.child_ended(&turn).await;
+
+        // Not sent (a plain error), and a lost acknowledgement: both retried
+        // with the same id, nothing marked, no report, no park.
+        for failing in [failure(false, false), failure(true, false)] {
+            let (done, sent) = held
+                .settle_failing(liveness(20, 0), &turn, vec![failing])
+                .await;
+            assert!(done.is_err(), "the loop must retry with backoff");
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].1, "hold-wake-20");
+        }
+        assert_eq!(
+            crate::database::load_subagent("child")
+                .unwrap()
+                .unwrap()
+                .noticed_turn,
+            None
+        );
+        assert_eq!(
+            (held.told(), held.parks.parks.load(Ordering::SeqCst)),
+            (0, 0)
+        );
+
+        // The retry succeeds once; the child is waiting on its follow-up and is
+        // judged again at its next observation.
+        let (done, sent) = held
+            .settle_failing(liveness(20, 0), &turn, Vec::new())
+            .await;
+        assert!(matches!(done.unwrap(), ChildCompletion::FollowUpSent));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].1, "hold-wake-20");
+
+        // The worker refuses it as stale: the child moved on, so its last
+        // message is reported once and nothing is sent again.
+        let (done, sent) = held
+            .settle_failing(liveness(20, 0), &turn, vec![failure(false, true)])
+            .await;
+        assert!(matches!(done.unwrap(), ChildCompletion::Settled));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(held.told(), 1);
+        assert_eq!(held.parks.parks.load(Ordering::SeqCst), 1);
+    }
+
+    // A reader with no worker to ask cannot say a child is not waiting; it must
+    // not count a held child as handed back.
+    // Hard-won: review round 1: a detached held child read as handed back.
+    #[tokio::test]
+    async fn a_held_child_whose_worker_is_not_attached_has_not_handed_back() {
+        if !isolated(
+            "a_held_child_whose_worker_is_not_attached_has_not_handed_back",
+            "delegation-detached-held-child",
+        ) {
+            return;
+        }
+        use mj_core::subagent::Liveness;
+        let _writer = crate::database::install_isolated_test_writer();
+        let _held = HeldChild::new("detached held").await;
+        let reminder = mj_core::subagent::handback_reminder_command_id(10);
+        turn_at(&reminder, 20, mj_core::clock::epoch_millis(), None);
+        assert!(!crate::controller::subagent_has_handed_back("child", &Liveness::Unknown).unwrap());
+        assert!(
+            crate::controller::subagent_has_handed_back("child", &Liveness::Known(None)).unwrap(),
+            "a connected worker that publishes nothing keeps today's last-message report"
+        );
     }
 
     // A park stops the processes the child started, so a told child with live

@@ -377,8 +377,6 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         } => {
             if command.prompt_blocks().is_some() {
                 snapshot.latest_prompt_accepted_ordinal = Some(event.ordinal);
-                // New input supersedes the finished turn the liveness describes.
-                snapshot.work_liveness = None;
             }
             match command {
                 RelayCommand::DeliverMailboxEvent { event } => {
@@ -682,6 +680,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         bail!("queued command {command_id} is not a prompt");
                     };
                     snapshot.execution = RelayExecutionState::Running;
+                    // New input supersedes the finished turn the liveness
+                    // describes once it runs, not while it is only queued: a
+                    // queued prompt that is dropped leaves the child held.
+                    snapshot.work_liveness = None;
                     snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
                     snapshot.active_prompt = Some(StoredActiveRelayPrompt {
                         command_id: queued.command_id,
@@ -2308,7 +2310,7 @@ mod work_liveness_tests {
     }
 
     #[test]
-    fn hold_follow_up_replays_as_a_guarded_prompt_and_clears_liveness() {
+    fn hold_follow_up_replays_as_a_guarded_prompt_and_clears_liveness_when_it_starts() {
         let mut snapshot = RelaySnapshot::new("follow-up".into());
         snapshot.work_liveness = Some(liveness(7, 2));
         let command = RelayCommand::HoldFollowUp {
@@ -2340,11 +2342,21 @@ mod work_liveness_tests {
                 created_at_ms: 1,
             },
         );
-        assert_eq!(snapshot.work_liveness, None);
         assert_eq!(
             snapshot.latest_prompt_accepted_ordinal,
             Some(snapshot.latest_ordinal)
         );
+        // Queued is not running: a follow-up the queue drops leaves the child
+        // held. Only its start supersedes the turn the liveness describes.
+        assert_eq!(snapshot.work_liveness, Some(liveness(7, 2)));
+        apply(
+            &mut snapshot,
+            RelayObservation::CommandStarted {
+                command_id: "hold-give-up-7".into(),
+                started_at_ms: 2,
+            },
+        );
+        assert_eq!(snapshot.work_liveness, None);
     }
 
     // Protocol-66 workers decode `RelayCommand` with `deny_unknown_fields`, so

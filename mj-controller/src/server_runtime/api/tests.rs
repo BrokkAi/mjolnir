@@ -47,7 +47,11 @@ fn child_progress_uses_the_published_turn_and_report_together() {
             ..Default::default()
         },
     );
-    let progress = child_progress(&committed, "child");
+    let progress = child_progress(
+        &committed,
+        "child",
+        &mj_core::subagent::Liveness::Known(None),
+    );
     assert_eq!(progress.finished_span, Some((8, 12)));
     assert!(progress.answer.as_ref().unwrap().answers(7));
     assert!(
@@ -67,11 +71,33 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     committed
         .turns
         .insert_shared("child".into(), harness.clone());
-    assert!(child_progress(&committed, "child").awaiting_prompt(None));
+    assert!(
+        child_progress(
+            &committed,
+            "child",
+            &mj_core::subagent::Liveness::Known(None)
+        )
+        .awaiting_prompt(None)
+    );
     harness.state.2.as_mut().unwrap().answered_through = Some(14);
     committed.turns.insert_shared("child".into(), harness);
-    assert!(child_progress(&committed, "child").awaiting_prompt(None));
-    assert_eq!(child_progress(&committed, "other").failed_turn, None);
+    assert!(
+        child_progress(
+            &committed,
+            "child",
+            &mj_core::subagent::Liveness::Known(None)
+        )
+        .awaiting_prompt(None)
+    );
+    assert_eq!(
+        child_progress(
+            &committed,
+            "other",
+            &mj_core::subagent::Liveness::Known(None)
+        )
+        .failed_turn,
+        None
+    );
 }
 
 fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
@@ -1716,14 +1742,26 @@ async fn a_child_without_the_tool_or_with_queued_work_is_not_reminded() {
     let turn = finished_turn("task");
     assert_eq!(
         backend
-            .remind_subagent_to_hand_back("child-1", false, &turn, None, &[])
+            .remind_subagent_to_hand_back(
+                "child-1",
+                false,
+                &turn,
+                &mj_core::subagent::Liveness::Known(None),
+                &[]
+            )
             .await
             .unwrap(),
         ReportNudge::NotOwed
     );
     assert_eq!(
         backend
-            .remind_subagent_to_hand_back("child-1", true, &turn, None, &["api-next".into()])
+            .remind_subagent_to_hand_back(
+                "child-1",
+                true,
+                &turn,
+                &mj_core::subagent::Liveness::Known(None),
+                &["api-next".into()]
+            )
             .await
             .unwrap(),
         ReportNudge::NotOwed
@@ -1770,7 +1808,13 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
 
     assert_eq!(
         backend
-            .remind_subagent_to_hand_back("child-1", true, &turn, None, &[])
+            .remind_subagent_to_hand_back(
+                "child-1",
+                true,
+                &turn,
+                &mj_core::subagent::Liveness::Known(None),
+                &[]
+            )
             .await
             .unwrap(),
         ReportNudge::Pending
@@ -1799,7 +1843,13 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
 
     assert_eq!(
         backend
-            .remind_subagent_to_hand_back("child-1", true, &turn, None, &[])
+            .remind_subagent_to_hand_back(
+                "child-1",
+                true,
+                &turn,
+                &mj_core::subagent::Liveness::Known(None),
+                &[]
+            )
             .await
             .unwrap(),
         ReportNudge::Pending,
@@ -2041,7 +2091,6 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
                 login_failure: None,
                 provider_failure: None,
                 report_dir: None,
-                report_inputs: None,
             }
         };
     let status = |start: Option<&StartStatus>, progress: &ChildProgress| {
@@ -2121,7 +2170,6 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         login_failure: Some("codex4".into()),
         provider_failure: None,
         report_dir: None,
-        report_inputs: None,
     };
     let expected = "profile codex4: the login is no longer valid; run `mj login --profile codex4` and spawn again";
 
@@ -4559,7 +4607,8 @@ async fn harness_handback_uses_worker_turn_identity() {
     outcome.completed_ordinal = 9;
     session.last_turn_outcome = Some(outcome);
     crate::database::save_materialized_session(&session).unwrap();
-    let progress = load_child_progress("child-1").unwrap();
+    let progress =
+        load_child_progress("child-1", &mj_core::subagent::Liveness::Known(None)).unwrap();
     assert!(matches!(progress.report, ReportState::Delivered(_)));
     assert_eq!(progress.finished_span, Some((7, 9)));
 }

@@ -74,7 +74,7 @@ pub struct WaitObservation {
     pub report_pending_for: Option<String>,
     /// Whether the processes the child's last turn left running are alive, as
     /// its worker published it. Only the live snapshot carries it.
-    pub work_liveness: Option<mj_core::work_facts::WorkLiveness>,
+    pub work_liveness: mj_core::subagent::Liveness,
     /// When a held child, waiting for those processes, is asked to hand back
     /// what it has. The wait wakes then.
     pub hold_give_up_at_ms: Option<i64>,
@@ -251,7 +251,7 @@ impl WaitObservation {
             handback_tool,
             report,
             Some(turn),
-            self.work_liveness.as_ref(),
+            &self.work_liveness,
             &in_flight,
             now_ms,
         ) {

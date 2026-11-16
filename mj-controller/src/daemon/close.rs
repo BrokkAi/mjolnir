@@ -208,9 +208,7 @@ impl RuntimeState {
             .active_child_session_ids(parent_session_id);
         let mut liveness = std::collections::BTreeMap::new();
         for child_id in &children {
-            if let Some(alive) = self.work_liveness(child_id).await {
-                liveness.insert(child_id.clone(), alive);
-            }
+            liveness.insert(child_id.clone(), self.work_liveness(child_id).await);
         }
         let stopped = blocking({
             let parent_session_id = parent_session_id.to_owned();
@@ -224,7 +222,7 @@ impl RuntimeState {
                         crate::controller::stopped_subagent(
                             &controller.state,
                             child_id,
-                            liveness.get(child_id),
+                            &liveness[child_id],
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;

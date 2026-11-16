@@ -8395,6 +8395,39 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
     );
 }
 
+// A follow-up for a completion the child has moved past is refused for good,
+// so the daemon can tell it from a worker that merely cannot take a prompt yet.
+#[test]
+fn a_hold_follow_up_for_a_completion_that_is_no_longer_current_is_refused_for_good() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    relay.open_harness_turn_if_allowed().unwrap();
+    let id = relay.originating_command_id().unwrap();
+    relay.settle_harness_turn(None, "end_turn").unwrap();
+    let completion = relay.operational_state().turn_completion.unwrap();
+    let follow_up = |completed_command_id: String| RelayCommand::HoldFollowUp {
+        completed_command_id,
+        completed_ordinal: completion.completed_ordinal,
+        kind: mj_core::subagent::HoldFollowUpKind::ProcessesExited,
+        running: Vec::new(),
+    };
+    let refused = relay
+        .submit_command("stale-hold", follow_up("harness-turn-0".into()))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code, RelayErrorCode::InvalidState);
+    assert!(
+        !refused.retryable,
+        "a stale completion never succeeds later"
+    );
+    submit_relay(&mut relay, "current-hold", follow_up(id));
+}
+
 #[test]
 fn readiness_and_the_instant_the_scan_reads_cannot_disagree() {
     let temp = tempfile::tempdir().unwrap();

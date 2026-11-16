@@ -1394,6 +1394,19 @@ pub fn login_invalid_reason(profile_id: &str) -> String {
     format!("the login is no longer valid; run `mj login --profile {profile_id}` and spawn again")
 }
 
+/// What a caller knows of the processes a child's last turn left running.
+/// "No worker to ask" is not "nothing is running": a reader that cannot reach
+/// the child's worker must not report a child that may be waiting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Liveness {
+    /// The child's worker is not attached to this reader.
+    #[default]
+    Unknown,
+    /// The connected worker's publication: `None` when it publishes no
+    /// liveness (no processes were left, or the worker predates protocol 67).
+    Known(Option<crate::work_facts::WorkLiveness>),
+}
+
 /// Where a child's report stands after its last finished turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportState {
@@ -1451,7 +1464,7 @@ pub fn report_state(
     handback_tool: bool,
     report: &SubagentReport,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
-    liveness: Option<&crate::work_facts::WorkLiveness>,
+    liveness: &Liveness,
     in_flight: &[&str],
     now_ms: i64,
 ) -> ReportState {
@@ -1471,7 +1484,12 @@ pub fn report_state(
             if crate::state::classify_prompt_completion(stop_reason)
                 == crate::state::PromptCompletion::Finished
     );
-    if finished && is_handback_reminder(&turn.command_id) {
+    // A follow-up the worker refused as stale ends the hold: the child's last
+    // message is reported.
+    if finished
+        && is_handback_reminder(&turn.command_id)
+        && report.reminder_failed_for.as_deref() != Some(turn.command_id.as_str())
+    {
         let follow_up_in_flight = [HoldFollowUpKind::ProcessesExited, HoldFollowUpKind::GiveUp]
             .into_iter()
             .any(|kind| {
@@ -1481,8 +1499,14 @@ pub fn report_state(
         if follow_up_in_flight {
             return ReportState::Pending { remind: false };
         }
-        let Some(liveness) = liveness.filter(|l| l.completed_ordinal == turn.completed_ordinal)
-        else {
+        let liveness = match liveness {
+            // Nobody can say whether the child still waits: not an ending.
+            Liveness::Unknown => return ReportState::Pending { remind: false },
+            Liveness::Known(known) => known
+                .as_ref()
+                .filter(|l| l.completed_ordinal == turn.completed_ordinal),
+        };
+        let Some(liveness) = liveness else {
             return ReportState::Fallback;
         };
         let give_up_at_ms = turn.completed_at_ms.saturating_add(HOLD_GIVE_UP_MS);
@@ -1893,7 +1917,7 @@ pub fn has_handed_back(
     report: &SubagentReport,
     working: bool,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
-    liveness: Option<&crate::work_facts::WorkLiveness>,
+    liveness: &Liveness,
     now_ms: i64,
 ) -> bool {
     let Some(turn) = last_turn else {
@@ -2190,11 +2214,11 @@ mod tests {
         let turn = finished("task", "end_turn");
         let report = SubagentReport::default();
         assert_eq!(
-            report_state(false, &report, Some(&turn), None, &[], 0),
+            report_state(false, &report, Some(&turn), &Liveness::Known(None), &[], 0),
             ReportState::Fallback
         );
         assert_eq!(
-            report_state(true, &report, None, None, &[], 0),
+            report_state(true, &report, None, &Liveness::Known(None), &[], 0),
             ReportState::Fallback
         );
     }
@@ -2211,7 +2235,7 @@ mod tests {
                     true,
                     &report,
                     Some(&finished("task", stop_reason)),
-                    None,
+                    &Liveness::Known(None),
                     &[],
                     0
                 ),
@@ -2225,7 +2249,7 @@ mod tests {
                 true,
                 &report,
                 Some(&finished("next", "end_turn")),
-                None,
+                &Liveness::Known(None),
                 &[],
                 0
             ),
@@ -2241,7 +2265,7 @@ mod tests {
                 true,
                 &report,
                 Some(&finished("task", "end_turn")),
-                None,
+                &Liveness::Known(None),
                 &[],
                 0
             ),
@@ -2253,7 +2277,7 @@ mod tests {
                     true,
                     &report,
                     Some(&finished("task", stop_reason)),
-                    None,
+                    &Liveness::Known(None),
                     &[],
                     0
                 ),
@@ -2267,7 +2291,14 @@ mod tests {
             message: "stopped".to_owned(),
         };
         assert_eq!(
-            report_state(true, &report, Some(&interrupted), None, &[], 0),
+            report_state(
+                true,
+                &report,
+                Some(&interrupted),
+                &Liveness::Known(None),
+                &[],
+                0
+            ),
             ReportState::Fallback
         );
     }
@@ -2285,7 +2316,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&task),
-                None,
+                &Liveness::Known(None),
                 &["handback-reminder-r"],
                 60_000
             ),
@@ -2296,7 +2327,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&task),
-                None,
+                &Liveness::Known(None),
                 &[],
                 1_000 + HANDBACK_REMINDER_GRACE_MS - 1
             ),
@@ -2308,7 +2339,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&task),
-                None,
+                &Liveness::Known(None),
                 &[],
                 1_000 + HANDBACK_REMINDER_GRACE_MS
             ),
@@ -2320,7 +2351,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&finished("handback-reminder-r", "end_turn")),
-                None,
+                &Liveness::Known(None),
                 &[],
                 2_000
             ),
@@ -2332,7 +2363,7 @@ mod tests {
             ..SubagentReport::default()
         };
         assert_eq!(
-            report_state(true, &failed, Some(&task), None, &[], 0),
+            report_state(true, &failed, Some(&task), &Liveness::Known(None), &[], 0),
             ReportState::Fallback
         );
     }
@@ -2351,7 +2382,8 @@ mod tests {
             alive,
             checked_at_ms: 0,
         };
-        let held = |now_ms, liveness: Option<&WorkLiveness>| {
+        let known = |liveness| Liveness::Known(Some(liveness));
+        let held = |now_ms, liveness: &Liveness| {
             report_state(true, &reminded, Some(&reminder_turn), liveness, &[], now_ms)
         };
         let give_up_at_ms = reminder_turn.completed_at_ms + HOLD_GIVE_UP_MS;
@@ -2361,18 +2393,26 @@ mod tests {
             waiting_on: Vec::new(),
             follow_up,
         };
-        assert_eq!(held(give_up_at_ms - 1, Some(&live(ordinal, 2))), hold(None));
         assert_eq!(
-            held(give_up_at_ms, Some(&live(ordinal, 2))),
+            held(give_up_at_ms - 1, &known(live(ordinal, 2))),
+            hold(None)
+        );
+        assert_eq!(
+            held(give_up_at_ms, &known(live(ordinal, 2))),
             hold(Some(HoldFollowUpKind::GiveUp))
         );
         assert_eq!(
-            held(5, Some(&live(ordinal, 0))),
+            held(5, &known(live(ordinal, 0))),
             hold(Some(HoldFollowUpKind::ProcessesExited))
         );
         // A worker that publishes nothing, or liveness of another turn, never holds.
-        assert_eq!(held(5, None), ReportState::Fallback);
-        assert_eq!(held(5, Some(&live(ordinal + 1, 2))), ReportState::Fallback);
+        assert_eq!(held(5, &Liveness::Known(None)), ReportState::Fallback);
+        assert_eq!(held(5, &known(live(ordinal + 1, 2))), ReportState::Fallback);
+        // A reader with no worker to ask cannot say the child is not waiting.
+        assert_eq!(
+            held(5, &Liveness::Unknown),
+            ReportState::Pending { remind: false }
+        );
         // A follow-up already on its way is pending, not due again.
         let wake = hold_follow_up_command_id(HoldFollowUpKind::ProcessesExited, ordinal);
         assert_eq!(
@@ -2380,7 +2420,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&reminder_turn),
-                Some(&live(ordinal, 0)),
+                &known(live(ordinal, 0)),
                 &[wake.as_str()],
                 5
             ),
@@ -2394,7 +2434,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&finished(&give_up, "end_turn")),
-                None,
+                &Liveness::Known(None),
                 &[],
                 5
             ),
@@ -2405,7 +2445,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&finished(&wake, "end_turn")),
-                None,
+                &Liveness::Known(None),
                 &[],
                 5
             ),
@@ -3011,7 +3051,7 @@ mod tests {
             &report,
             false,
             Some(&reminder_turn),
-            None,
+            &Liveness::Known(None),
             0
         ));
         let harness_turn = crate::state::MaterializedTurnOutcome {
@@ -3030,7 +3070,7 @@ mod tests {
             &queued_report,
             false,
             Some(&harness_turn),
-            None,
+            &Liveness::Known(None),
             0
         ));
         assert!(awaiting_prompt(Some(84), Some(&harness_turn)));
@@ -3052,7 +3092,7 @@ mod tests {
             &delivered,
             false,
             Some(&task),
-            None,
+            &Liveness::Known(None),
             0
         ));
         // Still working, never finished a turn, or given a newer prompt.
@@ -3061,22 +3101,36 @@ mod tests {
             &delivered,
             true,
             Some(&task),
-            None,
+            &Liveness::Known(None),
             0
         ));
-        assert!(!has_handed_back(true, &delivered, false, None, None, 0));
+        assert!(!has_handed_back(
+            true,
+            &delivered,
+            false,
+            None,
+            &Liveness::Known(None),
+            0
+        ));
         let newer = SubagentReport {
             awaited_ordinal: Some(9),
             ..delivered.clone()
         };
-        assert!(!has_handed_back(true, &newer, false, Some(&task), None, 0));
+        assert!(!has_handed_back(
+            true,
+            &newer,
+            false,
+            Some(&task),
+            &Liveness::Known(None),
+            0
+        ));
         // Owes a report and has not been reminded, or was reminded just now.
         assert!(!has_handed_back(
             true,
             &SubagentReport::default(),
             false,
             Some(&task),
-            None,
+            &Liveness::Known(None),
             0
         ));
         let reminded = SubagentReport {
@@ -3088,7 +3142,7 @@ mod tests {
             &reminded,
             false,
             Some(&task),
-            None,
+            &Liveness::Known(None),
             1_000
         ));
         // Its last message is the report once the reminder went unanswered,
@@ -3098,7 +3152,7 @@ mod tests {
             &reminded,
             false,
             Some(&task),
-            None,
+            &Liveness::Known(None),
             1_000 + HANDBACK_REMINDER_GRACE_MS
         ));
         assert!(has_handed_back(
@@ -3106,7 +3160,7 @@ mod tests {
             &SubagentReport::default(),
             false,
             Some(&task),
-            None,
+            &Liveness::Known(None),
             0
         ));
         // A turn that failed or asked a question handed nothing back.
@@ -3117,7 +3171,7 @@ mod tests {
                     &SubagentReport::default(),
                     false,
                     Some(&finished("task", stop_reason)),
-                    None,
+                    &Liveness::Known(None),
                     0
                 ),
                 "{stop_reason}"
