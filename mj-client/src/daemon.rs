@@ -2298,8 +2298,8 @@ impl DaemonClient {
         }
     }
 
-    /// The capacity service's latest reading of every host and fleet. The
-    /// daemon is the only prober; this reads what it holds.
+    /// The capacity service's latest reading of every host and fleet. This
+    /// reads what the daemon holds and never probes.
     pub async fn host_capacity(&mut self) -> Result<Vec<mj_core::targets::HostCapacityRow>> {
         match self.request(DaemonAction::HostCapacity).await? {
             DaemonReply::HostCapacity(rows) => Ok(rows),
