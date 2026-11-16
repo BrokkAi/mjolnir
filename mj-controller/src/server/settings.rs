@@ -137,14 +137,14 @@ fn discover(
         let stored = serde_json::to_value(Config::load().ok()?).ok()?;
         let mut real = draft.clone();
         hidden::restore(&mut real, &stored).ok()?;
-        if let Some(backend) = warm
-            && let Ok(config) = draft::config_from_draft(real.clone())
-        {
-            backend.warm_profile_capabilities(&config);
-        }
         let config = draft::config_from_draft(real.clone()).ok()?;
         let current = warm.and_then(|backend| backend.profile_capabilities_snapshot());
         let capabilities = current.as_ref().unwrap_or(capabilities);
+        if let Some(backend) = warm
+            && !capabilities.covers(&config)
+        {
+            backend.warm_profile_capabilities(&config);
+        }
         let action_reason = match capabilities.options(&config, None) {
             Some(options)
                 if autoconfigure(&merged_model_offers(&options.models), |_| None).is_some() =>
