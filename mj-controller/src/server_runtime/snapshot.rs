@@ -127,13 +127,11 @@ pub(super) fn viewer_capacity(
                 logical_cores: usage.map(|usage| usage.logical_cores),
                 container_capacity,
                 disk_total_bytes: usage.and_then(|usage| usage.disk_total_bytes),
-                // A fleet reports how many machines it is running; a plain host
-                // has no such count and says nothing rather than zero.
-                virtual_machines: matches!(
-                    entry.target.kind,
-                    crate::targets::DeploymentCapacityKind::AwsFleet
-                )
-                .then(|| u64::from(!reading.on_demand)),
+                // The same count `mj hosts` reports: absent for a plain host
+                // and for a fleet whose size is unknown.
+                virtual_machines: reading
+                    .fleet_instances(&entry.target)
+                    .map(|count| count as u64),
                 sampled_at_epoch_seconds: reading.sampled_at_epoch_seconds,
                 // A target with no result yet is loading, not idle.
                 refreshing: !rejected && (waiting || !reading.has_answered()),

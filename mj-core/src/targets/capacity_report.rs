@@ -75,6 +75,15 @@ impl TargetCapacityState {
         self.sampled_at_epoch_seconds.is_some() || self.probe_error.is_some()
     }
 
+    /// How many instances a fleet is running, when the last probe answered.
+    /// `None` for a plain host, and for a fleet whose size is unknown because
+    /// its probe failed without a reading to fall back on.
+    pub fn fleet_instances(&self, target: &DeploymentCapacityTarget) -> Option<usize> {
+        (target.kind == DeploymentCapacityKind::AwsFleet
+            && (self.usage.is_some() || self.on_demand))
+            .then_some(target.probes.len())
+    }
+
     /// Fold one probe result into the state.
     pub fn apply(
         &mut self,
@@ -158,8 +167,7 @@ impl HostCapacityRow {
             host: target.host.clone(),
             target_ids: target.target_ids.clone(),
             kind: target.kind,
-            fleet_instances: (target.kind == DeploymentCapacityKind::AwsFleet)
-                .then_some(target.probes.len()),
+            fleet_instances: state.fleet_instances(target),
             has_reading: usage.is_some(),
             cpu_percent: usage.and_then(|usage| usage.cpu_percent),
             memory_used_bytes: usage.map_or(0, |usage| usage.memory_used_bytes),
