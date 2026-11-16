@@ -173,6 +173,10 @@ pub struct CommandSpec {
     /// observers. Executor-local, never persisted in command plans.
     #[serde(skip)]
     pub sensitive_output: bool,
+    /// Log non-empty stderr at `WARN` even when the command exits 0.
+    /// Executor-local, never persisted in command plans.
+    #[serde(skip)]
+    pub warn_on_stderr: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<std::path::PathBuf>,
     pub purpose: String,
@@ -244,6 +248,7 @@ impl CommandSpec {
             env_remove: Vec::new(),
             clear_env: false,
             sensitive_output: false,
+            warn_on_stderr: false,
             cwd: None,
             purpose: String::new(),
             stage: None,
@@ -284,6 +289,12 @@ impl CommandSpec {
     /// plan-adjacent siblings that share the same group.
     pub fn parallel_group(mut self, group: u32) -> Self {
         self.parallel_group = Some(group);
+        self
+    }
+
+    /// Log non-empty stderr at `WARN` when this command succeeds.
+    pub fn warn_on_stderr(mut self) -> Self {
+        self.warn_on_stderr = true;
         self
     }
 
@@ -2242,6 +2253,21 @@ impl CommandPlan {
     }
 }
 
+/// Emit a `WARN` log if a command succeeded with non-empty stderr and opted in.
+pub fn log_command_warnings(command: &CommandSpec, output: &CommandOutput) {
+    if command.warn_on_stderr && !command.sensitive_output {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let warning = stderr.trim();
+        if !warning.is_empty() {
+            tracing::warn!(
+                purpose = %command.purpose,
+                stderr = %warning,
+                "command succeeded with warnings"
+            );
+        }
+    }
+}
+
 /// Fail the same way [`CommandPlan::execute`] does for a non-zero exit
 /// status; kept as a shared helper so [`CommandPlan::execute_concurrent`]
 /// reports identical error text.
@@ -2260,6 +2286,7 @@ pub fn checked_command_output(
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    log_command_warnings(command, &output);
     Ok(output)
 }
 

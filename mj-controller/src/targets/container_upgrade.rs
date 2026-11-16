@@ -706,7 +706,13 @@ impl RetainedContainer {
                 "container identity changed since upgrade confirmation; refusing replacement"
             );
             if current.state.running {
-                checked(&host, vec!["kill".into(), self.source_id.clone()], executor)?;
+                checked_container_state_change(
+                    &host,
+                    "kill",
+                    &self.source_id,
+                    ContainerStateGoal::NotRunning,
+                    executor,
+                )?;
             }
             checked(
                 &host,
@@ -898,7 +904,13 @@ impl RetainedContainer {
                 backup.id == self.source_id && !backup.state.running,
                 "refusing to retire a changed or running backup"
             );
-            checked(&host, vec!["rm".into(), self.source_id.clone()], executor)?;
+            checked_container_state_change(
+                &host,
+                "rm",
+                &self.source_id,
+                ContainerStateGoal::Absent,
+                executor,
+            )?;
         }
         Ok(())
     }
@@ -920,7 +932,13 @@ impl RetainedContainer {
                 backup.id == self.source_id && !backup.state.running,
                 "refusing to retire a changed or running source"
             );
-            checked(&host, vec!["rm".into(), self.source_id.clone()], executor)?;
+            checked_container_state_change(
+                &host,
+                "rm",
+                &self.source_id,
+                ContainerStateGoal::Absent,
+                executor,
+            )?;
         }
         if let Some(state) = &self.control_state {
             let output = executor.execute(&locator_command(&self.locator, vec!["sh".into(), "-c".into(), "set -eu; [ -f \"$1/restore-complete\" ] || exit 0; rm -f -- \"$1/state.tar\" \"$1\"/state.tar.capture-*".into(), "mj-control-transfer-cleanup".into(), state.staging_directory.clone()]).purpose("retire completed private control-state transfer"))?;
@@ -1030,6 +1048,52 @@ impl RetainedContainer {
         checked(host, vec!["start".into(), self.name.clone()], executor)?;
         Ok(())
     }
+}
+
+#[derive(Copy, Clone)]
+enum ContainerStateGoal {
+    NotRunning,
+    Absent,
+}
+
+fn checked_container_state_change(
+    host: &ImageHost,
+    verb: &str,
+    container_id: &str,
+    goal: ContainerStateGoal,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    if host.engine() != "podman" {
+        checked(host, vec![verb.into(), container_id.to_owned()], executor)?;
+        return Ok(());
+    }
+    let output = executor.execute(&host.command(
+        vec!["podman".into(), verb.into(), container_id.to_owned()],
+        "upgrade container while retaining storage".into(),
+    ))?;
+    let inspected = inspect(host, container_id, executor)?;
+    let achieved = match goal {
+        ContainerStateGoal::NotRunning => inspected.is_none_or(|c| !c.state.running),
+        ContainerStateGoal::Absent => inspected.is_none(),
+    };
+    if achieved {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let warning = stderr.trim();
+        if output.status != 0 || !warning.is_empty() {
+            tracing::warn!(
+                container_id,
+                verb,
+                status = output.status,
+                stderr = %warning,
+                "podman container state-change command succeeded by post-command state"
+            );
+        }
+        return Ok(());
+    }
+    bail!(
+        "container upgrade failed; storage retained: {}",
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 fn checked(

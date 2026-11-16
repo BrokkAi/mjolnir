@@ -623,5 +623,6 @@ pub(super) fn execute_checked(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    mj_core::targets::log_command_warnings(command, &output);
     Ok(())
 }

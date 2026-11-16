@@ -351,7 +351,7 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
         _ => return Ok(None),
     };
     let script = format!(
-        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}\nif podman container inspect \"$container\" >/dev/null 2>&1; then\n    podman stop --time 0 --ignore \"$container\" >/dev/null\n    running=$(podman container inspect --format '{{{{.State.Running}}}}' \"$container\")\n    [ \"$running\" = false ] || {{ echo 'Podman session container is still running' >&2; exit 1; }}\nfi\n"
+        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}if podman container inspect \"$container\" >/dev/null 2>&1; then\n    stop_err=$(podman stop --time 0 --ignore \"$container\" 2>&1 >/dev/null) || true\n    if running=$(podman container inspect --format '{{{{.State.Running}}}}' \"$container\" 2>/dev/null); then\n        if [ \"$running\" = false ]; then\n            [ -z \"$stop_err\" ] || printf '%s\\n' \"$stop_err\" >&2\n        else\n            [ -z \"$stop_err\" ] || printf '%s\\n' \"$stop_err\" >&2\n            echo 'Podman session container is still running' >&2\n            exit 1\n        fi\n    elif podman info >/dev/null 2>&1 && ! podman container inspect \"$container\" >/dev/null 2>&1; then\n        [ -z \"$stop_err\" ] || printf '%s\\n' \"$stop_err\" >&2\n    else\n        [ -z \"$stop_err\" ] || printf '%s\\n' \"$stop_err\" >&2\n        echo 'could not determine whether the Podman session container stopped' >&2\n        exit 1\n    fi\nfi\n"
     );
     let command = match ssh {
         Some(ssh) => ssh_command(
@@ -377,7 +377,8 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
         ),
     }
     .purpose("stop exact Podman session container without removing storage")
-    .stage(ProvisionStage::StoppingTarget);
+    .stage(ProvisionStage::StoppingTarget)
+    .warn_on_stderr();
     Ok(Some(CommandPlan {
         description: format!("quiesce Mjolnir session {session_id}"),
         commands: vec![command],
@@ -474,7 +475,7 @@ pub(super) fn podman_cleanup_plan(
         _ => unreachable!("Podman cleanup requires a Podman locator"),
     };
     let remove_container_script = format!(
-        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}\npodman rm --force --ignore \"$container\" >/dev/null\n"
+        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}rm_err=$(podman rm --force --ignore \"$container\" 2>&1 >/dev/null) || true\nif podman info >/dev/null 2>&1 && ! podman container inspect \"$container\" >/dev/null 2>&1; then\n    [ -z \"$rm_err\" ] || printf '%s\\n' \"$rm_err\" >&2\nelse\n    [ -z \"$rm_err\" ] || printf '%s\\n' \"$rm_err\" >&2\n    echo 'Podman session container is still present' >&2\n    exit 1\nfi\n"
     );
     let at_host = |args: Vec<String>| match ssh {
         Some(ssh) => ssh_command_owned(ssh, args),
@@ -493,7 +494,8 @@ pub(super) fn podman_cleanup_plan(
             session_id.to_owned(),
         ])
         .purpose("remove exact stopped Podman session container")
-        .stage(ProvisionStage::RemovingContainer),
+        .stage(ProvisionStage::RemovingContainer)
+        .warn_on_stderr(),
     ];
     match workspace_storage {
         PodmanWorkspaceLocator::ContainerLayer => {}
