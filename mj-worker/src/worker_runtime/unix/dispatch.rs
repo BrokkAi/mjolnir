@@ -463,9 +463,12 @@ fn run_relay_coordinator(
                         state.offer_settle_facts(None);
                         ended?;
                     }
-                    if record_deferred(
-                        &relay, &mut in_flight, deferred, &mut session_configured,
-                        &mut user_shells, &mut kimi_tasks, startup.as_mut(),
+                    let mut capturing = capture.as_ref().map(|observer| Capture {
+                        observer, wakes: &mut dispatch_wakes,
+                    });
+                    if record_events_in_order(
+                        &relay, &mut in_flight, deferred, &mut events, &mut session_configured,
+                        &mut user_shells, &mut kimi_tasks, capturing.as_mut(), startup.as_mut(),
                     ).await? {
                         verdict_tasks.shutdown().await;
                         return Ok(());
@@ -669,15 +672,81 @@ async fn capture_while_open(
 async fn record_one_runtime_event(
     relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
-    mut event: RuntimeEvent,
+    event: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
     capture: Option<&mut Capture<'_>>,
+    startup: Option<&mut HarnessStartup>,
+) -> Result<bool> {
+    record_events_in_order(
+        relay,
+        in_flight,
+        std::collections::VecDeque::from([event]),
+        events,
+        session_configured,
+        user_shells,
+        kimi_tasks,
+        capture,
+        startup,
+    )
+    .await
+}
+
+/// Record `queue` in order. What arrives while one event is observed belongs
+/// after it, and is itself a later event of the same kind: it is judged by the
+/// same rule, so an autonomous turn that ends inside an observation is
+/// observed too.
+#[allow(clippy::too_many_arguments)]
+async fn record_events_in_order(
+    relay: &Arc<RelayCell>,
+    in_flight: &mut BTreeMap<String, RelayCommand>,
+    mut queue: std::collections::VecDeque<RuntimeEvent>,
+    events: &mut mpsc::Receiver<RuntimeEvent>,
+    session_configured: &mut bool,
+    user_shells: &mut crate::user_shell::UserShellRegistry,
+    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    mut capture: Option<&mut Capture<'_>>,
     mut startup: Option<&mut HarnessStartup>,
 ) -> Result<bool> {
-    let mut deferred = std::collections::VecDeque::new();
+    while let Some(event) = queue.pop_front() {
+        let mut deferred = std::collections::VecDeque::new();
+        // Boxed: the observation's future is large, and tests run on small stacks.
+        let stopped = Box::pin(observe_and_record(
+            relay,
+            in_flight,
+            event,
+            events,
+            &mut deferred,
+            session_configured,
+            user_shells,
+            kimi_tasks,
+            capture.as_deref_mut(),
+            startup.as_deref_mut(),
+        ))
+        .await?;
+        if stopped {
+            return Ok(true);
+        }
+        queue.append(&mut deferred);
+    }
+    Ok(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn observe_and_record(
+    relay: &Arc<RelayCell>,
+    in_flight: &mut BTreeMap<String, RelayCommand>,
+    mut event: RuntimeEvent,
+    events: &mut mpsc::Receiver<RuntimeEvent>,
+    deferred: &mut std::collections::VecDeque<RuntimeEvent>,
+    session_configured: &mut bool,
+    user_shells: &mut crate::user_shell::UserShellRegistry,
+    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    capture: Option<&mut Capture<'_>>,
+    startup: Option<&mut HarnessStartup>,
+) -> Result<bool> {
     // One rule for "a managed child's turn ended": a prompt of ours finishing,
     // or the harness ending a turn it started on its own.
     let finishing_prompt = matches!(event, RuntimeEvent::PromptFinished { .. })
@@ -689,7 +758,7 @@ async fn record_one_runtime_event(
         Some(capture) => {
             let (prepared, facts) = tokio::join!(
                 prepare_kimi_runtime_event(kimi_tasks, relay, &mut event),
-                capture_while_open(capture, relay, events, &mut deferred),
+                capture_while_open(capture, relay, events, deferred),
             );
             prepared?;
             Some(facts)
@@ -700,54 +769,14 @@ async fn record_one_runtime_event(
         }
     };
     track_user_shell_completion(user_shells, &event);
-    if record_runtime_event_with_startup(
+    record_runtime_event_with_startup(
         relay,
         in_flight,
         event,
         session_configured,
         work_facts,
-        startup.as_deref_mut(),
-    )? {
-        return Ok(true);
-    }
-    record_deferred(
-        relay,
-        in_flight,
-        deferred,
-        session_configured,
-        user_shells,
-        kimi_tasks,
         startup,
     )
-    .await
-}
-
-/// Record what arrived during an observation, in the order it arrived, now
-/// that the outcome it followed is recorded.
-async fn record_deferred(
-    relay: &Arc<RelayCell>,
-    in_flight: &mut BTreeMap<String, RelayCommand>,
-    mut deferred: std::collections::VecDeque<RuntimeEvent>,
-    session_configured: &mut bool,
-    user_shells: &mut crate::user_shell::UserShellRegistry,
-    kimi_tasks: &mut Option<KimiTaskMonitor>,
-    mut startup: Option<&mut HarnessStartup>,
-) -> Result<bool> {
-    while let Some(mut event) = deferred.pop_front() {
-        prepare_kimi_runtime_event(kimi_tasks, relay, &mut event).await?;
-        track_user_shell_completion(user_shells, &event);
-        if record_runtime_event_with_startup(
-            relay,
-            in_flight,
-            event,
-            session_configured,
-            None,
-            startup.as_deref_mut(),
-        )? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn record_runtime_event_with_startup(
