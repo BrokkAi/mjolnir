@@ -460,6 +460,15 @@ impl DurableRelay {
                 turn.autonomous =
                     snapshot.continuation.autonomous_turn_started == Some(turn.first_ordinal);
             }
+            // An older worker recorded a withdrawn continuation only as the
+            // quota flag, so a retry stays blocked for a session already in
+            // that state at upgrade.
+            if snapshot.format_version < 25
+                && snapshot.continuation.quota_suppressed
+                && snapshot.continuation.withdrawn_ordinal.is_none()
+            {
+                snapshot.continuation.withdrawn_ordinal = Some(snapshot.latest_ordinal);
+            }
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
             // they did not retain its start through subsequent background work.
@@ -944,6 +953,11 @@ impl DurableRelay {
         state.task_settled_at_ms = facts.task_settled_at_ms;
         state.background_needed = facts.background_needed;
         state.activity = Some(mj_core::activity::classify(&facts));
+        // The worker alone decides whether it will resubmit a failed turn once
+        // its login changes; the daemon only reads the answer.
+        state.authentication_retry_waiting = self
+            .authentication_retry_identity()
+            .map(|(_, rejected)| rejected.to_owned());
         state
     }
 

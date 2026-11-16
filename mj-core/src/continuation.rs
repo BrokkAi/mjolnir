@@ -24,6 +24,13 @@ pub struct ContinuationState {
     pub completed_command_id: Option<String>,
     #[serde(default)]
     pub quota_suppressed: bool,
+    /// Ordinal of the newest event after which automatic continuation was
+    /// withdrawn (a control command, a cancellation, lost native continuity,
+    /// a context command). Written beside every `quota_suppressed = true` and
+    /// never reset: a consumer compares it with the ordinal of the prompt it
+    /// asks about, so a withdrawal before that prompt does not count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn_ordinal: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_recovery: Option<QuotaRecovery>,
     /// Legacy pre-revision-24 snapshot field; only used during snapshot upgrade.

@@ -92,6 +92,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         goal: Default::default(),
         capacity_retry: None,
         retry_assessment_pending: false,
+        authentication_retry_waiting: None,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,
         session_id: session_id.into(),
