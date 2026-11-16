@@ -256,6 +256,9 @@ pub(super) async fn run_daemon_runtime(
                 .map(|intent| intent.session_id.clone()),
         );
         lifecycle_owned.extend(state.recover_restarts(restart_intents)?);
+        let create_intents = blocking(crate::database::load_session_create_intents).await?;
+        let creates = create_intents.len();
+        lifecycle_owned.extend(state.recover_creates(create_intents)?);
         let (retained_cleanups, startup_cleanups) = {
             let owner = state.owner();
             let sessions = &owner.controller().state.sessions;
@@ -278,6 +281,7 @@ pub(super) async fn run_daemon_runtime(
         tracing::info!(
             moves,
             restarts,
+            creates,
             retained_cleanups,
             startup_cleanups,
             "daemon startup: recovery of moves, restarts and cleanups queued"

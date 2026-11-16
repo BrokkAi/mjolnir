@@ -599,12 +599,46 @@ impl RuntimeState {
         let capacity_warning = (!capacity_warning.is_empty()).then_some(capacity_warning);
         drop(_container_admission);
         let session_id = registered.session.id.clone();
+        self.start_create_lifecycle(
+            session_id,
+            control,
+            publication,
+            remember_launch_choices,
+            None,
+        )?;
+        let publishing = crate::launch_timing::LaunchPhaseTimer::new(
+            &registered.session.id,
+            "publish registered session view",
+        );
+        self.reload_controller().await?;
+        drop(publishing);
+        Ok((registered, review_notice, capacity_warning))
+    }
+
+    /// Admit the Create lifecycle of a registered session. A create is
+    /// resumable: shutdown interrupts it before it commits instead of
+    /// cancelling it, it holds no handoff admission while it provisions, and
+    /// the next daemon finishes it from the durable create intent.
+    ///
+    /// `recovery_operation` is the intent's operation id when a restarted
+    /// daemon re-admits an interrupted create; that run first retires what the
+    /// interrupted attempt built.
+    pub(super) fn start_create_lifecycle(
+        self: &Arc<Self>,
+        session_id: String,
+        control: LifecycleControl,
+        publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
+        remember_launch_choices: bool,
+        recovery_operation: Option<String>,
+    ) -> Result<()> {
+        control.mark_resumable();
+        let recovering = recovery_operation.is_some();
         let scheduled_at = std::time::Instant::now();
         self.start_or_join_lifecycle_controlled(
             session_id,
             LifecycleKind::Create,
             None,
-            None,
+            recovery_operation.map(|operation| format!("recovery:{operation}")),
             Some(control.clone()),
             move |state, session_id, cancelled| async move {
                 tracing::info!(%session_id, elapsed_ms = scheduled_at.elapsed().as_millis(),
@@ -642,20 +676,52 @@ impl RuntimeState {
                     state,
                     session_id.clone(),
                 );
-                let provision = controller
-                    .provision_session_controlled_with_commit(
-                        &session_id,
-                        &executor,
-                        || {
-                            ensure!(
-                                control.grant_commit(),
-                                "session creation cancelled before commit"
-                            );
-                            Ok(())
-                        },
-                        remember_launch_choices,
-                    )
-                    .await;
+                // The commit and the write that marks the session running
+                // are the one stretch a handoff waits for: a daemon replaced
+                // between them would redo a create that had just succeeded.
+                let commit_admission = Mutex::new(None);
+                let commit = || {
+                    let admission = match crate::upgrade::activity("session create commit") {
+                        Ok(admission) => admission,
+                        Err(error) => {
+                            // The daemon is being replaced: the next one owns
+                            // this create, which has not committed.
+                            control.interrupt_uncommitted_for_shutdown();
+                            return Err(error);
+                        }
+                    };
+                    ensure!(
+                        control.grant_commit(),
+                        "session creation cancelled before commit"
+                    );
+                    *commit_admission
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some(admission);
+                    Ok(())
+                };
+                let interrupted = || control.interrupted_for_shutdown();
+                let provision = if recovering {
+                    controller
+                        .recover_interrupted_create(
+                            &session_id,
+                            &executor,
+                            commit,
+                            remember_launch_choices,
+                            &interrupted,
+                        )
+                        .await
+                } else {
+                    controller
+                        .provision_session_controlled_with_commit(
+                            &session_id,
+                            &executor,
+                            commit,
+                            remember_launch_choices,
+                            &interrupted,
+                        )
+                        .await
+                };
+                drop(commit_admission);
                 if let Some(error) = publication_error {
                     return match provision {
                         Ok(()) => Err(error),
@@ -668,13 +734,58 @@ impl RuntimeState {
                 Ok(DaemonLifecycleResult::Done)
             },
         )?;
-        let publishing = crate::launch_timing::LaunchPhaseTimer::new(
-            &registered.session.id,
-            "publish registered session view",
-        );
-        self.reload_controller().await?;
-        drop(publishing);
-        Ok((registered, review_notice, capacity_warning))
+        Ok(())
+    }
+
+    /// Re-admit the creates a previous daemon's shutdown interrupted. Runs at
+    /// startup before clients are served, so a client that reconnects to wait
+    /// for its session finds the create in the lifecycle registry. Returns the
+    /// sessions it owns, which the unowned-lifecycle reconciliation must skip.
+    ///
+    /// An intent whose session is no longer creating (finished or failed by
+    /// something that did not settle the intent, such as an older daemon) is
+    /// discarded. Capacity is not admitted again: the original create passed
+    /// that gate, and refusing here would strand a session the person already
+    /// has.
+    pub(super) fn recover_creates(
+        self: &Arc<Self>,
+        intents: Vec<crate::database::SessionCreateIntent>,
+    ) -> Result<BTreeSet<String>> {
+        let mut owned = BTreeSet::new();
+        for intent in intents {
+            let creating = self
+                .owner()
+                .controller()
+                .state
+                .sessions
+                .get(&intent.session_id)
+                .is_some_and(|record| {
+                    !record.archived
+                        && matches!(
+                            record.state,
+                            mj_core::state::SessionState::Provisioning
+                                | mj_core::state::SessionState::Disconnected
+                        )
+                });
+            if !creating {
+                crate::database::discard_session_create_intent(
+                    &intent.session_id,
+                    &intent.operation_id,
+                )?;
+                tracing::info!(session_id = %intent.session_id, "discarded a create intent whose session is no longer creating");
+                continue;
+            }
+            tracing::info!(session_id = %intent.session_id, "resuming a session creation interrupted by a daemon restart");
+            self.start_create_lifecycle(
+                intent.session_id.clone(),
+                LifecycleControl::default(),
+                None,
+                intent.remember_launch_choices,
+                Some(intent.operation_id),
+            )?;
+            owned.insert(intent.session_id);
+        }
+        Ok(owned)
     }
 
     pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {

@@ -166,6 +166,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         grant_commit: impl FnOnce() -> Result<()>,
         remember_launch_choices: bool,
+        interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<()> {
         crate::worker_lifecycle::run(
             session_id,
@@ -187,6 +188,7 @@ impl Controller {
                         github_token.as_deref(),
                         ProvisioningFailureDisposition::Discard,
                         remember_launch_choices,
+                        interrupted,
                     )
                     .await?;
                 let setup = execute_concurrent_lanes(
@@ -210,15 +212,93 @@ impl Controller {
                 match result {
                     Ok(native_session_id) => {
                         if let Err(error) = grant_commit() {
-                            return Err(self.rollback_failed_new_session(session_id, error)?);
+                            return Err(self.rollback_unless_interrupted(
+                                session_id,
+                                error,
+                                interrupted,
+                            )?);
                         }
                         self.mark_worker_connected(session_id, native_session_id)
                     }
-                    Err(error) => Err(self.rollback_failed_new_session(session_id, error)?),
+                    Err(error) => {
+                        Err(self.rollback_unless_interrupted(session_id, error, interrupted)?)
+                    }
                 }
             },
         )
         .await
+    }
+
+    /// Finish a create that an earlier daemon's shutdown interrupted: retire
+    /// whatever the interrupted attempt built, return the record to its
+    /// registered form, and provision again.
+    ///
+    /// Retire-then-provision is used because several provisioning steps are
+    /// not safe to re-enter (a persisted managed worktree is never planned
+    /// again, `podman run --name` fails when the container exists, a clone
+    /// refuses a populated workspace). Retirement is idempotent, so an attempt
+    /// that is interrupted again is reset again by the next daemon.
+    pub async fn recover_interrupted_create(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        grant_commit: impl FnOnce() -> Result<()>,
+        remember_launch_choices: bool,
+        interrupted: &(dyn Fn() -> bool + Sync),
+    ) -> Result<()> {
+        crate::worker_lifecycle::run(session_id, "recover interrupted create", executor, async {
+            if let Err(error) = self.reset_interrupted_create(session_id) {
+                return Err(self.rollback_unless_interrupted(session_id, error, interrupted)?);
+            }
+            self.provision_session_controlled_with_commit(
+                session_id,
+                executor,
+                grant_commit,
+                remember_launch_choices,
+                interrupted,
+            )
+            .await
+        })
+        .await
+    }
+
+    fn reset_interrupted_create(&mut self, session_id: &str) -> Result<()> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .clone();
+        ensure!(
+            matches!(
+                session.state,
+                SessionState::Provisioning | SessionState::Disconnected
+            ),
+            "session {session_id} is {}, not an unfinished create",
+            session.state.as_str()
+        );
+        // Retirement stops the process group before it removes files, and
+        // runs on an executor the shutdown that interrupted the create (or
+        // the next one) cannot cancel.
+        if let Some(environment) = crate::database::session_environment(session_id)? {
+            super::environment::retire_owned_environment(
+                environment,
+                &self.config,
+                &super::failed_launch_cleanup_executor(),
+                super::BranchDisposition::Delete,
+                super::CheckoutDisposition::Remove,
+            )
+            .context("retire the interrupted attempt's environment")?;
+        }
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        if let Some(managed) = record.managed_worktree.take() {
+            record.project_directory = Some(managed.source_project_directory.clone());
+        }
+        record.target = None;
+        record.state = SessionState::Provisioning;
+        record.last_error = None;
+        record.updated_at = now();
+        crate::database::reset_session_for_create_retry(record)
     }
 
     /// Start a child worker inside an already-provisioned parent target.
@@ -478,6 +558,28 @@ impl Controller {
         }
     }
 
+    /// A create the daemon's shutdown interrupted before it committed keeps
+    /// its record and everything it built: the durable create intent makes the
+    /// next daemon retire that and provision again. Any other failure rolls
+    /// back. The decision is read at the moment of failure from the one owner
+    /// of the fact, the create's lifecycle control.
+    fn rollback_unless_interrupted(
+        &mut self,
+        session_id: &str,
+        error: anyhow::Error,
+        interrupted: &(dyn Fn() -> bool + Sync),
+    ) -> Result<anyhow::Error> {
+        if interrupted() {
+            tracing::info!(
+                session_id,
+                error = format!("{error:#}"),
+                "session creation interrupted by daemon shutdown; the next daemon finishes it"
+            );
+            return Ok(error.context("the daemon stopped during session creation"));
+        }
+        self.rollback_failed_new_session(session_id, error)
+    }
+
     fn rollback_failed_new_session(
         &mut self,
         session_id: &str,
@@ -576,6 +678,8 @@ impl Controller {
                 // Resume is the only production caller; it reopens a
                 // directory the user already chose, so it keeps the history.
                 true,
+                // Resume is cancelled and rolled back to its archived record.
+                &|| false,
             )
             .await?;
         match execute_repository_setup(session_id, &repositories, executor) {
@@ -594,6 +698,7 @@ impl Controller {
         github_token: Option<&str>,
         failure_disposition: ProvisioningFailureDisposition,
         remember_launch_choices: bool,
+        interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<RepositorySetup> {
         crate::worker_lifecycle::run(session_id, "provision session target with failure disposition", executor, async {
         let _target_timing = LaunchPhaseTimer::new(session_id, "plan checkout and provision target");
@@ -660,7 +765,7 @@ impl Controller {
         let managed_checkout = match preparation {
             Ok(created) => created,
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
-                return Err(self.rollback_failed_new_session(session_id, error)?);
+                return Err(self.rollback_unless_interrupted(session_id, error, interrupted)?);
             }
             Err(error) => return Err(error),
         };
@@ -885,7 +990,7 @@ impl Controller {
             // with the target still named, retirement on an executor the
             // create's cancellation cannot stop, and only then `Error`.
             Err(error) => {
-                return Err(self.rollback_failed_new_session(session_id, error)?);
+                return Err(self.rollback_unless_interrupted(session_id, error, interrupted)?);
             }
             Ok((locator, remainder, bundle, build_cache)) => {
                 let image = self
@@ -901,6 +1006,9 @@ impl Controller {
                         None => mj_core::state::ContainerSettings::requested(&session),
                     });
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
+                // Holds a create after its target exists, so a test can restart
+                // the daemon in the middle of it.
+                mj_core::test_hooks::reach_test_hook("create_after_target_provisioned")?;
                 let runtime = self.state.sessions.get_mut(session_id)
                     .expect("session retained after target creation")
                     .target_runtime.as_mut().context("selected runtime disappeared")?;
@@ -935,7 +1043,7 @@ impl Controller {
         };
         let result = match result {
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
-                return Err(self.rollback_failed_new_session(session_id, error)?);
+                return Err(self.rollback_unless_interrupted(session_id, error, interrupted)?);
             }
             result => result,
         };

@@ -1479,13 +1479,9 @@ fn follow_daemon_creation(
     lifecycle_updates: &UnboundedSender<DashboardLifecycleUpdate>,
     cancelled: Arc<AtomicBool>,
 ) {
-    let result = mj_core::runtime::block_on(async {
-        let mut daemon = daemon::connect_or_start().await?;
-        daemon.wait_create_session(session_id.clone()).await?;
-        Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
-    })
-    .and_then(|result| result)
-    .map_err(crate::pollers::DashboardLifecycleFailure::from);
+    let result = mj_core::runtime::block_on(await_daemon_creation(&session_id, &cancelled))
+        .and_then(|result| result)
+        .map_err(crate::pollers::DashboardLifecycleFailure::from);
     report(
         operation,
         lifecycle_updates,
@@ -1495,6 +1491,53 @@ fn follow_daemon_creation(
             operation: cancelled,
         },
     );
+}
+
+/// Wait for the daemon to finish creating a session, across daemon restarts.
+///
+/// A daemon that stops mid-create does not fail it: the next daemon finishes
+/// it from its durable record and serves `WaitCreateSession` for it again. A
+/// lost connection therefore means "ask again", never "failed". The wait is
+/// read-only, so repeating it is safe; `StartCreateSession` is never repeated.
+/// Each retry follows a lost connection and waits a quarter second, and the
+/// loop ends with the daemon's answer or the caller's cancellation.
+async fn await_daemon_creation(
+    session_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<LifecycleSuccess> {
+    const RETRY_DELAY: Duration = Duration::from_millis(250);
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            bail!("operation cancelled");
+        }
+        let mut daemon = daemon::connect_or_start().await?;
+        let error = match daemon.wait_create_session(session_id.to_owned()).await {
+            Ok(()) => return Ok(LifecycleSuccess::Created),
+            Err(error) => error,
+        };
+        let Some(refusal) = error.downcast_ref::<mj_client::daemon::DaemonRefusal>() else {
+            tracing::info!(session_id, error = format!("{error:#}"), "lost the daemon while a session was being created; waiting again");
+            tokio::time::sleep(RETRY_DELAY).await;
+            continue;
+        };
+        if !refusal.0.contains("no create operation exists") {
+            return Err(error);
+        }
+        // The daemon holds no create for this session: the record says how it
+        // ended, or that a restarting daemon has not admitted it yet.
+        let record = daemon.session_record(session_id.to_owned()).await?;
+        match record.map(|record| (record.state, record.last_error)) {
+            Some((mj_core::state::SessionState::Provisioning, _))
+            | Some((mj_core::state::SessionState::Disconnected, _)) => {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+            Some((mj_core::state::SessionState::Error, reason)) => {
+                bail!(reason.unwrap_or_else(|| "session creation failed".to_owned()))
+            }
+            Some(_) => return Ok(LifecycleSuccess::Created),
+            None => return Err(error),
+        }
+    }
 }
 
 /// Follow one query until the index settles. Dropping its guard cancels both

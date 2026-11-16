@@ -2899,6 +2899,22 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     assert!(control.grant_commit());
     assert!(operation(LifecycleKind::Suspend, control.clone()).interrupt_for_shutdown());
     assert!(control.stopped_for_shutdown());
+
+    // A resumable create is interrupted, not cancelled: a person's cancel and
+    // a commit both lose to it, and its failure paths see that the next
+    // daemon owns it. Once it committed, shutdown leaves it alone.
+    let control = LifecycleControl::default();
+    control.mark_resumable();
+    assert!(operation(LifecycleKind::Create, control.clone()).interrupt_for_shutdown());
+    assert!(control.interrupted_for_shutdown() && control.stopped_for_shutdown());
+    assert!(control.cancelled.load(Ordering::Acquire));
+    assert!(!control.request_cancel("person cancellation"));
+    assert!(!control.grant_commit());
+    let control = LifecycleControl::default();
+    control.mark_resumable();
+    assert!(control.grant_commit());
+    assert!(!operation(LifecycleKind::Create, control.clone()).interrupt_for_shutdown());
+    assert!(!control.interrupted_for_shutdown());
 }
 
 #[tokio::test]

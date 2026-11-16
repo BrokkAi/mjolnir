@@ -2132,6 +2132,7 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
             &executor,
             || panic!("failed setup cannot commit"),
             false,
+            &|| false,
         )
         .await
         .unwrap_err();
