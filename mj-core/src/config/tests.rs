@@ -103,6 +103,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
         codex_profile: None,
@@ -135,6 +136,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
         codex_profile: None,
@@ -3202,6 +3204,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
         codex_profile: codex_profile.map(str::to_owned),
@@ -3437,6 +3440,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             codex_profile: None,
@@ -3485,6 +3489,29 @@ fn a_profile_models_allow_list_round_trips_and_is_omitted_when_empty() {
     assert!(config.profiles["ds8bit"].models.is_empty());
     config.save_to(&path).unwrap();
     assert!(!fs::read_to_string(&path).unwrap().contains("models"));
+    // The credits option loads off, is not written while off, and survives
+    // being on.
+    assert!(!config.profiles["ds8bit"].load_balancing_may_consume_credits);
+    assert!(
+        !fs::read_to_string(&path)
+            .unwrap()
+            .contains("load_balancing_may_consume_credits")
+    );
+    config
+        .profiles
+        .get_mut("ds8bit")
+        .unwrap()
+        .load_balancing_may_consume_credits = true;
+    config.save_to(&path).unwrap();
+    assert!(
+        Config::load_from(&path).unwrap().profiles["ds8bit"].load_balancing_may_consume_credits
+    );
+    config
+        .profiles
+        .get_mut("ds8bit")
+        .unwrap()
+        .load_balancing_may_consume_credits = false;
+    config.save_to(&path).unwrap();
 
     let listed = "openrouter/deepseek/deepseek-v4.1-flash-1017".to_owned();
     config.profiles.get_mut("ds8bit").unwrap().models = vec![listed.clone()];

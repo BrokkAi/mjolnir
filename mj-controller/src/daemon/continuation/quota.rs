@@ -44,7 +44,7 @@ pub(super) fn destinations(
                 .unwrap_or(false)
             && c.choices.models.iter().any(|choice| choice.value == model)
             && !c.unhealthy.contains_key(model)
-            && !crate::profile_scheduler::exhausted(c, model, now)
+            && crate::profile_scheduler::ineligibility(c, model, now).is_none()
     });
     crate::profile_scheduler::draw_candidates(
         &mut candidates,

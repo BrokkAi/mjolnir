@@ -585,6 +585,65 @@ misses into catches (catalog-cache-key-collision, stale-model-launch-spec,
 symbol-change-keeps-cached-transcript, web-feed-self-deadlock) are partial or
 no for Bifrost.
 
+## Relation briefs, ablation: is the decisive relation what the blind brief adds?
+
+Plan `brief/PLAN-ablation.md`, registered before any run. Results:
+`results/brief-ablation/`. Outcome: **the relation carries it**.
+
+- Diffs: the 10 where the blind brief lifted catches. Chosen by outcome, so
+  the arms compare only with each other, on these diffs.
+- Arm D is the stage C Bifrost brief plus the decisive item. The stage A
+  editor's census item was rewritten by a carbon/high editor into the Bifrost
+  brief's form: anchors, completeness tag, no item longer than the brief's
+  longest, and at most two items per diff (8 diffs needed two).
+  - Contains check: all 10 state the fact.
+  - Leak check: two judges, all `missed`.
+- Arm X is the blind brief minus the editor's matching item. Exactly one line
+  is removed per diff.
+- Runs: 3 Terra/high and 3 Sol/high per diff and arm, 120 sessions.
+  mj-estimated API cost $13.32. The codex quota ran out mid-run; 3
+  interrupted jobs were relaunched from scratch.
+- Judging round G: gemini-4-carbon/high judges on Jonathan's instruction
+  (rounds A to F used Opus/high). They rejudged every compared arm on the 10
+  diffs, 304 outputs. The two judges agree on all; an independent carbon hand
+  check of all 158 caught or partial verdicts changed none. Round G
+  reproduces round F's no-brief, Bifrost and blind rates within 3.3 points
+  for every arm and model, so there is no judge-consistency caveat.
+
+Catch rate per session on the 10 diffs (mean over diffs):
+
+| Model | No brief | Bifrost (F) | Bifrost + item (D) | Blind − item (X) | Blind (B) |
+|---|---:|---:|---:|---:|---:|
+| Terra/high | 20.0% | 20.0% | 73.3% | 46.7% | 90.0% |
+| Sol/high | 33.3% | 40.0% | 63.3% | 56.7% | 70.0% |
+
+- Closure, (D − F) / (B − F), the share of the gap the decisive item closes
+  alone: Terra 0.76 (95% 0.44 to 1.0), Sol 0.78 (0.25 to 1.0). Terra is
+  above the plan's 0.6.
+- Removing the item from the blind brief costs Terra 43 points (13 to 73)
+  and Sol 13 (0 to 33).
+- Per diff for Terra (`ablation.json`), the item alone took six diffs to 3/3
+  where the plain Bifrost brief caught at most 1/3. On those diffs the blind
+  brief without it mostly fell back to 0 or 1 of 3:
+  - catalog-cache-key-collision
+  - codex-effort-alias-lost
+  - stale-model-launch-spec
+  - symbol-change-keeps-cached-transcript
+  - terminal-id-reused
+  - web-feed-self-deadlock
+- The item did not help on two diffs, where the blind brief's other items
+  carry the catch (blind minus the item still catches):
+  - metadata-checkpoint-overwrites-checkout: 0/3 with D, 3/3 without the
+    item;
+  - child-model-wrong-efforts: 2/3 with D, 3/3.
+- Reading: for these bugs, one stated relation of the census kind accounts
+  for about three quarters of the blind brief's lift, in Bifrost's own
+  format. The rest is the writer's other items. This supports building the
+  relations (#13211 site context, shared state first) over brief prose. The
+  items here were written by hand from the census; Bifrost does not compute
+  them today, so the result says what the engine must state, not that it
+  can.
+
 ## Bifrost tool coverage: can a code graph produce the decisive fact?
 
 For the Bifrost session, at Jonathan's request (`toolcov/SPEC.md`,

@@ -586,6 +586,7 @@ impl ApiBackend {
             .lock()
             .map_err(|_| anyhow!("profile health lock poisoned"))?;
         let now = std::time::SystemTime::now();
+        let config = self.profile_catalog.live()?;
         for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
@@ -604,6 +605,9 @@ impl ApiBackend {
                                 .map(|mark| (model.value.clone(), mark))
                         })
                         .collect();
+                    let may_consume_credits = config
+                        .enabled_profile(&profile_id)
+                        .is_some_and(|profile| profile.load_balancing_may_consume_credits);
                     candidates
                         .offered
                         .push(crate::server::api::SubagentCandidate {
@@ -611,6 +615,7 @@ impl ApiBackend {
                             harness,
                             choices,
                             quota,
+                            may_consume_credits,
                             unhealthy,
                         });
                 }
@@ -3568,6 +3573,7 @@ impl SubagentBackend for ApiBackend {
                                 .get(&profile_id)
                                 .and_then(|publication| publication.report.as_ref()),
                         ),
+                        may_consume_credits: profile.load_balancing_may_consume_credits,
                         unhealthy,
                     });
             }

@@ -589,7 +589,12 @@ impl IsolatedTest {
         let mut command = Command::new(std::env::current_exe().expect("this test binary"));
         command
             .args(["--exact", &name, "--nocapture"])
-            .env("RUST_MIN_STACK", Self::CHILD_STACK_BYTES);
+            .env("RUST_MIN_STACK", Self::CHILD_STACK_BYTES)
+            // The instance name selects the default viewer port and the
+            // store layout, so a child owns it: an inherited one changes
+            // output the child's goldens pin. A test that needs an instance
+            // sets it with `env`.
+            .env_remove("MJ_INSTANCE");
         Self { name, command }
     }
 

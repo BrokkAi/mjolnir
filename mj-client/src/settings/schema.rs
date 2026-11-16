@@ -84,7 +84,8 @@ fn scheduler_defaults() -> Value {
 /// kind's fields, so the editor never offers them.
 fn profile_defaults(kind: &str) -> Value {
     let mut fields =
-        json!({"enabled":true,"kind":kind,"home":"","environment":{},"context_window_bytes":null});
+        json!({"enabled":true,"kind":kind,"home":"","environment":{},"context_window_bytes":null,
+               "load_balancing_may_consume_credits":false});
     let object = fields.as_object_mut().unwrap();
     match kind {
         "codex" => {
@@ -310,6 +311,7 @@ pub fn label(key: &str) -> String {
         "guardian_review_model" => "Guardian review model",
         "codex_profile" => "Codex profile",
         "claude_permission_mode" => "Claude permission mode",
+        "load_balancing_may_consume_credits" => "Load balancing may consume credits",
         "models" => "Offered models",
         "bind" => "Listen address and port",
         "tailscale_detect" => "Detect Tailscale",
@@ -1031,6 +1033,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "guardian_review_model" => {
             "Codex with a custom provider: newest-flash, session (the session's model), or a model name. Blank: newest-flash."
+        }
+        "load_balancing_may_consume_credits" => {
+            "When this subscription profile has used up its quota for a model, let load balancing still pick it and spend its paid credits. Off: it is skipped until the quota resets. Does not affect a session you pin to this profile."
         }
         "models" => {
             "Optional. Offer only these models from this profile, one exact model name per entry. Leave empty to offer everything the profile advertises. The profile's current model is always offered."
