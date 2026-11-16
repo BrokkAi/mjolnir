@@ -351,7 +351,7 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
         _ => return Ok(None),
     };
     let script = format!(
-        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}if podman container inspect \"$container\" >/dev/null 2>&1; then\n    stop_err=$(podman stop --time 0 --ignore \"$container\" 2>&1 >/dev/null) || true\n    [ -z \"$stop_err\" ] || printf '%s\\n' \"$stop_err\" >&2\n    if running=$(podman container inspect --format '{{{{.State.Running}}}}' \"$container\" 2>/dev/null); then\n        [ \"$running\" = false ] || {{ echo 'Podman session container is still running' >&2; exit 1; }}\n    elif ! podman info >/dev/null 2>&1 || podman container inspect \"$container\" >/dev/null 2>&1; then\n        echo 'could not determine whether the Podman session container stopped' >&2\n        exit 1\n    fi\nfi\n"
+        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}if podman container inspect \"$container\" >/dev/null 2>&1; then\n    stop_err=$(podman stop --time 0 --ignore \"$container\" 2>&1 >/dev/null) || true\n    [ -z \"$stop_err\" ] || printf '%s\\n' \"$stop_err\" >&2\n    # `container exists` exits 1 only for a definite absence; 125 is an error.\n    status=0\n    podman container exists \"$container\" || status=$?\n    case $status in\n        0)\n            running=$(podman container inspect --format '{{{{.State.Running}}}}' \"$container\")\n            [ \"$running\" = false ] || {{ echo 'Podman session container is still running' >&2; exit 1; }}\n            ;;\n        1) ;;\n        *)\n            echo 'could not determine whether the Podman session container stopped' >&2\n            exit 1\n            ;;\n    esac\nfi\n"
     );
     let command = match ssh {
         Some(ssh) => ssh_command(
@@ -475,7 +475,7 @@ pub(super) fn podman_cleanup_plan(
         _ => unreachable!("Podman cleanup requires a Podman locator"),
     };
     let remove_container_script = format!(
-        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}rm_err=$(podman rm --force --ignore \"$container\" 2>&1 >/dev/null) || true\n[ -z \"$rm_err\" ] || printf '%s\\n' \"$rm_err\" >&2\nif ! podman info >/dev/null 2>&1 || podman container inspect \"$container\" >/dev/null 2>&1; then\n    echo 'Podman session container is still present' >&2\n    exit 1\nfi\n"
+        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}rm_err=$(podman rm --force --ignore \"$container\" 2>&1 >/dev/null) || true\n[ -z \"$rm_err\" ] || printf '%s\\n' \"$rm_err\" >&2\n# `container exists` exits 1 only for a definite absence; 125 is an error.\nstatus=0\npodman container exists \"$container\" || status=$?\ncase $status in\n    1) ;;\n    0) echo 'Podman session container is still present' >&2; exit 1 ;;\n    *) echo 'could not determine whether the Podman session container was removed' >&2; exit 1 ;;\nesac\n"
     );
     let at_host = |args: Vec<String>| match ssh {
         Some(ssh) => ssh_command_owned(ssh, args),
