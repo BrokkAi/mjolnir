@@ -1441,6 +1441,37 @@ impl TestRemoteManager {
     /// Accepts every command the daemon submits until none arrives for a
     /// moment, and returns them with the session each went to. Run it beside
     /// the call under test, which waits for each acceptance.
+    /// The session manager's control, for starting the delegation loop on it.
+    pub(super) fn control_for_test(&self) -> SessionManagerControl {
+        self.control.clone()
+    }
+
+    /// The next command the daemon submits, left unanswered so a test decides
+    /// when it is acknowledged: the session, the command id and the reply.
+    pub(super) async fn next_submit(
+        &mut self,
+    ) -> (
+        String,
+        String,
+        tokio::sync::oneshot::Sender<std::result::Result<u64, mj_client::session::SubmitFailure>>,
+    ) {
+        loop {
+            let request = tokio::time::timeout(Duration::from_secs(10), self.requests.recv())
+                .await
+                .expect("the daemon submits a command")
+                .expect("the manager is running");
+            if let crate::session_manager::RemoteSessionRequest::Submit {
+                session_id,
+                command_id,
+                reply,
+                ..
+            } = request
+            {
+                return (session_id, command_id, reply);
+            }
+        }
+    }
+
     /// The first submissions fail with `failures`, in order, before the worker
     /// accepts anything.
     pub(super) async fn answer_submissions(

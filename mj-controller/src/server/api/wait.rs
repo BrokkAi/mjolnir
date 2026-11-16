@@ -157,6 +157,13 @@ async fn wait_for_turn(
                     Some(_) => None,
                     None => backend.turn_state(session_id.clone()).await?,
                 };
+                // The backend owns what a child's record and worker view say
+                // about its processes, as it does for every other reader.
+                let child_liveness = if child_report.is_some() {
+                    backend.subagent_work_liveness(session_id.clone()).await
+                } else {
+                    mj_core::subagent::Liveness::default()
+                };
                 let session_facts = {
                     let snapshot = snapshot_rx.borrow();
                     let session = require_session_record(&snapshot, &session_id)?;
@@ -169,6 +176,7 @@ async fn wait_for_turn(
                     );
                     if let Some((handback_tool, report)) = &child_report {
                         let now = mj_core::clock::epoch_millis();
+                        observation.work_liveness = child_liveness.clone();
                         observation.apply_subagent_report(*handback_tool, report, now);
                         report_deadline = [
                             reminder_grace_end(&observation, report, now),
@@ -387,15 +395,6 @@ pub(super) fn build_observation(
         capacity_retry: session.capacity_retry.as_deref().cloned(),
         quota_recovery: session.quota_recovery.as_deref().cloned(),
         start_status,
-        // A session that may be running but has no connected worker view
-        // cannot say whether its child still waits; one that cannot be
-        // running has nothing to wait for.
-        work_liveness: match session.lifecycle {
-            ViewerLifecycleCategory::Live | ViewerLifecycleCategory::Starting => {
-                mj_core::subagent::Liveness::Unknown
-            }
-            _ => mj_core::subagent::Liveness::Known(None),
-        },
         ..WaitObservation::default()
     };
     if let Some(view) = live
@@ -404,8 +403,6 @@ pub(super) fn build_observation(
     {
         observation.background_work = Some(ApiBackgroundWork::from(&*snapshot.operational));
         observation.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
-        observation.work_liveness =
-            mj_core::subagent::Liveness::Known(snapshot.operational.work_liveness.clone());
     }
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
         // Use activity and turn facts from the same actor snapshot. The viewer

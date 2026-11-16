@@ -56,6 +56,73 @@ impl RuntimeState {
         )
     }
 
+    /// Ask an idle child's worker to stop the background tasks its harness
+    /// tracks, the capability behind `mj stop-task`. Nothing is stopped while a
+    /// turn runs or a prompt is queued. One failed stop never skips the rest,
+    /// and a task that already ended is not a failure. The whole step is bound
+    /// by [`PARK_TIMEOUT`], the park's own bound; a step that runs out leaves
+    /// the idle reservation to refuse the park, which is retried.
+    async fn stop_idle_background_tasks(&self, session_id: &str) {
+        let Ok(handle) = self
+            .session_manager
+            .client()
+            .session(session_id.to_owned())
+            .await
+        else {
+            return;
+        };
+        let tasks = |handle: &mj_client::session::SessionHandle| {
+            let view = handle.view();
+            let snapshot = view.snapshot.as_ref().filter(|_| view.connected)?;
+            let idle = matches!(
+                snapshot.materialized.execution,
+                mj_core::state::MaterializedExecutionState::Idle
+            ) && snapshot.materialized.active_turn.is_none()
+                && snapshot.materialized.queued_prompts.is_empty();
+            idle.then(|| {
+                snapshot
+                    .operational
+                    .background_commands
+                    .iter()
+                    .filter(|command| command.can_stop)
+                    .map(|command| command.id.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let Some(wanted) = tasks(&handle) else {
+            return;
+        };
+        let stopping = async {
+            let mut stopped = 0;
+            for task in &wanted {
+                match handle.stop_background_task(task.clone()).await {
+                    Ok(()) => stopped += 1,
+                    // Ended on its own since the view was read: nothing to stop.
+                    Err(_) if tasks(&handle).is_none_or(|now| !now.contains(task)) => {}
+                    Err(error) => tracing::warn!(
+                        session_id,
+                        task,
+                        error = format!("{error:#}"),
+                        "could not stop a sub-agent's background task before its park"
+                    ),
+                }
+            }
+            stopped
+        };
+        match tokio::time::timeout(PARK_TIMEOUT, stopping).await {
+            Ok(0) => {}
+            Ok(stopped) => tracing::info!(
+                session_id,
+                stopped,
+                "stopped a told sub-agent's background tasks before its park"
+            ),
+            Err(_) => tracing::warn!(
+                session_id,
+                "stopping a sub-agent's background tasks outlasted the park bound"
+            ),
+        }
+    }
+
     /// Park a sub-agent whose turn ended and whose parent was told. A child
     /// that has work in flight or queued, or that is no longer running, is
     /// left as it is. Any failure leaves the child running; the caller logs it.
@@ -162,6 +229,16 @@ impl RuntimeState {
                         return Ok(DaemonLifecycleResult::Park(
                             crate::controller::ParkOutcome::Busy,
                         ));
+                    }
+                    // The park refuses while the harness tracks background
+                    // commands. The gate is open (the parent was told and its
+                    // grace turn is over, or nothing is alive) and no message of
+                    // the parent is waiting, so the child's own worker is asked
+                    // to stop them. Doing it here, in the serialized decision,
+                    // means a later message waits for this park instead of
+                    // finding its tasks gone.
+                    if failure.is_none() {
+                        state.stop_idle_background_tasks(&session_id).await;
                     }
                     let controller = blocking(Controller::load).await?;
                     let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);

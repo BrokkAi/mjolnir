@@ -92,7 +92,7 @@ pub(crate) struct DelegationPublisher {
     generation: u64,
 }
 impl DelegationSender {
-    pub(super) fn register(&self, session: &str) -> Arc<DelegationPublisher> {
+    pub(crate) fn register(&self, session: &str) -> Arc<DelegationPublisher> {
         let mut mailbox = self.mailbox.lock().expect("delegation mailbox poisoned");
         mailbox.next_generation += 1;
         let generation = mailbox.next_generation;
@@ -111,7 +111,7 @@ impl DelegationSender {
     }
 }
 impl DelegationPublisher {
-    pub(super) fn publish(&self, view: &ManagedSessionView) {
+    pub(crate) fn publish(&self, view: &ManagedSessionView) {
         // A disconnected view is not evidence that durable requests disappeared.
         let Some(value) = DelegationObservation::from_view(view) else {
             return;
