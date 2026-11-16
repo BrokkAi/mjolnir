@@ -9,12 +9,26 @@ const CLOSE_RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(1);
 /// child must not be resubmitted every few seconds.
 const CLOSE_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// How many finished reviewers the restart sweep closes at once. Measured on
+/// the 120-thread development host, 400 stale reviewers destroyed in an
+/// isolated store: throughput stopped improving past 32 in flight (about 17
+/// closes a second, against 0.8 one at a time; each close spends its time in
+/// the `ps` scan of the worker-liveness probe), and 8 and 16 in flight reached
+/// only 4.5 and 5.8 a second. With 2,000 in flight the closes saturated tokio's
+/// 512-thread blocking pool and an unrelated blocking call waited up to 98
+/// seconds; at 128 in flight it waited under 60 milliseconds. 64 is twice the
+/// knee and an eighth of the pool.
+pub(super) const SWEEP_CLOSE_WIDTH: usize = 64;
+
 /// What the closer has learned about one child's close: how many attempts in a
 /// row failed and the last failure it reported.
 #[derive(Default)]
 pub(super) struct CloseAttempts {
     failures: u32,
     last_failure: Option<String>,
+    /// The restart sweep started this close, and its first result starts the
+    /// next swept child.
+    advances_sweep: bool,
 }
 
 impl CloseAttempts {
@@ -354,6 +368,28 @@ impl HostState {
         }
     }
 
+    /// Starts the close of the next child the restart sweep queued, if any.
+    pub(super) fn close_next_swept_child(&mut self) {
+        while let Some(child) = self.sweep_queue.pop_front() {
+            if self
+                .child_closure_owners
+                .values()
+                .any(|(id, _)| id == &child)
+            {
+                continue;
+            }
+            self.spawn_child_close(
+                child,
+                std::time::Duration::ZERO,
+                CloseAttempts {
+                    advances_sweep: true,
+                    ..CloseAttempts::default()
+                },
+            );
+            return;
+        }
+    }
+
     pub(super) fn close_child(&mut self, child: String) {
         if self
             .child_closure_owners
@@ -393,6 +429,9 @@ impl HostState {
             .child_closure_owners
             .remove(&id)
             .expect("a supervised child close has an owner");
+        if std::mem::take(&mut attempts.advances_sweep) {
+            self.close_next_swept_child();
+        }
         let failure = match result {
             Ok((_, Ok(()))) => {
                 if attempts.failures > 0 {

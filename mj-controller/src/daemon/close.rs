@@ -265,17 +265,13 @@ impl RuntimeState {
             not_handed_back,
             "stopping sub-agents before suspending their parent"
         );
-        for child in stopped {
-            let child_id = child.child_session_id;
-            // A sub-agent borrows its parent's worker and owns no branch.
-            Box::pin(self.force_destroy_indexed_session(
-                child_id.clone(),
-                BranchDisposition::Keep,
-                LifecycleKind::StopSubagent,
-            ))
+        let children = stopped
+            .into_iter()
+            .map(|child| child.child_session_id)
+            .collect();
+        self.stop_subagents(children, LifecycleKind::StopSubagent, None)
             .await
-            .with_context(|| format!("stop sub-agent {child_id} before suspending its parent"))?;
-        }
+            .context("stop sub-agents before suspending their parent")?;
         Ok(())
     }
 

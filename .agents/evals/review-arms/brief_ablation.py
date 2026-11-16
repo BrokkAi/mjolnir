@@ -171,15 +171,19 @@ def insert(brief, section, after_line, item):
 
 def plus(path, replace, out):
     rows = [json.loads(l) for l in open(path) if l.strip()]
-    ids = [r["id"] for r in rows]
-    if len(ids) != len(set(ids)) or not set(ids) <= set(diffs()):
-        raise SystemExit(f"edited rows must be distinct diffs of the plan: {ids}")
+    # A compound fact may be split into at most two consecutive items (the plan's arm D); the
+    # second row's after_line is the first new item, so rows of one diff apply in file order.
+    by_bug = collections.defaultdict(list)
     for r in rows:
-        bug = r["id"]
+        by_bug[r["id"]].append(r)
+    if not set(by_bug) <= set(diffs()) or any(len(rs) > 2 for rs in by_bug.values()):
+        raise SystemExit(f"edited rows must name diffs of the plan, at most two each: {[r['id'] for r in rows]}")
+    for bug, rs in by_bug.items():
         src = ROOT / "briefs/bifrost" / bug / "brief.md"
-        text = src.read_text()
+        text = result = src.read_text()
         try:
-            result = insert(text, r["section"], r["after_line"], r["item"])
+            for r in rs:
+                result = insert(result, r["section"], r["after_line"], r["item"])
         except ValueError as e:
             raise SystemExit(f"{bug}: {e}")
         d = out / bug
@@ -187,10 +191,11 @@ def plus(path, replace, out):
             raise SystemExit(f"{d / 'brief.md'} exists; give --replace {bug} to overwrite it")
         d.mkdir(parents=True, exist_ok=True)
         (d / "brief.md").write_text(result)
-        save(d / "meta.json", {"source": str(src), "source_sha256": sha(text), "section": r["section"],
-                               "after_line": r["after_line"], "inserted": r["item"].strip(),
+        save(d / "meta.json", {"source": str(src), "source_sha256": sha(text),
+                               "inserted": [{"section": r["section"], "after_line": r["after_line"],
+                                             "item": r["item"].strip()} for r in rs],
                                "result_sha256": sha(result)})
-        print(f"{bug}: inserted into {r['section']}")
+        print(f"{bug}: inserted {len(rs)} item(s) into {rs[0]['section']}")
     missing = sorted(set(diffs()) - {b for b in diffs() if (out / b / "brief.md").exists()})
     if missing:
         print(f"no bifrost-plus brief yet for: {missing}")

@@ -632,6 +632,57 @@ pub(super) fn archived_repository_snapshot(
                     .to_vec(),
             }),
         },
+        linked_worktrees: repository
+            .linked_worktrees
+            .iter()
+            .enumerate()
+            .map(|(index, worktree)| {
+                let worktree_index = index as u32;
+                let repository_id = || id.clone();
+                Ok(crate::archive::LinkedWorktreeSnapshot {
+                    metadata: worktree.metadata.clone(),
+                    staged_patch: archive
+                        .payload_by_role(&PayloadRole::GitLinkedWorktreeStagedPatch {
+                            repository_id: repository_id(),
+                            worktree: worktree_index,
+                        })?
+                        .to_vec(),
+                    unstaged_patch: archive
+                        .payload_by_role(&PayloadRole::GitLinkedWorktreeUnstagedPatch {
+                            repository_id: repository_id(),
+                            worktree: worktree_index,
+                        })?
+                        .to_vec(),
+                    untracked_tar: archive
+                        .payload_by_role(&PayloadRole::GitLinkedWorktreeUntrackedTar {
+                            repository_id: repository_id(),
+                            worktree: worktree_index,
+                        })?
+                        .to_vec(),
+                    operation_payloads: match worktree.metadata.git_operation {
+                        None => None,
+                        Some(_) => Some(crate::archive::GitOperationPayloads {
+                            conflicted_worktree_tar: archive
+                                .payload_by_role(
+                                    &PayloadRole::GitLinkedWorktreeConflictedWorktreeTar {
+                                        repository_id: repository_id(),
+                                        worktree: worktree_index,
+                                    },
+                                )?
+                                .to_vec(),
+                            state_tar: archive
+                                .payload_by_role(
+                                    &PayloadRole::GitLinkedWorktreeOperationStateTar {
+                                        repository_id: repository_id(),
+                                        worktree: worktree_index,
+                                    },
+                                )?
+                                .to_vec(),
+                        }),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
     })
 }
 

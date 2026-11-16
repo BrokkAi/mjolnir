@@ -244,13 +244,6 @@ impl ReviewEnvironment for ControllerEnvironment {
             .subagents
             .values()
             .filter(|child| child.kind == mj_core::subagent::SubagentKind::Reviewer)
-            .filter(|child| {
-                controller
-                    .state
-                    .sessions
-                    .get(&child.child_session_id)
-                    .is_some_and(|session| session.state.is_active() || session.target.is_some())
-            })
             .map(|child| ReviewerChildRelation {
                 parent_session_id: child.parent_session_id.clone(),
                 request_key: child.kind.request_key(&child.request_key),
@@ -343,8 +336,13 @@ impl ReviewEnvironment for ControllerEnvironment {
             if runtime.session_record(child).is_none() {
                 return Ok(());
             }
+            // A reviewer's verdict lives in the review's own state, and its
+            // usage in the accounting table, so nothing needs the child's
+            // session once its role has an outcome. Destroying it, rather
+            // than suspending it, keeps finished reviewers from piling up as
+            // sub-agents of the session that asked for the review.
             runtime
-                .suspend_session(child.to_owned())
+                .destroy_reviewer_child(child.to_owned())
                 .await
                 .map_err(|e| format!("{e:#}"))
         })
