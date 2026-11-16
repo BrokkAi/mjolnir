@@ -6,8 +6,10 @@
     "permissionGrants": {
       "allow": [
         "command(gh pr list)",
+        "read_file(/personal-notes/)",
         "mcp(mj-memory/*)",
-        "mcp(mj-agents/*)"
+        "mcp(mj-agents/*)",
+        "read_file(@USER_HOME@)"
       ],
       "deny": [
         "command(rm)"

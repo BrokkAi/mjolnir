@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 
 /// One observed identity shared by credential installation and prompt dispatch.
 /// Sampling supplemental recovery evidence never performs filesystem I/O.
@@ -477,9 +478,14 @@ const OWNED_MCP_SERVERS: [&str; 3] = [
 /// these servers. Claude's allowed tools and Codex's server approval mode do
 /// the same for those harnesses.
 ///
+/// Also grant reads below the home directory agy sees in its launch environment.
+/// A trailing directory separator allows nested files and keeps sibling paths
+/// outside the grant (checked against agy 1.5.8). This grants no writes or
+/// commands; agy keeps applying its Auto-mode policy to those tools.
+///
 /// Unconstrained targets run agy with `--dangerously-skip-permissions`, which
 /// already approves every call.
-pub(super) fn stage_antigravity_mcp_grants(spec: &LaunchSpec) -> Result<()> {
+pub(super) fn stage_antigravity_grants(spec: &LaunchSpec) -> Result<()> {
     if spec.harness != HarnessKind::Antigravity
         || spec.execution_policy != ExecutionPolicy::ConfiguredApprovals
     {
@@ -491,10 +497,23 @@ pub(super) fn stage_antigravity_mcp_grants(spec: &LaunchSpec) -> Result<()> {
         .map(|value| spec.harness.home_from_environment(value))
         .with_context(|| {
             format!(
-                "the Antigravity launch has no {}, so its MCP grants cannot be staged",
+                "the Antigravity launch has no {}, so its permission grants cannot be staged",
                 spec.harness.home_env()
             )
         })?;
+    // agy uses Go's os.UserHomeDir: USERPROFILE on Windows, HOME elsewhere.
+    // Its process receives exactly spec.environment, without worker inheritance.
+    let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let user_home = PathBuf::from(spec.environment.get(home_variable).with_context(|| {
+        format!(
+            "the Antigravity launch has no {home_variable}, so its home read grant cannot be staged"
+        )
+    })?);
+    anyhow::ensure!(
+        user_home.is_absolute() && user_home.parent().is_some(),
+        "Antigravity {home_variable} must name an absolute home directory below the filesystem root: {}",
+        user_home.display()
+    );
     let path = home
         .join("config/projects")
         .join(format!("{ANTIGRAVITY_PROJECT_ID}.json"));
@@ -513,7 +532,7 @@ pub(super) fn stage_antigravity_mcp_grants(spec: &LaunchSpec) -> Result<()> {
         .into_iter()
         .map(|(server, _)| server)
         .collect::<Vec<_>>();
-    let mut project = with_owned_mcp_grants(existing, &servers)
+    let mut project = with_antigravity_grants(existing, &servers, &user_home)
         .with_context(|| format!("update Antigravity project file {}", path.display()))?;
     project.push(b'\n');
     mj_core::config::atomic_write(&path, &project)
@@ -521,11 +540,13 @@ pub(super) fn stage_antigravity_mcp_grants(spec: &LaunchSpec) -> Result<()> {
 }
 
 /// agy's project file with `mcp(<server>/*)` allowed for `servers` and for no
-/// other Mjolnir server. Everything else agy keeps in the file, and every
-/// other grant, is preserved.
-fn with_owned_mcp_grants(
+/// other Mjolnir server, plus reads below `user_home`. Other project entries
+/// and grants are preserved. Historical home read rules cannot be distinguished
+/// from the person's own rules, so only the current rule is deduplicated.
+fn with_antigravity_grants(
     existing: Option<serde_json::Value>,
     servers: &[String],
+    user_home: &Path,
 ) -> Result<Vec<u8>> {
     fn object<'a>(
         parent: &'a mut serde_json::Map<String, serde_json::Value>,
@@ -549,17 +570,25 @@ fn with_owned_mcp_grants(
         .or_insert_with(|| serde_json::Value::Array(Vec::new()))
         .as_array_mut()
         .context("allow is not a JSON array")?;
+    let directory_prefix = user_home.join("");
+    let read_rule = format!(
+        "read_file({})",
+        directory_prefix
+            .to_str()
+            .context("Antigravity home is not UTF-8")?
+    );
     let owned = OWNED_MCP_SERVERS.map(rule);
     allow.retain(|entry| {
         !entry
             .as_str()
-            .is_some_and(|rule| owned.iter().any(|owned| owned == rule))
+            .is_some_and(|rule| rule == read_rule || owned.iter().any(|owned| owned == rule))
     });
     allow.extend(
         servers
             .iter()
             .map(|server| serde_json::Value::String(rule(server))),
     );
+    allow.push(serde_json::Value::String(read_rule));
     serde_json::to_vec_pretty(&project).context("serialize the project file")
 }
 

@@ -541,9 +541,9 @@ async fn run_bridge(
     // grants at startup.
     {
         let staged = spec.clone();
-        tokio::task::spawn_blocking(move || stage_antigravity_mcp_grants(&staged))
+        tokio::task::spawn_blocking(move || stage_antigravity_grants(&staged))
             .await
-            .context("stage Antigravity MCP grants task failed")??;
+            .context("stage Antigravity permission grants task failed")??;
     }
     let spec = &spec;
     let mut child = Command::new(&spec.command)
