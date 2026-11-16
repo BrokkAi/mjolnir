@@ -16,6 +16,12 @@ use crate::text::{counted, format_resource_bytes, refresh_age};
 /// longer what the host is doing.
 pub const CAPACITY_SAMPLE_STALE_AFTER_SECONDS: u64 = 90;
 
+/// Whether a reading sampled at `sampled_at` has stopped tracking its host.
+/// Every surface that marks capacity stale asks this one rule.
+pub fn capacity_sample_is_stale(sampled_at: u64, now_epoch_seconds: u64) -> bool {
+    now_epoch_seconds.saturating_sub(sampled_at) > CAPACITY_SAMPLE_STALE_AFTER_SECONDS
+}
+
 /// Why a reading cannot be trusted, if it cannot: a probe that failed, or a
 /// sample that stopped refreshing. `None` means the reading is current.
 pub fn capacity_staleness(
@@ -31,14 +37,12 @@ pub fn capacity_staleness(
         return has_reading.then(|| format!("stale: {error}"));
     }
     let sampled_at = sampled_at_epoch_seconds?;
-    (now_epoch_seconds.saturating_sub(sampled_at) > CAPACITY_SAMPLE_STALE_AFTER_SECONDS).then(
-        || {
-            format!(
-                "stale: sampled {}",
-                refresh_age(now_epoch_seconds, sampled_at)
-            )
-        },
-    )
+    capacity_sample_is_stale(sampled_at, now_epoch_seconds).then(|| {
+        format!(
+            "stale: sampled {}",
+            refresh_age(now_epoch_seconds, sampled_at)
+        )
+    })
 }
 
 /// Everything the capacity service knows about one probe target. One value

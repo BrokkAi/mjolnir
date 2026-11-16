@@ -707,10 +707,8 @@ pub(super) fn spawn_capacity_service(
         .active_controller_projection()
         .deployment_capacity_targets();
     targets_tx.send_replace(initial);
-    let (states_tx, states_rx) = tokio::sync::watch::channel(BTreeMap::<
-        String,
-        crate::targets::TargetCapacityState,
-    >::new());
+    let (states_tx, states_rx) =
+        tokio::sync::watch::channel(BTreeMap::<String, crate::targets::TargetCapacityState>::new());
     let feed = CapacityFeed {
         targets: targets_tx.subscribe(),
         states: states_rx,

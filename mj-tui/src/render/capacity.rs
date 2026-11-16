@@ -14,8 +14,6 @@ pub(crate) fn fleet_vm_label(detail: &CapacityDetail) -> String {
     crate::widgets::counted(count, "VM", "VMs")
 }
 
-pub(crate) use mj_core::targets::CAPACITY_SAMPLE_STALE_AFTER_SECONDS;
-
 /// Why the row's reading cannot be trusted, if it cannot.
 pub(crate) fn capacity_staleness(
     detail: &CapacityDetail,

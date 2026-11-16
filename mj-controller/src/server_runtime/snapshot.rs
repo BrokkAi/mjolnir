@@ -57,13 +57,14 @@ pub(super) struct PhoneCapacity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PhoneRefresh {
     Idle,
-    Waiting { after_results: u64 },
+    Waiting {
+        after_results: u64,
+    },
     /// The poller was gone and refused the nudge.
-    Rejected { after_results: u64 },
+    Rejected {
+        after_results: u64,
+    },
 }
-
-/// How old a reading may be before the page says so.
-pub(super) const CAPACITY_STALE_AFTER: Duration = Duration::from_secs(120);
 
 /// Keep the state map in step with the targets the daemon's capacity service
 /// probes.
@@ -142,7 +143,7 @@ pub(super) fn viewer_capacity(
                 // A target with no result yet is loading, not idle.
                 refreshing: !rejected && (waiting || reading.results == 0),
                 stale: reading.sampled_at_epoch_seconds.is_some_and(|sampled| {
-                    now.saturating_sub(sampled) > CAPACITY_STALE_AFTER.as_secs()
+                    mj_core::targets::capacity_sample_is_stale(sampled, now)
                 }),
                 has_error: rejected || reading.probe_error.is_some(),
             }
