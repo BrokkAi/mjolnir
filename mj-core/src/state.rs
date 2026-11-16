@@ -334,7 +334,11 @@ impl MaterializedTurnOutcome {
     /// The highest acceptance answered by the projection, or a legacy row.
     pub fn answered_ordinal(&self) -> Option<u64> {
         self.answered_through.or_else(|| {
-            crate::subagent::reminded_turn_ordinal(&self.command_id).or(self.accepted_ordinal)
+            crate::subagent::reminded_turn_ordinal(&self.command_id)
+                .or_else(|| {
+                    crate::subagent::hold_follow_up_of(&self.command_id).map(|(_, ordinal)| ordinal)
+                })
+                .or(self.accepted_ordinal)
         })
     }
 

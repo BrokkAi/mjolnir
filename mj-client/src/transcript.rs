@@ -1443,6 +1443,8 @@ mod tests {
         };
         assert!(!user("user:prompt-1").generated);
         assert!(user("user:handback-reminder-5").generated);
+        assert!(user("user:hold-wake-5").generated);
+        assert!(user("user:hold-give-up-5").generated);
         assert!(user("user:session-message-turn-r1").generated);
     }
 

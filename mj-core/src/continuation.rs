@@ -207,6 +207,10 @@ generated_prompts! {
         MailboxWake => "mailbox-wake-",
         /// The prompt that reminds a child to hand back its report.
         HandbackReminder => "handback-reminder-",
+        /// The prompt that tells a held child its background work has exited.
+        HoldWake => "hold-wake-",
+        /// The prompt that asks a held child to hand back after the hold ended.
+        HoldGiveUp => "hold-give-up-",
         /// Another session's message delivered as a turn.
         SessionMessageTurn => "session-message-turn-",
         /// A worker's retry after a provider failure.
