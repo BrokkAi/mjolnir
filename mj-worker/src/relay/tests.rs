@@ -5005,6 +5005,35 @@ fn a_requested_stop_acknowledgement_does_not_open_a_harness_turn() {
     assert!(state.harness_turn.is_some());
 }
 
+// Hard-won: review round 3: the adapter wraps the acknowledgement in a blockquote paragraph,
+// so a stop requested on an idle session opened a harness turn that never settled.
+#[test]
+fn an_idle_stop_acknowledgement_in_the_adapters_blockquote_shape_opens_no_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay_with_stoppable_task(temp.path());
+    relay
+        .background_task_stop_target("air:4:root:sleeper")
+        .unwrap();
+    // As recorded from claude-agent-acp: noticeTranscriptText through transcriptBlock.
+    let recorded =
+        "\n\n> **Task stopped by user:** python3 -c \"import time; time.sleep(100020)\".\n\n";
+    relay
+        .record_session_update(agent_text_chunk(recorded))
+        .unwrap();
+    let state = relay.operational_state();
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert!(
+        state.harness_turn.is_none(),
+        "no model cycle follows a requested stop, so no result would settle a turn"
+    );
+    // Without a pending stop the same text is ordinary agent output.
+    let mut other = claude_relay(temp.path().join("other").as_path());
+    other
+        .record_session_update(agent_text_chunk(recorded))
+        .unwrap();
+    assert!(other.operational_state().harness_turn.is_some());
+}
+
 // Hard-won: 460153f3: Claude renamed tasks between the stop request and its stop acknowledgement.
 #[test]
 fn a_stop_acknowledgement_matches_whatever_name_the_adapter_now_uses() {

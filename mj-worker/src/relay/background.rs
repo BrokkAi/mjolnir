@@ -79,6 +79,17 @@ pub(super) fn is_agent_output(update: &SessionUpdate) -> bool {
 /// (`taskStopped`, via `noticeTranscriptText`) on 2026-09-22.
 pub(super) const CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX: &str = "**Task stopped by user:** ";
 
+/// Whether `text` is the adapter's stop acknowledgement. The adapter renders
+/// the notice with `transcriptBlock` (`dist/session-notices.js`, claude-agent-acp
+/// 0.102.0 and later): a blockquote paragraph with blank lines on both sides,
+/// `"\n\n> **Task stopped by user:** <name>.\n\n"`, so the marker is not at
+/// the start of the chunk. The bare form is what older adapters sent.
+fn is_stop_acknowledgement_text(text: &str) -> bool {
+    let text = text.trim_start();
+    let text = text.strip_prefix("> ").unwrap_or(text);
+    text.starts_with(CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX)
+}
+
 /// The text of an agent message chunk whose content is a single text block.
 pub(super) fn agent_chunk_text(update: &SessionUpdate) -> Option<&str> {
     match update {
@@ -621,8 +632,7 @@ impl DurableRelay {
                     .get(id)
                     .is_some_and(|pending| !pending.is_empty())
             })
-            && agent_chunk_text(update)
-                .is_some_and(|text| text.starts_with(CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX))
+            && agent_chunk_text(update).is_some_and(is_stop_acknowledgement_text)
     }
 
     pub(super) fn is_claude_stop_acknowledgement(&self, update: &SessionUpdate) -> bool {
