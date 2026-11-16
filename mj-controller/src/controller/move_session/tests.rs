@@ -5682,8 +5682,15 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
         operation.cancellation_requested = false;
         operation.error = None;
         operation.selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+        // What the dashboard seals: no attached directories, and an explicitly
+        // cleared resource allocation.
+        operation.selection.additional_mounts = Some(Vec::new());
+        operation.selection.clear_resource_allocation = true;
         crate::database::save_move_operation(&operation).unwrap();
         let mut requested = operation.selection.clone();
+        // Hard-won: move-f309ba7ac67ad183c55de12d66239891: the CLI could not retry a Move the dashboard sealed, because it cannot send attached directories or a cleared allocation.
+        requested.additional_mounts = None;
+        requested.clear_resource_allocation = false;
         // Hard-won: 5390a50d: omitted retry fields used source settings and stranded a sealed Move.
         requested.profile_id = None;
         requested.target_template_id = None;
