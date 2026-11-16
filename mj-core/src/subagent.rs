@@ -1196,6 +1196,25 @@ fn bounded_report_with_recovery(text: &str, maximum: usize, recovery: &str) -> (
     )
 }
 
+/// How long Mjolnir holds a child that ended its turn to wait for processes it
+/// started before asking it to hand back what it has. The user chose 30
+/// minutes on 2026-11-16: the measured 90th percentile of background work that
+/// agents waited for was 30 minutes (1,057 tasks since 2026-11-01; 99th
+/// percentile 115 minutes), and a longer run survives because a park waits for
+/// the parent's next turn, in which the parent can tell the child to continue.
+pub const HOLD_GIVE_UP_MS: i64 = 30 * 60 * 1000;
+
+/// Which follow-up prompt Mjolnir sends a child it is holding while the child
+/// waits for its own background processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldFollowUpKind {
+    /// Every process the child was waiting for has exited.
+    ProcessesExited,
+    /// The child waited [`HOLD_GIVE_UP_MS`] and should hand back what it has.
+    GiveUp,
+}
+
 /// Whether a command id names the prompt that reminds a child to hand back its
 /// report, which is how [`report_state`] tells it from the task it follows up.
 #[must_use]

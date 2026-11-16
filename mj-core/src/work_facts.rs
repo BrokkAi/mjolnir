@@ -118,6 +118,24 @@ pub struct ChangedPath {
     pub path: String,
 }
 
+/// Whether the work processes a finished turn left running are still alive.
+///
+/// The worker owns this fact: it watches the process identities recorded in
+/// that turn's [`WorkFacts`] and republishes the count as they exit, because
+/// only the worker can see its own process namespace (a remote host or a
+/// container). The daemon reads it from the relay snapshot to hold a child
+/// that is waiting on its own background work, and to delay a park that would
+/// stop those processes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkLiveness {
+    /// `completed_ordinal` of the turn whose work facts are watched.
+    pub completed_ordinal: u64,
+    /// How many of that turn's process identities are still alive.
+    pub alive: u32,
+    /// Wall-clock time of the check that produced `alive`.
+    pub checked_at_ms: u64,
+}
+
 impl WorkFacts {
     /// Facts when nothing could be observed, with the reason for both parts.
     pub fn unavailable(reason: impl Into<String>) -> Self {
