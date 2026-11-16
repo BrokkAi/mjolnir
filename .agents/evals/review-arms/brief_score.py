@@ -28,7 +28,11 @@ import statistics
 import sys
 
 import brief_oracle
-from driver import ARMS, BRIEF_ARMS, ROOT, SCRIPTS, save
+from driver import ARMS, BRIEF_ARMS, QUERY_ARMS, ROOT, SCRIPTS, save
+
+# The condition each judged arm stands for: its brief kind, or "site-tool" for the query arms
+# (brief/PLAN-oz.md), which carry no brief but a site_context tool.
+CONDITION = {**BRIEF_ARMS, **{a: "site-tool" for a in QUERY_ARMS}}
 
 BASELINE_ARMS = ("A", "B", "D", "D2")
 MODELS = ("gpt-6.1-terra", "gpt-6.1-sol")
@@ -46,6 +50,10 @@ def scoped_sets():
 
 def latency(session_dir):
     """Seconds from the reviewer's prompt to the end of its turn; the same definition as score.py."""
+    # Reviewers captured after mj 8fe3c40bd have no session or transcript (driver.py reads the
+    # stored handback instead), so their latency is unknown, not zero.
+    if not (session_dir / "transcript.json").exists():
+        return None
     row = json.loads((session_dir / "session.json").read_text())
     done = (row.get("last_turn_outcome") or {}).get("completed_at_ms")
     items = [i for p in json.loads((session_dir / "transcript.json").read_text()) for i in p["items"]]
@@ -66,9 +74,10 @@ def sessions(arms):
                 if r["effort"] != "high" or r["model"] not in MODELS or not (sd / "output.md").exists():
                     continue
                 usage = json.loads((sd / "usage.json").read_text())
-                tools = sum(1 for p in json.loads((sd / "transcript.json").read_text()) for i in p["items"]
-                            if i["role"] in ("tool", "terminal"))
-                out.append({"bug": bug, "arm": arm, "condition": BRIEF_ARMS[arm] if arm in arms else "no-brief",
+                tools = (sum(1 for p in json.loads((sd / "transcript.json").read_text()) for i in p["items"]
+                             if i["role"] in ("tool", "terminal"))
+                         if (sd / "transcript.json").exists() else None)
+                out.append({"bug": bug, "arm": arm, "condition": CONDITION[arm] if arm in arms else "no-brief",
                             "session": r["child"], "model": r["model"], "dir": str(sd),
                             "latency_s": latency(sd), "tool_calls": tools,
                             "total_tokens": usage["totals"]["total_tokens"]["tokens"]})
@@ -77,7 +86,7 @@ def sessions(arms):
 
 def conditions(arms):
     """no-brief, then each brief kind (oracle, blind) the arms carry; kinds are never pooled."""
-    return ["no-brief", *sorted({BRIEF_ARMS[a] for a in arms})]
+    return ["no-brief", *sorted({CONDITION[a] for a in arms})]
 
 
 def require_complete(rows, arms):
@@ -86,7 +95,7 @@ def require_complete(rows, arms):
     No-brief: the stored arms give each Hard-won diff at least 3 sessions per model.
     Each brief kind: exactly the sessions its arms launch (driver.ARMS), all with output.
     """
-    planned = collections.Counter((BRIEF_ARMS[arm], m.split(":")[0]) for arm in arms for m in ARMS[arm])
+    planned = collections.Counter((CONDITION[arm], m.split(":")[0]) for arm in arms for m in ARMS[arm])
     have = collections.Counter((r["bug"], r["condition"], r["model"]) for r in rows)
     gaps = []
     for bug in sum(scoped_sets().values(), []):
@@ -309,7 +318,7 @@ def score():
             report["per_arm"].append({"condition": cond, "model": model, "sessions": len(ks),
                                       "median_tokens": statistics.median(k["total_tokens"] for k in ks),
                                       "median_latency_s": statistics.median(lat) if lat else None,
-                                      "median_tool_calls": statistics.median(k["tool_calls"] for k in ks)})
+                                      "median_tool_calls": (statistics.median(t) if (t := [k["tool_calls"] for k in ks if k["tool_calls"] is not None]) else None)})
     if "oracle" in conds:
         report["stage_a"] = decide(rate)
     if "bifrost" in conds and "blind" in conds:
