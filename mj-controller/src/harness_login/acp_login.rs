@@ -245,7 +245,7 @@ async fn sign_in(
         return Ok(Outcome::DeviceAuth);
     }
     println!("Signing in with {} ({}).", method.name, method.id);
-    let terminal = match method.terminal_command(kind, entrypoint) {
+    let terminal = match method.terminal_command(kind, home, entrypoint, environment) {
         Ok(terminal) => terminal,
         Err(error) => {
             session.shutdown().await;
@@ -322,6 +322,11 @@ async fn sign_in(
             };
             if let Err(error) = result {
                 session.shutdown().await;
+                if is_headless_browser_error(&error) {
+                    return Ok(Outcome::Unavailable(
+                        "no browser is available for ACP sign-in".to_owned(),
+                    ));
+                }
                 return Err(error.context(format!(
                     "complete the {} ACP sign-in method {}",
                     kind.display_name(),
@@ -393,33 +398,47 @@ impl AuthMethod {
     fn terminal_command(
         &self,
         kind: HarnessKind,
+        home: &Path,
         entrypoint: &Path,
+        environment: &BTreeMap<String, String>,
     ) -> Result<Option<TerminalCommand>> {
-        if let Some(hint) = &self.terminal {
+        let mut resolved = if let Some(hint) = &self.terminal {
             if let Some(command) = &hint.command {
-                return Ok(Some(TerminalCommand {
+                Some(TerminalCommand {
                     command: PathBuf::from(command),
                     args: hint.args.clone(),
                     env: hint.env.clone(),
-                }));
-            }
-            if let Some(fallback) = known_terminal_fallback(kind, &self.id, entrypoint) {
-                return Ok(Some(fallback));
-            }
-            if hint.args.is_empty() {
+                })
+            } else if let Some(fallback) =
+                known_terminal_fallback(kind, &self.id, entrypoint, environment)
+            {
+                Some(fallback)
+            } else if hint.args.is_empty() {
                 bail!(
                     "the {} ACP bridge advertised a terminal login method {} without a command",
                     kind.display_name(),
                     self.id
                 );
+            } else {
+                Some(TerminalCommand {
+                    command: entrypoint.to_path_buf(),
+                    args: hint.args.clone(),
+                    env: hint.env.clone(),
+                })
             }
-            return Ok(Some(TerminalCommand {
-                command: entrypoint.to_path_buf(),
-                args: hint.args.clone(),
-                env: hint.env.clone(),
-            }));
+        } else {
+            known_terminal_fallback(kind, &self.id, entrypoint, environment)
+        };
+        if let Some(command) = &mut resolved
+            && kind == HarnessKind::Antigravity
+            && !command
+                .args
+                .iter()
+                .any(|arg| arg == "--gemini-dir" || arg == "--gemini_dir")
+        {
+            command.args.extend(kind.home_cli_args(home));
         }
-        Ok(known_terminal_fallback(kind, &self.id, entrypoint))
+        Ok(resolved)
     }
 }
 
@@ -431,6 +450,7 @@ fn known_terminal_fallback(
     kind: HarnessKind,
     method: &str,
     entrypoint: &Path,
+    environment: &BTreeMap<String, String>,
 ) -> Option<TerminalCommand> {
     let args: &[&str] = match (kind, method) {
         (HarnessKind::OpenCode, "opencode-login") => &["auth", "login", "--standalone"],
@@ -438,7 +458,13 @@ fn known_terminal_fallback(
         // Grok's ACP bridge names an agent method, but its usable sign-in is
         // the CLI's own login. Running it is safer than leaving `authenticate`
         // to open a browser the target cannot show.
-        (HarnessKind::Grok, "grok.com") => &["login"],
+        (HarnessKind::Grok, "grok.com") => {
+            if has_desktop_session(environment) {
+                &["login"]
+            } else {
+                &["login", "--device-auth"]
+            }
+        }
         _ => return None,
     };
     Some(TerminalCommand {
@@ -490,13 +516,22 @@ fn looks_interactive(id: &str) -> bool {
 }
 
 /// Whether this login has a desktop session for a browser callback or opener.
-fn has_desktop_session(environment: &BTreeMap<String, String>) -> bool {
+pub(crate) fn has_desktop_session(environment: &BTreeMap<String, String>) -> bool {
     cfg!(any(target_os = "macos", target_os = "windows"))
         || ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|name| {
             environment
                 .get(*name)
                 .is_some_and(|value| !value.trim().is_empty())
         })
+}
+
+/// agy refuses `authenticate` with a generic -32603 when it cannot reach a
+/// browser (for example over SSH, which `has_desktop_session` cannot see on
+/// macOS); its message is the only signal it gives (agy 1.5.8).
+fn is_headless_browser_error(error: &anyhow::Error) -> bool {
+    format!("{error:#}")
+        .to_ascii_lowercase()
+        .contains("no browser is available")
 }
 
 fn api_key_present(environment: &BTreeMap<String, String>) -> bool {
@@ -1314,7 +1349,12 @@ mod tests {
             env_vars: Vec::new(),
         };
         let command = method
-            .terminal_command(HarnessKind::OpenCode, Path::new("/pinned/opencode"))
+            .terminal_command(
+                HarnessKind::OpenCode,
+                Path::new("/home/opencode"),
+                Path::new("/pinned/opencode"),
+                &BTreeMap::new(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(command.command, Path::new("/pinned/opencode"));
