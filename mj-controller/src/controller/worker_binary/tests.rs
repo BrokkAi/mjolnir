@@ -128,6 +128,72 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
     assert!(error.contains("missing worker build stamp"), "{error}");
 }
 
+// Hard-won: 816ca1d77: the controller ran an old root binary that lacks the worker control subcommands
+#[cfg(unix)]
+#[test]
+fn probing_and_stopping_a_root_with_an_old_worker_installs_the_current_one_first() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_OLD_ROOT_WORKER_CHILD";
+    const SESSION: &str = "17171717171717171717171717171717";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        // The current worker: answers the control subcommands, then carries
+        // this build's stamp after its `exit`.
+        let current = directory.path().join("current-worker");
+        let mut body = b"#!/bin/sh\ncase \"$2\" in liveness) echo dead ;; esac\nexit 0\n".to_vec();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "probing_and_stopping_a_root_with_an_old_worker_installs_the_current_one_first",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-816ca1d77-old-root")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root.to_string_lossy().into_owned(),
+    };
+    // A build from before `worker stop|liveness|holder`: clap's own rejection.
+    // Another root hard-links the same inode, so an in-place write would
+    // change it too.
+    let old = "#!/bin/sh\necho \"error: unrecognized subcommand '$2'\" >&2\nexit 2\n";
+    let install_old = || {
+        let _ = std::fs::remove_file(root.join("hel"));
+        std::fs::write(root.join("hel"), old).unwrap();
+        std::fs::set_permissions(root.join("hel"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let shared = directory.path().join("other-root-hel");
+        let _ = std::fs::remove_file(&shared);
+        std::fs::hard_link(root.join("hel"), &shared).unwrap();
+        shared
+    };
+    let root_text = root.to_string_lossy().into_owned();
+
+    let shared = install_old();
+    let liveness =
+        probe_worker_liveness(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
+    assert_eq!(liveness.status, 0);
+    assert_eq!(String::from_utf8_lossy(&liveness.stdout).trim(), "dead");
+    assert_ne!(std::fs::read_to_string(root.join("hel")).unwrap(), old);
+    assert_eq!(std::fs::read_to_string(&shared).unwrap(), old);
+
+    let shared = install_old();
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(SESSION, "test stop")
+        .unwrap()
+        .unwrap();
+    stop_worker(&owner, &ProcessExecutor, &locator, &root_text).unwrap();
+    assert_ne!(std::fs::read_to_string(root.join("hel")).unwrap(), old);
+    assert_eq!(std::fs::read_to_string(&shared).unwrap(), old);
+}
+
 #[test]
 fn stale_pins_are_re_resolved() {
     const CHILD: &str = "MJ_STALE_WORKER_PIN_CHILD";

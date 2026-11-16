@@ -1,20 +1,37 @@
 use super::*;
 
+/// Exit status of a worker control script whose root holds a `hel` that does
+/// not understand `worker stop|liveness|holder`. Nothing ran, so the command
+/// can be run again once the current worker is installed. The link script in
+/// the worker store uses 75 to 77.
+pub const WORKER_CONTROL_STALE_STATUS: i32 = 79;
+
 /// Shell that runs `hel worker <subcommand> --root <root>` from the worker
-/// root's own installed binary, the session's worker build. The worker holds an
-/// exclusive lock on `<root>/worker.lock` for its whole life, which no shell can
-/// test portably, so the target's `hel` does. A root without that binary never
-/// had a worker started from it, so `when_no_binary` answers for it.
+/// root's own installed binary. The worker holds an exclusive lock on
+/// `<root>/worker.lock` for its whole life, which no shell can test portably,
+/// so the target's `hel` does. A root without that binary never had a worker
+/// started from it, so `when_no_binary` answers for it.
+///
+/// The root's binary is whatever build last started a worker there, which can
+/// predate these subcommands. The script then exits with
+/// [`WORKER_CONTROL_STALE_STATUS`] before doing anything, and the controller
+/// installs the current worker and runs it again
+/// (`controller::worker_binary::execute_worker_control`).
 fn installed_worker_script(worker_root: &str, subcommand: &str, when_no_binary: &str) -> String {
     format!(
         r#"hel_root={root}
 if [ -e "$hel_root/hel" ]; then
+    if ! "$hel_root/hel" worker stop --help >/dev/null 2>&1; then
+        echo "worker binary in $hel_root predates the worker control commands" >&2
+        exit {stale}
+    fi
     "$hel_root/hel" worker {subcommand} --root "$hel_root" || exit $?
 else
     {when_no_binary}
 fi
 "#,
         root = posix_quote(worker_root),
+        stale = WORKER_CONTROL_STALE_STATUS,
     )
 }
 

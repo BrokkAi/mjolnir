@@ -625,10 +625,12 @@ impl Controller {
                 let backend =
                     backend_locator(current.target.as_ref().unwrap(), current, &self.config)?;
                 let root = crate::targets::worker_root(&backend, session_id)?;
-                let cleanup = super::super::execute_checked(
+                let cleanup = super::super::worker_binary::execute_worker_control_checked(
                     &crate::targets::CancellableProcessExecutor::with_timeout(
                         std::time::Duration::from_secs(15),
                     ),
+                    &backend,
+                    session_id,
                     crate::targets::command_on_locator(
                         &backend,
                         session_id,

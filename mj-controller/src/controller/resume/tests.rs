@@ -2848,7 +2848,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         }
         let (backend, worker_root) = controller.worker_placement(id).unwrap();
         assert_eq!(
-            worker_recovery(&executor, &backend, &worker_root),
+            worker_recovery(&executor, &backend, id, &worker_root),
             WorkerRecovery::NothingToRecover
         );
         controller
@@ -2861,7 +2861,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         let stale_seed = root.join(mj_core::relay::RESTORED_RELAY_SEED_FILE);
         std::fs::write(&stale_seed, b"old bootstrap input").unwrap();
         assert_eq!(
-            worker_recovery(&executor, &backend, &worker_root),
+            worker_recovery(&executor, &backend, id, &worker_root),
             WorkerRecovery::NothingToRecover
         );
         std::fs::remove_file(stale_seed).unwrap();
@@ -2884,7 +2884,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         std::fs::create_dir_all(root.parent().unwrap()).unwrap();
         // The other caller keeps its existing no-relay recovery semantics.
         assert_eq!(
-            worker_recovery(&executor, &backend, &worker_root),
+            worker_recovery(&executor, &backend, id, &worker_root),
             WorkerRecovery::NothingToRecover
         );
         // A present non-directory is evidence of an unusable lookup, not loss.

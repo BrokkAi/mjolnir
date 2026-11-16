@@ -40,8 +40,74 @@ fn run_owned_worker_stop(
         targets::worker_root(locator, owner.session_id())? == worker_root,
         "worker owner does not cover the selected root"
     );
-    execute_checked(executor, command(locator, worker_root))?;
+    execute_worker_control_checked(
+        executor,
+        locator,
+        owner.session_id(),
+        command(locator, worker_root),
+    )?;
     Ok(())
+}
+
+/// Run a worker control command (`hel worker liveness|holder|stop`, alone or
+/// inside a longer script) for the session's root.
+///
+/// Roots keep the build that last started a worker there, so a parked
+/// sub-agent or a worker not yet upgraded can hold a `hel` that predates those
+/// subcommands. Only a current `hel` can judge or stop such a worker (the lock
+/// it checks is older than the subcommands). The script then exits with
+/// [`targets::WORKER_CONTROL_STALE_STATUS`] without having run anything, so this
+/// installs the current worker through the usual install path and runs the
+/// command once more. The install replaces `hel` by rename, never in place:
+/// roots share inodes and some run them. When the current worker cannot be
+/// installed for the target this fails and names the root; there is no second
+/// way to stop a worker.
+pub(crate) fn execute_worker_control(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    command: &CommandSpec,
+) -> Result<mj_core::targets::CommandOutput> {
+    let output = executor.execute(command)?;
+    if output.status != targets::WORKER_CONTROL_STALE_STATUS {
+        return Ok(output);
+    }
+    let root = targets::worker_root(locator, session_id)?;
+    let worker = WorkerInstall::for_target(locator, executor).with_context(|| {
+        format!(
+            "worker root {root} holds a worker too old to stop or probe, \
+             and the current worker cannot be installed there"
+        )
+    })?;
+    install_worker_binary(executor, locator, session_id, &worker, "hel")
+        .with_context(|| format!("replace the old worker binary in {root}"))?;
+    executor.execute(command)
+}
+
+/// [`execute_worker_control`], failing on a nonzero exit.
+pub(crate) fn execute_worker_control_checked(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    command: CommandSpec,
+) -> Result<mj_core::targets::CommandOutput> {
+    let output = execute_worker_control(executor, locator, session_id, &command)?;
+    crate::controller::check_output(&command, output)
+}
+
+/// Probe worker liveness; see [`execute_worker_control`].
+pub(in crate::controller) fn probe_worker_liveness(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_root: &str,
+) -> Result<mj_core::targets::CommandOutput> {
+    execute_worker_control(
+        executor,
+        locator,
+        session_id,
+        &worker_liveness_command(locator, worker_root),
+    )
 }
 
 /// Restore a stopped Podman target before signaling its worker. Checkpoint
@@ -176,6 +242,7 @@ MJ_ENTRIES
 pub(in crate::controller) fn worker_recovery(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
+    session_id: &str,
     worker_root: &str,
 ) -> WorkerRecovery {
     let answer = |command: CommandSpec| match executor.execute(&command) {
@@ -187,7 +254,12 @@ pub(in crate::controller) fn worker_recovery(
     match answer(worker_recovery_command(locator, worker_root)).as_deref() {
         Some("recoverable" | "partial" | "checkout-partial") => WorkerRecovery::Recoverable,
         Some("nothing" | "absent") => {
-            match answer(worker_liveness_command(locator, worker_root)).as_deref() {
+            match probe_worker_liveness(executor, locator, session_id, worker_root)
+                .ok()
+                .filter(|output| output.status == 0)
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                .as_deref()
+            {
                 Some("dead") => WorkerRecovery::NothingToRecover,
                 Some("alive" | "starting") => WorkerRecovery::Recoverable,
                 _ => WorkerRecovery::Unknown,
@@ -292,7 +364,7 @@ pub(in crate::controller) fn start_worker_durably(
     if let Some(intent) = crate::database::load_worker_restart(id)?
         && intent.operation_id != owner.operation_id()
     {
-        let output = executor.execute(&worker_liveness_command(locator, worker_root))?;
+        let output = probe_worker_liveness(executor, locator, id, worker_root)?;
         ensure!(
             output.status == 0 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
             "another worker replacement is still booting"

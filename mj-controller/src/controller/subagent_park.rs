@@ -238,10 +238,7 @@ impl Controller {
             // An older failed wake may have left a parked record and boot
             // intent. Only proved death permits retiring that intent.
             if crate::database::load_worker_restart(session_id)?.is_some() {
-                let output = executor.execute(&super::worker_binary::worker_liveness_command(
-                    &backend,
-                    &worker_root,
-                ))?;
+                let output = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &worker_root)?;
                 ensure!(
                     output.status == 0 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
                     "parked sub-agent still has a live worker boot"
@@ -330,9 +327,7 @@ impl Controller {
             if let Err(error) = observed {
                 // A failed connection alone does not prove death. The same
                 // lifecycle owner probes and settles before recovery can act.
-                let liveness = executor.execute(&super::worker_binary::worker_liveness_command(
-                    &backend, &worker_root,
-                )).context("check whether the failed unpark worker exited")?;
+                let liveness = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &worker_root).context("check whether the failed unpark worker exited")?;
                 if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
                     let detail = format!("{error:#}");
                     let failure = if mj_core::credentials::text_reports_auth_failure(&detail) {
