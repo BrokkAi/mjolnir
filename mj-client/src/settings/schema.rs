@@ -83,8 +83,7 @@ fn scheduler_defaults() -> Value {
 /// The fields one profile kind uses. Profile validation rejects another
 /// kind's fields, so the editor never offers them.
 fn profile_defaults(kind: &str) -> Value {
-    let mut fields =
-        json!({"enabled":true,"kind":kind,"home":"","environment":{},"context_window_bytes":null,
+    let mut fields = json!({"enabled":true,"kind":kind,"home":"","environment":{},"context_window_bytes":null,
                "load_balancing_may_consume_credits":false});
     let object = fields.as_object_mut().unwrap();
     match kind {

@@ -301,6 +301,11 @@ Always test new code in a separate named instance using `--instance <test-name>`
 Use that instance for every daemon, TUI, CLI, and end-to-end test invocation of
 the new build. Never point a test build at the host's default instance or live
 session data: protocol and store changes must not disrupt ongoing session work.
+Separate instances are for short-lived testing. Stop a test instance's daemon
+(`mj --instance <test-name> daemon stop`) when the test is done. Each running
+daemon refreshes quotas on its own, so leftover daemons add load on shared
+logins. Run long-running work, such as campaigns, experiments and judges, on
+the main instance.
 A binary run from a Cargo target directory, test binaries included, enforces
 this: it refuses to start, replace, stop, or migrate the default instance's
 daemon and store. When it refuses, add `--instance` (or, in a unit test, give

@@ -511,14 +511,10 @@ pub(crate) enum TranscriptHydration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CapacityDetail {
     pub(crate) target: DeploymentCapacityTarget,
-    pub(crate) usage: Option<DeploymentCapacityUsage>,
-    pub(crate) on_demand: bool,
-    /// When the reading in `usage` was taken. A sample that stopped refreshing
-    /// must not read as current, so the clock travels with the reading.
-    pub(crate) sampled_at_epoch_seconds: Option<u64>,
-    /// Why the most recent probe failed, if it did. The last good reading stays
-    /// on screen beside it rather than vanishing on one failed probe.
-    pub(crate) probe_error: Option<String>,
+    /// The reading, its clock, the latest failure and the empty-fleet answer,
+    /// folded by the one reducer the daemon uses. The last good reading stays
+    /// on screen beside a failed probe rather than vanishing.
+    pub(crate) state: mj_core::targets::TargetCapacityState,
     pub(crate) refreshing: bool,
 }
 
@@ -1117,7 +1113,7 @@ impl DashboardState {
     ) -> Vec<&mj_core::targets::storage::TargetStorageView> {
         let hosts = mj_core::targets::storage::capacity_storage_hosts(
             &detail.target,
-            detail.usage.as_ref(),
+            detail.state.usage.as_ref(),
         );
         mj_core::targets::storage::views_for(&self.target_storage, &hosts)
     }
@@ -1131,10 +1127,7 @@ impl DashboardState {
                 let detail = previous.remove(&id).map_or(
                     CapacityDetail {
                         target: target.clone(),
-                        usage: None,
-                        on_demand: false,
-                        sampled_at_epoch_seconds: None,
-                        probe_error: None,
+                        state: Default::default(),
                         refreshing: false,
                     },
                     |mut detail| {
@@ -1164,15 +1157,7 @@ impl DashboardState {
                 return;
             };
             detail.refreshing = false;
-            match result {
-                Ok(usage) => {
-                    detail.on_demand = usage.is_none();
-                    detail.usage = usage;
-                    detail.sampled_at_epoch_seconds = Some(sampled_at_epoch_seconds);
-                    detail.probe_error = None;
-                }
-                Err(error) => detail.probe_error = Some(error),
-            }
+            detail.state.apply(&result, sampled_at_epoch_seconds, 0);
             detail.target.target_ids.clone()
         };
         self.refresh_wizard_resource_limits(&affected_targets);
