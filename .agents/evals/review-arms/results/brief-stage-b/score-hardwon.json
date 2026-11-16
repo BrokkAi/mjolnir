@@ -1,0 +1,491 @@
+{
+  "sets": {
+    "P": 18,
+    "S": 4,
+    "C": 8
+  },
+  "rates": [
+    {
+      "set": "C",
+      "condition": "blind",
+      "model": "gpt-6.1-sol",
+      "diffs": 8,
+      "sessions": 24,
+      "catch_rate": 0.333,
+      "ci95": [
+        0.083,
+        0.667
+      ],
+      "partial_rate": 0.0
+    },
+    {
+      "set": "C",
+      "condition": "blind",
+      "model": "gpt-6.1-terra",
+      "diffs": 8,
+      "sessions": 24,
+      "catch_rate": 0.125,
+      "ci95": [
+        0.0,
+        0.375
+      ],
+      "partial_rate": 0.125
+    },
+    {
+      "set": "C",
+      "condition": "no-brief",
+      "model": "gpt-6.1-sol",
+      "diffs": 8,
+      "sessions": 24,
+      "catch_rate": 0.375,
+      "ci95": [
+        0.125,
+        0.75
+      ],
+      "partial_rate": 0.0
+    },
+    {
+      "set": "C",
+      "condition": "no-brief",
+      "model": "gpt-6.1-terra",
+      "diffs": 8,
+      "sessions": 29,
+      "catch_rate": 0.208,
+      "ci95": [
+        0.0,
+        0.5
+      ],
+      "partial_rate": 0.104
+    },
+    {
+      "set": "C",
+      "condition": "oracle",
+      "model": "gpt-6.1-sol",
+      "diffs": 8,
+      "sessions": 24,
+      "catch_rate": 0.25,
+      "ci95": [
+        0.042,
+        0.542
+      ],
+      "partial_rate": 0.083
+    },
+    {
+      "set": "C",
+      "condition": "oracle",
+      "model": "gpt-6.1-terra",
+      "diffs": 8,
+      "sessions": 24,
+      "catch_rate": 0.167,
+      "ci95": [
+        0.0,
+        0.417
+      ],
+      "partial_rate": 0.167
+    },
+    {
+      "set": "P",
+      "condition": "blind",
+      "model": "gpt-6.1-sol",
+      "diffs": 18,
+      "sessions": 54,
+      "catch_rate": 0.407,
+      "ci95": [
+        0.185,
+        0.63
+      ],
+      "partial_rate": 0.056
+    },
+    {
+      "set": "P",
+      "condition": "blind",
+      "model": "gpt-6.1-terra",
+      "diffs": 18,
+      "sessions": 54,
+      "catch_rate": 0.556,
+      "ci95": [
+        0.333,
+        0.759
+      ],
+      "partial_rate": 0.0
+    },
+    {
+      "set": "P",
+      "condition": "no-brief",
+      "model": "gpt-6.1-sol",
+      "diffs": 18,
+      "sessions": 54,
+      "catch_rate": 0.222,
+      "ci95": [
+        0.074,
+        0.389
+      ],
+      "partial_rate": 0.037
+    },
+    {
+      "set": "P",
+      "condition": "no-brief",
+      "model": "gpt-6.1-terra",
+      "diffs": 18,
+      "sessions": 60,
+      "catch_rate": 0.204,
+      "ci95": [
+        0.056,
+        0.37
+      ],
+      "partial_rate": 0.037
+    },
+    {
+      "set": "P",
+      "condition": "oracle",
+      "model": "gpt-6.1-sol",
+      "diffs": 18,
+      "sessions": 54,
+      "catch_rate": 0.481,
+      "ci95": [
+        0.259,
+        0.704
+      ],
+      "partial_rate": 0.037
+    },
+    {
+      "set": "P",
+      "condition": "oracle",
+      "model": "gpt-6.1-terra",
+      "diffs": 18,
+      "sessions": 54,
+      "catch_rate": 0.593,
+      "ci95": [
+        0.37,
+        0.796
+      ],
+      "partial_rate": 0.037
+    },
+    {
+      "set": "S",
+      "condition": "blind",
+      "model": "gpt-6.1-sol",
+      "diffs": 4,
+      "sessions": 12,
+      "catch_rate": 0.25,
+      "ci95": [
+        0.0,
+        0.75
+      ],
+      "partial_rate": 0.0
+    },
+    {
+      "set": "S",
+      "condition": "blind",
+      "model": "gpt-6.1-terra",
+      "diffs": 4,
+      "sessions": 12,
+      "catch_rate": 0.417,
+      "ci95": [
+        0.0,
+        0.833
+      ],
+      "partial_rate": 0.0
+    },
+    {
+      "set": "S",
+      "condition": "no-brief",
+      "model": "gpt-6.1-sol",
+      "diffs": 4,
+      "sessions": 12,
+      "catch_rate": 0.25,
+      "ci95": [
+        0.0,
+        0.75
+      ],
+      "partial_rate": 0.0
+    },
+    {
+      "set": "S",
+      "condition": "no-brief",
+      "model": "gpt-6.1-terra",
+      "diffs": 4,
+      "sessions": 12,
+      "catch_rate": 0.333,
+      "ci95": [
+        0.0,
+        0.75
+      ],
+      "partial_rate": 0.0
+    },
+    {
+      "set": "S",
+      "condition": "oracle",
+      "model": "gpt-6.1-sol",
+      "diffs": 4,
+      "sessions": 12,
+      "catch_rate": 0.25,
+      "ci95": [
+        0.0,
+        0.75
+      ],
+      "partial_rate": 0.0
+    },
+    {
+      "set": "S",
+      "condition": "oracle",
+      "model": "gpt-6.1-terra",
+      "diffs": 4,
+      "sessions": 12,
+      "catch_rate": 0.5,
+      "ci95": [
+        0.0,
+        1.0
+      ],
+      "partial_rate": 0.0
+    }
+  ],
+  "effects": [
+    {
+      "brief": "blind",
+      "set": "P",
+      "model": "gpt-6.1-terra",
+      "diffs": 18,
+      "effect_points": 35.2,
+      "ci95_points": [
+        14.8,
+        55.6
+      ]
+    },
+    {
+      "brief": "blind",
+      "set": "P",
+      "model": "gpt-6.1-sol",
+      "diffs": 18,
+      "effect_points": 18.5,
+      "ci95_points": [
+        1.9,
+        37.0
+      ]
+    },
+    {
+      "brief": "blind",
+      "set": "S",
+      "model": "gpt-6.1-terra",
+      "diffs": 4,
+      "effect_points": 8.3,
+      "ci95_points": [
+        0.0,
+        25.0
+      ]
+    },
+    {
+      "brief": "blind",
+      "set": "S",
+      "model": "gpt-6.1-sol",
+      "diffs": 4,
+      "effect_points": 0.0,
+      "ci95_points": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "brief": "blind",
+      "set": "C",
+      "model": "gpt-6.1-terra",
+      "diffs": 8,
+      "effect_points": -8.3,
+      "ci95_points": [
+        -25.0,
+        0.0
+      ]
+    },
+    {
+      "brief": "blind",
+      "set": "C",
+      "model": "gpt-6.1-sol",
+      "diffs": 8,
+      "effect_points": -4.2,
+      "ci95_points": [
+        -12.5,
+        0.0
+      ]
+    },
+    {
+      "brief": "oracle",
+      "set": "P",
+      "model": "gpt-6.1-terra",
+      "diffs": 18,
+      "effect_points": 38.9,
+      "ci95_points": [
+        16.7,
+        61.1
+      ]
+    },
+    {
+      "brief": "oracle",
+      "set": "P",
+      "model": "gpt-6.1-sol",
+      "diffs": 18,
+      "effect_points": 25.9,
+      "ci95_points": [
+        7.4,
+        46.3
+      ]
+    },
+    {
+      "brief": "oracle",
+      "set": "S",
+      "model": "gpt-6.1-terra",
+      "diffs": 4,
+      "effect_points": 16.7,
+      "ci95_points": [
+        0.0,
+        50.0
+      ]
+    },
+    {
+      "brief": "oracle",
+      "set": "S",
+      "model": "gpt-6.1-sol",
+      "diffs": 4,
+      "effect_points": 0.0,
+      "ci95_points": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "brief": "oracle",
+      "set": "C",
+      "model": "gpt-6.1-terra",
+      "diffs": 8,
+      "effect_points": -4.2,
+      "ci95_points": [
+        -12.5,
+        0.0
+      ]
+    },
+    {
+      "brief": "oracle",
+      "set": "C",
+      "model": "gpt-6.1-sol",
+      "diffs": 8,
+      "effect_points": -12.5,
+      "ci95_points": [
+        -29.2,
+        0.0
+      ]
+    }
+  ],
+  "per_arm": [
+    {
+      "condition": "no-brief",
+      "model": "gpt-6.1-terra",
+      "sessions": 101,
+      "median_tokens": 259665,
+      "median_latency_s": 44.3,
+      "median_tool_calls": 8
+    },
+    {
+      "condition": "no-brief",
+      "model": "gpt-6.1-sol",
+      "sessions": 90,
+      "median_tokens": 483815.0,
+      "median_latency_s": 103.30000000000001,
+      "median_tool_calls": 12.0
+    },
+    {
+      "condition": "blind",
+      "model": "gpt-6.1-terra",
+      "sessions": 90,
+      "median_tokens": 199064.5,
+      "median_latency_s": 34.7,
+      "median_tool_calls": 5.0
+    },
+    {
+      "condition": "blind",
+      "model": "gpt-6.1-sol",
+      "sessions": 90,
+      "median_tokens": 446742.0,
+      "median_latency_s": 96.1,
+      "median_tool_calls": 12.0
+    },
+    {
+      "condition": "oracle",
+      "model": "gpt-6.1-terra",
+      "sessions": 90,
+      "median_tokens": 188553.0,
+      "median_latency_s": 32.05,
+      "median_tool_calls": 5.0
+    },
+    {
+      "condition": "oracle",
+      "model": "gpt-6.1-sol",
+      "sessions": 90,
+      "median_tokens": 430788.0,
+      "median_latency_s": 99.65,
+      "median_tool_calls": 12.0
+    }
+  ],
+  "expected_catches_of_30": [
+    {
+      "model": "gpt-6.1-terra",
+      "condition": "no-brief",
+      "value": 6.7
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "condition": "blind",
+      "value": 12.7
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "condition": "oracle",
+      "value": 14.0
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "condition": "no-brief",
+      "value": 8.0
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "condition": "blind",
+      "value": 11.0
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "condition": "oracle",
+      "value": 11.7
+    }
+  ],
+  "stage_a": {
+    "decision": "supports building",
+    "control_1_passes": true,
+    "per_model": {
+      "gpt-6.1-terra": {
+        "effect_points": 38.9,
+        "ci95_points": [
+          16.7,
+          61.1
+        ],
+        "control_gain_points": -4.2,
+        "decision_effect_points": 38.9,
+        "decision_ci95_points": [
+          16.7,
+          61.1
+        ]
+      },
+      "gpt-6.1-sol": {
+        "effect_points": 25.9,
+        "ci95_points": [
+          7.4,
+          46.3
+        ],
+        "control_gain_points": -12.5,
+        "decision_effect_points": 25.9,
+        "decision_ci95_points": [
+          7.4,
+          46.3
+        ]
+      }
+    }
+  }
+}

@@ -308,6 +308,8 @@ impl Controller {
                         reconnect: &reconnect,
                         launch: Some(&launch),
                         prepared: true,
+                        discard_queued_prompts: None,
+                        swap_admission: None,
                         messages: &RESTART_FROM_PARKED,
                     },
                 )
@@ -589,7 +591,7 @@ mod tests {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
                 claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)

@@ -336,7 +336,11 @@ fn resolve_launch(
     )?;
     if !model_first
         && let Some(profile_id) = profile_id.as_deref()
-        && let Err(error) = crate::server::require_profile(&snapshot, profile_id)
+        && let Err(error) = if request.profile_id.is_some() {
+            crate::server::require_named_profile(&snapshot, profile_id)
+        } else {
+            crate::server::require_profile(&snapshot, profile_id).map(|_| ())
+        }
     {
         return Err(if request.profile_id.is_some() {
             error.into()
@@ -397,10 +401,8 @@ pub(super) async fn resume(
         if !session.capabilities.resume {
             return Err(ApiFailure::conflict(resume_refusal(session)));
         }
-        // The daemon's resume restores a checkpoint and nothing else. Without
-        // one it could only fail after this route had answered, where the
-        // caller never sees why (launch finding R6-1).
-        if !session.has_checkpoint {
+        // Failed sessions can repair their retained environment without an archive.
+        if !session.has_resume_source() {
             return Err(ApiFailure::conflict(no_checkpoint_refusal(session)));
         }
         let resolved = |named: Option<String>, recorded: &str, field: &str| match named {
@@ -515,6 +517,10 @@ pub(super) fn resume_refusal(session: &ViewerSession) -> String {
         ViewerLifecycleCategory::Live => {
             "this session is already running; to restart it, suspend it first (`mj suspend`), then resume it".to_owned()
         }
+        ViewerLifecycleCategory::Suspended | ViewerLifecycleCategory::Failed
+            if !session.has_resume_source() => {
+                no_checkpoint_refusal(session)
+            }
         ViewerLifecycleCategory::Suspended | ViewerLifecycleCategory::Failed => {
             "this session has an operation running; wait for it to finish, then resume".to_owned()
         }
@@ -648,7 +654,7 @@ pub(super) async fn wiki_restore(
     Json(request): Json<WikiRestoreBody>,
 ) -> Result<(StatusCode, Json<StartSessionResponse>), ApiFailure> {
     let backend = backend(&state)?.clone();
-    crate::server::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
+    crate::server::require_named_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
     // Also requires a launchable target.
     let resource_allocation = new_session_allocation(&state, &request.target_id, None, None)?;
     let session_id = backend

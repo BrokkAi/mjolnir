@@ -5,7 +5,25 @@ use super::*;
 /// machine-wide controller-store guard and before starting background work.
 pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
     let state = crate::database::load_state()?;
-    let operations = crate::database::load_move_operations()?;
+    let mut operations = crate::database::load_move_operations()?;
+    // Daemons that shipped before Moves released the archive of an unsealed
+    // source left it on the record. The sweep below then deletes the files.
+    for operation in &mut operations {
+        let source_live = state
+            .sessions
+            .get(&operation.selection.session_id)
+            .is_some_and(|session| {
+                matches!(
+                    session.state,
+                    SessionState::Running | SessionState::Disconnected
+                )
+            });
+        if crate::controller::move_session::forget_unsealed_move_archives(operation, source_live)
+            .is_some()
+        {
+            crate::database::save_move_operation(operation)?;
+        }
+    }
     let restarts = crate::database::load_session_restarts()?;
     let removed =
         reconcile_managed_checkpoint_archives_in(&sessions_dir(), &state, &operations, &restarts)?;

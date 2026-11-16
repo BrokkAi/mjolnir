@@ -182,16 +182,11 @@ pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
     }
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
+        // A legacy per-profile table, read but never saved: not a setting.
+        // Fields of other profile kinds never appear: each kind's defaults
+        // list only its own (`schema::defaults`).
+        ["profiles", _] if matches!(key, "subagents" | "muse_auto_review") => true,
         // This machine is always this machine; its type is not a choice.
-        ["profiles", _] if key == "subagents" => true,
-        // These two settings are read only for a Codex profile; the profile's
-        // own validation rejects them on any other kind.
-        ["profiles", _] if matches!(key, "guardian_review_model" | "codex_profile") => {
-            value["kind"].as_str() != Some("codex")
-        }
-        ["profiles", _] if key == "claude_permission_mode" => {
-            value["kind"].as_str() != Some("claude")
-        }
         ["machines", mj_core::config::LOCAL_MACHINE_ID] => key == "kind",
         // Present only while reviewers still have to be chosen automatically:
         // it is not a setting. Review is on exactly when reviewers exist.
@@ -286,13 +281,14 @@ pub fn machine_build_cache_summary(path: &[String], value: &Value) -> Option<Str
     Some(format!("{enabled} · {budget}"))
 }
 
-/// How much a row that opens its own page holds.
-pub fn contents_summary(value: &Value) -> Option<String> {
+/// How much the page at `path` holds, counted the way the page lists it:
+/// hidden keys are left out, and synthetic pages such as `interface` count
+/// the rows they show.
+pub fn contents_summary(path: &[String], value: &Value) -> Option<String> {
+    let count = visible_paths(path, value).len();
     match value {
-        Value::Object(entries) => {
-            Some(mj_core::text::counted(entries.len(), "setting", "settings"))
-        }
-        Value::Array(entries) => Some(mj_core::text::counted(entries.len(), "entry", "entries")),
+        Value::Object(_) => Some(mj_core::text::counted(count, "setting", "settings")),
+        Value::Array(_) => Some(mj_core::text::counted(count, "entry", "entries")),
         _ => None,
     }
 }

@@ -109,6 +109,15 @@ pub(super) async fn require_api_auth(
     request: HttpRequest<axum::body::Body>,
     next: Next,
 ) -> Result<Response, ApiFailure> {
+    // Shutdown is authoritative even for the unauthenticated API probe. A
+    // reconnect must never identify this daemon as healthy after its transfer
+    // streams have been cancelled.
+    if state.shutdown.is_cancelled() {
+        return Err(
+            ApiFailure::unavailable("the daemon is shutting down; reconnect")
+                .with_code(Some(DAEMON_HANDOFF_CODE)),
+        );
+    }
     let bearer = request
         .headers()
         .get(AUTHORIZATION)
@@ -183,6 +192,10 @@ pub(super) struct ProfileConfigQuery {
     /// `models` allow-list. `mj doctor` compares the two.
     #[serde(default)]
     pub(super) unrestricted: bool,
+    /// Answer for a disabled profile too; discovery itself refuses an id the
+    /// configuration does not have.
+    #[serde(default)]
+    pub(super) with_disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

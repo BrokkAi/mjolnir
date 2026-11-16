@@ -54,6 +54,30 @@ pub fn move_has_pending_queue(session_id: &str) -> bool {
     )
 }
 
+/// Preserve a restored destination's readiness when close replaces Running
+/// with Closing. The caller saves this intent and the session in one transaction.
+pub(crate) fn move_destination_before_close(
+    session: &mj_core::state::SessionRecord,
+) -> Result<Option<MoveOperation>> {
+    if session.state != SessionState::Running {
+        return Ok(None);
+    }
+    let Some(mut operation) = crate::database::load_move_operation(&session.id)? else {
+        return Ok(None);
+    };
+    if operation.phase != MovePhase::Cancelled
+        || operation.is_resolved()
+        || operation.queue_admission_started
+        || operation.recovery_session.is_none()
+    {
+        return Ok(None);
+    }
+    operation.destination_target = session.target.clone().map(|target| *target);
+    operation.destination_native_session_id = session.native_session_id.clone();
+    operation.updated_at = now();
+    Ok(Some(operation))
+}
+
 pub fn release_move_queue_hold(session_id: &str) {
     set_move_queue_hold(session_id, false);
 }
@@ -273,6 +297,49 @@ pub(crate) fn forget_missing_move_archives(operation: &mut MoveOperation) -> boo
         );
     }
     true
+}
+
+/// Release the restore archives of a Move that ended without ever sealing its
+/// source, once that source is live again.
+///
+/// The Move recorded its handoff before asking the worker to seal. When the
+/// seal then failed or was refused, the source went on running and journalling,
+/// so the archive no longer describes it. Keeping the reference would make the
+/// next Move a "retry" of that archive. The Move writes `recovery_session`
+/// only once the source is sealed, so its absence marks a Move that never got
+/// that far. A source that is not live is another case: it was sealed or
+/// stopped, and the archive is what its retry restores.
+///
+/// Returns `None` when nothing changed. Otherwise the Move-owned handoff files
+/// to delete once the record is saved. The Move's `checkpoint` belongs to the
+/// session record and is only dropped from the Move.
+pub(crate) fn forget_unsealed_move_archives(
+    operation: &mut MoveOperation,
+    source_live: bool,
+) -> Option<Vec<std::path::PathBuf>> {
+    if !source_live
+        || !matches!(operation.phase, MovePhase::Failed | MovePhase::Cancelled)
+        || operation.is_resolved()
+        || operation.queue_admission_started
+        || operation.recovery_session.is_some()
+        || (operation.handoff.is_none() && operation.checkpoint.is_none())
+    {
+        return None;
+    }
+    tracing::info!(
+        session_id = %operation.selection.session_id,
+        reference = %operation.operation_id,
+        "a Move ended before sealing its source, which is running again; releasing its stale restore archive"
+    );
+    operation.checkpoint = None;
+    Some(
+        operation
+            .handoff
+            .take()
+            .map(|handoff| handoff.archive_path)
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// Record, at daemon startup, every Move whose archive is missing. An active
@@ -846,6 +913,126 @@ fn replace_queued_images_with_placeholders(
 }
 
 impl Controller {
+    /// Close takes over only after the Move owner has actually stopped. A
+    /// placement published during cloning is not a destination worker.
+    pub(crate) async fn settle_superseded_move_for_close(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        before_close: Option<super::lifecycle::BeforeClose>,
+    ) -> Result<bool> {
+        let Some(mut operation) = crate::database::load_move_operation(session_id)? else {
+            return Ok(false);
+        };
+        if operation.phase != MovePhase::Cancelled
+            || operation.is_resolved()
+            || operation.queue_admission_started
+        {
+            return Ok(false);
+        }
+        let Some(source) = operation.recovery_session.clone() else {
+            // An archive written before sealing cannot authorize teardown;
+            // even a Closed source might contain work newer than its checkpoint.
+            return Err(super::lifecycle::LifecycleFailureReason::UnsealedMoveSource.into());
+        };
+        let current = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("Move session disappeared")?;
+        // Restore publishes a boot owner before launching the harness. It
+        // may already accept work before Running or StartingQueue is saved.
+        if current.state == SessionState::Running
+            || (current.target.is_some()
+                && current.target.as_deref() == operation.destination_target.as_ref())
+            || crate::database::load_worker_restart(session_id)?
+                .is_some_and(|intent| current.target.as_deref() == Some(&intent.target))
+        {
+            return Ok(false);
+        }
+        let retained_source = operation.retains_source_environment();
+        if !retained_source {
+            let verified = operation
+                .checkpoint
+                .as_ref()
+                .context("superseded Move has no full source checkpoint")?;
+            super::checkpoint::verify_installed_checkpoint_gate(session_id, verified)?;
+        }
+        if let Some(before_close) = before_close {
+            before_close.await?;
+        }
+        // Created/CleanupPending destinations may not have a target locator
+        // yet. Their durable owner must still retire them before resolution.
+        self.cleanup_prepared_move_destination(&mut operation, executor)
+            .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+        if retained_source {
+            let reason =
+                anyhow::Error::new(super::lifecycle::LifecycleFailureReason::RetainedMoveSource);
+            let persist = |record: &mj_core::state::SessionRecord, environment: Option<&str>| {
+                crate::database::settle_superseded_move_source(
+                    record,
+                    environment,
+                    &operation.operation_id,
+                )
+            };
+            if operation.workspace_transfer.is_some() {
+                self.rollback_move_destination_with_persist(&operation, reason, executor, persist)
+                    .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+            } else {
+                self.retain_failed_in_place_move_with_persist(
+                    session_id,
+                    &source,
+                    reason,
+                    |record| persist(record, None),
+                )?;
+            }
+        } else {
+            // The environment ledger owns both identities, even when the
+            // failed provisioning left only a partial destination checkout.
+            let source_environment =
+                crate::database::move_source_environment(&operation.operation_id)?;
+            let current = self.state.sessions[session_id].clone();
+            if current.target.is_some() {
+                super::environment::retire_session_environment(
+                    &current,
+                    &self.config,
+                    executor,
+                    super::BranchDisposition::Keep,
+                )
+                .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+            }
+            if let Some(environment) = &source_environment {
+                super::environment::retire_owned_environment(
+                    environment.clone(),
+                    &self.config,
+                    executor,
+                    super::BranchDisposition::Keep,
+                    super::CheckoutDisposition::Remove,
+                )
+                .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+            }
+            let mut stopped = source;
+            stopped.state = SessionState::Stopped;
+            stopped.target = None;
+            stopped.checkpoint = operation.checkpoint.clone().map(Box::new);
+            stopped.last_error = None;
+            stopped.updated_at = now();
+            crate::database::settle_superseded_move_source(
+                &stopped,
+                source_environment
+                    .as_ref()
+                    .map(|environment| environment.id.as_str()),
+                &operation.operation_id,
+            )?;
+            self.state.sessions.insert(session_id.to_owned(), stopped);
+        }
+        // Source ownership and the Move's resolution became durable together.
+        release_move_queue_hold(session_id);
+        if retained_source {
+            return Err(super::lifecycle::LifecycleFailureReason::RetainedMoveSource.into());
+        }
+        Ok(true)
+    }
     /// Returns the planned conversion when this move turns a local checkout
     /// into an isolated workspace, so the caller can describe it without
     /// reading Git a second time.
@@ -1159,15 +1346,7 @@ impl Controller {
         }
         let profile_id = selection.profile_id.as_deref().unwrap();
         let target_id = selection.target_template_id.as_deref().unwrap();
-        let profile = self
-            .config
-            .profiles
-            .get(profile_id)
-            .context("unknown destination profile")?;
-        ensure!(
-            profile.enabled,
-            "destination profile {profile_id:?} is disabled"
-        );
+        let profile = self.config.named_profile(profile_id)?;
         let requested_oracle = selection.oracle.unwrap_or(source.oracle);
         let explicit_oracle = selection.oracle == Some(true) || selection.oracle_choice.is_some();
         if requested_oracle
@@ -1221,6 +1400,22 @@ impl Controller {
             &self.config.targets,
             self.state.subagents.contains_key(&source.id),
             previous.as_ref(),
+        )?;
+        // Preparation is where a Move is decided, and only an accepted Move
+        // logs its decision, so a refused preparation would otherwise say
+        // nothing about which part of the environment blocked keeping it.
+        tracing::info!(
+            session_id = %source.id,
+            in_place,
+            source_state = ?source.state,
+            retained_checkpoint = retry,
+            obstacle = move_environment_obstacle(
+                source,
+                &selection,
+                &self.config.targets,
+                self.state.subagents.contains_key(&source.id),
+            ),
+            "move environment decision at preparation"
         );
         let mounts = move_requested_mounts(source, &selection);
         ensure!(
@@ -1457,6 +1652,12 @@ impl Controller {
         let timestamp = now();
         let mut operation = match retry {
             Some(mut op) => {
+                // A retry decides what is restored, never whether the
+                // environment is touched.
+                ensure!(
+                    op.in_place == checked.in_place,
+                    "the Move's environment decision changed after it was sealed; prepare and confirm the Move again"
+                );
                 ensure!(
                     !op.queue_admission_started || op.queue == queue,
                     "queued work may already have run; retry with the original queue choice on the same destination"
@@ -1532,19 +1733,7 @@ impl Controller {
         tracing::info!(
             session_id = id,
             in_place = operation.in_place,
-            reason = move_environment_change(
-                &source,
-                &checked.selection,
-                bare_targets_share_environment(
-                    &self.config.targets,
-                    &source.target_template_id,
-                    checked
-                        .selection
-                        .target_template_id
-                        .as_deref()
-                        .unwrap_or_default(),
-                ),
-            )
+            reason = move_environment_change_for(&source, &checked.selection, &self.config.targets)
             .unwrap_or(if operation.in_place {
                 "environment unchanged"
             } else {
@@ -1640,6 +1829,7 @@ impl Controller {
             .context("Move outcome session is missing")?
             .last_error
             .clone();
+        let mut released_handoffs = Vec::new();
         let (status, error, recovery) = match result {
             Ok(()) => {
                 operation.phase = MovePhase::Completed;
@@ -1670,6 +1860,17 @@ impl Controller {
                     MovePhase::Failed
                 };
                 operation.cancellation_requested = cancelled;
+                released_handoffs = forget_unsealed_move_archives(
+                    operation,
+                    matches!(
+                        self.state
+                            .sessions
+                            .get(&session_id)
+                            .map(|record| record.state),
+                        Some(SessionState::Running | SessionState::Disconnected)
+                    ),
+                )
+                .unwrap_or_default();
                 let recovery = failed_move_recovery(operation, &self.state);
                 let error = format!("{error:#}");
                 tracing::warn!(
@@ -1696,6 +1897,19 @@ impl Controller {
         };
         operation.updated_at = now();
         crate::database::save_move_outcome(operation, last_error.as_deref())?;
+        // The record no longer names these files, so nothing can restore them.
+        for path in released_handoffs {
+            if let Err(error) = std::fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    %session_id,
+                    path = %path.display(),
+                    %error,
+                    "could not remove the stale handoff of a Move that never sealed its source"
+                );
+            }
+        }
         let record = self
             .state
             .sessions
@@ -1807,6 +2021,24 @@ impl Controller {
                 ensure!(!operation.cancellation_requested, "Move was cancelled; destination retained without further queue admission");
                 self.finish_workspace_transfer(&mut operation, executor)?;
                 return self.admit_move_queue(&mut operation, executor).await;
+            }
+            if operation.phase == MovePhase::Cancelled
+                && !operation.is_resolved()
+                && operation.workspace_transfer.is_some()
+                && operation.recovery_session.is_some()
+                && session.state == SessionState::Closing
+                && operation.destination_target.is_none()
+                && !crate::database::load_worker_restart(&id)?
+                    .is_some_and(|intent| session.target.as_deref() == Some(&intent.target))
+            {
+                // Cancellation retains Move's source for retry; it does not
+                // authorize suspension. Its durable seal already proves the
+                // source cut, so never lease an uninstalled destination here.
+                return Err(self.rollback_move_destination(
+                    &operation,
+                    anyhow::anyhow!("Move cancelled after sealing its source; source environment retained for explicit retry"),
+                    executor,
+                )?);
             }
             if operation.workspace_transfer.is_some() && operation.recovery_session.is_some() && !operation.cancellation_requested
                 && !(operation.phase == MovePhase::ResumingDestination && session.state == SessionState::Running) {
@@ -2763,49 +2995,86 @@ fn subagent_mutations_pending(
             .any(|request| request.action.mutates_child_state())
 }
 
-/// Whether this move can replace only the harness inside the source target.
+/// Whether this move replaces only the harness inside the source target.
 ///
-/// The environment is kept only when nothing about it changes: the same target
-/// template (or another one that names the same bare machine), the same
-/// attached mounts, and the same resource allocation. A retry takes its retention decision from the durable Move intent instead;
-/// a sub-agent never owns its own target.
+/// That is a fact about the environments alone: the same target template (or
+/// another one that names the same bare machine), the same attached mounts and
+/// the same resource allocation. A previous Move's retry state never decides
+/// it, only what a retry restores. A sub-agent never owns its own target.
+///
+/// A live source takes this decision fresh. A source that is not live can only
+/// continue an in-place Move that sealed it and still holds its restore
+/// archive; if the environment no longer matches what that Move kept, the
+/// Move is refused, never turned into a transfer of the checkout.
 pub(crate) fn move_in_place_for_record(
     source: &mj_core::state::SessionRecord,
     selection: &MoveSelection,
     targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
     is_subagent: bool,
     previous: Option<&MoveOperation>,
-) -> bool {
-    let retry = previous.is_some_and(|operation| operation.checkpoint_retained());
-    previous
-        .is_some_and(|operation| retry && operation.in_place && operation.selection == *selection)
-        || in_place_move_eligible(source, selection, targets, is_subagent, retry)
+) -> Result<bool> {
+    // A Move that began admitting queued work has already carried out its
+    // environment decision: the session now runs on the destination, and a
+    // retry only finishes that admission. Comparing the destination with
+    // itself would call every such Move in place.
+    if let Some(operation) = previous.filter(|operation| {
+        operation.queue_admission_started && !operation.queue_admission_finished
+    }) {
+        return Ok(operation.in_place);
+    }
+    let obstacle = move_environment_obstacle(source, selection, targets, is_subagent);
+    if matches!(
+        source.state,
+        SessionState::Running | SessionState::Disconnected
+    ) {
+        return Ok(obstacle.is_none());
+    }
+    if previous.is_some_and(|operation| operation.in_place && operation.checkpoint_retained()) {
+        if let Some(obstacle) = obstacle {
+            bail!(
+                "the retained in-place Move kept this session's environment, but {obstacle} now; \
+                 destroy the session or restore the earlier settings"
+            );
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
-pub(crate) fn in_place_move_eligible(
+/// Why the source's environment cannot be kept for this destination, if it
+/// cannot. The decision and its logs read this one answer.
+fn move_environment_obstacle(
     source: &mj_core::state::SessionRecord,
     selection: &MoveSelection,
     targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
     is_subagent: bool,
-    retry: bool,
-) -> bool {
-    !retry
-        && !is_subagent
-        && source.target.is_some()
-        && matches!(
-            source.state,
-            SessionState::Running | SessionState::Disconnected
-        )
-        && move_environment_change(
-            source,
-            selection,
-            bare_targets_share_environment(
-                targets,
-                &source.target_template_id,
-                selection.target_template_id.as_deref().unwrap_or_default(),
-            ),
-        )
-        .is_none()
+) -> Option<&'static str> {
+    if is_subagent {
+        Some("a sub-agent never owns its environment")
+    } else if source.target.is_none() {
+        Some("the session has no environment")
+    } else {
+        move_environment_change_for(source, selection, targets)
+    }
+}
+
+/// What about the requested destination differs from the source's environment,
+/// if anything. The one place that pairs the comparison with the bare-target
+/// sharing rule.
+fn move_environment_change_for(
+    source: &mj_core::state::SessionRecord,
+    selection: &MoveSelection,
+    targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
+) -> Option<&'static str> {
+    move_environment_change(
+        source,
+        selection,
+        bare_targets_share_environment(
+            targets,
+            &source.target_template_id,
+            selection.target_template_id.as_deref().unwrap_or_default(),
+        ),
+    )
 }
 
 /// Whether two target templates are bare targets on the same machine, so the

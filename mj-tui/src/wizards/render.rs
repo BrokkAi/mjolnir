@@ -981,8 +981,7 @@ pub(crate) fn render_review_wizard(
     }
     // Guardian targets rely on the harness's own approval mode rather than
     // Hel-managed isolation.
-    if (matches!(target, TargetTemplate::LocalBare)
-        || target.permission_mode() == Some(mj_core::config::PermissionMode::Guardian))
+    if target.permission_mode() == Some(mj_core::config::PermissionMode::Guardian)
         && let Some(kind) = dashboard
             .config
             .profiles

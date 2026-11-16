@@ -66,15 +66,6 @@ pub fn capture_checkpoint_with_native_state(
         resolved.allow_empty_native,
         native_state,
     )?;
-    let repositories =
-        collect_checkpoint_repositories(&resolved.workspace_root, &resolved.repositories, git)?;
-    let native_bytes = native_artifacts
-        .iter()
-        .try_fold(0_u64, |total, artifact| {
-            total.checked_add(artifact.data.len() as u64)
-        })
-        .context("native checkpoint size overflow")?;
-    let repository_bytes = checkpoint_repository_bytes(&repositories)?;
 
     let parent = resolved
         .stage_path
@@ -93,16 +84,27 @@ pub fn capture_checkpoint_with_native_state(
         .with_context(|| format!("create temporary checkpoint stage in {}", parent.display()))?;
 
     let mut staged_native = Vec::with_capacity(native_artifacts.len());
+    let mut native_bytes = 0_u64;
     for (index, artifact) in native_artifacts.into_iter().enumerate() {
         let body_path = PathBuf::from(format!("native/{index:08}"));
-        write_private_file(temporary.path(), &body_path, &artifact.data, 0o600)?;
+        let size =
+            write_private_reader(temporary.path(), &body_path, &mut artifact.reader()?, 0o600)?;
+        native_bytes = native_bytes
+            .checked_add(size)
+            .context("native checkpoint size overflow")?;
         staged_native.push(StagedNativeArtifact {
             relative_path: artifact.relative_path,
             mode: artifact.mode,
-            size: artifact.data.len() as u64,
+            size,
             body_path,
         });
     }
+    // Native bytes are copied before repository collection, which can take
+    // long enough for the harness to append more history; the stage must hold
+    // the native state selected above, as it did when bodies were read eagerly.
+    let repositories =
+        collect_checkpoint_repositories(&resolved.workspace_root, &resolved.repositories, git)?;
+    let repository_bytes = checkpoint_repository_bytes(&repositories)?;
     let staged_repositories = write_staged_repositories(temporary.path(), repositories)?;
     let source_fingerprint_after = checkpoint_source_fingerprint(
         &resolved.harness_home,
@@ -427,7 +429,7 @@ pub(super) fn collect_subagent_reports(
         total += data.len() as u64;
         artifacts.push(NativeArtifact {
             relative_path: Path::new(mj_core::subagent::ARCHIVE_REPORT_DIR).join(relative),
-            data,
+            data: data.into(),
             mode: 0o600,
         });
     }
@@ -521,14 +523,18 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
             .native_artifacts
             .into_iter()
             .map(|artifact| {
-                let data = read_staged_file(&stage_path, &artifact.body_path, MAX_NATIVE_FILE)?;
+                validate_relative_path(&artifact.body_path)?;
+                let path = stage_path.join(&artifact.body_path);
+                ensure_no_symlink_ancestors(&stage_path, &artifact.body_path)?;
+                let size = fs::symlink_metadata(&path)?;
+                ensure!(size.is_file(), "staged native artifact is not a file");
                 ensure!(
-                    data.len() as u64 == artifact.size,
+                    size.len() == artifact.size,
                     "staged native artifact size changed"
                 );
                 Ok(NativeArtifact {
                     relative_path: artifact.relative_path,
-                    data,
+                    data: mj_core::archive::NativeArtifactData::File(path),
                     mode: artifact.mode,
                 })
             })
@@ -544,22 +550,22 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                     committed_bundle: read_staged_file(
                         &stage_path,
                         &repository.committed_bundle_path,
-                        MAX_NATIVE_TOTAL,
+                        u64::MAX,
                     )?,
                     staged_patch: read_staged_file(
                         &stage_path,
                         &repository.staged_patch_path,
-                        MAX_NATIVE_TOTAL,
+                        u64::MAX,
                     )?,
                     unstaged_patch: read_staged_file(
                         &stage_path,
                         &repository.unstaged_patch_path,
-                        MAX_NATIVE_TOTAL,
+                        u64::MAX,
                     )?,
                     untracked_tar: read_staged_file(
                         &stage_path,
                         &repository.untracked_tar_path,
-                        MAX_NATIVE_TOTAL,
+                        u64::MAX,
                     )?,
                     operation_payloads: match (
                         &repository.conflicted_worktree_tar_path,
@@ -571,13 +577,9 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                                 conflicted_worktree_tar: read_staged_file(
                                     &stage_path,
                                     worktree_path,
-                                    MAX_NATIVE_TOTAL,
+                                    u64::MAX,
                                 )?,
-                                state_tar: read_staged_file(
-                                    &stage_path,
-                                    state_path,
-                                    MAX_NATIVE_TOTAL,
-                                )?,
+                                state_tar: read_staged_file(&stage_path, state_path, u64::MAX)?,
                             })
                         }
                         _ => bail!("staged repository has only one of its Git operation payloads"),
@@ -714,7 +716,7 @@ pub fn export_checkpoint_with_native_state(
     // one just replaced by `/clear`, impossible to close cleanly (R4-5).
     let prompted = current_native_session_received_prompt(&spec.canonical_session);
     let native_started = std::time::Instant::now();
-    let native_artifacts = collect_checkpoint_native_artifacts(
+    let mut native_artifacts = collect_checkpoint_native_artifacts(
         &spec.session,
         &relay_root,
         &harness_home,
@@ -723,6 +725,27 @@ pub fn export_checkpoint_with_native_state(
         !prompted,
         native_state,
     )?;
+    // The barrier stops dispatch, but a harness can still finish an async
+    // native write. Own the captured bytes before repository collection and ZIP
+    // planning, just as the staged capture path does.
+    let parent = output_path
+        .parent()
+        .context("checkpoint archive has no parent")?;
+    fs::create_dir_all(parent)?;
+    let native_snapshot = tempfile::Builder::new()
+        .prefix(CHECKPOINT_CAPTURE_TEMPORARY_PREFIX)
+        .tempdir_in(parent)?;
+    for (index, artifact) in native_artifacts.iter_mut().enumerate() {
+        if matches!(artifact.data, mj_core::archive::NativeArtifactData::File(_)) {
+            let relative = PathBuf::from(index.to_string());
+            {
+                let mut reader = artifact.reader()?;
+                write_private_reader(native_snapshot.path(), &relative, &mut reader, 0o600)?;
+            }
+            artifact.data =
+                mj_core::archive::NativeArtifactData::File(native_snapshot.path().join(relative));
+        }
+    }
     let native_ms = native_started.elapsed().as_millis() as u64;
     let repositories_started = std::time::Instant::now();
     let repositories = collect_checkpoint_repositories_with_policy(
@@ -977,13 +1000,6 @@ pub(super) fn collect_checkpoint_native_artifacts_with_reports(
     }
     artifacts.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     artifacts.dedup_by(|left, right| left.relative_path == right.relative_path);
-    let total = artifacts.iter().try_fold(0_u64, |total, artifact| {
-        total.checked_add(artifact.data.len() as u64)
-    });
-    anyhow::ensure!(
-        total.context("native artifact size overflow")? <= MAX_NATIVE_TOTAL,
-        "native session artifacts are too large"
-    );
     Ok((artifacts, omitted_reports))
 }
 

@@ -152,7 +152,9 @@ impl DashboardState {
                 .set("This session is active; press Enter to open it.");
             return DashboardAction::None;
         }
-        if session.checkpoint.is_none() {
+        if session.checkpoint.is_none()
+            && !(session.state == SessionState::Error && session.target.is_some())
+        {
             self.notices
                 .set("This session has no verified recovery copy to resume.");
             return DashboardAction::None;

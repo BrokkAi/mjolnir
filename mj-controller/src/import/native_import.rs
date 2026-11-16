@@ -58,8 +58,29 @@ pub fn import_native_session(
         .transpose()?;
     let mut repositories =
         collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
-    let native_artifacts =
+    let mut native_artifacts =
         collect_import_native_artifacts(harness, harness_home, native_session_id, source_path)?;
+    // Own the selected native bytes through archive publication. A harness may
+    // keep writing its source files after this import's canonical capture.
+    fs::create_dir_all(archive_directory)?;
+    let native_snapshot = tempfile::Builder::new()
+        .prefix("native-import-")
+        .tempdir_in(archive_directory)?;
+    for (index, artifact) in native_artifacts.iter_mut().enumerate() {
+        if let Some(control) = control {
+            control.check_cancelled()?;
+        }
+        let path = native_snapshot.path().join(index.to_string());
+        {
+            let mut source = CancellableRead {
+                inner: artifact.reader()?,
+                control,
+            };
+            let mut target = fs::File::create(&path)?;
+            std::io::copy(&mut source, &mut target)?;
+        }
+        artifact.data = mj_checkpoint::archive::NativeArtifactData::File(path);
+    }
     if harness == HarnessKind::Muse {
         // The preview may precede a user's confirmation by minutes. Never
         // pair its old transcript with a newer native conversation.
@@ -75,13 +96,15 @@ pub fn import_native_session(
             "native session changed after it was selected; select it again"
         );
         ensure!(
-            native_artifacts
-                == collect_import_native_artifacts(
+            native_import_artifacts_match(
+                &native_artifacts,
+                &collect_import_native_artifacts(
                     harness,
                     harness_home,
                     native_session_id,
-                    source_path
-                )?,
+                    source_path,
+                )?
+            )?,
             "native session changed while being imported; stop its harness and retry"
         );
     }
@@ -456,11 +479,7 @@ pub(super) fn import_profile_id(
     let Some(requested) = requested else {
         return Ok(default_profile(config, harness, home));
     };
-    let profile = config
-        .profiles
-        .get(requested)
-        .with_context(|| format!("unknown import profile {requested:?}"))?;
-    ensure!(profile.enabled, "import profile {requested:?} is disabled");
+    let profile = config.named_profile(requested)?;
     ensure!(
         profile.kind == harness,
         "import profile {requested:?} does not use {harness:?}"
@@ -665,5 +684,53 @@ impl<'a> ImportProjectRemap<'a> {
             }
         }
         Ok(())
+    }
+}
+
+/// Compare captured contents, independently of whether bodies live in memory
+/// or private snapshot files. Reader chunk boundaries need not agree.
+fn native_import_artifacts_match(
+    captured: &[mj_checkpoint::archive::NativeArtifact],
+    current: &[mj_checkpoint::archive::NativeArtifact],
+) -> Result<bool> {
+    if captured.len() != current.len() {
+        return Ok(false);
+    }
+    for (captured, current) in captured.iter().zip(current) {
+        if captured.relative_path != current.relative_path || captured.mode != current.mode {
+            return Ok(false);
+        }
+        let mut captured = BufReader::new(captured.reader()?);
+        let mut current = BufReader::new(current.reader()?);
+        loop {
+            let left = captured.fill_buf()?;
+            let right = current.fill_buf()?;
+            if left.is_empty() && right.is_empty() {
+                break;
+            }
+            let size = left.len().min(right.len());
+            if size == 0 || left[..size] != right[..size] {
+                return Ok(false);
+            }
+            captured.consume(size);
+            current.consume(size);
+        }
+    }
+    Ok(true)
+}
+
+/// Checks import cancellation before every read, so cancelling stops a copy
+/// of an arbitrarily large native file instead of waiting for it to finish.
+struct CancellableRead<'a, 'b, R> {
+    inner: R,
+    control: Option<&'a ImportControl<'b>>,
+}
+
+impl<R: std::io::Read> std::io::Read for CancellableRead<'_, '_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(control) = self.control {
+            control.check_cancelled().map_err(std::io::Error::other)?;
+        }
+        self.inner.read(buffer)
     }
 }

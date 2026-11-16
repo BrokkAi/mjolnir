@@ -490,8 +490,10 @@ fn batch(generation: u64, refresh: bool, ids: &[&str]) -> QuotaRefreshBatch {
         generation,
         refresh,
         profiles: ids.iter().map(|id| probeless_request(id)).collect(),
+        extra: Vec::new(),
         grants: Vec::new(),
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     }
 }
 
@@ -589,6 +591,67 @@ async fn a_reload_probes_only_the_profile_it_added() {
 }
 
 #[tokio::test]
+async fn extra_profiles_are_probed_once_and_never_on_the_batch_schedule() {
+    let (profiles, mut updates) = poller_with_store(vec![]);
+    let mut with_extra = batch(1, false, &["a"]);
+    with_extra.extra = vec![probeless_request("extra")];
+    profiles.send_replace(with_extra);
+    // The batch cycle runs first, then the extra's one-shot probe.
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 1 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
+
+    // A batch change does not re-probe an extra it already answered.
+    let mut same = batch(2, false, &["a"]);
+    same.extra = vec![probeless_request("extra")];
+    profiles.send_replace(same);
+    assert_quiet(&mut updates).await;
+
+    // A forced refresh re-reads it, and a changed identity is a new question.
+    let mut forced = batch(3, true, &["a"]);
+    forced.extra = vec![probeless_request("extra")];
+    profiles.send_replace(forced);
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 3 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+
+    let mut changed = probeless_request("extra");
+    changed.codex_source =
+        crate::quota::CodexQuotaSource::Provider(crate::quota::ProviderCredential {
+            id: "other".into(),
+            host: "example.invalid".into(),
+            api_key: "key2".into(),
+        });
+    let mut next = batch(4, false, &["a"]);
+    next.extra = vec![changed];
+    profiles.send_replace(next);
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
+}
+
+async fn next_update_report(updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>) -> String {
+    let QuotaUpdate::Report(outcome) = next_update(updates).await else {
+        panic!("expected a report");
+    };
+    outcome.report.profile_id
+}
+
+#[tokio::test]
 async fn an_explicit_refresh_probes_every_profile_even_when_fresh() {
     let (profiles, mut updates) = poller_with_store(vec![stored_report("a", 60)]);
     profiles.send_replace(batch(1, false, &["a"]));
@@ -609,6 +672,67 @@ async fn an_explicit_refresh_probes_every_profile_even_when_fresh() {
         next_update(&mut updates).await,
         QuotaUpdate::Finished { generation: 2 }
     ));
+}
+
+/// A named refresh probes even a fresh report, and a forced extra answers
+/// again. The pulse is consumed once: the next batch change re-probes nothing.
+#[tokio::test]
+async fn a_forced_profile_probe_answers_now_and_only_once() {
+    let (profiles, mut updates) = poller_with_store(vec![stored_report("a", 60)]);
+    profiles.send_replace(batch(1, false, &["a"]));
+    // The fresh stored report is published without a probe.
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Report(_)
+    ));
+    assert_quiet(&mut updates).await;
+
+    let forced_map: std::collections::BTreeMap<String, u64> =
+        [("a".to_owned(), 1), ("extra".to_owned(), 1)]
+            .into_iter()
+            .collect();
+    let mut forced = batch(2, false, &["a"]);
+    forced.extra = vec![probeless_request("extra")];
+    forced.forced_probes = forced_map.clone();
+    profiles.send_replace(forced);
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 2 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
+
+    // A batch carrying the same requests again — one a coalesced channel
+    // never delivered — answers nothing twice.
+    let mut quiet = batch(3, false, &["a"]);
+    quiet.extra = vec![probeless_request("extra")];
+    quiet.forced_probes = forced_map;
+    profiles.send_replace(quiet);
+    assert_quiet(&mut updates).await;
+
+    // A new request for the same profiles is a new sequence and answers again.
+    let mut again = batch(4, false, &["a"]);
+    again.extra = vec![probeless_request("extra")];
+    again.forced_probes = [("a".to_owned(), 2), ("extra".to_owned(), 2)]
+        .into_iter()
+        .collect();
+    profiles.send_replace(again);
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 4 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
 }
 
 #[tokio::test]
@@ -731,6 +855,7 @@ async fn a_refused_unexpired_claude_login_wakes_both_daemons_and_is_exchanged_on
     let (request, credentials) =
         renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, 7 * ONE_HOUR_MS);
     let (batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
+        extra: Vec::new(),
         grants: vec![request.clone()],
         ..Default::default()
     });
@@ -818,6 +943,7 @@ async fn a_refused_claude_login_reports_failed_renewal_then_delivers_a_replaceme
     )
     .unwrap();
     let (batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
+        extra: Vec::new(),
         grants: vec![request.clone()],
         rejected_logins: [(request.profile_id.clone(), [rejected].into())].into(),
         ..Default::default()
@@ -937,8 +1063,10 @@ async fn a_held_claude_profile_still_renews_its_grant_early() {
         generation: 1,
         refresh: false,
         profiles: vec![held_request],
+        extra: Vec::new(),
         grants: vec![grant_only],
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     });
     // The held report is published and the usage API is not asked.
     let QuotaUpdate::Report(outcome) = next_update(&mut updates).await else {
@@ -985,8 +1113,10 @@ async fn the_poller_wakes_for_every_renewal_with_only_grant_only_profiles() {
         generation: 1,
         refresh: false,
         profiles: Vec::new(),
+        extra: Vec::new(),
         grants: vec![request],
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     for renewal in ["access-2", "access-3"] {
@@ -1082,8 +1212,10 @@ async fn a_due_claude_renewal_is_skipped_while_a_handoff_waits() {
         generation: 1,
         refresh: false,
         profiles: Vec::new(),
+        extra: Vec::new(),
         grants: vec![request],
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     });
     spawn_claude_grant_refresher(
         receiver,
@@ -1127,8 +1259,10 @@ async fn a_reconfigured_claude_profile_is_renewed_under_its_new_home_at_once() {
         refresh: false,
         profiles: Vec::new(),
         // Grant-only, so the poller never asks the usage API about it.
+        extra: Vec::new(),
         grants: vec![request],
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     };
     profiles.send_replace(batch(old_home));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1165,8 +1299,10 @@ async fn a_replaced_claude_login_with_a_sooner_expiry_is_renewed_within_a_rechec
         generation: 1,
         refresh: false,
         profiles: vec![request],
+        extra: Vec::new(),
         grants: Vec::new(),
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     });
     spawn_claude_grant_refresher(
         receiver,
@@ -1713,7 +1849,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
                 claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
@@ -1810,7 +1946,7 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
                 claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())

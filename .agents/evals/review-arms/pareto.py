@@ -1,6 +1,6 @@
 """Latency vs. verified findings Pareto frontier for reviewer combinations of up to 3.
 
-Usage: python3 pareto.py <verify-dir> [--samples 4000] [--bootstrap 1000]
+Usage: python3 pareto.py <verify-dir> [--samples 4000] [--bootstrap 1000] [--sessions Sol/medium=2]
 
 Reads <verify-dir>/sessions.csv, groups.csv and session_groups.csv (score.py)
 and writes <verify-dir>/pareto.csv and pareto.md. The method follows the
@@ -33,7 +33,8 @@ import pathlib
 import random
 import statistics
 
-LABELS = {"gpt-6.1-terra": "Terra", "gpt-6.1-sol": "Sol", "muse-ember-1.0": "Ember"}
+LABELS = {"gpt-6.1-terra": "Terra", "gpt-6.1-sol": "Sol", "muse-ember-1.0": "Ember", "greptile": "Greptile",
+          "gemini-4-hydrogen": "Gemini", "kimi-code/k3.1-pro": "Kimi", "deepseek-flash": "DSF"}
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 p = argparse.ArgumentParser()
 p.add_argument("verify")
@@ -44,6 +45,10 @@ p.add_argument("--severities", default="high,medium,low",
                help="comma-separated severities of counted groups (rejected groups have none)")
 p.add_argument("--min-sessions", type=int, default=3,
                help="sessions each configuration needs per diff; also the most repeats of one configuration")
+p.add_argument("--sessions", default="", metavar="CONFIG=N,...",
+               help="per-configuration override of --min-sessions, e.g. Sol/medium=2")
+p.add_argument("--exclude", default="", metavar="CONFIG,...",
+               help="configurations left out, e.g. one that ran on only some diffs")
 a = p.parse_args()
 V = ROOT / a.verify
 counted = set(a.verdicts.split(","))
@@ -67,12 +72,18 @@ info = {}
 for s in sessions:
     by_diff[s["bug"]][config(s)].append(s["session"])
     info[s["session"]] = {"latency": float(s["latency_s"]) if s["latency_s"] else None,
-                          "tokens": int(s["total_tokens"]),
+                          "tokens": int(s["total_tokens"]) if s["total_tokens"] else None,
                           "cost": float(s["cost_usd"]) if s.get("cost_usd") else None}
+excluded = set(filter(None, a.exclude.split(",")))
+assert excluded <= {config(s) for s in sessions}, f"unknown configurations {sorted(excluded)}"
+sessions = [s for s in sessions if config(s) not in excluded]
 configs = sorted({config(s) for s in sessions})
+overrides = dict(kv.split("=") for kv in a.sessions.split(",") if kv)
+assert set(overrides) <= set(configs), f"unknown configurations {sorted(set(overrides) - set(configs))}"
+cap = {c: int(overrides.get(c, a.min_sessions)) for c in configs}
 options = [o for n in (1, 2, 3) for o in itertools.combinations_with_replacement(configs, n)
-           if max(collections.Counter(o).values()) <= a.min_sessions]
-diffs = sorted(d for d, per in by_diff.items() if all(len(per[c]) >= a.min_sessions for c in configs))
+           if all(k <= cap[c] for c, k in collections.Counter(o).items())]
+diffs = sorted(d for d, per in by_diff.items() if all(len(per[c]) >= cap[c] for c in configs))
 skipped = sorted(set(by_diff) - set(diffs))
 
 
@@ -93,7 +104,9 @@ for o in options:
             hit = set().union(*(found[s] for s in members))
             lats = [info[s]["latency"] for s in members]
             rows.append((len(hit), max(lats) if None not in lats else None,
-                         sum(info[s]["tokens"] for s in members),
+                         # External reviewers report no tokens; such an assignment has no token count.
+                         None if any(info[s]["tokens"] is None for s in members)
+                         else sum(info[s]["tokens"] for s in members),
                          # An unpriced member leaves the assignment unpriced, never free.
                          None if any(info[s]["cost"] is None for s in members)
                          else sum(info[s]["cost"] for s in members)))
@@ -107,7 +120,9 @@ def summarize(o, ds, rng, samples):
         lats = [x for x in (rng.choice(per[o, d])[1] for d in ds) if x is not None]
         if lats:
             medians.append(statistics.median(lats))
-    tokens = statistics.fmean(statistics.fmean(r[2] for r in per[o, d]) for d in ds)
+    tok = [r[2] for d in ds for r in per[o, d]]
+    tokens = (statistics.fmean(statistics.fmean(r[2] for r in per[o, d]) for d in ds)
+              if None not in tok else None)
     # Priced only when every assignment is: a priced subset would bias the mean.
     costs = [[r[3] for r in per[o, d]] for d in ds]
     cost = (statistics.fmean(statistics.fmean(c) for c in costs)
@@ -145,7 +160,8 @@ def label(o):
 
 rows = sorted(({"option": label(o), "reviewers": len(o), "findings": round(s["findings"], 2),
                 "findings_per_diff": round(s["findings"] / len(diffs), 3),
-                "median_latency_s": round(s["latency"], 1), "tokens_per_diff": round(s["tokens_per_diff"]),
+                "median_latency_s": round(s["latency"], 1),
+                "tokens_per_diff": None if s["tokens_per_diff"] is None else round(s["tokens_per_diff"]),
                 "cost_per_diff_usd": None if s["cost_per_diff"] is None else round(s["cost_per_diff"], 3),
                 "frontier": o in main_frontier,
                 "cost_frontier": o in cost_frontier, "bootstrap_frontier_share": round(hits[o] / a.bootstrap, 3)}

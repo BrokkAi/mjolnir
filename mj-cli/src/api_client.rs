@@ -6,6 +6,7 @@
 //! means the CLI and the server cannot disagree about them.
 
 pub(crate) mod events;
+mod fetch;
 mod pinned_tls;
 
 use std::net::SocketAddr;
@@ -64,6 +65,7 @@ impl BusyRetry {
 /// A client for one daemon's API.
 pub(crate) struct ApiClient {
     base_url: String,
+    daemon_instance: Option<String>,
     token: String,
     busy_retry: BusyRetry,
     /// Where the one "waiting for the daemon" line goes; stderr outside tests.
@@ -153,7 +155,9 @@ impl ApiClient {
         let http = http_client(certificate_sha256.as_deref(), resolver)?;
         probe_api(&http, &viewer_url).await?;
         let token = client.api_credential().await?;
-        Ok(Self::with_http(viewer_url, token, http))
+        let mut api = Self::with_http(viewer_url, token, http);
+        api.daemon_instance = Some(client.identity().await?.instance_id);
+        Ok(api)
     }
 
     #[cfg(test)]
@@ -164,6 +168,7 @@ impl ApiClient {
     fn with_http(base_url: String, token: String, http: reqwest::Client) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
+            daemon_instance: None,
             token,
             busy_retry: BusyRetry::DEFAULT,
             wait_notice: |line| eprintln!("{line}"),
@@ -389,6 +394,7 @@ impl ApiClient {
         profile: &str,
         model: Option<String>,
         unrestricted: bool,
+        with_disabled: bool,
     ) -> Result<mj_core::worker_launch::ProfileConfig> {
         let mut request = self
             .http
@@ -399,6 +405,9 @@ impl ApiClient {
         }
         if unrestricted {
             request = request.query(&[("unrestricted", "true")]);
+        }
+        if with_disabled {
+            request = request.query(&[("with_disabled", "true")]);
         }
         decode(self.send(request).await?).await
     }
@@ -693,52 +702,6 @@ impl ApiClient {
         )
         .await?;
         Ok(())
-    }
-
-    /// A file, a directory as a zip archive, or with `list` a JSON listing of
-    /// either, from the session's target, with the path it resolved to there.
-    pub(crate) async fn fetch(
-        &self,
-        session_id: &str,
-        path: &str,
-        list: bool,
-    ) -> Result<mj_checkpoint::archive::FetchedPath> {
-        use mj_checkpoint::archive::FetchedKind;
-        let mut request = self
-            .http
-            .get(self.url(&format!("/sessions/{session_id}/files")))
-            .query(&[("path", path)]);
-        if list {
-            request = request.query(&[("list", "true")]);
-        }
-        let response = self.send(request.timeout(EXPORT_TIMEOUT)).await?;
-        let headers = response.headers();
-        let kind = match headers
-            .get(reqwest::header::CONTENT_TYPE)
-            .map(reqwest::header::HeaderValue::as_bytes)
-        {
-            Some(b"application/octet-stream") => FetchedKind::File,
-            Some(b"application/zip") => FetchedKind::Directory,
-            Some(b"application/json") if list => FetchedKind::Listing,
-            other => bail!(
-                "the daemon answered a fetch with content type {:?}",
-                other.map(String::from_utf8_lossy)
-            ),
-        };
-        let resolved = headers
-            .get(mj_controller::server::api::FETCHED_PATH_HEADER)
-            .and_then(|value| mj_controller::server::api::decode_fetched_path(value.as_bytes()))
-            .context("the daemon did not say where the path resolved; it predates `mj fetch`")?;
-        let bytes = response
-            .bytes()
-            .await
-            .context("read the fetched path")?
-            .to_vec();
-        Ok(mj_checkpoint::archive::FetchedPath {
-            kind,
-            path: resolved,
-            bytes,
-        })
     }
 
     /// Export the session's work. A branch push answers JSON; a patch and a
@@ -1295,17 +1258,15 @@ mod tests {
             .unwrap()
             .expect("the route answers with the session");
         assert_eq!(session.id, "session-2");
-        assert_eq!(
-            client
-                .fetch("session-1", "docs/README.md", false)
-                .await
-                .unwrap(),
-            mj_checkpoint::archive::FetchedPath {
-                kind: mj_checkpoint::archive::FetchedKind::File,
-                path: "/workspace/docs/README.md".to_owned(),
-                bytes: b"file bytes".to_vec(),
-            }
-        );
+        let fetched = client
+            .fetch("session-1", "docs/README.md", false)
+            .await
+            .unwrap();
+        assert_eq!(fetched.kind, mj_checkpoint::archive::FetchedKind::File);
+        assert_eq!(fetched.path, "/workspace/docs/README.md");
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut fetched.reader(), &mut bytes).unwrap();
+        assert_eq!(bytes, b"file bytes");
 
         let seen = seen.lock().unwrap().clone();
         assert_eq!(

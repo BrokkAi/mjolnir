@@ -2505,6 +2505,41 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 132 {
         super::container_size::report(super::container_size::migrate(connection)?);
     }
+    // Compatible: revision-132 Move writers name columns explicitly, preserving
+    // this nullable intent (new rows default NULL). Exact operation-ID matching
+    // makes stale IDs inert; retries that reuse an ID invalidate it via trigger.
+    // NULL is conservative: cancellation alone never authorizes suspension.
+    // Older daemons retain their pre-existing reaper behaviour, including a
+    // destructive fallback to an older checkpoint if the Move row is lost.
+    // Compatibility means no worse than before; only upgraded daemons fix it.
+    if version < 133 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        let add_column = if legacy_schema::table_has_column(
+            &transaction,
+            "session_moves",
+            "close_requested_operation_id",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE session_moves ADD COLUMN close_requested_operation_id TEXT NULL;"
+        };
+        transaction.execute_batch(&format!(
+            "{add_column}
+             CREATE TRIGGER IF NOT EXISTS invalidate_move_close_intent
+             AFTER UPDATE OF operation_id, operation_json ON session_moves
+             WHEN NEW.close_requested_operation_id IS NOT NULL
+               AND (NEW.operation_id IS NOT OLD.operation_id
+                    OR json_extract(NEW.operation_json, '$.cancellation_requested') = 0)
+             BEGIN
+                 UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=NEW.session_id;
+             END;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (133, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=133;"
+        ))?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4056,6 +4091,8 @@ mod reader_tests {
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(70).is_err());
+        assert!(state.ensure_supported_by(132).is_ok());
+        assert_eq!(upgraded.query_row("SELECT close_requested_operation_id FROM session_moves WHERE session_id='source'", [], |row| row.get::<_, Option<String>>(0)).unwrap(), None);
         let preserved: String = upgraded
             .query_row(
                 "SELECT operation_json FROM session_moves WHERE session_id='source'",
@@ -4703,6 +4740,16 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 133
+            && legacy_schema::table_has_column(
+                &connection,
+                "session_moves",
+                "close_requested_operation_id",
+            )
+            .unwrap()
+        {
+            connection.execute_batch("DROP TRIGGER IF EXISTS invalidate_move_close_intent; ALTER TABLE session_moves DROP COLUMN close_requested_operation_id;").unwrap();
+        }
         if version < 132 {
             for column in ["container_cpus", "container_memory"] {
                 if !legacy_schema::table_has_column(&connection, "sessions", column).unwrap() {
@@ -5292,6 +5339,84 @@ mod reader_tests {
                 .dismissed_failure
                 .is_none()
         );
+    }
+
+    #[test]
+    fn move_close_intent_migration_preserves_revision_132_writers() {
+        const NAME: &str = "move_close_intent_migration_preserves_revision_132_writers";
+        const CHILD: &str = "MJ_TEST_MOVE_CLOSE_MIGRATION";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .isolated_store(directory.path())
+            .env(CHILD, "1")
+            .run();
+            return;
+        }
+        let path = mj_core::config::data_dir().join("move-close-compat.sqlite3");
+        for id in ["source", "later"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        stamp_schema_version(&path, 132);
+        // Exact explicit-column UPSERT used by revision-132 writers. It must
+        // preserve future columns on updates and default them to NULL on insert.
+        let older_write = |connection: &Connection, session: &str, operation: &str| {
+            connection.execute("INSERT INTO session_moves(session_id, operation_id, operation_json,source_environment_id)
+                VALUES (?1,?2,?3,(SELECT environment_id FROM environment_bindings WHERE session_id=?1))
+                ON CONFLICT(session_id) DO UPDATE SET source_environment_id=CASE WHEN session_moves.operation_id=excluded.operation_id THEN session_moves.source_environment_id ELSE excluded.source_environment_id END,
+                operation_id=excluded.operation_id,
+                operation_json=CASE WHEN session_moves.operation_id=excluded.operation_id AND json_extract(session_moves.operation_json, '$.cancellation_requested')=1
+                    THEN json_set(excluded.operation_json, '$.cancellation_requested', json('true')) ELSE excluded.operation_json END",
+                params![session, operation, serde_json::json!({"operation_id":operation,"cancellation_requested":true}).to_string()]).unwrap();
+        };
+        let old = Connection::open(&path).unwrap();
+        older_write(&old, "source", "old-move");
+        old.execute_batch("CREATE TRIGGER reject_close_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=133 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
+        assert!(migrate_schema(&old).is_err());
+        assert_eq!(read_schema_state(&old).unwrap().revision, 132);
+        assert_eq!(
+            read_schema_state(&old).unwrap().minimum_compatible,
+            Some(132)
+        );
+        assert!(
+            !legacy_schema::table_has_column(&old, "session_moves", "close_requested_operation_id")
+                .unwrap()
+        );
+        old.execute_batch("DROP TRIGGER reject_close_migration")
+            .unwrap();
+        drop(old);
+        let writer = open_writer(&path).unwrap();
+        let schema = read_schema_state(&writer).unwrap();
+        assert_eq!(schema.revision, 133);
+        assert_eq!(schema.minimum_compatible, Some(132));
+        assert!(schema.ensure_supported_by(132).is_ok());
+        let intent = |session: &str| {
+            writer
+                .query_row(
+                    "SELECT close_requested_operation_id FROM session_moves WHERE session_id=?1",
+                    [session],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(intent("source"), None);
+        writer.execute("UPDATE session_moves SET close_requested_operation_id=operation_id WHERE session_id='source'", []).unwrap();
+        older_write(&writer, "source", "old-move");
+        writer.execute("UPDATE session_moves SET operation_json=json_set(operation_json,'$.cancellation_requested',json('true')), source_environment_id=source_environment_id WHERE session_id='source'", []).unwrap();
+        assert_eq!(intent("source").as_deref(), Some("old-move"));
+        older_write(&writer, "later", "inserted-move");
+        assert_eq!(intent("later"), None);
+        older_write(&writer, "source", "new-move");
+        assert_eq!(intent("source"), None);
+        writer.execute("UPDATE session_moves SET close_requested_operation_id='old-move' WHERE session_id='source'", []).unwrap();
+        assert!(!writer.query_row("SELECT close_requested_operation_id=operation_id FROM session_moves WHERE session_id='source'", [], |row| row.get::<_, bool>(0)).unwrap());
+        writer.execute("UPDATE session_moves SET close_requested_operation_id=operation_id WHERE session_id='source'", []).unwrap();
+        // Older retry code reuses the operation ID, but explicitly resetting
+        // cancellation invalidates the previous request in the same transaction.
+        writer.execute("UPDATE session_moves SET operation_json=json_set(operation_json,'$.cancellation_requested',json('false')) WHERE session_id='source'", []).unwrap();
+        assert_eq!(intent("source"), None);
     }
 
     #[test]

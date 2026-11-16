@@ -262,7 +262,7 @@ pub struct WorkerLaunchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_memory: Option<ProjectMemoryLaunchConfig>,
     /// Target-level policy translated into harness-specific controls by the
-    /// worker. Raw localhost and guardian SSH targets preserve configured
+    /// worker. Localhost and guardian SSH targets preserve configured
     /// approvals for harnesses that support them. Other targets run
     /// unconstrained.
     #[serde(
@@ -755,6 +755,7 @@ mod tests {
             HarnessKind::Claude,
             HarnessKind::Codex,
             HarnessKind::Dsh,
+            HarnessKind::Kimi,
             HarnessKind::Muse,
             // Delegates through Mjolnir but has no push review gate.
             HarnessKind::OpenCode,

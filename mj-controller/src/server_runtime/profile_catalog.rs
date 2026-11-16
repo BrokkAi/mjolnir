@@ -200,6 +200,18 @@ struct Inner {
 }
 
 impl Inner {
+    /// Whether background work (periodic refresh, home watching) may probe
+    /// `definition`'s profile. A retained definition keeps the configuration
+    /// it was built from, so ask the live one: disabling a profile ends its
+    /// automatic probes even while its definition serves explicit requests.
+    fn probes_automatically(&self, definition: &Definition) -> bool {
+        self.live
+            .as_ref()
+            .unwrap_or(&definition.config)
+            .enabled_profile(&definition.id)
+            .is_some()
+    }
+
     /// Whether every non-Failed entry of `identity` carries a settled
     /// digest, all identical: the identity's served answers all describe
     /// one home state, so nothing is left retrying. A still-failing entry
@@ -224,7 +236,12 @@ impl Inner {
     fn allowed_models(&self, identity: &str) -> Vec<String> {
         self.live
             .iter()
-            .flat_map(Config::enabled_profiles)
+            .flat_map(|config| {
+                config
+                    .profiles
+                    .iter()
+                    .map(|(id, profile)| (id.as_str(), profile))
+            })
             .find(|(id, profile)| profile.capabilities_key(id) == identity)
             .map(|(_, profile)| profile.models.clone())
             .or_else(|| {
@@ -412,7 +429,10 @@ impl ProfileCatalog {
         snapshot
     }
 
-    /// Adoption updates which profiles are enabled without invalidating capability entries.
+    /// Adoption keeps ready capability entries. A definition whose identity
+    /// changed, or whose profile was enabled or disabled, is retired: its
+    /// supervisors stop, and the next claim builds a fresh owner that reuses
+    /// ready entries and retries failed ones.
     pub(crate) fn sync(self: &Arc<Self>, config: &Config) {
         let (changed, first) = {
             let mut inner = self.lock();
@@ -431,12 +451,11 @@ impl ProfileCatalog {
                 inner.publication = None;
             }
             if let Some(old) = &inner.live {
-                for (id, profile) in old.enabled_profiles() {
+                for (id, profile) in &old.profiles {
                     let identity = profile.capabilities_key(id);
-                    if config
-                        .enabled_profile(id)
-                        .is_none_or(|new| new.capabilities_key(id) != identity)
-                        && let Some(definition) = inner.definitions.get(&identity)
+                    if config.named_profile(id).ok().is_none_or(|new| {
+                        new.capabilities_key(id) != identity || new.enabled != profile.enabled
+                    }) && let Some(definition) = inner.definitions.get(&identity)
                     {
                         definition.cancellation.cancel();
                     }
@@ -679,15 +698,22 @@ impl ProfileCatalog {
     /// `config` selects under one lock. A Settings draft uses this same path
     /// without becoming the live configuration.
     pub(crate) fn ensure(self: &Arc<Self>, config: &Config) {
-        self.ensure_profiles(config, true);
+        self.ensure_profiles(config, true, None);
     }
 
-    fn ensure_profiles(self: &Arc<Self>, config: &Config, refresh_live: bool) {
+    fn ensure_profiles(
+        self: &Arc<Self>,
+        config: &Config,
+        refresh_live: bool,
+        requested: Option<&str>,
+    ) {
         let config = Arc::new(config.clone());
         let mut started = Vec::new();
         {
             let mut inner = self.lock();
-            for (id, profile) in config.enabled_profiles() {
+            for (id, profile) in config.profiles.iter().filter(|(id, profile)| {
+                requested.map_or(profile.enabled, |requested| requested == id.as_str())
+            }) {
                 let identity = profile.capabilities_key(id);
                 inner
                     .wanted
@@ -795,7 +821,7 @@ impl ProfileCatalog {
             let Some(identity) = inner
                 .live
                 .as_ref()
-                .and_then(|config| config.enabled_profile(profile_id))
+                .and_then(|config| config.named_profile(profile_id).ok())
                 .map(|profile| profile.capabilities_key(profile_id))
             else {
                 return;
@@ -949,9 +975,10 @@ impl ProfileCatalog {
                 if definition.cancellation.is_cancelled() {
                     continue;
                 }
-                let Some(profile) = definition.config.enabled_profile(&definition.id) else {
+                if !inner.probes_automatically(definition) {
                     continue;
-                };
+                }
+                let profile = &definition.config.profiles[&definition.id];
                 let home = mj_core::path_input::expand_local(&profile.home)
                     .unwrap_or_else(|_| profile.home.clone());
                 identities_by_home
@@ -1102,6 +1129,16 @@ impl ProfileCatalog {
         self: &Arc<Self>,
         expired: impl Fn(&CacheKey, &ProfileConfig) -> bool,
     ) -> Vec<CacheKey> {
+        self.refresh_where(expired, false)
+    }
+
+    /// [`Self::refresh`], which skips disabled profiles unless
+    /// `include_disabled`: only a request naming one refreshes it.
+    fn refresh_where(
+        self: &Arc<Self>,
+        expired: impl Fn(&CacheKey, &ProfileConfig) -> bool,
+        include_disabled: bool,
+    ) -> Vec<CacheKey> {
         let mut started = Vec::new();
         {
             let mut inner = self.lock();
@@ -1123,6 +1160,9 @@ impl ProfileCatalog {
                 else {
                     continue;
                 };
+                if !include_disabled && !inner.probes_automatically(&definition) {
+                    continue;
+                }
                 let attempt = self.attempt_refresh(&definition, key.1.clone());
                 inner.refreshing.insert(key.clone(), attempt.clone());
                 started.push((key, attempt, definition.cancellation));
@@ -1435,6 +1475,12 @@ impl ProfileCatalog {
                     {
                         return;
                     }
+                    // A disabled profile is probed only on request: the
+                    // failure stays, and the next request that names the
+                    // profile starts one fresh attempt (`reread_failed`).
+                    if !inner.probes_automatically(&inner.definitions[&key.0]) {
+                        return;
+                    }
                     attempt = self.attempt(&inner.definitions[&key.0], key.1.clone());
                     inner
                         .entries
@@ -1453,7 +1499,7 @@ impl ProfileCatalog {
         id: &str,
         model: Option<String>,
     ) -> Result<ProfileConfig> {
-        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let profile = config.named_profile(id)?;
         let identity = profile.capabilities_key(id);
         // Model-specific probes select that model to discover its efforts. Only
         // the default probe can grant the default-model exemption.
@@ -1500,14 +1546,21 @@ impl ProfileCatalog {
         id: &str,
         model: Option<String>,
     ) -> Result<ProfileConfig> {
-        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let profile = config.named_profile(id)?;
         let live = profile.kind == HarnessKind::Muse;
         // A live read has its own fresh-probe admission in fetch_live. Re-
         // ensuring an adopted definition would retire that owner and discard
         // the default entry that model-specific reads depend on.
         let identity = profile.capabilities_key(id);
-        if !live || !self.lock().definitions.contains_key(&identity) {
-            self.ensure(config);
+        // A retired owner (its profile changed, or was enabled or disabled)
+        // is no owner: claim a fresh one.
+        let owned = self
+            .lock()
+            .definitions
+            .get(&identity)
+            .is_some_and(|definition| !definition.cancellation.is_cancelled());
+        if !live || !owned {
+            self.ensure_profiles(config, true, Some(id));
         }
         let key = (identity, model);
         let cancellation = self.lock().definitions[&key.0].cancellation.clone();
@@ -1527,11 +1580,24 @@ impl ProfileCatalog {
         id: &str,
         model: Option<String>,
     ) -> Result<ProfileConfig> {
-        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let profile = config.named_profile(id)?;
         let identity = profile.capabilities_key(id);
         // Claim and reuse under the same lock, so concurrent first readers
         // cannot replace each other's Muse owner. Only warm passes refresh it.
-        self.ensure_profiles(config, false);
+        self.ensure_profiles(config, false, Some(id));
+        if !profile.enabled {
+            // Background work never probes a disabled profile, so the
+            // request that names one retries its failures and re-probes its
+            // expired entries. Readers keep the old answer until a probe
+            // succeeds.
+            self.reread_failed(id);
+            self.refresh_where(
+                |key, choices| {
+                    key.0 == identity && !crate::controller::profile_config::is_current(choices)
+                },
+                true,
+            );
+        }
         let key = (identity, model);
         let mut revisions = self.revisions.subscribe();
         loop {
@@ -1660,7 +1726,7 @@ impl ProfileCatalog {
         self.lock()
             .live
             .as_ref()
-            .and_then(|config| config.enabled_profile(id))
+            .and_then(|config| config.named_profile(id).ok())
             .map(|profile| profile.models.clone())
             .unwrap_or_default()
     }
@@ -1733,10 +1799,7 @@ impl ProfileCatalog {
     ) -> Result<ProfileConfig> {
         loop {
             let config = self.live()?;
-            let identity = config
-                .enabled_profile(id)
-                .context("profile unavailable")?
-                .capabilities_key(id);
+            let identity = config.named_profile(id)?.capabilities_key(id);
             let result = if unrestricted {
                 self.fetch_unrestricted(&config, id, model.clone()).await
             } else {
@@ -1744,7 +1807,8 @@ impl ProfileCatalog {
             };
             let current = self.live()?;
             if current
-                .enabled_profile(id)
+                .named_profile(id)
+                .ok()
                 .map(|profile| profile.capabilities_key(id))
                 .as_ref()
                 == Some(&identity)
@@ -1773,9 +1837,7 @@ impl ProfileCatalog {
         parent: &str,
         models: std::collections::BTreeSet<String>,
     ) -> Result<std::collections::BTreeMap<String, mj_core::subagent::SubagentOptions>> {
-        config
-            .enabled_profile(parent)
-            .context("parent profile unavailable")?;
+        config.named_profile(parent)?;
         let defaults = join_all(config.enabled_profiles().map(|(id, _)| async move {
             (id.to_owned(), self.fetch_settled(config, id, None).await)
         }))
@@ -3507,6 +3569,64 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
+    // Hard-won: 18ef04c19: a retryable failure kept a disabled profile's supervisor probing in the background.
+    #[tokio::test(start_paused = true)]
+    async fn a_disabled_profile_retries_a_failure_only_when_requested_again() {
+        let calls = calls();
+        let failing = Arc::new(AtomicBool::new(true));
+        let catalog = ProfileCatalog::with_probe(flag_probe(failing.clone(), calls.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
+        config.profiles.get_mut("parent").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        assert!(
+            catalog
+                .fetch_settled(&config, "parent", None)
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(600)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no background retry");
+
+        failing.store(false, Ordering::SeqCst);
+        catalog
+            .fetch_settled(&config, "parent", None)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    // Hard-won: a5eb2adae: re-enabling a profile kept its failed entry with no supervisor to retry it.
+    #[tokio::test(start_paused = true)]
+    async fn re_enabling_a_profile_retries_its_failed_discovery() {
+        let calls = calls();
+        let failing = Arc::new(AtomicBool::new(true));
+        let catalog = ProfileCatalog::with_probe(flag_probe(failing.clone(), calls.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
+        config.profiles.get_mut("parent").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        assert!(
+            catalog
+                .fetch_settled(&config, "parent", None)
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_secs(600)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        failing.store(false, Ordering::SeqCst);
+        config.profiles.get_mut("parent").unwrap().enabled = true;
+        catalog.sync_now(&config).await;
+        catalog.capabilities(&["parent".into()]).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     // Hard-won: #1232: Windows has no local worker, so every probe failed and the owner retried forever.
     #[tokio::test(start_paused = true)]
     async fn a_discovery_no_retry_can_fix_waits_for_a_session_to_report_choices() {
@@ -3590,6 +3710,40 @@ mod tests {
         );
         assert!(catalog.capabilities(&["parent".into()]).await.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn disabled_profile_is_discovered_only_on_request_and_never_refreshed() {
+        let probes = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(probes.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
+        config.profiles.get_mut("parent").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        assert!(catalog.candidates().unwrap().is_empty());
+        let (left, right) = tokio::join!(
+            catalog.fetch_settled(&config, "parent", None),
+            catalog.fetch_settled(&config, "parent", None)
+        );
+        left.unwrap();
+        right.unwrap();
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert!(catalog.refresh(|_, _| true).is_empty());
+        assert!(catalog.candidates().unwrap().is_empty());
+    }
+
+    // Hard-won: 1152c612e: a definition kept from before disabling still read its old enabled copy and kept refreshing.
+    #[tokio::test]
+    async fn disabling_a_discovered_profile_ends_its_background_refresh() {
+        let probes = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(probes.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
+        catalog.sync_now(&config).await;
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        config.profiles.get_mut("parent").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        assert!(catalog.refresh(|_, _| true).is_empty());
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -4217,9 +4371,15 @@ mod tests {
             "editing the allow-list does not rediscover"
         );
 
+        config.profiles.get_mut("p").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        let read = catalog.capabilities(&["p".into()]).await.unwrap();
+        assert_eq!(values(&read[0]), ["p-model", "m2"]);
+        assert_eq!(catalog.allowed_models("p"), ["m2", "unadvertised"]);
         config.profiles.get_mut("p").unwrap().models.clear();
         catalog.sync_now(&config).await;
-        assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
+        let read = catalog.capabilities(&["p".into()]).await.unwrap();
+        assert_eq!(values(&read[0]), ["p-model", "m1", "m2", "m3"]);
     }
     // Hard-won: 9d1f70d2b: refreshing Muse retired an admission waiter.
     #[tokio::test]
@@ -4317,6 +4477,22 @@ mod tests {
                 .iter()
                 .any(|choice| choice.value == "p-model")
         );
+    }
+
+    // Hard-won: 9120b5643: an explicit read of a Muse profile disabled after discovery joined its retired owner and failed.
+    #[tokio::test]
+    async fn a_disabled_muse_profile_gets_a_fresh_owner_on_request() {
+        let probes = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(probes.clone()));
+        let mut config = test_config(&[("p", HarnessKind::Muse)]);
+        catalog.sync_now(&config).await;
+        config.profiles.get_mut("p").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        catalog.fetch(&config, "p", None).await.unwrap();
+        catalog
+            .fetch(&config, "p", Some("p-model".into()))
+            .await
+            .unwrap();
     }
 
     // Hard-won: a2afafcb3: a model probe exempted its requested hidden model.

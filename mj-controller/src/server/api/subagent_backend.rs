@@ -94,6 +94,7 @@ pub trait SubagentBackend: Send + Sync {
             profile, model, refresh,
         ))
     }
+
     /// What `profile`'s harness advertises before the profile's `models`
     /// allow-list, for `mj doctor`. Backends without the daemon's catalogue
     /// answer with the ordinary choices.
@@ -185,7 +186,16 @@ pub trait SubagentBackend: Send + Sync {
                 .read_file(session_id, path, mj_checkpoint::archive::FetchMode::Content)
                 .await?;
             match fetched.kind {
-                mj_checkpoint::archive::FetchedKind::File => Ok(fetched.bytes),
+                mj_checkpoint::archive::FetchedKind::File => {
+                    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+                        let mut bytes = Vec::new();
+                        std::io::Read::read_to_end(&mut fetched.reader(), &mut bytes)?;
+                        Ok(bytes)
+                    })
+                    .await
+                    .map_err(|error| ExportError::Failed(error.into()))?
+                    .map_err(ExportError::Failed)
+                }
                 _ => Err(ExportError::Refused(format!(
                     "{} is a directory, not a file",
                     fetched.path

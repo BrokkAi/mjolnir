@@ -3343,7 +3343,7 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
         claude_permission_mode: None,
         aws: None,
         ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
@@ -3424,7 +3424,7 @@ fn a_session_never_runs_from_the_profile_home_itself() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
         claude_permission_mode: None,
         aws: None,
         ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
@@ -5440,4 +5440,131 @@ fn worker_liveness_does_not_report_death_when_ps_fails() {
         assert_eq!(output.status.code(), Some(71));
         assert!(output.stdout.is_empty(), "{output:?}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires rootless Podman and cached ghcr.io/brokkai/mjolnir/agent-dev:latest image"]
+fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout() {
+    struct ContainerGuard(String);
+    impl Drop for ContainerGuard {
+        fn drop(&mut self) {
+            let command = CommandSpec::new("podman", ["rm", "--force", "--ignore", &self.0]);
+            let _ = ProcessExecutor.execute_cleanup(&command);
+        }
+    }
+
+    let session = mj_core::state::new_session_id().unwrap();
+    let name = resource_name(&session).unwrap();
+    let _guard = ContainerGuard(name.clone());
+
+    let run = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            [
+                "run",
+                "-d",
+                "--name",
+                &name,
+                "--label",
+                "dev.mj.managed=true",
+                "--label",
+                &format!("dev.mj.session={session}"),
+                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "sleep",
+                "300",
+            ],
+        ))
+        .unwrap();
+    assert_eq!(run.status, 0, "{}", String::from_utf8_lossy(&run.stderr));
+    let cid = String::from_utf8_lossy(&run.stdout).trim().to_owned();
+
+    let exec = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            ["exec", "-d", &name, "sleep", "300"],
+        ))
+        .unwrap();
+    assert_eq!(exec.status, 0, "{}", String::from_utf8_lossy(&exec.stderr));
+    let exec_id = String::from_utf8_lossy(&exec.stdout).trim().to_owned();
+
+    // Give conmon a moment to register, then kill the exec session's conmon
+    // and its exec'd process so Podman hits readExecExitCode()'s 5s timeout.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let ps = ProcessExecutor
+        .execute(&CommandSpec::new("ps", ["-eo", "pid,comm,args"]))
+        .unwrap();
+    assert_eq!(ps.status, 0);
+    let exec_conmon = String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .find(|line| {
+            let mut parts = line.split_whitespace();
+            let _pid = parts.next();
+            let comm = parts.next();
+            comm == Some("conmon")
+                && line.contains(&cid)
+                && line.contains(&exec_id)
+                && line.contains(" -e ")
+        })
+        .and_then(|line| line.split_whitespace().next())
+        .expect("exec conmon pid")
+        .to_owned();
+    let kill_conmon = ProcessExecutor
+        .execute(&CommandSpec::new("kill", ["-9", &exec_conmon]))
+        .unwrap();
+    assert_eq!(kill_conmon.status, 0);
+
+    let kill_exec_proc = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            [
+                "exec",
+                &name,
+                "sh",
+                "-c",
+                "for p in $(pgrep sleep); do [ \"$p\" != 1 ] && kill -9 \"$p\"; done",
+            ],
+        ))
+        .unwrap();
+    assert_eq!(kill_exec_proc.status, 0);
+
+    let locator = TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: name.clone(),
+        workspace_storage: Default::default(),
+    };
+
+    let quiesce = quiesce_plan(&locator, &session).unwrap().unwrap();
+    let outputs = quiesce.execute(&ProcessExecutor).unwrap();
+    let stderr = String::from_utf8_lossy(&outputs[0].stderr);
+    assert!(
+        stderr.contains("timed out waiting for file"),
+        "expected Podman's exec-exit timeout warning on stderr, got: {stderr}"
+    );
+    let running = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            [
+                "container",
+                "inspect",
+                "--format",
+                "{{.State.Running}}",
+                &name,
+            ],
+        ))
+        .unwrap();
+    assert_eq!(running.status, 0);
+    assert_eq!(String::from_utf8_lossy(&running.stdout).trim(), "false");
+
+    let cleanup = podman_cleanup_plan(&locator, &session).unwrap();
+    let remove_output = mj_core::targets::checked_command_output(
+        &cleanup.commands[0],
+        ProcessExecutor.execute(&cleanup.commands[0]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(remove_output.status, 0);
+    let exists = ProcessExecutor
+        .execute(&CommandSpec::new("podman", ["container", "exists", &name]))
+        .unwrap();
+    assert_eq!(exists.status, 1, "container should be absent after removal");
 }

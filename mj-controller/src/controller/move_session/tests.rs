@@ -24,9 +24,8 @@ use mj_checkpoint::archive::{
 };
 use mj_core::config::{Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
 #[cfg(unix)]
-use mj_core::state::{
-    CheckpointMetadata, MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition,
-};
+use mj_core::state::CheckpointMetadata;
+use mj_core::state::{MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition};
 #[cfg(unix)]
 use mj_core::test_hooks::install_fake_command;
 
@@ -533,7 +532,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 additional_mounts: None,
                 resource_allocation: None,
             },
-            "unknown destination profile",
+            "unknown profile \"missing-profile\"",
         ),
         (
             "invalid resource allocation",
@@ -1323,8 +1322,8 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     .into_iter()
     .map(|(id, template)| (id.to_string(), template))
     .collect();
-    let cases: Vec<(&str, mj_core::state::MoveSelection, bool, bool, bool)> = vec![
-        ("profile only", baseline.clone(), false, false, true),
+    let cases: Vec<(&str, mj_core::state::MoveSelection, bool, bool)> = vec![
+        ("profile only", baseline.clone(), false, true),
         (
             "another local bare target",
             mj_core::state::MoveSelection {
@@ -1335,7 +1334,6 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
                 target_template_id: Some("local-bare-two".into()),
                 ..baseline.clone()
             },
-            false,
             false,
             true,
         ),
@@ -1351,7 +1349,6 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
             },
             false,
             false,
-            false,
         ),
         (
             "different attached mounts",
@@ -1363,7 +1360,6 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
                 additional_mounts: another_mount,
                 ..baseline.clone()
             },
-            false,
             false,
             false,
         ),
@@ -1379,7 +1375,6 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
             },
             false,
             false,
-            false,
         ),
         (
             "clearing absent resources is a no-op",
@@ -1392,15 +1387,14 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
                 ..baseline.clone()
             },
             false,
-            false,
             true,
         ),
-        ("retry", baseline.clone(), false, true, false),
-        ("sub-agent", baseline.clone(), true, false, false),
+        ("sub-agent", baseline.clone(), true, false),
     ];
-    for (label, selection, is_subagent, retry, expected) in cases {
+    for (label, selection, is_subagent, expected) in cases {
         assert_eq!(
-            super::in_place_move_eligible(&source, &selection, &targets, is_subagent, retry),
+            super::move_in_place_for_record(&source, &selection, &targets, is_subagent, None)
+                .unwrap(),
             expected,
             "{label}"
         );
@@ -1410,27 +1404,32 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     // stopped source has already lost it.
     let mut without_target = source.clone();
     without_target.target = None;
-    assert!(!super::in_place_move_eligible(
-        &without_target,
-        &baseline,
-        &targets,
-        false,
-        false
-    ));
+    assert!(
+        !super::move_in_place_for_record(&without_target, &baseline, &targets, false, None)
+            .unwrap()
+    );
     let mut stopped = source.clone();
     stopped.state = SessionState::Stopped;
-    assert!(!super::in_place_move_eligible(
-        &stopped, &baseline, &targets, false, false
-    ));
-    let mut disconnected = source;
+    assert!(!super::move_in_place_for_record(&stopped, &baseline, &targets, false, None).unwrap());
+    let mut disconnected = source.clone();
     disconnected.state = SessionState::Disconnected;
-    assert!(super::in_place_move_eligible(
-        &disconnected,
-        &baseline,
-        &targets,
-        false,
-        false
-    ));
+    assert!(
+        super::move_in_place_for_record(&disconnected, &baseline, &targets, false, None).unwrap()
+    );
+
+    // A cross-target Move that began admitting its queue already runs on the
+    // destination, which matches the selection exactly. Its retry keeps the
+    // decision it carried out instead of calling the destination in place.
+    let mut admitting = source_recovery_operation(&source);
+    admitting.source_target_template_id = "ssh-bare".into();
+    admitting.selection = baseline.clone();
+    admitting.phase = MovePhase::Failed;
+    admitting.queue_admission_started = true;
+    // Hard-won: 2333717a3: a cross-target Move that began admitting its queue could no longer be retried
+    assert!(
+        !super::move_in_place_for_record(&source, &baseline, &targets, false, Some(&admitting))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -1644,7 +1643,6 @@ fn ssh_bare_targets_share_an_environment_only_on_the_same_connection() {
     ));
 }
 
-#[cfg(unix)]
 pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
         quota_stop_reason: None,
@@ -2378,6 +2376,7 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
     assert_eq!(
         restored,
         [mj_core::move_workspace::WorkspaceRepository {
+            base_commit: None,
             // The transfer names the repository as the source captured it.
             id: HOST_CHECKOUT_REPOSITORY.into(),
             root: cloned[0].clone(),
@@ -2500,6 +2499,7 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
             .repositories
             .iter()
             .map(|repository| WorkspaceRepository {
+                base_commit: None,
                 id: repository.id.clone(),
                 root: container_checkout.clone(),
             })
@@ -2953,7 +2953,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     codex_profile: None,
-                    muse_auto_review: None,
+                    legacy_muse_auto_review: None,
                     claude_permission_mode: None,
                     aws: None,
                     ..mj_core::config::HarnessProfile::new(kind, home.clone())
@@ -3453,13 +3453,14 @@ fn bare_move_preparation_preserves_an_explicit_resource_reset() {
     let mut selection = prepared.selection;
     selection.clear_resource_allocation = true;
     assert!(
-        !super::in_place_move_eligible(
+        !super::move_in_place_for_record(
             &source,
             &selection,
             &fixture.controller.config.targets,
             false,
-            false
-        ),
+            None
+        )
+        .unwrap(),
         "clearing a legacy CPU allocation changes the environment"
     );
 }
@@ -3505,13 +3506,16 @@ fn profile_move_after_explicit_resume_starts_fresh_without_transferring_files() 
         assert!(prepared.workspace.is_none());
         assert!(!prepared.stops_subagents);
         assert_ne!(prepared.operation_id, operation.operation_id);
-        assert!(super::move_in_place_for_record(
-            &fixture.controller.state.sessions[LATCH_RELAY_SESSION],
-            &prepared.selection,
-            &fixture.controller.config.targets,
-            false,
-            Some(&operation),
-        ));
+        assert!(
+            super::move_in_place_for_record(
+                &fixture.controller.state.sessions[LATCH_RELAY_SESSION],
+                &prepared.selection,
+                &fixture.controller.config.targets,
+                false,
+                Some(&operation),
+            )
+            .unwrap()
+        );
     }
     let stored = crate::database::load_move_operation(LATCH_RELAY_SESSION)
         .unwrap()
@@ -3537,6 +3541,96 @@ fn profile_move_after_explicit_resume_starts_fresh_without_transferring_files() 
         let api = crate::server::ViewerMoveRecovery::from_operation(&stored).unwrap();
         assert!(api.checkpoint_retained);
         assert!(stored.retains_checkpoint());
+    }
+}
+
+#[cfg(unix)]
+// Hard-won: move-8c670999: a failed in-place Move made every later same-target Move a workspace transfer
+#[test]
+fn in_place_move_that_failed_at_the_seal_leaves_the_next_same_target_move_in_place() {
+    let name = test_name(
+        "in_place_move_that_failed_at_the_seal_leaves_the_next_same_target_move_in_place",
+    );
+    if !isolated_test_child(&name, "MJ_MOVE_SEAL_FAILURE_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    // The Move's own handoff is a separate file; the session keeps its checkpoint.
+    let mut handoff = fixture.checkpoint.clone();
+    handoff.archive_path = fixture
+        .checkpoint
+        .archive_path
+        .with_file_name("move-handoff.hel.zip");
+    fs::copy(&fixture.checkpoint.archive_path, &handoff.archive_path).unwrap();
+    // What the Move stores before it asks the worker to seal, and what is still
+    // stored when the worker refuses: the source never stopped and has moved on.
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.phase = MovePhase::ClosingSource;
+    operation.handoff = Some(handoff.clone());
+    operation.checkpoint = Some(fixture.checkpoint.clone());
+    crate::database::save_move_operation(&operation).unwrap();
+    let outcome = fixture
+        .controller
+        .finish_move_result(
+            &mut operation,
+            Err(anyhow::anyhow!(
+                "seal verified checkpoint for close: close does not match the current checkpoint cut"
+            )),
+            &RefusingExecutor("recording a failed Move runs no commands"),
+        )
+        .unwrap();
+    assert_eq!(outcome.outcome, "failed");
+    let stored = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.phase, MovePhase::Failed);
+    assert!(!stored.checkpoint_retained());
+    assert!(!stored.offers_retry());
+    assert!(
+        !handoff.archive_path.exists(),
+        "the stale handoff is released"
+    );
+    assert!(
+        fixture.checkpoint.archive_path.exists(),
+        "the session's own checkpoint is not the Move's to delete"
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // A later Move that differs from the failed one in a defaulted field is
+    // still a profile-only Move: it never inspects or transfers the workspace.
+    let mut selection = operation.selection.clone();
+    selection.clear_resource_allocation = true;
+    for _ in 0..2 {
+        let prepared = runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection.clone(),
+                &RefusingExecutor("a same-environment Move must not inspect the workspace"),
+            ))
+            .unwrap();
+        assert!(prepared.in_place);
+        assert!(prepared.workspace.is_none());
+        assert_ne!(prepared.operation_id, operation.operation_id);
+        // The second pass starts from the row a daemon that shipped earlier
+        // left behind, which startup releases the same way.
+        crate::database::save_move_operation(&MoveOperation {
+            handoff: Some(handoff.clone()),
+            checkpoint: Some(fixture.checkpoint.clone()),
+            ..stored.clone()
+        })
+        .unwrap();
+        crate::controller::reconcile_managed_checkpoint_archives().unwrap();
+        let released = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert!(!released.checkpoint_retained());
+        fixture.controller.state = crate::database::load_state().unwrap();
     }
 }
 

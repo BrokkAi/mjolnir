@@ -328,6 +328,12 @@ pub struct DurableRelay {
     held_writes: VecDeque<checkpoint_hold::HeldWrite>,
     /// The barrier whose hold something that could not wait already ended.
     hold_ended_for: Option<String>,
+    /// The barrier whose cut background work started after. See
+    /// `checkpoint_hold`.
+    cut_spoiled_for: Option<String>,
+    /// The background work the relay last saw, to tell work that starts from
+    /// work already running. See `checkpoint_hold`.
+    known_background_work: BTreeSet<String>,
     /// Benchmark aid: stage and persist a snapshot on every append, the way
     /// the relay did before transcript appends were amortized, so both
     /// policies can be timed in one process.
@@ -378,6 +384,25 @@ impl DurableRelay {
             "checkpoint recovery requires existing relay state"
         );
         Self::open_with_harness(root, session_id, relay_version, true, None, &[])
+    }
+
+    pub(crate) fn discard_queued_prompts_before_start(
+        root: &Path,
+        session_id: &str,
+        command_id: &str,
+    ) -> Result<()> {
+        let mut relay = Self::open_with_harness(
+            root.to_path_buf(),
+            session_id.to_owned(),
+            env!("CARGO_PKG_VERSION"),
+            true,
+            None,
+            &[],
+        )?;
+        relay
+            .submit_command(command_id, RelayCommand::ClearQueuedPrompts)?
+            .map_err(|error| anyhow!("discard queued prompts before startup: {}", error.message))?;
+        Ok(())
     }
 
     fn open_with_harness(
@@ -641,6 +666,8 @@ impl DurableRelay {
             agent_terminal_tool_calls: BTreeMap::new(),
             held_writes: VecDeque::new(),
             hold_ended_for: None,
+            cut_spoiled_for: None,
+            known_background_work: BTreeSet::new(),
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
@@ -893,7 +920,11 @@ impl DurableRelay {
         state.native_agent_count = self.native_agent_count();
         state.clear_context = matches!(
             self.verdict_harness,
-            Some(mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude)
+            Some(
+                mj_core::config::HarnessKind::Codex
+                    | mj_core::config::HarnessKind::Claude
+                    | mj_core::config::HarnessKind::Kimi
+            )
         );
         state.background_commands = self.background_commands();
         state.background_work_known = self.background_work_known;
@@ -1092,6 +1123,9 @@ impl DurableRelay {
     }
 
     fn persist_activity_transition(&mut self) -> Result<()> {
+        // The one place background work gains members: every change to it
+        // ends here, journaled or not.
+        self.note_background_work()?;
         if self.refresh_idle_clock(epoch_millis()) {
             self.persist_snapshot()
                 .context("persist session idle transition")?;

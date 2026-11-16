@@ -1335,7 +1335,7 @@ impl TargetLocator {
         }
     }
 
-    /// Only raw localhost sessions can use the daemon host's CLI and config.
+    /// Only localhost sessions can use the daemon host's CLI and config.
     pub const fn skills_scope(&self) -> crate::skills::SkillsScope {
         match self {
             Self::LocalBare { .. } => crate::skills::SkillsScope::Localhost,

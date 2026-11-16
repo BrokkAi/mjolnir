@@ -5,15 +5,14 @@ pub(super) const MAX_CONCURRENT_PREFLIGHTS: usize = 4;
 
 /// How one phone action ended when it did not succeed.
 ///
-/// `detail` is the whole error chain: it goes to the daemon log and to the
-/// session's error overlay, both of which stay on this machine. `refusal` is
-/// the part that may travel: a sentence written for the caller at the place
-/// the failure was produced. A failure with no refusal answers generically,
-/// which is why nothing leaks when a new failure site says nothing.
+/// `detail` is the whole error chain and belongs in the daemon log. `refusal`
+/// and `reason` are written for the caller at the failure boundary. They may
+/// be published on the session; failures without either use generic guidance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PhoneActionFailure {
     pub(super) detail: String,
     pub(super) refusal: Option<Refusal>,
+    pub(super) reason: Option<crate::controller::LifecycleFailureReason>,
 }
 
 impl PhoneActionFailure {
@@ -21,6 +20,9 @@ impl PhoneActionFailure {
         Self {
             detail: format!("{error:#}"),
             refusal: Refusal::of(error),
+            reason: error
+                .downcast_ref::<crate::controller::LifecycleFailureReason>()
+                .copied(),
         }
     }
 
@@ -30,6 +32,7 @@ impl PhoneActionFailure {
         Self {
             detail: detail.into(),
             refusal: None,
+            reason: None,
         }
     }
 

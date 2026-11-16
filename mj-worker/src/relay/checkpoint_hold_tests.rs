@@ -2,6 +2,8 @@
 //! its cut (campaign finding I2-3).
 use super::test_support::*;
 use super::*;
+#[cfg(unix)]
+use crate::acp::RuntimeEvent;
 use agent_client_protocol::v1::schema::ContentChunk;
 
 fn notification(text: &str) -> SessionUpdate {
@@ -218,4 +220,124 @@ fn a_question_during_a_barrier_is_journaled_at_once() {
     assert!(asked > cut.ordinal);
     assert!(notice_ordinal(&relay, "before the question").unwrap() < asked);
     assert!(!relay.worker_writes_held());
+}
+
+/// Claude Code ends a cancelled cycle with a result and the adapter's
+/// `usage_update` origin marker, in that order, right after a barrier became
+/// ready. With no harness turn open the result journals nothing, so it must
+/// not end the hold: the marker waits and the Close still matches its cut.
+// Hard-won: 634af0a36: a runtime event that journaled nothing ended the cut hold, so a late usage_update moved the cut
+// Runtime events reach the relay only through the Unix worker runtime.
+#[cfg(unix)]
+#[test]
+fn a_runtime_event_that_journals_nothing_leaves_the_cut_held() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = configured(&temp);
+    durable.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+    let cut = ready_checkpoint(&mut durable, "cancelled-turn-barrier");
+    let relay = Arc::new(RelayCell::new(durable));
+    let mut in_flight = BTreeMap::new();
+
+    let result = mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
+        "type": "result", "subtype": "error_during_execution", "is_error": true,
+        "num_turns": 1, "stop_reason": "cancelled",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "origin": {"kind": "human"},
+    }))
+    .unwrap()
+    .unwrap();
+    crate::worker_runtime::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::ClaudeTurnResult(result),
+    )
+    .unwrap();
+    let usage_update = serde_json::json!({
+        "sessionUpdate": "usage_update",
+        "used": 10,
+        "size": 200,
+        "_meta": {"_claude/origin": {"kind": "human"}},
+    });
+    crate::worker_runtime::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::SessionUpdate {
+            update: usage_update,
+        },
+    )
+    .unwrap();
+
+    let mut durable = relay.lock().unwrap();
+    assert!(durable.worker_writes_held());
+    assert_eq!(durable.operational_state().latest_ordinal, cut.ordinal);
+
+    submit_relay(
+        &mut durable,
+        "close-command",
+        RelayCommand::Close {
+            barrier_command_id: "cancelled-turn-barrier".into(),
+            expected: cut,
+        },
+    );
+    submit_relay(
+        &mut durable,
+        "close-checkpoint-complete",
+        RelayCommand::CompleteCheckpoint {
+            barrier_command_id: "cancelled-turn-barrier".into(),
+        },
+    );
+    assert!(!durable.worker_writes_held());
+    assert!(
+        !journal(&durable)
+            .iter()
+            .any(|event| matches!(event.observation, RelayObservation::SessionUpdate { .. }))
+    );
+}
+
+/// A background task the adapter announces after the barrier became ready
+/// journals nothing, so the frontier still equals the cut. Close must still be
+/// refused: sealing there would stop work the cut never saw.
+// Hard-won: 15e0e5b35: background work that started after the cut and journaled nothing let Close stop it
+// Runtime events reach the relay only through the Unix worker runtime.
+#[cfg(unix)]
+#[test]
+fn background_work_started_after_the_cut_refuses_the_close() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = configured(&temp);
+    durable.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
+    let cut = ready_checkpoint(&mut durable, "spoiled-barrier");
+    let relay = Arc::new(RelayCell::new(durable));
+    let mut in_flight = BTreeMap::new();
+
+    crate::worker_runtime::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::AirTaskChanged {
+            session_id: "native-session".into(),
+            update: crate::acp::AirTaskUpdate::Spawned {
+                task_id: "build".into(),
+                description: "cargo build".into(),
+                can_stop: true,
+            },
+        },
+    )
+    .unwrap();
+
+    let mut durable = relay.lock().unwrap();
+    assert_eq!(durable.operational_state().latest_ordinal, cut.ordinal);
+    let response = durable.handle(relay_request(
+        "request-close",
+        RelayRequest::Submit {
+            command_id: "close-command".into(),
+            command: RelayCommand::Close {
+                barrier_command_id: "spoiled-barrier".into(),
+                expected: cut,
+            },
+        },
+    ));
+    let refusal = format!("{:?}", response.body);
+    assert!(
+        refusal.contains("background work started after the checkpoint cut"),
+        "{refusal}"
+    );
 }

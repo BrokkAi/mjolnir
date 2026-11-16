@@ -159,6 +159,28 @@ impl ProfileCapabilitiesSnapshot {
                 .collect(),
         }
     }
+
+    /// Whether every enabled profile in `config` has ready model choices and
+    /// every model `config` selects on it has ready effort choices.
+    pub fn covers(&self, config: &Config) -> bool {
+        config.enabled_profiles().all(|(id, profile)| {
+            let Some(entry) = self.profiles.get(&profile.capabilities_key(id)) else {
+                return false;
+            };
+            let CapabilityState::Ready(choices) = &entry.choices else {
+                return false;
+            };
+            config.selected_models(id).into_iter().all(|wanted| {
+                let Some(offer) = model_catalog::resolve(&choices.models, &wanted) else {
+                    return true;
+                };
+                matches!(
+                    entry.efforts.get(&offer.value),
+                    Some(CapabilityState::Ready(_))
+                )
+            })
+        })
+    }
 }
 
 fn merge_efforts(into: &mut Vec<SessionConfigChoice>, choices: &[SessionConfigChoice]) {

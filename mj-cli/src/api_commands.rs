@@ -1859,21 +1859,33 @@ pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
     let fetched = client.fetch(&args.session, &args.path, args.ls).await?;
     if args.ls {
         let listing: mj_checkpoint::archive::SessionListing =
-            serde_json::from_slice(&fetched.bytes).context("decode the listing")?;
+            tokio::task::spawn_blocking(move || {
+                serde_json::from_reader(fetched.reader()).context("decode the listing")
+            })
+            .await??;
         if args.json {
             return print_json(&listing);
         }
         print_lines(listing_lines(&listing));
         return Ok(());
     }
-    if args.stdout {
-        let mut stdout = std::io::stdout().lock();
-        stdout
-            .write_all(&fetched.bytes)
-            .context("write the fetched path")?;
-        return stdout.flush().context("write the fetched path");
-    }
-    let saved = fetched.save(&std::env::temp_dir(), &args.session)?;
+    let session = args.session.clone();
+    let saved = tokio::task::spawn_blocking(
+        move || -> Result<Option<mj_checkpoint::archive::SavedFetch>> {
+            if args.stdout {
+                let mut stdout = std::io::stdout().lock();
+                std::io::copy(&mut fetched.reader(), &mut stdout)
+                    .context("write the fetched path")?;
+                stdout.flush().context("write the fetched path")?;
+                return Ok(None);
+            }
+            Ok(Some(fetched.save(&std::env::temp_dir(), &session)?))
+        },
+    )
+    .await??;
+    let Some(saved) = saved else {
+        return Ok(());
+    };
     if args.json {
         return print_json(&saved);
     }
@@ -2512,16 +2524,20 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
 
 #[derive(Debug, Args)]
 pub(crate) struct ModelsArgs {
-    /// Profile whose harness to ask.
+    /// Profile whose harness to ask. Omitted lists the models every enabled
+    /// profile offers, with the profiles supporting each.
     #[arg(long)]
-    profile: String,
+    profile: Option<String>,
     /// List the efforts this model offers instead of the default model's.
-    #[arg(long)]
+    #[arg(long, requires = "profile")]
     model: Option<String>,
     /// List every model the harness advertises, ignoring the profile's
     /// `models` allow-list. Use it to find the exact values to put there.
     #[arg(long, conflicts_with = "model")]
     unrestricted: bool,
+    /// With no --profile, include disabled profiles in the aggregate.
+    #[arg(long)]
+    with_disabled: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -2549,17 +2565,94 @@ pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
     else {
         bail!("daemon did not return a runtime snapshot for cached quota reports");
     };
-    let quota = projection.metadata.quotas.reports.get(&args.profile);
+    let client = ApiClient::connect().await?;
+    let Some(profile) = args.profile.as_deref() else {
+        let config = projection.metadata.installed_config();
+        let ids: Vec<String> = config
+            .profiles
+            .iter()
+            .filter(|(_, profile)| args.with_disabled || profile.enabled)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let results = futures::future::join_all(ids.iter().map(|id| {
+            let client = &client;
+            async move {
+                (
+                    id.clone(),
+                    client
+                        .models(id, None, args.unrestricted, args.with_disabled)
+                        .await,
+                )
+            }
+        }))
+        .await;
+        let rendered = render_models_aggregate(&results, args.json)?;
+        println!("{rendered}");
+        return Ok(());
+    };
+    let quota = projection.metadata.quotas.reports.get(profile);
     let billing = quota
         .map(mj_client::quota::ProfileQuota::billing_class)
         .unwrap_or(mj_client::quota::QuotaBilling::Unknown);
-    let choices = ApiClient::connect()
-        .await?
-        .models(&args.profile, args.model, args.unrestricted)
+    let choices = client
+        .models(profile, args.model, args.unrestricted, args.with_disabled)
         .await?;
     let rendered = render_models(&choices, billing, args.json)?;
     println!("{rendered}");
     Ok(())
+}
+
+/// The aggregated `mj models` view: one row per normalized model identity,
+/// naming every profile that offers it. Provider qualifiers fold away, so
+/// `openai/gpt-5.3-codex` and `gpt-5.3-codex` share a row.
+fn render_models_aggregate(
+    results: &[(String, Result<mj_core::worker_launch::ProfileConfig>)],
+    json: bool,
+) -> Result<String> {
+    let mut by_model: std::collections::BTreeMap<String, (String, Vec<String>)> =
+        Default::default();
+    let mut unavailable: Vec<(String, String)> = Vec::new();
+    for (profile, result) in results {
+        match result {
+            Ok(choices) => {
+                for model in &choices.models {
+                    let entry = by_model
+                        .entry(mj_core::model_catalog::normalize_model(&model.value))
+                        .or_insert_with(|| (model.name.clone(), Vec::new()));
+                    entry.1.push(profile.clone());
+                }
+            }
+            Err(error) => unavailable.push((profile.clone(), format!("{error:#}"))),
+        }
+    }
+    if json {
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "models": by_model
+                .iter()
+                .map(|(value, (name, profiles))| serde_json::json!({
+                    "value": value,
+                    "name": name,
+                    "profiles": profiles,
+                }))
+                .collect::<Vec<_>>(),
+            "unavailable": unavailable
+                .iter()
+                .map(|(profile, error)| (profile.clone(), error.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        }))
+        .context("serialize the aggregated model catalog");
+    }
+    let mut lines: Vec<String> = by_model
+        .iter()
+        .map(|(value, (name, profiles))| format!("{value}  {name}: {}", profiles.join(", ")))
+        .collect();
+    if by_model.is_empty() {
+        lines.push("no profile reports any models".to_owned());
+    }
+    for (profile, error) in &unavailable {
+        lines.push(format!("{profile}: {error}"));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn render_models(
@@ -2656,6 +2749,9 @@ pub(crate) struct QuotaArgs {
     /// Ask the daemon to probe again, and wait for the fresh cycle's readings.
     #[arg(long)]
     refresh: bool,
+    /// Include disabled profiles, probing once for any without a report.
+    #[arg(long)]
+    with_disabled: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -2666,8 +2762,55 @@ pub(crate) struct QuotaArgs {
 /// agent, so a fresh cycle can take a while on a loaded host.
 const QUOTA_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
-pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
+/// Pump runtime deltas until `done` holds or the deadline passes; returns the
+/// latest cursor and metadata seen. One waiter feeds `--refresh` (a new
+/// cycle) and `--with-disabled` (a report for every profile just probed).
+async fn pump_quota_feed(
+    daemon: &mut mj_client::daemon::DaemonClient,
+    mut cursor: Option<mj_client::runtime_feed::RuntimeCursor>,
+    mut metadata: mj_client::runtime_feed::RuntimeMetadata,
+    deadline: std::time::Instant,
+    done: impl Fn(&mj_client::runtime_feed::RuntimeMetadata) -> bool,
+) -> Result<(
+    Option<mj_client::runtime_feed::RuntimeCursor>,
+    mj_client::runtime_feed::RuntimeMetadata,
+)> {
     use mj_client::runtime_feed::RuntimeFrame;
+    while !done(&metadata) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let Ok(frame) =
+            tokio::time::timeout(remaining, daemon.runtime_changes(cursor.clone(), true)).await
+        else {
+            break;
+        };
+        match frame? {
+            RuntimeFrame::Snapshot {
+                cursor: next,
+                projection,
+            } => {
+                cursor = Some(next);
+                metadata = projection.metadata;
+            }
+            RuntimeFrame::Delta {
+                cursor: next,
+                changes,
+                ..
+            } => {
+                cursor = Some(next);
+                if let Some(changed) = changes.metadata {
+                    metadata = changed;
+                }
+            }
+            RuntimeFrame::ResetRequired => cursor = None,
+        }
+    }
+    Ok((cursor, metadata))
+}
+
+pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
     let mut daemon = crate::daemon::connect_or_start().await?;
     let mj_client::runtime_feed::RuntimeFrame::Snapshot {
         cursor: first,
@@ -2684,40 +2827,45 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
         let pending = metadata.quotas.cycles;
         daemon.refresh_quota().await?;
         let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
-        while metadata.quotas.cycles <= pending {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            // The wait elapsed without a new cycle: print what the daemon has.
-            let Ok(frame) =
-                tokio::time::timeout(remaining, daemon.runtime_changes(cursor.clone(), true)).await
-            else {
-                break;
-            };
-            match frame? {
-                RuntimeFrame::Snapshot {
-                    cursor: next,
-                    projection,
-                } => {
-                    cursor = Some(next);
-                    metadata = projection.metadata;
-                }
-                RuntimeFrame::Delta {
-                    cursor: next,
-                    changes,
-                    ..
-                } => {
-                    cursor = Some(next);
-                    if let Some(changed) = changes.metadata {
-                        metadata = changed;
-                    }
-                }
-                RuntimeFrame::ResetRequired => cursor = None,
-            }
+        let pumped = pump_quota_feed(&mut daemon, cursor, metadata, deadline, |metadata| {
+            metadata.quotas.cycles > pending
+        })
+        .await?;
+        cursor = pumped.0;
+        metadata = pumped.1;
+    }
+    if args.with_disabled {
+        let config = metadata.installed_config();
+        // A disabled profile with a served report shows it; one without gets
+        // a single daemon probe, and this waits for the answer.
+        let probe: Vec<String> = config
+            .profiles
+            .iter()
+            .filter(|(id, profile)| {
+                !profile.enabled
+                    && args.profile.as_deref().is_none_or(|wanted| wanted == *id)
+                    && !metadata.quotas.reports.contains_key(*id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !probe.is_empty() {
+            daemon.probe_quota_profiles(probe.clone(), false).await?;
+            let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
+            let pumped = pump_quota_feed(&mut daemon, cursor, metadata, deadline, |metadata| {
+                probe
+                    .iter()
+                    .all(|id| metadata.quotas.reports.contains_key(id))
+            })
+            .await?;
+            metadata = pumped.1;
         }
     }
-    let rendered = render_quota(&metadata, args.profile.as_deref(), args.json)?;
+    let rendered = render_quota(
+        &metadata,
+        args.profile.as_deref(),
+        args.with_disabled,
+        args.json,
+    )?;
     println!("{rendered}");
     Ok(())
 }
@@ -2742,6 +2890,7 @@ fn quota_row(
         "profile": id,
         "harness": profile.kind.id(),
         "billing": billing_label,
+        "enabled": profile.enabled,
         "probing": probing,
         "report": report,
     });
@@ -2794,8 +2943,9 @@ fn quota_row(
         .join(" · ");
     entry["detail"] = serde_json::Value::String(status.clone());
     let mut text = format!(
-        "{id} ({}, {billing_label}): {status}",
-        profile.kind.display_name()
+        "{id} ({}, {billing_label}{}): {status}",
+        profile.kind.display_name(),
+        if profile.enabled { "" } else { ", disabled" }
     );
     if let Some(report) = report {
         text.push_str(&format!(
@@ -2823,21 +2973,29 @@ fn quota_age(now: u64, epoch_seconds: u64) -> String {
 fn render_quota(
     metadata: &mj_client::runtime_feed::RuntimeMetadata,
     only: Option<&str>,
+    with_disabled: bool,
     json: bool,
 ) -> Result<String> {
-    render_quota_at(metadata, only, json, mj_core::clock::epoch_seconds())
+    render_quota_at(
+        metadata,
+        only,
+        with_disabled,
+        json,
+        mj_core::clock::epoch_seconds(),
+    )
 }
 
 fn render_quota_at(
     metadata: &mj_client::runtime_feed::RuntimeMetadata,
     only: Option<&str>,
+    with_disabled: bool,
     json: bool,
     now: u64,
 ) -> Result<String> {
     let config = metadata.installed_config();
     let mut rows = Vec::new();
     for (id, profile) in &config.profiles {
-        if !profile.enabled {
+        if !profile.enabled && !with_disabled {
             continue;
         }
         if only.is_some_and(|wanted| wanted != id) {
@@ -2848,6 +3006,9 @@ fn render_quota_at(
     if let Some(wanted) = only
         && rows.is_empty()
     {
+        if with_disabled {
+            bail!("no profile {wanted:?}");
+        }
         bail!("no enabled profile {wanted:?}");
     }
     if json {
@@ -2949,9 +3110,10 @@ mod tests {
                 &[root.path().to_path_buf()],
                 false,
                 FetchMode::Listing,
+                tempfile::tempfile().unwrap(),
             )
             .unwrap();
-            serde_json::from_slice(&fetched.bytes).unwrap()
+            serde_json::from_reader(fetched.reader()).unwrap()
         };
         let mut directory = list(&probes);
         // The standard library cannot set a symlink's own time, so the link's
@@ -4562,6 +4724,51 @@ mod tests {
     }
 
     #[test]
+    fn api_models_aggregate_matches_cli_golden() {
+        let choices = |models: &[(&str, &str)]| mj_core::worker_launch::ProfileConfig {
+            model: None,
+            models: models
+                .iter()
+                .map(|(value, name)| mj_core::acp::SessionConfigChoice {
+                    value: (*value).to_owned(),
+                    name: (*name).to_owned(),
+                    description: None,
+                })
+                .collect(),
+            efforts: vec![],
+            observed_at: 1,
+        };
+        let results = vec![
+            (
+                "claude-main".to_owned(),
+                Ok(choices(&[
+                    ("claude-opus-4-7", "Claude Opus 4.7"),
+                    ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+                ])),
+            ),
+            (
+                "claude-backup".to_owned(),
+                Ok(choices(&[("anthropic.claude-opus-4-7", "Opus")])),
+            ),
+            (
+                "codex".to_owned(),
+                Ok(choices(&[("gpt-5.3-codex", "GPT-5.3 Codex")])),
+            ),
+            (
+                "grok".to_owned(),
+                Err(anyhow::anyhow!("profile discovery failed: login expired")),
+            ),
+        ];
+        let mut output = String::from("=== mj models text ===\n");
+        output.push_str(&render_models_aggregate(&results, false).unwrap());
+        output.push_str("\n=== mj models --json ===\n");
+        output.push_str(&render_models_aggregate(&results, true).unwrap());
+        output.push_str("\n=== mj models, nothing offered ===\n");
+        output.push_str(&render_models_aggregate(&[], false).unwrap());
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-models-aggregate", &output);
+    }
+
+    #[test]
     fn api_quota_matches_cli_golden() {
         use mj_client::quota::{PaidCredits, ProfileQuota, QuotaSnapshot, QuotaWindow};
         use mj_core::config::{HarnessKind, HarnessProfile};
@@ -4678,14 +4885,16 @@ mod tests {
             ..Default::default()
         };
         let mut output = String::from("=== mj quota text ===\n");
-        output.push_str(&render_quota_at(&metadata, None, false, now).unwrap());
+        output.push_str(&render_quota_at(&metadata, None, false, false, now).unwrap());
         output.push_str("\n=== mj quota --profile claude ===\n");
-        output.push_str(&render_quota_at(&metadata, Some("claude"), false, now).unwrap());
+        output.push_str(&render_quota_at(&metadata, Some("claude"), false, false, now).unwrap());
         output.push_str("\n=== mj quota --json ===\n");
-        output.push_str(&render_quota_at(&metadata, None, true, now).unwrap());
+        output.push_str(&render_quota_at(&metadata, None, false, true, now).unwrap());
+        output.push_str("\n=== mj quota --with-disabled ===\n");
+        output.push_str(&render_quota_at(&metadata, None, true, false, now).unwrap());
         output.push_str("\n=== mj quota --profile missing ===\n");
         output.push_str(
-            &render_quota_at(&metadata, Some("missing"), false, now)
+            &render_quota_at(&metadata, Some("missing"), false, false, now)
                 .unwrap_err()
                 .to_string(),
         );

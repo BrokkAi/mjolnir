@@ -1031,6 +1031,7 @@ fn latch_relay_child_serves_stdio() {
     // trailing newline before the body runs. End that line first so it
     // cannot glue itself onto the first protocol frame.
     println!();
+    let mut resume_discarded = false;
     let checkpoint_only = std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some();
     // Queue-only connections never own or write the control journal.
     let mut relay: Option<mj_worker::relay::DurableRelay> = None;
@@ -1231,7 +1232,15 @@ fn latch_relay_child_serves_stdio() {
             }
             relay
         });
-        if !checkpoint_only && !configured && Instant::now() >= ready_at {
+        if matches!(&request.request, mj_core::relay::RelayRequest::Submit { command_id, command: RelayCommand::ClearQueuedPrompts } if command_id == "discard-before-ready")
+        {
+            resume_discarded = true;
+        }
+        let discard_ready = !Path::new(&root)
+            .join("resume-discard-before-ready")
+            .exists()
+            || resume_discarded;
+        if !checkpoint_only && !configured && Instant::now() >= ready_at && discard_ready {
             relay
                 .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
                     config_options: Vec::new(),
@@ -1812,6 +1821,76 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         "busy deferral must return without detaching or restarting the connection"
     );
     channels.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: 6984aae: live Resume waited for readiness before discarding queued work.
+#[cfg(unix)]
+#[tokio::test]
+async fn live_resume_discards_queue_before_native_readiness() {
+    const CHILD: &str = "MJ_RESUME_DISCARD_READY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            "live_resume_discards_queue_before_native_readiness",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("resume-discard-before-ready"), b"").unwrap();
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    }));
+    crate::database::save_session(&session).unwrap();
+    let controller = Controller {
+        config: Default::default(),
+        state: mj_core::state::State {
+            sessions: [(LATCH_RELAY_SESSION.into(), session)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+    };
+    let target = latch_relay_target(&root, None, ReleaseSupport::Supported, false);
+    let backend = targets::TargetLocator::LocalBare {
+        worker_root: root.to_string_lossy().into_owned(),
+    };
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        LATCH_RELAY_SESSION,
+        "test discard readiness",
+    )
+    .unwrap()
+    .unwrap();
+    let result = owner
+        .scope(tokio::time::timeout(
+            Duration::from_secs(10),
+            controller.observe_started_worker(
+                LATCH_RELAY_SESSION,
+                &targets::ProcessExecutor,
+                super::super::worker_restart::InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &root.to_string_lossy(),
+                    reconnect: &target.spec,
+                    launch: None,
+                    prepared: true,
+                    discard_queued_prompts: Some("discard-before-ready".into()),
+                    swap_admission: None,
+                    messages: &super::super::worker_restart::RESTART_FOR_CHECKPOINT,
+                },
+            ),
+        ))
+        .await;
+    let connection = result
+        .expect("queue discard must unblock native readiness")
+        .unwrap();
+    drop(connection);
 }
 
 #[cfg(unix)]

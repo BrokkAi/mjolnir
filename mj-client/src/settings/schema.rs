@@ -43,7 +43,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null,"claude_permission_mode":null,"models":[]})
+            profile_defaults(value["kind"].as_str().unwrap_or("codex"))
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
         // The build cache is its own page, and the saved file keeps only the
@@ -80,6 +80,26 @@ fn scheduler_defaults() -> Value {
 
 /// The fields one machine kind needs. A machine owns the host settings every
 /// runtime on it shares, which is why the build cache lives here.
+/// The fields one profile kind uses. Profile validation rejects another
+/// kind's fields, so the editor never offers them.
+fn profile_defaults(kind: &str) -> Value {
+    let mut fields =
+        json!({"enabled":true,"kind":kind,"home":"","environment":{},"context_window_bytes":null});
+    let object = fields.as_object_mut().unwrap();
+    match kind {
+        "codex" => {
+            object.insert("guardian_review_model".to_owned(), Value::Null);
+            object.insert("codex_profile".to_owned(), Value::Null);
+        }
+        "claude" => {
+            object.insert("claude_permission_mode".to_owned(), Value::Null);
+        }
+        _ => {}
+    }
+    object.insert("models".to_owned(), json!([]));
+    fields
+}
+
 fn machine_defaults(kind: &str) -> Value {
     let mut fields = json!({"kind":kind});
     let object = fields.as_object_mut().unwrap();

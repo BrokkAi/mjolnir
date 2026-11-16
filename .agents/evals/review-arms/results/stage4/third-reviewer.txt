@@ -1,0 +1,48 @@
+## severities high,medium,low
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  Terra/xhigh+Terra/xhigh      total  181.00
+  Terra/xhigh+Terra/xhigh+Terra/high total  188.25
+  Terra/xhigh+Terra/xhigh+Sol/high total  191.00
+  Terra/xhigh+Terra/xhigh+Sol/xhigh total  211.50
+  Terra/xhigh+Terra/xhigh+Gemini/high total  202.00
+  Terra/xhigh+Terra/xhigh+Kimi/high total  196.00
+  Terra/xhigh+Terra/xhigh+Ember/xhigh total  186.00
+  Terra/xhigh+Terra/xhigh+Greptile/base total  213.00
+  Terra/xhigh+Terra/xhigh+Greptile/plus total  236.00
+  Terra/high+Terra/high+Terra/high total  118.00
+  Greptile/plus                total  164.00
+  Terra/xhigh+Terra/xhigh+Terra/high - Terra/xhigh+Terra/xhigh: +7.25 (95% +3.17 to +12.00); diffs better 11, worse 0, tied 59
+  Terra/xhigh+Terra/xhigh+Sol/high - Terra/xhigh+Terra/xhigh: +10.00 (95% +5.33 to +15.00); diffs better 18, worse 0, tied 52
+  Terra/xhigh+Terra/xhigh+Sol/xhigh - Terra/xhigh+Terra/xhigh: +30.50 (95% +19.00 to +43.00); diffs better 27, worse 0, tied 43
+  Terra/xhigh+Terra/xhigh+Gemini/high - Terra/xhigh+Terra/xhigh: +21.00 (95% +11.00 to +33.00); diffs better 15, worse 0, tied 55
+  Terra/xhigh+Terra/xhigh+Kimi/high - Terra/xhigh+Terra/xhigh: +15.00 (95% +7.00 to +25.00); diffs better 11, worse 0, tied 59
+  Terra/xhigh+Terra/xhigh+Ember/xhigh - Terra/xhigh+Terra/xhigh: +5.00 (95% +1.00 to +11.00); diffs better 4, worse 0, tied 66
+  Terra/xhigh+Terra/xhigh+Greptile/base - Terra/xhigh+Terra/xhigh: +32.00 (95% +19.00 to +47.00); diffs better 24, worse 0, tied 46
+  Terra/xhigh+Terra/xhigh+Greptile/plus - Terra/xhigh+Terra/xhigh: +55.00 (95% +38.00 to +73.00); diffs better 35, worse 0, tied 35
+  Terra/high+Terra/high+Terra/high - Terra/xhigh+Terra/xhigh: -63.00 (95% -83.00 to -42.75); diffs better 5, worse 41, tied 24
+  Greptile/plus - Terra/xhigh+Terra/xhigh: -17.00 (95% -39.00 to +5.00); diffs better 16, worse 25, tied 29
+
+## severities high,medium
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  Terra/xhigh+Terra/xhigh      total  102.00
+  Terra/xhigh+Terra/xhigh+Terra/high total  103.67
+  Terra/xhigh+Terra/xhigh+Sol/high total  108.00
+  Terra/xhigh+Terra/xhigh+Sol/xhigh total  120.00
+  Terra/xhigh+Terra/xhigh+Gemini/high total  114.00
+  Terra/xhigh+Terra/xhigh+Kimi/high total  107.00
+  Terra/xhigh+Terra/xhigh+Ember/xhigh total  102.00
+  Terra/xhigh+Terra/xhigh+Greptile/base total  112.00
+  Terra/xhigh+Terra/xhigh+Greptile/plus total  121.00
+  Terra/high+Terra/high+Terra/high total   74.00
+  Greptile/plus                total   93.00
+  Terra/xhigh+Terra/xhigh+Terra/high - Terra/xhigh+Terra/xhigh: +1.67 (95% +0.33 to +3.67); diffs better 4, worse 0, tied 66
+  Terra/xhigh+Terra/xhigh+Sol/high - Terra/xhigh+Terra/xhigh: +6.00 (95% +2.33 to +10.33); diffs better 10, worse 0, tied 60
+  Terra/xhigh+Terra/xhigh+Sol/xhigh - Terra/xhigh+Terra/xhigh: +18.00 (95% +9.50 to +28.00); diffs better 17, worse 0, tied 53
+  Terra/xhigh+Terra/xhigh+Gemini/high - Terra/xhigh+Terra/xhigh: +12.00 (95% +5.00 to +20.00); diffs better 9, worse 0, tied 61
+  Terra/xhigh+Terra/xhigh+Kimi/high - Terra/xhigh+Terra/xhigh: +5.00 (95% +1.00 to +10.00); diffs better 5, worse 0, tied 65
+  Terra/xhigh+Terra/xhigh+Ember/xhigh - Terra/xhigh+Terra/xhigh: +0.00 (95% +0.00 to +0.00); diffs better 0, worse 0, tied 70
+  Terra/xhigh+Terra/xhigh+Greptile/base - Terra/xhigh+Terra/xhigh: +10.00 (95% +4.00 to +18.00); diffs better 8, worse 0, tied 62
+  Terra/xhigh+Terra/xhigh+Greptile/plus - Terra/xhigh+Terra/xhigh: +19.00 (95% +10.00 to +30.00); diffs better 14, worse 0, tied 56
+  Terra/high+Terra/high+Terra/high - Terra/xhigh+Terra/xhigh: -28.00 (95% -42.00 to -15.00); diffs better 4, worse 23, tied 43
+  Greptile/plus - Terra/xhigh+Terra/xhigh: -9.00 (95% -25.00 to +6.00); diffs better 12, worse 16, tied 42
+

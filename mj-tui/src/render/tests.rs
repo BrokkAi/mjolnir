@@ -3579,11 +3579,16 @@ fn golden_dashboard_footer_render() {
     );
 }
 
+// Hard-won: 3747d578c: Windows omits the default localhost permission metadata.
 #[test]
 fn golden_dashboard_resource_panels() {
     let mut output = String::new();
 
     let mut target_config = Config::default();
+    // Pin the permission metadata even on hosts that cannot run local workers.
+    target_config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
     let mut sandbox = Config::default().with_local_targets().targets["docker"].clone();
     if let TargetTemplate::LocalDocker { container } = &mut sandbox {
         container.image = "example.test/own:latest".into();

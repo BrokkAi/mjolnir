@@ -122,17 +122,43 @@ pub(crate) fn spawn_background_async<T: Send + 'static>(
     spawn_async_job(None, label, updates, timeout, work, to_update)
 }
 
-/// Loads the manager's complete view from the daemon. Workspace listings and
-/// their detached-draft previews are read through the same client so the
-/// snapshot is ordered and every failure reaches the dashboard.
+/// Loads the manager's complete view from the daemon: one listing plus one
+/// drafts query. The per-workspace snapshot this replaced loaded the whole
+/// controller once per workspace for session previews the manager never shows.
 pub(crate) async fn load_workspace_management_entries(
     daemon: &mut daemon::DaemonClient,
 ) -> Result<Vec<WorkspaceManagementEntry>> {
+    let mut entries = workspace_management_listings(daemon).await?;
+    fill_workspace_management_drafts(daemon, &mut entries).await?;
+    Ok(entries)
+}
+
+/// The workspace list alone: names and session counts, no drafts.
+async fn workspace_management_listings(
+    daemon: &mut daemon::DaemonClient,
+) -> Result<Vec<WorkspaceManagementEntry>> {
     let listings = daemon.list_workspaces().await?;
-    let mut entries = Vec::with_capacity(listings.len());
-    for listing in listings {
-        let snapshot = daemon.snapshot(listing.workspace.id.clone()).await?;
-        let drafts = snapshot
+    Ok(listings
+        .into_iter()
+        .map(|listing| WorkspaceManagementEntry {
+            workspace: listing.workspace,
+            drafts: Vec::new(),
+        })
+        .collect())
+}
+
+async fn fill_workspace_management_drafts(
+    daemon: &mut daemon::DaemonClient,
+    entries: &mut [WorkspaceManagementEntry],
+) -> Result<()> {
+    for group in daemon.list_workspace_drafts().await? {
+        let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| entry.workspace.id == group.workspace_id)
+        else {
+            continue;
+        };
+        entry.drafts = group
             .drafts
             .into_iter()
             .map(|draft| WorkspaceDraftEntry {
@@ -143,12 +169,8 @@ pub(crate) async fn load_workspace_management_entries(
                 owner_pid: draft.owner_pid,
             })
             .collect();
-        entries.push(WorkspaceManagementEntry {
-            workspace: snapshot.workspace,
-            drafts,
-        });
     }
-    Ok(entries)
+    Ok(())
 }
 
 pub(crate) fn spawn_workspace_management_operation(
@@ -171,12 +193,27 @@ pub(crate) fn spawn_workspace_management_load(
     generation: u64,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
-    spawn_workspace_management_operation(generation, "loading workspaces", updates, None, async {
+    let names_updates = updates.clone();
+    spawn_workspace_management_operation(generation, "loading workspaces", updates, None, async move {
         let mut daemon = daemon::connect_or_start().await?;
+        let mut entries = workspace_management_listings(&mut daemon).await?;
+        // Names first: the dialog opens on this answer while the drafts
+        // query runs. The supervised task's own answer carries the details.
+        let _ = names_updates.send(DashboardIoUpdate::WorkspaceManagement {
+            generation,
+            result: Ok(WorkspaceManagementResult {
+                entries: entries.clone(),
+                select_workspace: None,
+                deleted_workspace_id: None,
+                details_pending: true,
+            }),
+        });
+        fill_workspace_management_drafts(&mut daemon, &mut entries).await?;
         Ok(WorkspaceManagementResult {
-            entries: load_workspace_management_entries(&mut daemon).await?,
+            entries,
             select_workspace: None,
             deleted_workspace_id: None,
+            details_pending: false,
         })
     })
 }
@@ -246,6 +283,7 @@ pub(crate) fn spawn_workspace_create(
                 entries: load_workspace_management_entries(&mut daemon).await?,
                 select_workspace: Some(workspace.id),
                 deleted_workspace_id: None,
+                details_pending: false,
             })
         },
     )
@@ -270,6 +308,7 @@ pub(crate) fn spawn_workspace_rename(
                 entries: load_workspace_management_entries(&mut daemon).await?,
                 select_workspace: None,
                 deleted_workspace_id: None,
+                details_pending: false,
             })
         },
     )
@@ -337,6 +376,7 @@ pub(crate) fn spawn_workspace_draft_recovery(
                 entries: load_workspace_management_entries(&mut daemon).await?,
                 select_workspace: None,
                 deleted_workspace_id: None,
+                details_pending: false,
             })
         },
     )
@@ -932,6 +972,30 @@ pub(crate) fn spawn_quota_refresh_request(updates: UnboundedSender<DashboardIoUp
         SAVE_ACK_TIMEOUT,
         async move { daemon::connect_existing().await?.refresh_quota().await },
         DashboardIoUpdate::QuotaRefreshRequested,
+    );
+}
+
+/// Asks the daemon to probe one profile's quota now, even a disabled
+/// profile's. The answer arrives through the runtime feed like any other.
+pub(crate) fn spawn_quota_probe_request(
+    profile_id: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) {
+    let completion = profile_id.clone();
+    spawn_background_async(
+        format!("asking the daemon to refresh {profile_id}'s quota"),
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_existing()
+                .await?
+                .probe_quota_profiles(vec![profile_id], true)
+                .await
+        },
+        move |result| DashboardIoUpdate::QuotaProbeRequested {
+            profile_id: completion,
+            result,
+        },
     );
 }
 

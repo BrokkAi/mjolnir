@@ -52,6 +52,7 @@ pub(super) fn destinations(
         &config.quota.prefer,
         model,
         now,
+        crate::profile_scheduler::Placement::TopLevel,
     )?;
     Ok(candidates)
 }

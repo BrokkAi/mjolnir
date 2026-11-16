@@ -83,7 +83,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
                 claude_permission_mode: None,
                 aws: None,
                 codex_profile: None,
@@ -840,10 +840,9 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
 
     let mut materialized = mj_core::state::MaterializedSession::empty(session_id);
     materialized.session_title = Some("r5 suspend probe".into());
-    let update = crate::pollers::WorkerPollUpdate {
-        raw_observation: None,
-        session_id: session_id.to_owned(),
-        view: mj_controller::session_manager::ManagedSessionView {
+    let update = crate::pollers::WorkerPollUpdate::from_view(
+        session_id.to_owned(),
+        mj_controller::session_manager::ManagedSessionView {
             attention: Default::default(),
             snapshot: Some(mj_core::state::ManagedSessionSnapshot {
                 window: mj_core::state::ProjectionWindow::of(&materialized),
@@ -860,7 +859,7 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
             connected: true,
             error: None,
         },
-    };
+    );
 
     let projection = crate::pollers::apply_worker_poll_update(&mut dashboard, update);
 
@@ -899,10 +898,9 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
 fn missing_target_poll_preserves_the_daemon_notice() {
     let mut dashboard = populated_dashboard();
     dashboard.set_notice("The daemon found the target missing.");
-    let update = crate::pollers::WorkerPollUpdate {
-        raw_observation: None,
-        session_id: "missing-target".into(),
-        view: mj_controller::session_manager::ManagedSessionView {
+    let update = crate::pollers::WorkerPollUpdate::from_view(
+        "missing-target".into(),
+        mj_controller::session_manager::ManagedSessionView {
             attention: Default::default(),
             snapshot: None,
             connected: false,
@@ -910,7 +908,7 @@ fn missing_target_poll_preserves_the_daemon_notice() {
                 "working directory is missing".into(),
             )),
         },
-    };
+    );
     assert!(crate::pollers::apply_worker_poll_update(&mut dashboard, update).is_none());
     assert_eq!(
         dashboard.notice().as_deref(),
@@ -1207,16 +1205,15 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     };
     let projection = crate::pollers::apply_worker_poll_update(
         &mut dashboard,
-        crate::pollers::WorkerPollUpdate {
-            raw_observation: None,
-            session_id: "session-1".into(),
-            view: mj_controller::session_manager::ManagedSessionView {
+        crate::pollers::WorkerPollUpdate::from_view(
+            "session-1".into(),
+            mj_controller::session_manager::ManagedSessionView {
                 attention: Default::default(),
                 snapshot: Some(snapshot),
                 connected: true,
                 error: None,
             },
-        },
+        ),
     )
     .expect("worker projection");
     // Completion reaches the UI before Jev's answer. The later publication

@@ -666,15 +666,19 @@ impl TargetTemplate {
     }
 
     pub const fn execution_policy(&self) -> ExecutionPolicy {
-        match self {
-            Self::LocalBare => ExecutionPolicy::ConfiguredApprovals,
-            Self::SshBare { permissions, .. } => permissions.execution_policy(),
-            _ => ExecutionPolicy::Unconstrained,
+        match self.permission_mode() {
+            Some(mode) => mode.execution_policy(),
+            None => ExecutionPolicy::Unconstrained,
         }
     }
 
+    /// The approval behavior of a target that runs the harness directly on a
+    /// machine, or `None` for a target whose container or instance boundary
+    /// replaces approvals. Localhost has no setting for it: the harness
+    /// always keeps its configured approvals there.
     pub const fn permission_mode(&self) -> Option<PermissionMode> {
         match self {
+            Self::LocalBare => Some(PermissionMode::Guardian),
             Self::SshBare { permissions, .. } => Some(*permissions),
             _ => None,
         }

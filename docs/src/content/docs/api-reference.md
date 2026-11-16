@@ -363,8 +363,11 @@ form) remember choices. `mj acp`, sub-agents and archive restores do not.
 When `model` is supplied without `profile_id`, Mjolnir checks every enabled,
 usable profile and chooses the one offering the exact model and, when named,
 the exact effort. It ranks by quota headroom paced against each window's reset,
-using the saved default profile to break ties. Usage-priced (API key) profiles
-come after every subscription profile that has or may have quota left. If no configured profile
+using the saved default profile to break ties. Profiles whose subscription
+carries a five-hour quota window come after profiles without one, regardless of
+how much the window has left, so the windowed allowance is preserved for work
+that cannot be billed; a subscription known to be out of quota for the model
+comes last. If no configured profile
 supports that selection, the request fails without changing the requested
 model or effort. Supplying both
 `profile_id` and `model` pins the profile and validates the model and effort on
@@ -988,10 +991,13 @@ cites, such as a sub-agent's report or a probe in `/tmp`.
 After symlinks are resolved, the path must lie in that boundary, in the
 directory holding the session's sub-agent report directories, or in the
 target's temporary directory. An empty path is `400`. A path outside those
-directories is `409`, as is a path that does not exist, a file over 16 MiB, a
-directory whose archive would pass 16 MiB or whose files hold more than
-128 MiB, a listing over 16 MiB, and a worker installed before directories
-could be fetched; resuming the session upgrades the worker.
+directories is `409`, as is a path that does not exist and a worker installed
+before directories could be fetched; resuming the session upgrades the worker.
+Files, directory archives, and listings have no fetch size limit. File and
+archive responses are streamed with a content length; daemon shutdown ends
+an active stream. Clients may retry this read after reconnecting to the
+replacement daemon. The CLI and MCP fetch tool retry interrupted transfers
+automatically after daemon replacement.
 
 `export` takes the form you want:
 

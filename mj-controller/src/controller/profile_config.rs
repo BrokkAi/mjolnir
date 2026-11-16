@@ -60,10 +60,7 @@ pub(crate) async fn validate_session_subagent_policy(
                 .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
         )
     };
-    let kind = config
-        .enabled_profile(profile_id)
-        .context("parent profile unavailable")?
-        .kind;
+    let kind = config.named_profile(profile_id)?.kind;
     // None asks for no Mjolnir sub-agents at all, so any harness accepts it;
     // only a Mjolnir policy needs the delegation tools.
     if !kind.supports_delegation_tools() && policy.uses_mjolnir() {
@@ -129,9 +126,7 @@ where
     F: Fn(String, Option<String>) -> Fut + Copy,
     Fut: std::future::Future<Output = Result<ProfileConfig>>,
 {
-    config
-        .enabled_profile(parent)
-        .context("parent profile is unavailable")?;
+    config.named_profile(parent)?;
     let candidates = config
         .profiles
         .iter()
@@ -362,9 +357,7 @@ pub(crate) async fn observe(
     let job_stored = stored.clone();
     serialized(profile_id.clone(), move |cancelled| {
         let config = Config::load()?;
-        let profile = config
-            .enabled_profile(&profile_id)
-            .context("observed profile was removed")?;
+        let profile = config.named_profile(&profile_id)?;
         let facts = mj_core::acp::AcpSessionFacts::from_operational(
             profile.kind,
             &state.config,
@@ -460,9 +453,7 @@ fn discover_with_provenance(
         !cancelled.load(std::sync::atomic::Ordering::Acquire),
         "profile discovery cancelled"
     );
-    let profile = config
-        .enabled_profile(profile_id)
-        .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?;
+    let profile = config.named_profile(profile_id)?;
     let mut environment = profile.environment.resolved().clone();
     let _ = super::worker_binary::apply_claude_setup_token(
         &mut environment,
@@ -1532,7 +1523,7 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             models: Default::default(),
@@ -1701,7 +1692,7 @@ mod tests {
                     context_window_bytes: None,
                     guardian_review_model: None,
                     codex_profile: None,
-                    muse_auto_review: None,
+                    legacy_muse_auto_review: None,
                     claude_permission_mode: None,
                     aws: None,
                     models: Default::default(),

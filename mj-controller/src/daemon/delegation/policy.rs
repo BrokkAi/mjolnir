@@ -40,6 +40,8 @@ pub(super) struct Policy {
     credentials: CredentialSyncCoordinator,
     signals: CredentialSyncSignalTracker,
     notices: CredentialSyncNotices,
+    /// Sequence of the last named forced probe published in the batch.
+    next_forced_probe: u64,
 }
 
 #[derive(Default)]
@@ -59,13 +61,13 @@ impl QuotaSourceScan {
     fn request(&mut self, intent: crate::daemon::QuotaRefreshIntent) {
         match self {
             Self::Idle => *self = Self::Queued(intent),
-            Self::Queued(pending) => *pending = coalesce_intent(*pending, intent),
+            Self::Queued(pending) => *pending = coalesce_intent(pending.clone(), intent),
             Self::Running {
                 intent: running,
                 successor,
                 ..
             } => {
-                let pending = successor.take().unwrap_or(*running);
+                let pending = successor.take().unwrap_or_else(|| running.clone());
                 *successor = Some(coalesce_intent(pending, intent));
             }
         }
@@ -78,11 +80,11 @@ impl QuotaSourceScan {
         let Self::Queued(intent) = self else {
             return None;
         };
-        let intent = *intent;
+        let intent = intent.clone();
         *self = Self::Running {
             task: None,
             config: Box::new(config),
-            intent,
+            intent: intent.clone(),
             successor: None,
         };
         Some(intent)
@@ -115,12 +117,12 @@ impl QuotaSourceScan {
         if *current_task != task {
             return None;
         }
-        let running_intent = *intent;
-        let successor = *successor;
+        let running_intent = intent.clone();
+        let successor = successor.take();
         let stale = config.as_ref() != current_config;
         let rerun = stale || successor.is_some();
         let next_intent = if rerun {
-            let followup = successor.unwrap_or(running_intent);
+            let followup = successor.unwrap_or_else(|| running_intent.clone());
             if stale {
                 coalesce_intent(followup, running_intent)
             } else {
@@ -129,12 +131,13 @@ impl QuotaSourceScan {
         } else {
             running_intent
         };
+        let next = next_intent.clone();
         *self = if rerun {
             Self::Queued(next_intent)
         } else {
             Self::Idle
         };
-        Some((next_intent, rerun))
+        Some((next, rerun))
     }
 }
 
@@ -237,6 +240,7 @@ impl Policy {
             credentials,
             signals: CredentialSyncSignalTracker::default(),
             notices: CredentialSyncNotices::default(),
+            next_forced_probe: 0,
         };
         policy.sync(false);
         policy
@@ -263,13 +267,73 @@ impl Policy {
 
     /// Consume all queued requests together; Force dominates source-only
     /// reconciliation while retaining the original manual-refresh behavior.
+    /// One-off probes always keep their requests: each names a profile the
+    /// asker wants read now.
     pub fn refresh(&mut self, first: crate::daemon::QuotaRefreshIntent) {
-        match coalesce_refresh_intents(first, &mut self.refresh_rx) {
-            crate::daemon::QuotaRefreshIntent::Force => self.sync(true),
-            crate::daemon::QuotaRefreshIntent::ReconcileSources => self
-                .quota_sources
-                .request(crate::daemon::QuotaRefreshIntent::ReconcileSources),
+        let mut intents = vec![first];
+        while let Ok(intent) = self.refresh_rx.try_recv() {
+            intents.push(intent);
         }
+        let mut force = false;
+        let mut reconcile = false;
+        let mut probes = Vec::new();
+        for intent in intents {
+            match intent {
+                crate::daemon::QuotaRefreshIntent::Force => force = true,
+                crate::daemon::QuotaRefreshIntent::ReconcileSources => reconcile = true,
+                crate::daemon::QuotaRefreshIntent::ProbeProfiles { requests, forced } => {
+                    probes.extend(requests.into_iter().map(|request| (request, forced)))
+                }
+            }
+        }
+        if force {
+            self.sync(true);
+        } else if reconcile {
+            self.quota_sources
+                .request(crate::daemon::QuotaRefreshIntent::ReconcileSources);
+        }
+        if !probes.is_empty() {
+            self.probe_profiles(probes);
+        }
+    }
+
+    /// One-off probes: a plain one names a profile the asker wants read once
+    /// (a `mj quota --with-disabled` read of a disabled profile), and its
+    /// publication stays until the profile's identity changes. A forced one is
+    /// a person asking to refresh that row now: it probes even a fresh
+    /// in-batch report, and re-probes an extra it already answered.
+    fn probe_profiles(&mut self, requests: Vec<(crate::quota::QuotaRefreshRequest, bool)>) {
+        for (request, force) in requests {
+            if force {
+                // A new sequence per request, retained in the batch: the
+                // poller answers every sequence it has not seen, however many
+                // publishes the watch channel coalesced in between.
+                self.next_forced_probe += 1;
+                self.batch
+                    .forced_probes
+                    .insert(request.profile_id.clone(), self.next_forced_probe);
+            }
+            if self
+                .batch
+                .profiles
+                .iter()
+                .any(|current| current.profile_id == request.profile_id)
+            {
+                continue;
+            }
+            match self
+                .batch
+                .extra
+                .iter_mut()
+                .find(|current| current.profile_id == request.profile_id)
+            {
+                Some(current) => *current = request,
+                None => self.batch.extra.push(request),
+            }
+        }
+        self.batch.generation = self.batch.generation.saturating_add(1);
+        self.profiles_tx.send_replace(self.batch.clone());
+        self.reconcile_publications(&self.batch.profiles.clone());
     }
 
     pub fn start_quota_source_scan(&mut self) -> Option<mj_core::config::Config> {
@@ -330,6 +394,7 @@ impl Policy {
         let desired = requests
             .iter()
             .chain(&self.batch.grants)
+            .chain(&self.batch.extra)
             .map(|request| (request.profile_id.clone(), request.cache_identity()))
             .collect::<BTreeMap<_, _>>();
         let changed = {
@@ -567,21 +632,6 @@ impl Policy {
     }
 }
 
-fn coalesce_refresh_intents(
-    first: crate::daemon::QuotaRefreshIntent,
-    pending: &mut mpsc::UnboundedReceiver<crate::daemon::QuotaRefreshIntent>,
-) -> crate::daemon::QuotaRefreshIntent {
-    let mut force = first == crate::daemon::QuotaRefreshIntent::Force;
-    while let Ok(intent) = pending.try_recv() {
-        force |= intent == crate::daemon::QuotaRefreshIntent::Force;
-    }
-    if force {
-        crate::daemon::QuotaRefreshIntent::Force
-    } else {
-        crate::daemon::QuotaRefreshIntent::ReconcileSources
-    }
-}
-
 fn replace_source_requests(
     batch: &mut QuotaRefreshBatch,
     profiles: &watch::Sender<QuotaRefreshBatch>,
@@ -694,26 +744,6 @@ mod tests {
 
     #[tokio::test]
     async fn queued_force_dominates_source_reconciliation() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        sender
-            .send(crate::daemon::QuotaRefreshIntent::ReconcileSources)
-            .unwrap();
-        sender
-            .send(crate::daemon::QuotaRefreshIntent::Force)
-            .unwrap();
-        sender
-            .send(crate::daemon::QuotaRefreshIntent::ReconcileSources)
-            .unwrap();
-
-        assert_eq!(
-            coalesce_refresh_intents(
-                crate::daemon::QuotaRefreshIntent::ReconcileSources,
-                &mut receiver,
-            ),
-            crate::daemon::QuotaRefreshIntent::Force
-        );
-        assert!(receiver.try_recv().is_err());
-
         let config = mj_core::config::Config::default();
         let mut scan = QuotaSourceScan::default();
         scan.request(crate::daemon::QuotaRefreshIntent::Force);

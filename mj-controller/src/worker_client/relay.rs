@@ -25,6 +25,15 @@ impl ProjectMemoryTransfer<'_> {
     }
 
     async fn abort(mut self, error: anyhow::Error) -> anyhow::Error {
+        let client = self.client.as_ref().unwrap();
+        if client.abandoned.is_some()
+            || client.cancelled()
+            || error.downcast_ref::<RelayTransportDead>().is_some()
+        {
+            // Drop closes the connection and lets its worker clean up staging.
+            // An abort cannot succeed here and would obscure the primary cause.
+            return error;
+        }
         match self
             .call(MemoryAction::Abort {
                 transfer_id: self.id,
@@ -459,6 +468,21 @@ impl RelayClient {
         .map(|_| ())
     }
 
+    async fn call_legacy_project_memory(
+        &mut self,
+        request: RelayRequest,
+    ) -> Result<RelayResponsePayload> {
+        // Legacy workers send one whole tree. Keep their connection protected
+        // from a late response when checkpoint cancellation drops this future.
+        let mut transfer = ProjectMemoryTransfer {
+            client: Some(self),
+            id: 0,
+        };
+        let result = transfer.client.as_mut().unwrap().call(request).await;
+        transfer.complete();
+        result
+    }
+
     pub async fn project_memory_snapshot(
         &mut self,
     ) -> Result<(
@@ -469,7 +493,7 @@ impl RelayClient {
             return self.download_project_memory().await;
         }
         let request = RelayRequest::ProjectMemorySnapshot;
-        match self.call(request).await? {
+        match self.call_legacy_project_memory(request).await? {
             RelayResponsePayload::ProjectMemorySnapshot { baseline, replica } => {
                 tokio::task::spawn_blocking(move || Ok((baseline.decode()?, replica.decode()?)))
                     .await
@@ -673,7 +697,7 @@ impl RelayClient {
         .await
         .context("encode project memory task failed")??;
         let request = RelayRequest::InstallProjectMemorySnapshot { snapshot };
-        match self.call(request).await? {
+        match self.call_legacy_project_memory(request).await? {
             RelayResponsePayload::ProjectMemorySnapshotInstalled => Ok(()),
             _ => bail!("relay returned an unexpected project-memory install response"),
         }
@@ -714,7 +738,7 @@ impl RelayClient {
             expected_replica,
             tree,
         };
-        match self.call(request).await? {
+        match self.call_legacy_project_memory(request).await? {
             RelayResponsePayload::ProjectMemoryTreeReplaced { outcome } => Ok(outcome),
             _ => bail!("relay returned an unexpected project-memory replace response"),
         }
@@ -735,20 +759,28 @@ impl RelayClient {
         )
     }
 
-    /// Copy a verified controller blob to this session before admitting its reference.
-    pub async fn ensure_attachment(
+    pub async fn attachment_present(
         &mut self,
         reference: &mj_core::attachment::AttachmentRef,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         match self
             .call(RelayRequest::AttachmentPresent {
                 reference: reference.clone(),
             })
             .await?
         {
-            RelayResponsePayload::AttachmentPresent { present: true } => return Ok(()),
-            RelayResponsePayload::AttachmentPresent { present: false } => {}
+            RelayResponsePayload::AttachmentPresent { present } => Ok(present),
             _ => bail!("unexpected image presence response"),
+        }
+    }
+
+    /// Copy a verified controller blob to this session before admitting its reference.
+    pub async fn ensure_attachment(
+        &mut self,
+        reference: &mj_core::attachment::AttachmentRef,
+    ) -> Result<()> {
+        if self.attachment_present(reference).await? {
+            return Ok(());
         }
         let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let reference_copy = reference.clone();

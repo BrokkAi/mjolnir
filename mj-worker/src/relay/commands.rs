@@ -407,7 +407,11 @@ impl DurableRelay {
         if matches!(command, RelayCommand::ClearContext) {
             if !matches!(
                 self.verdict_harness,
-                Some(mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude)
+                Some(
+                    mj_core::config::HarnessKind::Codex
+                        | mj_core::config::HarnessKind::Claude
+                        | mj_core::config::HarnessKind::Kimi
+                )
             ) {
                 return Ok(Err(relay_protocol_error(
                     RelayErrorCode::InvalidState,
@@ -678,25 +682,14 @@ impl DurableRelay {
             barrier_command_id,
             expected,
         } = &command
+            && let Some(message) = self.close_cut_refusal(barrier_command_id, expected)
         {
-            let ready = self
-                .snapshot
-                .checkpoint_ready_through
-                .zip(self.snapshot.checkpoint_ready_digest.as_ref());
-            let exact_cut = self.snapshot.checkpoint_barrier.as_deref() == Some(barrier_command_id)
-                && ready.is_some_and(|(ordinal, digest)| {
-                    ordinal == expected.ordinal && digest == &expected.digest
-                })
-                && self.snapshot.latest_ordinal == expected.ordinal
-                && self.snapshot.latest_digest == expected.digest;
-            if !exact_cut {
-                return Ok(Err(relay_protocol_error(
-                    RelayErrorCode::InvalidState,
-                    "close does not match the current checkpoint cut",
-                    false,
-                    None,
-                )));
-            }
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                message,
+                false,
+                None,
+            )));
         }
 
         if self.checkpoint_only
@@ -1905,6 +1898,7 @@ impl DurableRelay {
             .latest_ordinal
             .checked_add(1)
             .ok_or_else(|| anyhow!("relay event ordinal exhausted"))?;
+        self.baseline_background_work_at_cut();
         self.append_relay_event(
             Some(command_id),
             RelayObservation::CheckpointReady {

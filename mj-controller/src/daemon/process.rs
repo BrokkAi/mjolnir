@@ -173,8 +173,6 @@ pub(super) async fn run_daemon_runtime(
     let manager = crate::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
     manager.control.update_model_policies(&controller);
     let manager_targets = manager.targets;
-    manager_targets.send_replace(dashboard_worker_targets(&controller));
-    log_relay_actors_launched(&manager_targets.borrow());
     let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
@@ -196,6 +194,19 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
+    let failure_runtime = Arc::downgrade(&state);
+    manager_control.install_harness_failure_handler(Arc::new(move |id, failure| {
+        let runtime = failure_runtime.clone();
+        Box::pin(async move {
+            let runtime = runtime
+                .upgrade()
+                .context("daemon stopped before readiness failure could be applied")?;
+            runtime.fail_unready_session(id, failure).await
+        })
+    }));
+    // Install the bounded failure recorder before worker observations start.
+    manager_targets.send_replace(dashboard_worker_targets(&controller));
+    log_relay_actors_launched(&manager_targets.borrow());
     state
         .reviewer_runtime
         .set(Arc::downgrade(&state))
@@ -228,13 +239,15 @@ pub(super) async fn run_daemon_runtime(
     // are shut down before the process-level writer can be closed.
     let bootstrapping = Instant::now();
     let bootstrap = async {
-        let move_operations = blocking(crate::database::load_move_operations).await?;
+        let (move_operations, close_operations) =
+            blocking(crate::database::load_move_recovery).await?;
         let moves = move_operations.len();
         let move_sessions = move_operations
             .iter()
             .map(|operation| operation.selection.session_id.clone())
             .collect::<BTreeSet<_>>();
-        let mut lifecycle_owned = state.recover_moves(move_operations)?;
+        let move_owners = state.recover_moves(move_operations, &close_operations)?;
+        let mut lifecycle_owned = move_owners.moves;
         let restart_intents = blocking(crate::database::load_session_restarts).await?;
         let restarts = restart_intents.len();
         lifecycle_owned.extend(
@@ -243,7 +256,6 @@ pub(super) async fn run_daemon_runtime(
                 .map(|intent| intent.session_id.clone()),
         );
         lifecycle_owned.extend(state.recover_restarts(restart_intents)?);
-        lifecycle_owned.extend(move_sessions.iter().cloned());
         let (retained_cleanups, startup_cleanups) = {
             let owner = state.owner();
             let sessions = &owner.controller().state.sessions;
@@ -271,11 +283,11 @@ pub(super) async fn run_daemon_runtime(
             "daemon startup: recovery of moves, restarts and cleanups queued"
         );
         state.restore_startup_deliveries(&cancellation).await?;
-        Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned))
+        Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned, move_owners.closes))
     }
     .await;
     log_startup_phase("recover moves and startup deliveries", bootstrapping);
-    let (move_sessions, move_owned) = match bootstrap {
+    let (move_sessions, move_owned, move_closes) = match bootstrap {
         Ok(ownership) => ownership,
         Err(error) => {
             epilogue_started.store(true, Ordering::Release);
@@ -457,13 +469,15 @@ pub(super) async fn run_daemon_runtime(
     // How often the harness readiness wait is looked at. The wait itself is
     // minutes long, so this only bounds how late a failure is noticed, and it
     // reads in-memory state rather than the store.
-    let mut readiness_tick = tokio::time::interval(Duration::from_secs(5));
-    readiness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut progress_tick = tokio::time::interval(Duration::from_secs(1));
     progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut interrupted_close_tasks = Vec::new();
-    for session_id in interrupted_suspend_session_ids(&controller) {
+    for session_id in interrupted_suspend_session_ids(&controller)
+        .into_iter()
+        .chain(move_closes)
+        .collect::<BTreeSet<_>>()
+    {
         if move_owned.contains(&session_id) {
             continue;
         }
@@ -732,19 +746,6 @@ pub(super) async fn run_daemon_runtime(
                     progress.phase(ServingPhase::BackgroundPolicy);
                     state.refresh_background_policies();
                     state.resume_startup_cleanups(false);
-                }
-                _ = readiness_tick.tick() => {
-                    progress.phase(ServingPhase::Readiness);
-                    // A live session whose harness never advertised itself
-                    // takes no prompt and reports no failure, so nothing else
-                    // ever ends its wait (#1090). The store write runs off
-                    // this loop.
-                    for unready in state.sessions_without_a_usable_harness() {
-                        let state = state.clone();
-                        client_tasks.spawn(async move {
-                            state.fail_unready_session(unready).await;
-                        });
-                    }
                 }
                 completed = interrupted_close_rx.recv() => {
                     progress.phase(ServingPhase::SuspensionRecovery);

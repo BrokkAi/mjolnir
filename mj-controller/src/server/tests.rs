@@ -2775,6 +2775,7 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
         snapshot.workspaces.push(ViewerWorkspace {
             id: id.into(),
             name: id.into(),
+            last_opened_at: String::new(),
         });
     }
     let change_workspace = |workspace_id: &str| ControllerAction::ChangeWorkspace {
@@ -3170,6 +3171,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     snapshot.workspaces.push(ViewerWorkspace {
         id: "workspace-1".into(),
         name: "One".into(),
+        last_opened_at: String::new(),
     });
     validate_action(
         &ControllerAction::Resume {
@@ -3270,6 +3272,7 @@ fn resume_action_refuses_a_target_the_session_cannot_use() {
     snapshot.workspaces.push(ViewerWorkspace {
         id: "workspace-1".into(),
         name: "One".into(),
+        last_opened_at: String::new(),
     });
     assert_eq!(
         snapshot.sessions[0].incompatible_resume_targets,
@@ -3742,7 +3745,7 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
                 reference: "4321-9".to_owned(),
             },
             StatusCode::INTERNAL_SERVER_ERROR,
-            "reference 4321-9",
+            "the controller could not start this action: The lifecycle operation could not finish. Retry the action; if the runtime is unavailable, Resume the session to repair it first. Reference 4321-9.",
         ),
         (
             ActionOutcome::Refused(mj_core::refusal::Refusal::precondition(

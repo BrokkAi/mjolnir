@@ -238,7 +238,9 @@ pub(super) fn configure_kimi_subagent_mcp(
     session_id: &str,
     home: &Path,
     role: mj_core::subagent::SubagentMcpRole,
+    review_tools: bool,
 ) -> Result<()> {
+    use mj_core::subagent::{REVIEW_MCP_SERVER, SUBAGENT_MCP_SERVER};
     let path = home.join("mcp.json");
     anyhow::ensure!(
         root.is_absolute()
@@ -262,7 +264,7 @@ pub(super) fn configure_kimi_subagent_mcp(
             .as_object_mut()
             .context("Kimi mcpServers must be an object")?;
         servers.insert(
-            mj_core::subagent::SUBAGENT_MCP_SERVER.into(),
+            SUBAGENT_MCP_SERVER.into(),
             serde_json::json!({
                 "transport": "stdio",
                 "command": command,
@@ -270,6 +272,21 @@ pub(super) fn configure_kimi_subagent_mcp(
                 "runtime_id": "local",
             }),
         );
+        // The review tools ride the same socket and harness channel as
+        // `mj-agents`; without review the entry leaves, as Claude's does.
+        if review_tools {
+            servers.insert(
+                REVIEW_MCP_SERVER.into(),
+                serde_json::json!({
+                    "transport": "stdio",
+                    "command": command,
+                    "args": role.review_server_args(Path::new(socket), "kimi"),
+                    "runtime_id": "local",
+                }),
+            );
+        } else {
+            servers.remove(REVIEW_MCP_SERVER);
+        }
         Ok(())
     })
 }
@@ -1002,7 +1019,7 @@ impl SubagentEndpoint {
         );
         Ok(bounce.then(|| SubagentToolResult {
             request_id: request.request_id.clone(), completed_at_ms: mj_core::clock::epoch_millis(), is_error: false,
-            message: "Not delivered yet: an automatic check judged that your assigned task may still have unfinished work. Compare your report with the assignment. If a required item is still undone and needs no new decision, do it, then hand back. Running low on context is not a reason to stop: your context is compacted automatically, so keep your progress in files and continue. If you were told you could stop here, you need instructions or a decision from the parent, or the task is done, call handback again with your report unchanged (put any question in it); it will be delivered without another check.".into(),
+            message: "Not delivered yet: an automatic check judged that your assigned task may still have unfinished work. Compare your report with the assignment. If a required item is still undone and needs no new decision, do it, then hand back. Running low on context is not a reason to stop: your context is compacted automatically, so keep your progress in files and continue. A long wait is not a reason either: when the assignment needs the result of a command that is still running, wait for it to finish. If you were told you could stop here, you need instructions or a decision from the parent, or the task is done, call handback again with your report unchanged (put any question in it); it will be delivered without another check.".into(),
         }))
     }
 
@@ -1436,11 +1453,13 @@ console.log("OpenCode durable mailbox bridge passed");
             "reviewer",
             &home,
             mj_core::subagent::SubagentMcpRole::Child,
+            false,
         )
         .unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.join("mcp.json")).unwrap()).unwrap();
         assert_eq!(config["mcpServers"]["existing"]["command"], "keep");
+        assert!(config["mcpServers"].get("mj-review").is_none());
         let server = &config["mcpServers"]["mj-agents"];
         assert_eq!(server["runtime_id"], "local");
         assert_eq!(server["transport"], "stdio");
@@ -1464,10 +1483,43 @@ console.log("OpenCode durable mailbox bridge passed");
                 root.path(),
                 "reviewer",
                 outside.path(),
-                mj_core::subagent::SubagentMcpRole::Child
+                mj_core::subagent::SubagentMcpRole::Child,
+                false,
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_kimi_primary_with_review_registers_and_retires_the_review_server() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        let role = mj_core::subagent::SubagentMcpRole::MessageOnly;
+        configure_kimi_subagent_mcp(root.path(), "primary", &home, role, true).unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("mcp.json")).unwrap()).unwrap();
+        let server = &config["mcpServers"]["mj-review"];
+        assert_eq!(server["runtime_id"], "local");
+        assert_eq!(server["transport"], "stdio");
+        assert_eq!(
+            server["args"],
+            serde_json::json!([
+                "worker",
+                "subagent-mcp",
+                "--socket",
+                root.path().join(SUBAGENT_SOCKET),
+                "--harness",
+                "kimi",
+                "--review-server"
+            ])
+        );
+        // A later launch without review removes the registration again.
+        configure_kimi_subagent_mcp(root.path(), "primary", &home, role, false).unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("mcp.json")).unwrap()).unwrap();
+        assert!(config["mcpServers"].get("mj-review").is_none());
+        assert!(config["mcpServers"].get("mj-agents").is_some());
     }
 
     use mj_core::subagent::SubagentToolAction;

@@ -49,6 +49,7 @@ impl RuntimeState {
                     .sessions
                     .get_mut(&session_id)
                     .with_context(|| format!("unknown session {session_id}"))?;
+                let ready_move = crate::controller::move_session::move_destination_before_close(record)?;
                 if matches!(
                     record.state,
                     SessionState::Running
@@ -58,11 +59,10 @@ impl RuntimeState {
                     record.state = SessionState::Closing;
                     record.last_error = None;
                     record.updated_at = chrono::Utc::now().to_rfc3339();
-                    crate::database::save_lifecycle_session(record)?;
                 } else if record.public_error().is_some() {
                     record.last_error = None;
-                    crate::database::save_lifecycle_session(record)?;
                 }
+                crate::database::save_suspension_intent(record, ready_move.as_ref())?;
                 Ok(())
             }
         })
@@ -187,8 +187,8 @@ impl RuntimeState {
     ///
     /// A child's durable output is the report it hands back, so a child is
     /// stopped and removed the way a destroy removes one, with no checkpoint
-    /// of its own; its conversation is put into SessionWiki first, so it stays
-    /// searchable. The children are listed on the parent's record before any
+    /// of its own; sub-agents are excluded from SessionWiki. The children are
+    /// listed on the parent's record before any
     /// of them is stopped, so the parent's model can be told about them when
     /// the parent resumes, or at once when the close fails after this and
     /// leaves the parent live.
@@ -250,9 +250,6 @@ impl RuntimeState {
             not_handed_back,
             "stopping sub-agents before suspending their parent"
         );
-        // One pass indexes the parent's whole tree, so each child is
-        // destroyed below without indexing it again.
-        self.index_before_destroy(parent_session_id).await;
         for child in stopped {
             let child_id = child.child_session_id;
             // A sub-agent borrows its parent's worker and owns no branch.
@@ -547,6 +544,16 @@ impl RuntimeState {
         ignore_nested_repositories: bool,
         commit: Option<&LifecycleControl>,
     ) -> Result<DaemonLifecycleResult> {
+        if controller
+            .settle_superseded_move_for_close(
+                session_id,
+                executor,
+                Some(self.stop_subagents_before_close(session_id, commit.cloned())),
+            )
+            .await?
+        {
+            return Ok(DaemonLifecycleResult::Done);
+        }
         let route = close_route(
             controller.state.sessions.get(session_id),
             controller.state.subagents.contains_key(session_id),

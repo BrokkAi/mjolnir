@@ -475,13 +475,7 @@ impl Controller {
             .or(previous.checkpoint.as_deref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
-        let profile = self
-            .config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?
-            .clone();
-        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+        let profile = self.config.named_profile(profile_id)?.clone();
         let target_template = self
             .config
             .targets
@@ -580,7 +574,19 @@ impl Controller {
         previous: &mj_core::state::SessionRecord,
         error: anyhow::Error,
     ) -> Result<anyhow::Error> {
-        self.retain_failed_in_place_restore(session_id, previous, error, "Move")
+        self.retain_failed_in_place_move_with_persist(session_id, previous, error, |record| {
+            crate::database::save_resumed_session(record, None)
+        })
+    }
+
+    pub(in crate::controller) fn retain_failed_in_place_move_with_persist(
+        &mut self,
+        session_id: &str,
+        previous: &mj_core::state::SessionRecord,
+        error: anyhow::Error,
+        persist: impl Fn(&mj_core::state::SessionRecord) -> Result<()>,
+    ) -> Result<anyhow::Error> {
+        self.retain_failed_in_place_restore(session_id, previous, error, "Move", persist)
     }
 
     pub(crate) fn retain_failed_in_place_restart(
@@ -589,7 +595,9 @@ impl Controller {
         previous: &mj_core::state::SessionRecord,
         error: anyhow::Error,
     ) -> Result<anyhow::Error> {
-        self.retain_failed_in_place_restore(session_id, previous, error, "Restart")
+        self.retain_failed_in_place_restore(session_id, previous, error, "Restart", |record| {
+            crate::database::save_resumed_session(record, None)
+        })
     }
 
     fn retain_failed_in_place_restore(
@@ -598,6 +606,7 @@ impl Controller {
         previous: &mj_core::state::SessionRecord,
         error: anyhow::Error,
         owner: &'static str,
+        persist: impl Fn(&mj_core::state::SessionRecord) -> Result<()>,
     ) -> Result<anyhow::Error> {
         crate::worker_lifecycle::run_blocking(
             session_id,
@@ -645,7 +654,7 @@ impl Controller {
                         "{error:#}; stopping retained worker failed: {cleanup_error:#}"
                     ));
                 }
-                crate::database::save_resumed_session(&retained, None)?;
+                persist(&retained)?;
                 self.state.sessions.insert(session_id.to_owned(), retained);
                 cleanup.context("stop retained worker before retry")?;
                 Ok(error)

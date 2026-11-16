@@ -692,6 +692,13 @@ pub struct DraftPreview {
     pub saved_at: String,
 }
 
+/// One workspace's detached drafts, without their text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDrafts {
+    pub workspace_id: String,
+    pub drafts: Vec<DraftPreview>,
+}
+
 /// `Ping`, `Status`, and `Stop` form the frozen management subset: their wire
 /// encoding — together with `RequestEnvelope`, `ResponseEnvelope`,
 /// `DaemonStatus`, and `WebViewerStatus` — must never change shape, because
@@ -857,6 +864,9 @@ pub enum DaemonAction {
     RecoverWebViewer(crate::web::WebViewerRecovery),
     InspectWebListener,
     ListWorkspaces,
+    /// Every workspace's detached drafts, without their text: the workspace
+    /// manager's details answer. Added in protocol 100.
+    ListWorkspaceDrafts,
     CreateWorkspace {
         name: String,
     },
@@ -1079,6 +1089,13 @@ pub enum DaemonAction {
     /// process that probes; the result arrives in the runtime feed. Added in
     /// protocol 43.
     RefreshQuota,
+    /// Probe exactly these profiles once, even disabled ones, and serve their
+    /// reports in the runtime feed. Added in protocol 99; `forced` (probe now,
+    /// off the profile's schedule, even with a fresh report) in protocol 100.
+    ProbeQuotaProfiles {
+        profile_ids: Vec<String>,
+        forced: bool,
+    },
     /// Discover eligible subagent models in the daemon, which owns the cache.
     SubagentOptions {
         profile: String,
@@ -1325,6 +1342,8 @@ pub enum DaemonReply {
     SubagentOptions(mj_core::subagent::SubagentOptions),
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
+    /// Every workspace's detached drafts, without their text.
+    WorkspaceDrafts(Vec<WorkspaceDrafts>),
     Snapshot(WorkspaceSnapshot),
     DashboardStartup(Box<DashboardStartup>),
     WorkspaceLayouts(WorkspaceLayouts),
@@ -2267,12 +2286,41 @@ impl DaemonClient {
         }
     }
 
+    /// Every workspace's detached drafts, without their text.
+    pub async fn list_workspace_drafts(&mut self) -> Result<Vec<WorkspaceDrafts>> {
+        match self.request(DaemonAction::ListWorkspaceDrafts).await? {
+            DaemonReply::WorkspaceDrafts(drafts) => Ok(drafts),
+            reply => bail!("unexpected daemon workspace-drafts reply {reply:?}"),
+        }
+    }
+
     /// Ask the daemon to probe every profile that is not on hold. Returns when
     /// the daemon has accepted the request, not when the probes finish.
     pub async fn refresh_quota(&mut self) -> Result<()> {
         match self.request(DaemonAction::RefreshQuota).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected refresh-quota reply {reply:?}"),
+        }
+    }
+
+    /// Ask the daemon to probe exactly these profiles once, even disabled
+    /// ones. `forced` probes now, off each profile's schedule, even with a
+    /// fresh report. Returns when the daemon has queued the probes, not when
+    /// they finish; the reports arrive in the runtime feed.
+    pub async fn probe_quota_profiles(
+        &mut self,
+        profile_ids: Vec<String>,
+        forced: bool,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::ProbeQuotaProfiles {
+                profile_ids,
+                forced,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected probe-quota reply {reply:?}"),
         }
     }
 
@@ -3526,7 +3574,10 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 95: milestone-4 setup discovery, availability, login status and machine actions.
 // Version 97: the daemon decides which sessions are notifications.
 // Version 98: container settings use the single resource allocation.
-pub const PROTOCOL_VERSION: u32 = 98;
+// Version 99: one-shot quota probes for profiles outside the enabled set.
+// Version 100: a one-shot quota probe can be forced off the profile's
+// schedule; the daemon answers one all-workspaces draft listing.
+pub const PROTOCOL_VERSION: u32 = 100;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

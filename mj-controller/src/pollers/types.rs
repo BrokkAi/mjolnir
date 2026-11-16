@@ -12,6 +12,16 @@ pub struct QuotaRefreshBatch {
     /// session copies. Those hold no refresh token, so the poller keeps their
     /// grant renewed too (#1490). Never overlaps `profiles`.
     pub grants: Vec<QuotaRefreshRequest>,
+    /// Profiles outside the batch asked about directly (`mj quota
+    /// --with-disabled`): each is probed once when it arrives, never on the
+    /// batch's schedule.
+    pub extra: Vec<QuotaRefreshRequest>,
+    /// Profiles the person asked to refresh by name, each with its request's
+    /// sequence: probed once per sequence, off the profile's schedule, even
+    /// with a fresh report. The set persists across batches, so a channel
+    /// that coalesces rapid publishes can only drop a superseded map, never a
+    /// request; the poller remembers the sequences it answered.
+    pub forced_probes: std::collections::BTreeMap<String, u64>,
     /// Access tokens refused by failed turns; a change wakes renewal.
     pub rejected_logins: BTreeMap<String, std::collections::BTreeSet<String>>,
 }

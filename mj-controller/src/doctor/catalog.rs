@@ -176,7 +176,7 @@ mod tests {
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             codex_profile: None,

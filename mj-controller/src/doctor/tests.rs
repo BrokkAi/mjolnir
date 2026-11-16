@@ -171,7 +171,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     );
 
     let podman = FakeExecutor::new([Ok(output(
-        b"keys.used=174\nkeys.quota=200\nkeys.max=1000\nmaxstartups=10:30:100\n",
+        b"keys.used=174\nkeys.quota=200\nkeys.max=1000\ninotify.max_user_instances=8192\nmaxstartups=10:30:100\n",
     ))]);
     let podman_check = ssh_podman_limits_check("remote-podman", &ssh, &podman);
     let podman_commands = podman.commands.borrow();
@@ -1019,6 +1019,48 @@ fn host_limits_report_pressure_when_keys_reach_the_quota() {
     );
 }
 
+// Hard-won: #1540: mj-made EC2 hosts kept Ubuntu's inotify default, and tests
+// starting file watchers failed with EMFILE at about 30 containers.
+#[test]
+fn host_limits_warn_when_inotify_instances_are_low() {
+    let low = parse_host_limits(b"keys.used=10\nkeys.quota=4096\ninotify.max_user_instances=128\n");
+    assert_eq!(low.inotify_max_user_instances, Some(128));
+    assert!(
+        low.inotify_sentence("dev@example.test").contains("is 128"),
+        "{}",
+        low.inotify_sentence("dev@example.test")
+    );
+    let executor = FakeExecutor::new([Ok(output(
+        b"keys.used=10\nkeys.quota=4096\ninotify.max_user_instances=128\nmaxstartups=10:30:100\n",
+    ))]);
+    let check = ssh_podman_limits_check(
+        "remote-podman",
+        &RuntimeSshTarget::from(&ssh_connection()),
+        &executor,
+    );
+    assert_eq!(check.status, CheckStatus::Warning);
+    assert!(
+        check.detail.contains("Too many open files"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .is_some_and(|remediation| remediation.contains("8192")),
+        "{:?}",
+        check.remediation
+    );
+
+    let healthy = parse_host_limits(b"inotify.max_user_instances=8192\n");
+    assert!(
+        !healthy
+            .inotify_max_user_instances
+            .is_some_and(|max| max < INOTIFY_INSTANCES_HEALTHY)
+    );
+}
+
 #[test]
 fn ssh_podman_checks_skip_host_limits_when_the_host_is_unreachable() {
     let executor = FakeExecutor::new([Ok(failed(
@@ -1617,9 +1659,11 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
 /// and could leave a scratch index behind. Doctor tells the user what is there
 /// and how to remove it, and changes nothing itself.
 // Hard-won: #1065: interrupted review captures left large refs and scratch indexes in the user’s repository.
+// Hard-won: #1542: doctor cleanup must retain the managed base's GC root.
 #[test]
 fn review_leftovers_are_reported_and_left_alone() {
-    let repository = tempfile::tempdir().unwrap();
+    use crate::controller::test_support::{committed_repository, test_git};
+    let repository = committed_repository();
     let git_dir = repository.path().join(".git");
     std::fs::create_dir_all(git_dir.join("refs/hel/worktrees/gone")).unwrap();
     std::fs::write(git_dir.join("refs/hel/review-capture"), "a".repeat(41)).unwrap();
@@ -1638,6 +1682,12 @@ fn review_leftovers_are_reported_and_left_alone() {
     let mut packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap();
     packed.push_str(&format!("{} refs/mj/reviewed/tree\n", "e".repeat(40)));
     std::fs::write(git_dir.join("packed-refs"), packed).unwrap();
+    let base_ref = mj_core::targets::HistoryCutoff::BASE_REF;
+    std::fs::write(git_dir.join(base_ref), "f".repeat(41)).unwrap();
+    std::fs::write(git_dir.join(format!("{base_ref}-extra")), "e".repeat(41)).unwrap();
+    let mut packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap();
+    packed.push_str(&format!("{} {base_ref}\n", "f".repeat(40)));
+    std::fs::write(git_dir.join("packed-refs"), packed).unwrap();
     let scratch = git_dir.join("hel-review-index-AbCdEf");
     std::fs::write(&scratch, b"scratch").unwrap();
 
@@ -1649,9 +1699,49 @@ fn review_leftovers_are_reported_and_left_alone() {
             "refs/hel/review-baseline",
             "refs/hel/review-capture",
             "refs/hel/worktrees/gone/review-baseline",
+            "refs/mj/base",
+            "refs/mj/base-extra",
             "refs/mj/review-baseline",
             "refs/mj/reviewed/tree"
         ]
+    );
+    // Both markers are required; an incomplete managed marker is residue too.
+    test_git(repository.path(), &["config", "mj.remoteWorkspace", "true"]);
+    assert_eq!(
+        crate::doctor::review_residue(repository.path()).refs,
+        residue.refs
+    );
+    test_git(
+        repository.path(),
+        &["config", "mj.baseCommit", &"f".repeat(40)],
+    );
+    let managed = crate::doctor::review_residue(repository.path());
+    assert_eq!(
+        managed.refs,
+        residue
+            .refs
+            .iter()
+            .filter(|name| *name != base_ref)
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        git_dir.join(base_ref).exists(),
+        "doctor leaves the managed pin alone"
+    );
+    // Packed-only base pins obey the same ownership rule.
+    std::fs::remove_file(git_dir.join(base_ref)).unwrap();
+    assert_eq!(
+        crate::doctor::review_residue(repository.path()).refs,
+        managed.refs
+    );
+    test_git(
+        repository.path(),
+        &["config", "mj.remoteWorkspace", "false"],
+    );
+    assert_eq!(
+        crate::doctor::review_residue(repository.path()).refs,
+        residue.refs
     );
     assert_eq!(residue.scratch_indexes, std::slice::from_ref(&scratch));
     assert!(

@@ -38,12 +38,34 @@ ARMS = {
     "C": ["muse-ember-1.0:high"] * 3,
     "D": ["gpt-6.1-sol:high"] * 3,
     "D2": ["gpt-6.1-sol:high"] * 2,  # stage 1 diffs already have one Sol session
+    "E": ["gpt-6.1-sol:medium"] * 2,
+    # deepseek-flash runs on the dsh-review profile (see README). F (DSF/high) was
+    # stopped as too slow after 5 diffs; its runs are kept in runs-dsf-high/.
+    "F": ["deepseek-flash:high", "gpt-6.1-terra:xhigh", "gpt-6.1-sol:xhigh"],
+    "I": ["deepseek-flash:low"],  # 3-diff pilot
+    # H and J give each diff 2 Terra/xhigh, 2 DSF/low and 2 Sol/xhigh sessions.
+    "H": ["gpt-6.1-terra:xhigh"] * 2 + ["gpt-6.1-sol:xhigh"],
+    "J": ["deepseek-flash:low"] * 2 + ["gpt-6.1-sol:xhigh"],
+    # DSF/low proved as slow as DSF/high (126-561 s) and never handed back, so the J
+    # jobs not yet started when it was dropped run as K: the Sol/xhigh session only.
+    "K": ["gpt-6.1-sol:xhigh"],
+    # Non-GPT reviewers, one session each. Muse's highest effort is xhigh.
+    "L": ["muse-ember-1.0:xhigh", "gemini-4-hydrogen:high", "kimi-code/k3.1-pro:high"],
+    "M": ["glm-5.3:high", "glm-5.3-flash:high"],  # GLM, one session each
 }
 WORKSPACE = json.loads((ROOT / "instance/workspace.json").read_text())["workspace"]["id"]
 # Hard-won candidates and the sampled ordinary diffs share one id space.
 CORPUS = {c["id"]: c for name in ("candidates-all.jsonl", "diffs.jsonl")
           if (SCRIPTS / "corpus" / name).exists()
           for c in map(json.loads, (SCRIPTS / "corpus" / name).read_text().splitlines())}
+# Relation-brief arms (brief/PLAN.md), kept apart from ARMS above.
+ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
+             "BT": ["gpt-6.1-terra:high"] * 3, "BS": ["gpt-6.1-sol:high"] * 3,
+             # Stage C (brief/PLAN-bifrost.md): the Bifrost relation_brief tool's brief.
+             "FT": ["gpt-6.1-terra:high"] * 3, "FS": ["gpt-6.1-sol:high"] * 3,
+             # Ablation (brief/PLAN-ablation.md): Bifrost plus the decisive item; blind minus it.
+             "DT": ["gpt-6.1-terra:high"] * 3, "DS": ["gpt-6.1-sol:high"] * 3,
+             "XT": ["gpt-6.1-terra:high"] * 3, "XS": ["gpt-6.1-sol:high"] * 3})
 
 
 def save(path, value):
@@ -137,11 +159,29 @@ def handback_messages(items):
     return messages
 
 
-def context_text(bug):
+def commit_message(bug):
     message = subprocess.check_output(["git", "-C", REPO, "log", "-1", "--format=%B", bug["intro_commit"]]).decode()
     # Trailers point at external sessions and other branches; the task intent is the rest.
-    message = "\n".join(line for line in message.splitlines()
-                        if not re.match(r"(Co-Authored-By|Claude-Session|Signed-off-by):|\(cherry picked from commit ", line.strip(), re.I)).strip()
+    return "\n".join(line for line in message.splitlines()
+                     if not re.match(r"(Co-Authored-By|Claude-Session|Signed-off-by):|\(cherry picked from commit ", line.strip(), re.I)).strip()
+
+
+# Arms whose reviewers also get a relation brief (brief/PLAN.md), by brief kind.
+BRIEF_ARMS = {"OT": "oracle", "OS": "oracle", "BT": "blind", "BS": "blind", "FT": "bifrost", "FS": "bifrost",
+              "DT": "bifrost-plus", "DS": "bifrost-plus", "XT": "blind-minus", "XS": "blind-minus"}
+BRIEF_NOTE = ("These are relations computed from the repository at this commit, not findings. "
+              "They may be incomplete.")
+
+
+def brief_section(bug, arm):
+    if arm not in BRIEF_ARMS:
+        return ""
+    brief = (ROOT / "briefs" / BRIEF_ARMS[arm] / bug["id"] / "brief.md").read_text().strip()
+    return f"\n## Relations computed from the repository\n\n{BRIEF_NOTE}\n\n{brief}\n"
+
+
+def context_text(bug, arm=None):
+    message = commit_message(bug)
     return f"""# Historical change for code review
 
 This message is context for a separate code reviewer. The repository is
@@ -152,7 +192,7 @@ branches, tags or remotes. The change is complete and committed.
 ## Commit message
 
 {message}
-
+{brief_section(bug, arm)}
 ## Reviewer constraints
 
 The reviewer reviews only this change, using this checkout and its history.
@@ -225,7 +265,7 @@ def run_job(job, gate):
     assert settings.get("mode") == "plan" and settings.get("web_fetch") == "disabled", settings
     save(d / "carrier-settings.json", settings)
 
-    (d / "historical-context.txt").write_text(context_text(bug))
+    (d / "historical-context.txt").write_text(context_text(bug, arm))
     command = "carrier-" + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:32]
     request = mj("message", "--session", sid, "--command-id", command, "--prompt-file", d / "historical-context.txt")
     save(d / "carrier-request.json", request)
@@ -309,24 +349,43 @@ def collect(d, bug, identity, sid, place, before):
             settings = {c["key"]: c.get("current") for c in row.get("config_options", [])}
             pages = transcript(child)
             save(cd / "transcript.json", pages)
-            save(cd / "usage.json", mj("usage", "--session", child))
+            usage = mj("usage", "--session", child)
+            save(cd / "usage.json", usage)
             items = [i for p in pages for i in p["items"]]
+            # A reviewer parked before capture reports no config options; its transcript
+            # records the model and effort it was given ("model set to ...").
+            for key in ("model", "effort"):
+                if not settings.get(key):
+                    set_to = [m.group(1) for i in items if i["role"] == "system"
+                              for m in [re.match(rf"{key} set to (\S+)$", i["body"].get("text") or "")] if m]
+                    settings[key] = set_to[-1] if set_to else None
             messages = handback_messages([i for i in items if i["role"] == "tool" and "handback" in json.dumps(i)])
-            if messages:
-                (cd / "output.md").write_text(messages[-1] + "\n")
+            # A reviewer that ends its turn with its findings as a message instead of a
+            # handback call (DeepSeek Flash on DSH did) leaves mj's review incomplete.
+            # Its review is still scored, from that last message, and the miss is recorded.
+            final = ["".join(c.get("content", {}).get("text", "") for c in i["body"].get("chunks", []))
+                     for i in items if i["role"] == "agent"]
+            # Only a turn that ended normally gives a final message; an errored or
+            # cancelled turn may stop on a progress message, so it counts as no output.
+            ended = ((row.get("last_turn_outcome") or {}).get("outcome") or {})
+            completed = ended.get("kind") == "completed" and ended.get("stop_reason") == "EndTurn"
+            output = messages[-1] if messages else (
+                next((t for t in reversed(final) if t.strip()), None) if completed else None)
+            if output:
+                (cd / "output.md").write_text(output + "\n")
             reviewers.append({"child": child, "slot": info["slot"], "profile": row.get("profile_id"),
                               "model": settings.get("model"), "effort": settings.get("effort"),
-                              "has_output": bool(messages)})
+                              "has_output": bool(output), "handback": bool(messages)})
         # A review can clear before every reviewer was observed, or with a reviewer
         # that failed. Only a complete capture is saved as reviewers.json, so a
         # resumed job captures again instead of reloading an incomplete one.
-        expected = sorted(r.split(":")[0] for r in ARMS[identity["arm"]])
-        got = sorted(r["model"] or "" for r in reviewers)
-        incomplete = [r["child"] for r in reviewers if not r["has_output"] or r["effort"] != "high"]
+        expected = sorted(ARMS[identity["arm"]])
+        got = sorted(f"{r['model']}:{r['effort']}" for r in reviewers)
+        incomplete = [r["child"] for r in reviewers if not r["has_output"]]
         if got != expected or incomplete:
             save(d / "reviewers-incomplete.json", reviewers)
-            raise RuntimeError(f"incomplete review: models {got}, expected {expected}; "
-                               f"without output or wrong effort: {incomplete}")
+            raise RuntimeError(f"incomplete review: reviewers {got}, expected {expected}; "
+                               f"without output: {incomplete}")
         save(d / "reviewers.json", reviewers)
 
     if (d / "inventory-check.json").exists():

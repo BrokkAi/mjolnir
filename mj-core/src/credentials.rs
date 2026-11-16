@@ -760,13 +760,7 @@ pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> 
 /// wants the program name to run `--version` against.
 pub fn native_login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
     let (command, mut args) = profile.kind.native_login_command();
-    if profile.kind == HarnessKind::Antigravity {
-        // agy selects its login with an argument, not our staging variable.
-        args.extend([
-            "--gemini-dir".into(),
-            crate::target_path::text(&profile.home),
-        ]);
-    }
+    args.extend(profile.kind.home_cli_args(&profile.home));
     (command, args)
 }
 

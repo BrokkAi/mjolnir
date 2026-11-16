@@ -19,10 +19,7 @@ flag, OpenCode's `"permission": "allow"` config setting, or DSH's
 `permission_mode` `allow`.
 Muse stages `:ask-me`, selects `allowAll` approvals, turns muse-acp's auto-review
 off, and disables only the sandbox (`--disable-sandbox`), so it runs without
-permission checks like OpenCode. A Muse profile with `muse_auto_review = true`
-opts back into the reviewer (`promptUnmatched` approvals with auto-review on),
-which answers each approval without prompting you, so critical actions can
-still be denied. Every other harness's control approves every call. Note that Kimi Code's
+permission checks like OpenCode. Every other harness's control approves every call. Note that Kimi Code's
 mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 
@@ -365,10 +362,12 @@ The cache directory lives on the container host and is mounted read-write into
 the container at the same absolute path. Mjolnir atomically copies the resolved
 host executable to `<cache>/.mjolnir/bin/mbx` inside that directory, then checks
 that this copy runs in the container and reports the expected version before
-installing mbx's Cargo launcher. Session start, resume, and periodic machine
-reconciliation refresh the copy when the native mbx version or file size
-changes. A replacement uses a same-directory temporary file and atomic rename,
-so running processes keep using the inode they already opened. If native mbx
+installing mbx's Cargo launcher. Session start and resume refresh the copy
+when the native mbx version or file size changes. So does applying a machine's
+build cache settings, which happens when the daemon starts, when the settings
+or the sessions using the cache change, and after an mbx install. A
+replacement uses a same-directory temporary file and atomic rename, so running
+processes keep using the inode they already opened. If native mbx
 is absent or too old, the old copy is left in place and new sessions run
 without the cache. Nothing is synchronized between hosts, and Mjolnir never
 runs mbx garbage collection: the host's own mbx and the automatic collection
@@ -425,7 +424,7 @@ syncs its active GitHub token into every live non-local session. That includes
 managed containers, EC2, SSH Podman, and raw SSH targets, and lets `gh` and
 HTTPS Git pushes work without copying SSH keys. The token never goes into a
 recovery archive. Raw SSH targets are therefore inside the token's trust
-boundary; raw localhost sessions are deliberately excluded. A slopcop login on
+boundary; localhost sessions are deliberately excluded. A slopcop login on
 that machine reaches the same sessions the same way, so an agent can run
 `slopcop` checks there without signing in again.
 

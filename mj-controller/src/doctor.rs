@@ -2300,10 +2300,15 @@ fn ssh_podman_runtime_check(
 /// `crun: create keyring` once the login user's keyring quota is exhausted, and
 /// sshd refuses new connections past `MaxStartups`. `sshd -T` needs root, so the
 /// directive is read from the config files instead; drop-ins may be unreadable,
-/// which the script reports rather than guessing.
+/// which the script reports rather than guessing. Rootless containers share the
+/// login user's inotify instances, so Ubuntu's 128 default fails worker bootstrap
+/// with EMFILE at about 30 containers (#1540).
 const SSH_PODMAN_HOST_LIMITS_SCRIPT: &str = r#"
 if [ -r /proc/sys/kernel/keys/maxkeys ]; then
     printf 'keys.max=%s\n' "$(cat /proc/sys/kernel/keys/maxkeys)"
+fi
+if [ -r /proc/sys/fs/inotify/max_user_instances ]; then
+    printf 'inotify.max_user_instances=%s\n' "$(cat /proc/sys/fs/inotify/max_user_instances)"
 fi
 if [ -r /proc/key-users ]; then
     awk -v uid="$(id -u)" '
@@ -2339,6 +2344,11 @@ exit 0
 /// margin.
 const KEYRING_PRESSURE_PERCENT: u64 = 80;
 
+/// The fleet template's inotify instance allowance, measured good on morannon.
+/// Ubuntu's 128 default fails worker bootstrap with EMFILE at about 30
+/// containers (#1540), so anything below this is reported as low.
+const INOTIFY_INSTANCES_HEALTHY: u64 = 8192;
+
 /// What `SSH_PODMAN_HOST_LIMITS_SCRIPT` managed to read. Every field is
 /// optional: an unreadable file is reported, never guessed at.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -2346,6 +2356,7 @@ struct HostLimits {
     keys_used: Option<u64>,
     keys_quota: Option<u64>,
     keys_max: Option<u64>,
+    inotify_max_user_instances: Option<u64>,
     max_startups: Option<String>,
     max_startups_unreadable: bool,
 }
@@ -2362,6 +2373,9 @@ fn parse_host_limits(stdout: &[u8]) -> HostLimits {
             "keys.used" => limits.keys_used = value.parse().ok(),
             "keys.quota" => limits.keys_quota = value.parse().ok(),
             "keys.max" => limits.keys_max = value.parse().ok(),
+            "inotify.max_user_instances" => {
+                limits.inotify_max_user_instances = value.parse().ok();
+            }
             "maxstartups" if !value.is_empty() => limits.max_startups = Some(value.to_owned()),
             "maxstartups.unreadable" => limits.max_startups_unreadable = value == "1",
             _ => {}
@@ -2376,6 +2390,7 @@ impl HostLimits {
         self.keys_used.is_none()
             && self.keys_quota.is_none()
             && self.keys_max.is_none()
+            && self.inotify_max_user_instances.is_none()
             && self.max_startups.is_none()
             && !self.max_startups_unreadable
     }
@@ -2415,9 +2430,18 @@ impl HostLimits {
             }
         }
     }
+
+    fn inotify_sentence(&self, destination: &str) -> String {
+        match self.inotify_max_user_instances {
+            Some(max) => {
+                format!("`fs.inotify.max_user_instances` on {destination} is {max}.")
+            }
+            None => format!("The inotify instance limit on {destination} could not be read."),
+        }
+    }
 }
 
-/// Report the two host limits that made provisioning fail under load. The
+/// Report the host limits that made provisioning fail under load. The
 /// target still works when they cannot be read, so an unreadable host is a
 /// warning with a manual command, never a `fixable` runtime failure.
 fn ssh_podman_limits_check(
@@ -2430,7 +2454,7 @@ fn ssh_podman_limits_check(
     let destination = &ssh.destination;
     let manual = || {
         format!(
-            "Read them by hand on {destination}: `cat /proc/key-users /proc/sys/kernel/keys/maxkeys` and `grep -ri maxstartups /etc/ssh/sshd_config /etc/ssh/sshd_config.d`."
+            "Read them by hand on {destination}: `cat /proc/key-users /proc/sys/kernel/keys/maxkeys /proc/sys/fs/inotify/max_user_instances` and `grep -ri maxstartups /etc/ssh/sshd_config /etc/ssh/sshd_config.d`."
         )
     };
     let command = ssh_validation_command(
@@ -2450,7 +2474,7 @@ fn ssh_podman_limits_check(
                 check_id,
                 title,
                 format!(
-                    "Could not read the kernel keyring quota or sshd MaxStartups from {destination}: {stderr}"
+                    "Could not read the kernel keyring quota, inotify instance limit, or sshd MaxStartups from {destination}: {stderr}"
                 ),
                 manual(),
             );
@@ -2460,7 +2484,7 @@ fn ssh_podman_limits_check(
                 check_id,
                 title,
                 format!(
-                    "Could not read the kernel keyring quota or sshd MaxStartups from {destination}: {error}"
+                    "Could not read the kernel keyring quota, inotify instance limit, or sshd MaxStartups from {destination}: {error}"
                 ),
                 manual(),
             );
@@ -2470,15 +2494,31 @@ fn ssh_podman_limits_check(
         return DoctorCheck::warning(
             check_id,
             title,
-            format!("{destination} reported no readable kernel keyring or sshd limits."),
+            format!("{destination} reported no readable kernel keyring, inotify, or sshd limits."),
             manual(),
         );
     }
     let detail = format!(
-        "{} {}",
+        "{} {} {}",
         limits.keyring_sentence(destination),
-        limits.max_startups_sentence()
+        limits.max_startups_sentence(),
+        limits.inotify_sentence(destination)
     );
+    if let Some(max) = limits
+        .inotify_max_user_instances
+        .filter(|max| *max < INOTIFY_INSTANCES_HEALTHY)
+    {
+        return DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "{detail} Rootless containers share the login user's inotify instances; the Ubuntu default of 128 fails worker bootstrap with `Too many open files` at about 30 containers."
+            ),
+            format!(
+                "Raise `fs.inotify.max_user_instances` and `user.max_inotify_instances` from {max} to {INOTIFY_INSTANCES_HEALTHY} with sysctl on {destination}; hosts mj makes get /etc/sysctl.d/90-mj-limits.conf from `mj ec2 create` or `mj ec2 tune`."
+            ),
+        );
+    }
     if limits.keyring_is_under_pressure() {
         return DoctorCheck::warning(
             check_id,
@@ -3751,8 +3791,9 @@ impl ReviewResidue {
 /// Releases before this one staged the whole working tree into the user's own
 /// object store and pinned it with two refs, and a capture that was killed
 /// partway left its scratch index behind. Linked worktrees pin their baselines
-/// under `refs/mj/worktrees/` (formerly `refs/hel/worktrees/`). All of it is the user's to remove, so this
-/// only reads.
+/// under `refs/mj/worktrees/` (formerly `refs/hel/worktrees/`). Review
+/// residue is the user's to remove, so this only reads. The managed base is
+/// retained state and must stay rooted for Git GC.
 pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     let mut residue = ReviewResidue::default();
     let git_dir = repository.join(".git");
@@ -3782,6 +3823,22 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
                 residue.scratch_indexes.push(entry.path());
             }
         }
+    }
+    if residue
+        .refs
+        .iter()
+        .any(|reference| reference == mj_core::targets::HistoryCutoff::BASE_REF)
+        && matches!(
+            mj_checkpoint::archive::remote_workspace_base(
+                &mj_checkpoint::archive::SystemGit,
+                repository
+            ),
+            Ok(Some(_))
+        )
+    {
+        residue
+            .refs
+            .retain(|reference| reference != mj_core::targets::HistoryCutoff::BASE_REF);
     }
     residue.refs.sort();
     residue.scratch_indexes.sort();

@@ -1,3 +1,4 @@
+use crate::profile_scheduler::Placement;
 use crate::profile_scheduler::draw_candidates;
 #[cfg(test)]
 use crate::profile_scheduler::{order_by_draw, rank_candidates};
@@ -438,11 +439,15 @@ async fn resolve_model_profile_selection_from(
     }
     if profile_id.is_none() {
         let prefer = backend.quota_preferences().await?;
-        let anchor = match source {
-            ModelProfileCandidateSource::Subagents { parent_profile } => Some(parent_profile),
-            ModelProfileCandidateSource::Session { ranking_anchor } => ranking_anchor,
+        let (anchor, placement) = match source {
+            ModelProfileCandidateSource::Subagents { parent_profile } => {
+                (Some(parent_profile), Placement::Child)
+            }
+            ModelProfileCandidateSource::Session { ranking_anchor } => {
+                (ranking_anchor, Placement::TopLevel)
+            }
             ModelProfileCandidateSource::Reviewers
-            | ModelProfileCandidateSource::ReviewersReady => None,
+            | ModelProfileCandidateSource::ReviewersReady => (None, Placement::Child),
         };
         draw_candidates(
             &mut offered,
@@ -450,6 +455,7 @@ async fn resolve_model_profile_selection_from(
             &prefer,
             &identity,
             now_epoch_seconds(),
+            placement,
         )?;
     }
     let reviewer_source = matches!(
@@ -739,6 +745,7 @@ pub(crate) fn merge_same_models(
         &[],
         model,
         now_seconds,
+        Placement::Child,
     );
     let mut seen = std::collections::BTreeSet::new();
     candidates.retain(|candidate| {
@@ -1106,11 +1113,73 @@ mod tests {
             candidate("high", Some(90), &["luna"]),
             candidate("empty", Some(0), &["luna"]),
         ];
-        rank_candidates(&mut candidates, Some("parent"), &[], "luna", 0);
+        rank_candidates(
+            &mut candidates,
+            Some("parent"),
+            &[],
+            "luna",
+            0,
+            Placement::Child,
+        );
         assert_eq!(
             ids(&candidates),
             vec![
                 "high", "parent", "a-other", "b-other", "unknown", "api", "empty"
+            ]
+        );
+    }
+
+    fn five_hour_candidate(
+        profile_id: &str,
+        remaining: Option<u8>,
+        models: &[&str],
+    ) -> SubagentCandidate {
+        let mut candidate = candidate(profile_id, remaining, models);
+        if let CandidateQuota::Subscription { windows, .. } = &mut candidate.quota {
+            windows[0].label = "5h".into();
+        }
+        candidate
+    }
+
+    // A top-level launch preserves five-hour-windowed quota for when nothing
+    // else can bill: windowed profiles rank below usage-priced ones no matter
+    // how full their window is; child placements keep the plain quota order.
+    #[test]
+    fn top_level_ranking_demotes_five_hour_windowed_profiles_below_unwindowed() {
+        let build = || {
+            vec![
+                SubagentCandidate {
+                    quota: CandidateQuota::UsagePriced,
+                    ..candidate("api", None, &["luna"])
+                },
+                five_hour_candidate("windowed-high", Some(90), &["luna"]),
+                candidate("weekly-low", Some(40), &["luna"]),
+                candidate("unknown", None, &["luna"]),
+                five_hour_candidate("windowed-empty", Some(0), &["luna"]),
+            ]
+        };
+        let mut children = build();
+        rank_candidates(&mut children, None, &[], "luna", 0, Placement::Child);
+        assert_eq!(
+            ids(&children),
+            vec![
+                "windowed-high",
+                "weekly-low",
+                "unknown",
+                "api",
+                "windowed-empty"
+            ]
+        );
+        let mut top_level = build();
+        rank_candidates(&mut top_level, None, &[], "luna", 0, Placement::TopLevel);
+        assert_eq!(
+            ids(&top_level),
+            vec![
+                "weekly-low",
+                "unknown",
+                "api",
+                "windowed-high",
+                "windowed-empty"
             ]
         );
     }
@@ -1128,6 +1197,7 @@ mod tests {
             &["c-preferred-first".into(), "b-preferred".into()],
             "luna",
             0,
+            Placement::Child,
         );
         assert_eq!(
             ids(&candidates),
@@ -1138,7 +1208,14 @@ mod tests {
             candidate("plain", Some(50), &["luna"]),
             candidate("preferred-out", Some(0), &["luna"]),
         ];
-        rank_candidates(&mut candidates, None, &["preferred-out".into()], "luna", 0);
+        rank_candidates(
+            &mut candidates,
+            None,
+            &["preferred-out".into()],
+            "luna",
+            0,
+            Placement::Child,
+        );
         assert_eq!(ids(&candidates), ["plain", "preferred-out"]);
     }
 
@@ -1171,11 +1248,25 @@ mod tests {
         let other = candidate("other", Some(40), &["claude-fable-5-1", "claude-opus-5"]);
 
         let mut for_fable = vec![fable.clone(), other.clone()];
-        rank_candidates(&mut for_fable, None, &[], "claude-fable-5-1", 1_000);
+        rank_candidates(
+            &mut for_fable,
+            None,
+            &[],
+            "claude-fable-5-1",
+            1_000,
+            Placement::Child,
+        );
         assert_eq!(ids(&for_fable), ["other", "fable-profile"]);
 
         let mut for_opus = vec![fable, other];
-        rank_candidates(&mut for_opus, None, &[], "claude-opus-5", 1_000);
+        rank_candidates(
+            &mut for_opus,
+            None,
+            &[],
+            "claude-opus-5",
+            1_000,
+            Placement::Child,
+        );
         assert_eq!(ids(&for_opus), ["fable-profile", "other"]);
     }
 
@@ -1215,23 +1306,37 @@ mod tests {
         ];
 
         let mut ranked = profiles.clone();
-        rank_candidates(&mut ranked, None, &[], "luna", now);
+        rank_candidates(&mut ranked, None, &[], "luna", now, Placement::Child);
         assert_eq!(ids(&ranked), ["pacing", "steady", "burning", "unknown"]);
 
         for unit in [1e-9, 0.5, 1.0] {
             let mut drawn = profiles.clone();
             let units = vec![unit; drawn.len()];
-            order_by_draw(&mut drawn, None, &[], &units, "luna", now);
+            order_by_draw(&mut drawn, None, &[], &units, "luna", now, Placement::Child);
             assert_eq!(ids(&drawn)[2..], ["burning", "unknown"]);
         }
 
         // The pace was measured at the reading: an unchanged reading still
         // projects later, until the window resets.
         let mut stale = profiles.clone();
-        rank_candidates(&mut stale, None, &[], "luna", now + 30 * 60);
+        rank_candidates(
+            &mut stale,
+            None,
+            &[],
+            "luna",
+            now + 30 * 60,
+            Placement::Child,
+        );
         assert_eq!(ids(&stale), ["pacing", "steady", "burning", "unknown"]);
         let mut reset = profiles.clone();
-        rank_candidates(&mut reset, None, &[], "luna", now + 4 * 60 * 60);
+        rank_candidates(
+            &mut reset,
+            None,
+            &[],
+            "luna",
+            now + 4 * 60 * 60,
+            Placement::Child,
+        );
         assert_eq!(ids(&reset), ["burning", "pacing", "steady", "unknown"]);
     }
 
@@ -1291,7 +1396,15 @@ mod tests {
             for _ in 0..draws {
                 let mut candidates = profiles.clone();
                 let units = (0..candidates.len()).map(|_| unit()).collect::<Vec<_>>();
-                order_by_draw(&mut candidates, Some("thirty-b"), &[], &units, "luna", 0);
+                order_by_draw(
+                    &mut candidates,
+                    Some("thirty-b"),
+                    &[],
+                    &units,
+                    "luna",
+                    0,
+                    Placement::Child,
+                );
                 let chosen = if included {
                     assert_eq!(ids(&candidates)[3..], ["unknown", "api", "empty"]);
                     &candidates[0]
