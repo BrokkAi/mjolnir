@@ -1,0 +1,264 @@
+{
+  "round": "brief-judge-h",
+  "diffs": [
+    "catalog-cache-key-collision",
+    "child-model-wrong-efforts",
+    "codex-effort-alias-lost",
+    "held-prompt-ignores-interrupt",
+    "projection-mixed-sqlite-snapshots",
+    "stale-model-launch-spec",
+    "terminal-id-reused",
+    "web-feed-self-deadlock",
+    "metadata-checkpoint-overwrites-checkout"
+  ],
+  "excluded_diffs": [
+    "symbol-change-keeps-cached-transcript"
+  ],
+  "primary_model": "gpt-6.1-terra",
+  "outcome": "selection is not the bottleneck",
+  "judge_consistency_caveats": [],
+  "per_model": {
+    "gpt-6.1-terra": {
+      "catch_rate": {
+        "W_diluted": 0.8148148148148148,
+        "D_bifrost_plus": 0.7037037037037037,
+        "F_bifrost": 0.2222222222222222,
+        "round_g": {
+          "D_bifrost_plus": 0.7037037037037037,
+          "F_bifrost": 0.2222222222222222,
+          "B_blind": 0.8888888888888888
+        }
+      },
+      "retention_r": 1.2307692307692306,
+      "retention_ci95": [
+        1.0,
+        1.9
+      ],
+      "retention_resamples_undefined": 6,
+      "W_minus_F": 0.5925925925925926,
+      "W_minus_F_ci95": [
+        0.296,
+        0.815
+      ],
+      "W_minus_D": 0.11111111111111105,
+      "W_minus_D_ci95": [
+        0.0,
+        0.259
+      ],
+      "B_minus_W": 0.07407407407407407,
+      "B_minus_W_ci95": [
+        -0.148,
+        0.296
+      ],
+      "judge_consistency_vs_round_g": {
+        "D_bifrost_plus": {
+          "round_h": 0.7037037037037037,
+          "round_g": 0.7037037037037037,
+          "difference_points": 0.0,
+          "differs_over_10_points": false
+        },
+        "F_bifrost": {
+          "round_h": 0.2222222222222222,
+          "round_g": 0.2222222222222222,
+          "difference_points": 0.0,
+          "differs_over_10_points": false
+        }
+      },
+      "per_diff": {
+        "catalog-cache-key-collision": {
+          "W": 1.0,
+          "D": 1.0,
+          "F": 0.0,
+          "D_round_g": 1.0,
+          "F_round_g": 0.0,
+          "B_round_g": 1.0
+        },
+        "child-model-wrong-efforts": {
+          "W": 1.0,
+          "D": 0.6666666666666666,
+          "F": 0.6666666666666666,
+          "D_round_g": 0.6666666666666666,
+          "F_round_g": 0.6666666666666666,
+          "B_round_g": 1.0
+        },
+        "codex-effort-alias-lost": {
+          "W": 1.0,
+          "D": 1.0,
+          "F": 0.3333333333333333,
+          "D_round_g": 1.0,
+          "F_round_g": 0.3333333333333333,
+          "B_round_g": 1.0
+        },
+        "held-prompt-ignores-interrupt": {
+          "W": 0.3333333333333333,
+          "D": 0.3333333333333333,
+          "F": 0.0,
+          "D_round_g": 0.3333333333333333,
+          "F_round_g": 0.0,
+          "B_round_g": 1.0
+        },
+        "projection-mixed-sqlite-snapshots": {
+          "W": 1.0,
+          "D": 0.3333333333333333,
+          "F": 0.0,
+          "D_round_g": 0.3333333333333333,
+          "F_round_g": 0.0,
+          "B_round_g": 0.3333333333333333
+        },
+        "stale-model-launch-spec": {
+          "W": 1.0,
+          "D": 1.0,
+          "F": 0.3333333333333333,
+          "D_round_g": 1.0,
+          "F_round_g": 0.3333333333333333,
+          "B_round_g": 1.0
+        },
+        "terminal-id-reused": {
+          "W": 1.0,
+          "D": 1.0,
+          "F": 0.0,
+          "D_round_g": 1.0,
+          "F_round_g": 0.0,
+          "B_round_g": 1.0
+        },
+        "web-feed-self-deadlock": {
+          "W": 1.0,
+          "D": 1.0,
+          "F": 0.3333333333333333,
+          "D_round_g": 1.0,
+          "F_round_g": 0.3333333333333333,
+          "B_round_g": 1.0
+        },
+        "metadata-checkpoint-overwrites-checkout": {
+          "W": 0.0,
+          "D": 0.0,
+          "F": 0.3333333333333333,
+          "D_round_g": 0.0,
+          "F_round_g": 0.3333333333333333,
+          "B_round_g": 0.6666666666666666
+        }
+      }
+    },
+    "gpt-6.1-sol": {
+      "catch_rate": {
+        "W_diluted": 0.5925925925925926,
+        "D_bifrost_plus": 0.5925925925925926,
+        "F_bifrost": 0.3333333333333333,
+        "round_g": {
+          "D_bifrost_plus": 0.5925925925925926,
+          "F_bifrost": 0.3333333333333333,
+          "B_blind": 0.6666666666666666
+        }
+      },
+      "retention_r": 1.0,
+      "retention_ci95": [
+        0.25,
+        3.0
+      ],
+      "retention_resamples_undefined": 276,
+      "W_minus_F": 0.25925925925925924,
+      "W_minus_F_ci95": [
+        0.0,
+        0.519
+      ],
+      "W_minus_D": 0.0,
+      "W_minus_D_ci95": [
+        -0.222,
+        0.222
+      ],
+      "B_minus_W": 0.07407407407407407,
+      "B_minus_W_ci95": [
+        0.0,
+        0.222
+      ],
+      "judge_consistency_vs_round_g": {
+        "D_bifrost_plus": {
+          "round_h": 0.5925925925925926,
+          "round_g": 0.5925925925925926,
+          "difference_points": 0.0,
+          "differs_over_10_points": false
+        },
+        "F_bifrost": {
+          "round_h": 0.3333333333333333,
+          "round_g": 0.3333333333333333,
+          "difference_points": 0.0,
+          "differs_over_10_points": false
+        }
+      },
+      "per_diff": {
+        "catalog-cache-key-collision": {
+          "W": 1.0,
+          "D": 1.0,
+          "F": 1.0,
+          "D_round_g": 1.0,
+          "F_round_g": 1.0,
+          "B_round_g": 1.0
+        },
+        "child-model-wrong-efforts": {
+          "W": 1.0,
+          "D": 0.3333333333333333,
+          "F": 0.3333333333333333,
+          "D_round_g": 0.3333333333333333,
+          "F_round_g": 0.3333333333333333,
+          "B_round_g": 1.0
+        },
+        "codex-effort-alias-lost": {
+          "W": 1.0,
+          "D": 1.0,
+          "F": 0.3333333333333333,
+          "D_round_g": 1.0,
+          "F_round_g": 0.3333333333333333,
+          "B_round_g": 1.0
+        },
+        "held-prompt-ignores-interrupt": {
+          "W": 0.0,
+          "D": 0.0,
+          "F": 0.0,
+          "D_round_g": 0.0,
+          "F_round_g": 0.0,
+          "B_round_g": 0.0
+        },
+        "projection-mixed-sqlite-snapshots": {
+          "W": 0.0,
+          "D": 0.0,
+          "F": 0.0,
+          "D_round_g": 0.0,
+          "F_round_g": 0.0,
+          "B_round_g": 0.0
+        },
+        "stale-model-launch-spec": {
+          "W": 0.3333333333333333,
+          "D": 1.0,
+          "F": 0.3333333333333333,
+          "D_round_g": 1.0,
+          "F_round_g": 0.3333333333333333,
+          "B_round_g": 1.0
+        },
+        "terminal-id-reused": {
+          "W": 1.0,
+          "D": 1.0,
+          "F": 0.0,
+          "D_round_g": 1.0,
+          "F_round_g": 0.0,
+          "B_round_g": 1.0
+        },
+        "web-feed-self-deadlock": {
+          "W": 1.0,
+          "D": 1.0,
+          "F": 1.0,
+          "D_round_g": 1.0,
+          "F_round_g": 1.0,
+          "B_round_g": 1.0
+        },
+        "metadata-checkpoint-overwrites-checkout": {
+          "W": 0.0,
+          "D": 0.0,
+          "F": 0.0,
+          "D_round_g": 0.0,
+          "F_round_g": 0.0,
+          "B_round_g": 0.0
+        }
+      }
+    }
+  }
+}

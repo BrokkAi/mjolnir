@@ -78,6 +78,11 @@ def audit_run(run):
     result = {"run": str(run.relative_to(ROOT)), "reviewers": {}}
     for transcript in sorted(run.glob("reviewers/*/transcript.json")):
         result["reviewers"][transcript.parent.name] = audit_reviewer(transcript, own)
+    # Since mj 8fe3c40bd a reviewer session is destroyed when its role ends, so driver.py keeps
+    # only its stored handback and no transcript: its tool calls cannot be audited. Say so; an
+    # empty reviewer list must not read as a clean audit.
+    listed = [r["child"][:12] for r in json.loads((run / "done.json").read_text())["reviewers"]]
+    result["unaudited"] = [c for c in listed if c not in result["reviewers"]]
     check = json.loads((run / "inventory-check.json").read_text())
     result["inventory_problems"] = check["problems"]
     (run / "audit.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -86,13 +91,18 @@ def audit_run(run):
 
 def main():
     runs = [(ROOT / a).resolve() for a in sys.argv[1:]] or sorted(p.parent for p in ROOT.glob("runs/*/*/done.json"))
+    failed = False
     for run in runs:
         r = audit_run(run)
         counts = {k: {} for k in r["reviewers"]}
         for rid, rv in r["reviewers"].items():
             for h in rv["hits"]:
                 counts[rid][h["kind"]] = counts[rid].get(h["kind"], 0) + 1
-        print(r["run"], json.dumps(counts), "inventory:", r["inventory_problems"] or "clean")
+        unaudited = f" UNAUDITED (no transcript): {r['unaudited']}" if r["unaudited"] else ""
+        print(r["run"], json.dumps(counts), "inventory:", r["inventory_problems"] or "clean", unaudited)
+        failed = failed or bool(r["unaudited"])
+    if failed:
+        sys.exit("some reviewers have no transcript to audit; their tool calls were not checked")
 
 
 if __name__ == "__main__":

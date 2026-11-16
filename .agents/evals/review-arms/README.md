@@ -644,6 +644,102 @@ Catch rate per session on the 10 diffs (mean over diffs):
   them today, so the result says what the engine must state, not that it
   can.
 
+## Relation briefs, dilution: does the decisive fact survive among its siblings?
+
+Plan `brief/PLAN-dilution.md`, registered before any run. Results:
+`results/brief-dilution/`. Outcome: **selection is not the bottleneck**.
+
+- Arm W is arm D's brief with every true fact of six kinds added. The kinds
+  are argument values at call sites, field and state writes, held scopes,
+  keys and comparisons, lifetimes, and shared state, for the functions the
+  diff changes and the call sites the brief cites. No budget.
+  - One blind carbon/high editor per diff listed 91 to 174 facts, and 1,550
+    for the 43-file symbol-change-keeps-cached-transcript.
+  - A blind truth check dropped 0 to 6.7% per diff as false.
+  - Recall of the decisive fact: the editors stated it on 1 of 10 diffs
+    (web-feed-self-deadlock, a held lock at a call). On the other 9 they had
+    only pieces of it: the counterpart outside the diff's functions (a
+    cache, a writer, a restart loop), or the link that joins true pieces.
+  - Briefs grew from 4-8 KB to 30-52 KB. The 300 KB symbol-change brief was
+    refused by the mj API (413), so W ran on 9 diffs and every arm is
+    compared on those 9.
+  - Leak check: every caught or partial verdict of the two Opus judges
+    quotes arm D's own item, none a sibling, so no sibling was dropped.
+- Runs: 3 Terra/high and 3 Sol/high per diff, 54 sessions, mj-estimated API
+  cost $6.72. The daemon replaced on 2026-11-16 destroys reviewer sessions
+  when their role ends (mj 8fe3c40bd), so driver.py now reads each handback
+  from the store. Every deviation is listed in
+  `results/brief-dilution/deviations.md`.
+- Blinding: with no reviewer transcript, `audit.py` cannot check these
+  reviewers' tool calls and reports them as unaudited. What still holds is
+  the checkout inventory check (no later history in the reviewer's
+  checkout), which passed for every run.
+- Judging round H: gemini-4-carbon/high, 220 outputs. The judges agree on
+  all; the hand check of 104 caught or partial verdicts changed none. Round
+  H reproduces round G's D and F exactly.
+
+Catch rate per session on the 9 diffs (mean over diffs):
+
+| Model | Bifrost (F) | Bifrost + item (D) | D + siblings (W) | Blind (B, round G) |
+|---|---:|---:|---:|---:|
+| Terra/high | 22.2% | 70.4% | 81.5% | 88.9% |
+| Sol/high | 33.3% | 59.3% | 59.3% | 66.7% |
+
+- Retention, (W − F) / (D − F): Terra 1.23 (95% 1.0 to 1.9), Sol 1.0 (0.25
+  to 3.0). Terra is above the plan's 0.7.
+- Reading: on these diffs a brief that states every fact of these kinds
+  keeps the decisive one's lift; W ≥ D may come from siblings that state
+  pieces of it. The open questions are elsewhere: whether the engine
+  computes these facts on real code, and whether a complete listing fits on
+  a large diff.
+
+## Wizard-of-Oz site tool: do reviewers fetch the decisive fact when they must ask?
+
+Plan `brief/PLAN-oz.md`, registered before any run. Results:
+`results/brief-oz/`. Outcome (Terra, primary): **querying fails**, because
+Terra never asked.
+
+- Arm Q: no brief. Reviewers have one MCP tool, `site_context`, which
+  answers for a function or `path:line` from arm W's facts (the truth-checked
+  siblings plus arm D's item), with completeness per answer. It is a
+  stand-in server reached by a forced-command ssh. The fixtures live only on
+  the server host; a blinding probe from a reviewer container could not read
+  them. Run from a second mj instance, so no other arm sees the tool.
+- Retrieval, from the server's call log:
+
+  | Model | Sessions | Called the tool | Calls | Got the decisive item |
+  |---|---:|---:|---:|---:|
+  | Terra/high | 30 | 0 | 0 | 0 |
+  | Sol/high | 30 | 26 | 71 | 9 |
+
+  Every Terra reviewer loaded the tool and listed it, then never called it.
+- Runs: 60 sessions on 10 diffs, mj-estimated API cost $6.87. Judging round
+  I (carbon/high, 244 outputs: Q, D, F and no brief) agrees on all; the hand
+  check of 104 caught or partial verdicts changed none. W's labels come from
+  round H, on its 9 diffs.
+- Blinding: as for arm W, reviewer tool calls are unaudited (no transcript).
+  The fixtures were outside every reviewer's reach (probe before the run),
+  the checkout inventory check passed, and the server log shows only
+  `site_context` calls.
+
+Catch rate per session on the 10 diffs (mean over diffs):
+
+| Model | No brief (N) | Bifrost (F) | Site tool (Q) | Bifrost + item (D) |
+|---|---:|---:|---:|---:|
+| Terra/high | 20.0% | 20.0% | 26.7% | 73.3% |
+| Sol/high | 33.3% | 40.0% | 53.3% | 63.3% |
+
+- Terra: Q − N +6.7 points (−6.7 to +20), Q − D −46.7 (−73.3 to −16.7).
+- Sol: Q − N +20.0 (+6.7 to +36.7), Q − D −10.0 (−26.7 to +3.3), Q − W on
+  the 9 diffs −11.1 (−29.6 to +7.4). By the plan's rule Sol alone would
+  read "querying works" (Q ≥ D − 10).
+- Reading: when the reviewer asks, the facts behind a query tool deliver
+  most of what handing them over does (Sol). Whether it asks depends on the
+  model: Terra/high, the best reviewer in this study, ignores an optional
+  tool. A tool-only design needs either a review procedure that makes the
+  reviewer query the changed code's sites, or the facts pushed into the
+  brief as well; that needs its own registered arm.
+
 ## Bifrost tool coverage: can a code graph produce the decisive fact?
 
 For the Bifrost session, at Jonathan's request (`toolcov/SPEC.md`,
