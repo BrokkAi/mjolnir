@@ -29,15 +29,16 @@ a = p.parse_args()
 out = pathlib.Path(a.out)
 out.mkdir(parents=True, exist_ok=True)
 
-# `gh issue list` without --search pages through the listing API, which has no 1,000-result cap.
-raw = subprocess.check_output(
-    ["gh", "issue", "list", "-R", a.repo, "--label", "bug", "--state", "closed", "-L", "100000",
-     "--json", "number,title,createdAt,closedAt,stateReason,labels"], text=True)
+# `gh issue list --label` stops at 1,000 issues (seen 2026-11-16: the first draw lost every bug issue
+# before 2026-08-17); the REST listing pages through all of them. It also lists pull requests.
+pages = json.loads(subprocess.check_output(
+    ["gh", "api", "--paginate", "--slurp", f"repos/{a.repo}/issues?labels=bug&state=closed&per_page=100"], text=True))
 pool = sorted(
-    ({"number": i["number"], "title": i["title"], "created_at": i["createdAt"], "closed_at": i["closedAt"],
+    ({"number": i["number"], "title": i["title"], "created_at": i["created_at"], "closed_at": i["closed_at"],
       "found_by": sorted(l["name"] for l in i["labels"] if l["name"].startswith("found-by:")) or None,
       "labels": sorted(l["name"] for l in i["labels"])}
-     for i in json.loads(raw) if i["createdAt"] < a.before and i["stateReason"] == "COMPLETED"),
+     for page in pages for i in page
+     if "pull_request" not in i and i["created_at"] < a.before and i["state_reason"] == "completed"),
     key=lambda i: i["number"])
 order = list(pool)
 random.Random(SEED).shuffle(order)
