@@ -1158,15 +1158,20 @@ umask 077
 store="$HOME/$1"
 mkdir -p -- "$store"
 chmod -- 700 "$store"
+present=$(mktemp "$store/.present-XXXXXXXXXX")
+trap 'rm -f -- "$present"' EXIT
 while IFS= read -r key; do
     if [ -f "$store/$key" ]; then
-        touch -- "$store/$key"
+        printf '%s\n' "$key" >> "$present"
     else
         printf '%s\n' "$key"
     fi
 done
+(cd "$store" && xargs sh -c '[ "$#" -eq 0 ] || touch -- "$@"' sh) < "$present"
 if [ ! -f "$store/.collected" ] || [ -n "$(find "$store/.collected" -mmin +60 -print)" ]; then
     find "$store" -type f -mmin +1440 -exec rm -f -- {} +
+    # Upload and pin directories that an interrupted run left behind.
+    find "$store" -mindepth 1 -maxdepth 1 -type d -mmin +1440 -exec rm -rf -- {} +
     touch -- "$store/.collected"
 fi"#;
 
@@ -1185,9 +1190,9 @@ mkdir -p -- "$store" "$(dirname -- "$destination")"
 chmod -- 700 "$store"
 work=$(mktemp -d "$destination.work-XXXXXXXXXX")
 upload=
-trap 'rm -rf -- "$work" ${upload:+"$upload"}' EXIT
+pins=
+trap 'rm -rf -- "$work" ${upload:+"$upload"} ${pins:+"$pins"}' EXIT
 tar -xzf - --no-same-owner --no-same-permissions -C "$work"
-ln -s -- "$store" "$work/.mj-store"
 tree="$work/profile"
 mkdir -p -- "$tree"
 content="$work/.mj-content"
@@ -1211,10 +1216,16 @@ if [ -d "$content" ]; then
     find "$upload" -type f -exec sh -c 'mv -f -- "$@" "$0"' "$store" {} +
     rmdir -- "$upload"
 fi
+# Pin every needed file with a hard link in a private directory of the store
+# (always the same filesystem), then check and copy from the pins: content
+# removed from the store afterwards cannot change what this run decided.
+pins=$(mktemp -d "$store/.pins-XXXXXXXXXX")
+ln -s -- "$pins" "$work/.mj-store"
 missing=
 if [ -f "$work/.mj-keys" ]; then
+    (cd "$store" && xargs sh -c '[ "$#" -eq 0 ] || ln -- "$@" "$0"' "$pins") < "$work/.mj-keys" || :
     while IFS= read -r key; do
-        [ -f "$store/$key" ] || missing="$missing$key
+        [ -f "$pins/$key" ] || missing="$missing$key
 "
     done < "$work/.mj-keys"
 fi
