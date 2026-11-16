@@ -39,7 +39,7 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 
 ## Outcomes & Retrospective
 
-(not yet)
+Implemented in four commits. The end-to-end test `tests/e2e/create_survives_restart.py` passes: `mj daemon restart` with a create held after its target exists returns in about 1.3 s, the next daemon logs "resuming a session creation interrupted by a daemon restart", and the session reaches running with no error and no leftover intent. Validation: workspace clippy clean; controller and CLI suites pass except four tests that look unrelated (three quota/spawn tests in `server_runtime::api::tests`, `push_review_delivers_each_verdict_without_holding_or_prompting_the_primary` which hangs, and `review_start_fails_with_the_reason_the_daemon_refused_it` whose message lacks a suffix); none were checked against the baseline. Limitations: recovery redoes the clone, sub-agent creates keep caller replay, other target kinds (Docker, SSH, Nitro) were not exercised end to end.
 
 
 ## Context and Orientation
