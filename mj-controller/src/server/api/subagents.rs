@@ -438,6 +438,28 @@ async fn resolve_model_profile_selection_from(
         )));
     }
     if profile_id.is_none() {
+        // Load balancing offers only profiles that may still run the model
+        // from their own allowance (or credits they may spend). A named
+        // profile is not load balancing and keeps its pin.
+        let now = now_epoch_seconds();
+        let mut excluded = Vec::new();
+        offered.retain(|candidate| {
+            match crate::profile_scheduler::ineligibility(&candidate.candidate, &identity, now) {
+                Some(reason) => {
+                    excluded.push(reason.describe(&candidate.profile_id, &identity));
+                    false
+                }
+                None => true,
+            }
+        });
+        if offered.is_empty() {
+            return Err(ApiFailure::conflict(format!(
+                "every {} profile that can run model {model:?} is out of subscription quota: {}. \
+                 Try again after the quota resets.",
+                source.profile_description(),
+                excluded.join("; ")
+            )));
+        }
         let prefer = backend.quota_preferences().await?;
         let (anchor, placement) = match source {
             ModelProfileCandidateSource::Subagents { parent_profile } => {
@@ -1087,6 +1109,7 @@ mod tests {
                     }],
                 }
             }),
+            may_consume_credits: false,
             unhealthy: Default::default(),
         }
     }
@@ -1860,7 +1883,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn reviewer_ready_later_candidate_bounds_earlier_probe_grace() {
-        let mut ready = candidate("ready", Some(0), &["fixed"]);
+        let mut ready = candidate("ready", None, &["fixed"]);
         ready.choices.model = Some("fixed".into());
         ready.choices.efforts = vec![mj_core::acp::SessionConfigChoice {
             value: "high".into(),
@@ -1897,7 +1920,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn reviewer_completed_third_candidate_bounds_each_stalled_predecessor() {
-        let mut ready = candidate("ready-third", Some(0), &["fixed"]);
+        let mut ready = candidate("ready-third", None, &["fixed"]);
         ready.choices.model = Some("fixed".into());
         ready.choices.efforts = vec![mj_core::acp::SessionConfigChoice {
             value: "high".into(),
@@ -1945,7 +1968,7 @@ mod tests {
             candidates: SubagentCandidates {
                 offered: vec![
                     candidate("stalled-first", Some(80), &["fixed"]),
-                    candidate("delayed-later", Some(0), &["fixed"]),
+                    candidate("delayed-later", None, &["fixed"]),
                 ],
                 unavailable: Vec::new(),
             },
@@ -2226,7 +2249,7 @@ mod tests {
         let candidates = SubagentCandidates {
             offered: vec![
                 // No quota left, so the weighted draw never puts it first.
-                candidate("parent", Some(0), &["fixed", "no-effort"]),
+                candidate("parent", None, &["fixed", "no-effort"]),
                 candidate("best", Some(70), &["fixed", "no-effort"]),
                 candidate("full-but-wrong-effort", Some(100), &["fixed"]),
             ],

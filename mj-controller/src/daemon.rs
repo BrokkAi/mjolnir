@@ -212,8 +212,12 @@ pub(crate) enum QuotaRefreshIntent {
     ReconcileSources,
     /// Probe these profiles once even though they sit outside the enabled
     /// batch (for `mj quota --with-disabled`); their reports stay served until
-    /// their identities change.
-    ProbeProfiles(Vec<crate::quota::QuotaRefreshRequest>),
+    /// their identities change. A forced probe answers now, off the profile's
+    /// schedule, even with a fresh report.
+    ProbeProfiles {
+        requests: Vec<crate::quota::QuotaRefreshRequest>,
+        forced: bool,
+    },
 }
 
 struct SurfaceNotice {
@@ -259,6 +263,7 @@ pub struct RuntimeState {
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<auto_afk::Inactivity>,
     inactivity_changed: tokio::sync::Notify,
+    mbx_install_wake: crate::controller::mbx::service::InstallWake,
     projects: Arc<crate::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
     recovery_observer: RecoveryObserver,
@@ -747,6 +752,7 @@ enum DaemonLifecycleResult {
 pub(crate) struct LifecycleFailure {
     pub(crate) detail: String,
     pub(crate) refusal: Option<Refusal>,
+    pub(crate) reason: Option<crate::controller::LifecycleFailureReason>,
 }
 
 /// One lifecycle operation's outcome, and the channel every waiter reads it
@@ -771,6 +777,9 @@ impl LifecycleFailure {
         Self {
             detail: format!("{error:#}"),
             refusal: Refusal::of(error),
+            reason: error
+                .downcast_ref::<crate::controller::LifecycleFailureReason>()
+                .copied(),
         }
     }
 
@@ -780,16 +789,42 @@ impl LifecycleFailure {
         Self {
             detail: detail.into(),
             refusal: None,
+            reason: None,
         }
     }
 
     /// Rebuild the error a waiter sees, with the refusal still attached.
     fn into_error(self) -> anyhow::Error {
-        match self.refusal {
+        let error = match self.refusal {
             Some(refusal) => anyhow::Error::new(refusal).context(self.detail),
             None => anyhow::Error::msg(self.detail),
+        };
+        match self.reason {
+            Some(reason) => error.context(reason),
+            None => error,
         }
     }
+
+    fn public_message(&self, prefix: &str, reference: &str) -> String {
+        lifecycle_failure_message(prefix, self.refusal.as_ref(), self.reason, reference)
+    }
+}
+
+/// Render only trusted boundary guidance; raw diagnostic chains stay in logs.
+pub(crate) fn lifecycle_failure_message(
+    prefix: &str,
+    refusal: Option<&Refusal>,
+    reason: Option<crate::controller::LifecycleFailureReason>,
+    reference: &str,
+) -> String {
+    let reason = if let Some(refusal) = refusal {
+        format!("{refusal}. Follow this guidance, then retry the action.")
+    } else if let Some(reason) = reason {
+        reason.to_string()
+    } else {
+        "The lifecycle operation could not finish. Retry the action; if the runtime is unavailable, Resume the session to repair it first.".into()
+    };
+    format!("{prefix}: {reason} Reference {reference}.")
 }
 
 impl std::fmt::Display for LifecycleFailure {

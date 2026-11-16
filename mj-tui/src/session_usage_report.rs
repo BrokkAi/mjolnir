@@ -54,13 +54,16 @@ pub(crate) struct SessionUsageDialog {
 }
 
 impl DashboardState {
-    pub(crate) fn begin_session_usage_report(&mut self) {
+    pub(crate) fn begin_session_usage_report(&mut self, profile: Option<String>) {
         self.usage_request_generation = self.usage_request_generation.wrapping_add(1);
         let mut form = Dialog::default();
         form.focus(UsageControl::Profile);
         self.mode = Mode::SessionUsageReport(SessionUsageDialog {
             generation: self.usage_request_generation,
-            query: SessionUsageQuery::default(),
+            query: SessionUsageQuery {
+                profile,
+                ..SessionUsageQuery::default()
+            },
             report: None,
             profiles: self.config.profiles.keys().cloned().collect(),
             selected_key: RefCell::new(None),

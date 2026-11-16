@@ -245,6 +245,12 @@ pub(crate) enum DashboardIoUpdate {
     /// The daemon's answer to a Refresh: it accepted the request, or it could
     /// not be reached.
     QuotaRefreshRequested(std::result::Result<(), String>),
+    /// The daemon's answer to a single profile's Refresh: it accepted the
+    /// probe, or it could not be reached.
+    QuotaProbeRequested {
+        profile_id: String,
+        result: std::result::Result<(), String>,
+    },
     /// The host's global Git author identity, read before the first new
     /// session of this run.
     GitIdentityChecked(std::result::Result<mj_client::daemon::GitIdentity, String>),
@@ -466,6 +472,9 @@ pub(crate) struct WorkspaceManagementResult {
     pub(crate) entries: Vec<WorkspaceManagementEntry>,
     pub(crate) select_workspace: Option<String>,
     pub(crate) deleted_workspace_id: Option<String>,
+    /// The entries carry the workspace list ahead of their drafts: the dialog
+    /// shows them at once and keeps mutations off until the details answer.
+    pub(crate) details_pending: bool,
 }
 
 pub(crate) struct RegisteredDashboardSession {
@@ -711,6 +720,7 @@ impl DashboardContext {
                     entries: self.dashboard.workspace_entries_without(&workspace_id),
                     select_workspace: None,
                     deleted_workspace_id: Some(workspace_id),
+                    details_pending: false,
                 });
                 self.apply_dashboard_io_update(DashboardIoUpdate::WorkspaceManagement {
                     generation,
@@ -735,6 +745,7 @@ impl DashboardContext {
                         entries,
                         select_workspace,
                         deleted_workspace_id,
+                        details_pending,
                     } = result;
                     // The runtime feed alone owns tab names, layouts and the
                     // active tab. A deletion owns only the composers, because
@@ -752,7 +763,7 @@ impl DashboardContext {
                     // manager, so a late create cannot switch another tab.
                     let outcome = self
                         .dashboard
-                        .finish_workspace_management(generation, Ok(entries));
+                        .finish_workspace_management(generation, Ok(entries), details_pending);
                     let foreground = outcome.foreground;
                     if let DashboardAction::CloseWorkspace {
                         generation,
@@ -778,7 +789,7 @@ impl DashboardContext {
                 Err(error) => {
                     if !self
                         .dashboard
-                        .finish_workspace_management(generation, Err(error.clone()))
+                        .finish_workspace_management(generation, Err(error.clone()), false)
                         .foreground
                     {
                         self.dashboard
@@ -1232,6 +1243,15 @@ impl DashboardContext {
                 self.manual_quota_refresh_cycles = None;
                 self.dashboard
                     .set_notice(format!("Could not refresh quota: {error}"));
+            }
+            DashboardIoUpdate::QuotaProbeRequested {
+                profile_id,
+                result,
+            } => {
+                if let Err(error) = result {
+                    self.dashboard
+                        .set_notice(format!("Could not refresh {profile_id}'s quota: {error}"));
+                }
             }
             DashboardIoUpdate::WebAccess { generation, access } => {
                 if generation == self.web_request_generation {

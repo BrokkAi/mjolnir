@@ -36,6 +36,10 @@ pub enum WorkspaceCommand {
 pub struct WorkspaceRepository {
     pub id: String,
     pub root: PathBuf,
+    /// Capture's authoritative handoff base. Capture runs only in the
+    /// controller's exact-build Move helper, never an older session worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

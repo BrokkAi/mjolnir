@@ -155,22 +155,55 @@ pub(super) async fn read_file(
     } else {
         mj_checkpoint::archive::FetchMode::Content
     };
-    let fetched = backend.read_file(session_id, path, mode).await?;
+    let fetched = tokio::select! {
+        result = backend.read_file(session_id, path, mode) => result?,
+        // A manual restart also interrupts a repeatable read. Tell the client
+        // it may reconnect even when this is not an automatic upgrade.
+        () = state.shutdown.cancelled() => return Err(ApiFailure::unavailable(
+            "the daemon stopped during fetch; reconnect and retry the download",
+        ).with_code(Some(DAEMON_HANDOFF_CODE))),
+    };
     let content_type = match fetched.kind {
         mj_checkpoint::archive::FetchedKind::File => "application/octet-stream",
         mj_checkpoint::archive::FetchedKind::Directory => "application/zip",
         mj_checkpoint::archive::FetchedKind::Listing => "application/json",
     };
     let resolved: String = url::form_urlencoded::byte_serialize(fetched.path.as_bytes()).collect();
+    let length = fetched.len();
+    let shutdown = state.shutdown.clone();
+    let stream = futures::stream::try_unfold(fetched.reader(), move |mut reader| {
+        let shutdown = shutdown.clone();
+        async move {
+            tokio::select! {
+                biased;
+                // EOF means the whole artifact was delivered. An interrupted
+                // stream must fail even if compression removes Content-Length.
+                () = shutdown.cancelled() => Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "daemon stopped during fetched payload delivery",
+                )),
+                result = async move {
+                    tokio::task::spawn_blocking(move || {
+                        // An I/O chunk, not a transfer size limit.
+                        let mut chunk = vec![0; 64 * 1024];
+                        let count = std::io::Read::read(&mut reader, &mut chunk)?;
+                        chunk.truncate(count);
+                        Ok::<_, std::io::Error>(if count == 0 { None } else { Some((chunk, reader)) })
+                    }).await.map_err(std::io::Error::other)?
+                } => result,
+            }
+        }
+    });
     Ok((
         [
             (CONTENT_TYPE, content_type.to_owned()),
+            (axum::http::header::CONTENT_LENGTH, length.to_string()),
             (
                 axum::http::HeaderName::from_static(FETCHED_PATH_HEADER),
                 resolved,
             ),
         ],
-        fetched.bytes,
+        axum::body::Body::from_stream(stream),
     )
         .into_response())
 }

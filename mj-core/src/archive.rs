@@ -40,6 +40,10 @@ pub const ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY: u32 = 8;
 pub const ARCHIVE_SCHEMA_VERSION_MESSAGES: u32 = 9;
 /// Durable private Git refs, including non-commit review baselines.
 pub const ARCHIVE_SCHEMA_VERSION_REVIEW_REFS: u32 = 10;
+/// Linked Git worktrees inside a captured checkout, restored beside it. An
+/// older build would drop them silently, so an archive that carries any
+/// declares this schema whatever else it carries.
+pub const ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES: u32 = 11;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
@@ -168,6 +172,72 @@ pub struct SavedStashEntry {
     pub message: String,
 }
 
+/// A linked worktree of the captured repository that lives inside the
+/// captured checkout, for example one made with `git worktree add .mj/lanes/x`.
+/// Its commits live in the repository's own bundle; this record and its
+/// payloads carry the rest of what the worktree holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedWorktreeMetadata {
+    /// The worktree's directory below the checkout's top level, written as
+    /// `/`-separated text on every OS.
+    #[serde(with = "slash_path")]
+    pub path: PathBuf,
+    pub head_commit: String,
+    /// The branch checked out in the worktree; `None` when HEAD is detached.
+    pub branch: Option<String>,
+    /// The reason the worktree was locked with, empty for a lock without one.
+    /// `None` when it is not locked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_reason: Option<String>,
+    /// The operation the worktree was in the middle of, as for a clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_operation: Option<SavedGitOperation>,
+}
+
+mod slash_path {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _, ser::Error as _};
+    use std::path::{Component, Path, PathBuf};
+
+    pub fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut parts = Vec::new();
+        for component in path.components() {
+            let Component::Normal(part) = component else {
+                return Err(S::Error::custom(
+                    "worktree path is not a plain relative path",
+                ));
+            };
+            parts.push(
+                part.to_str()
+                    .ok_or_else(|| S::Error::custom("worktree path is not UTF-8"))?,
+            );
+        }
+        serializer.serialize_str(&parts.join("/"))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        if text.is_empty() {
+            return Err(D::Error::custom("worktree path is empty"));
+        }
+        Ok(text.split('/').collect())
+    }
+}
+
+/// A linked worktree's manifest entry: its record and where its payloads are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedWorktreeManifest {
+    #[serde(flatten)]
+    pub metadata: LinkedWorktreeMetadata,
+    pub staged_patch_path: String,
+    pub unstaged_patch_path: String,
+    pub untracked_tar_path: String,
+    /// Present exactly when `metadata.git_operation` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicted_worktree_tar_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_state_tar_path: Option<String>,
+}
+
 /// The index side of an unfinished Git operation, and the objects it needs.
 /// The operation's working-tree files and its state files in the Git
 /// directory are the repository's two operation payloads.
@@ -213,6 +283,11 @@ pub struct RepositoryManifest {
     /// when `metadata.git_operation` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_state_tar_path: Option<String>,
+    /// Linked worktrees inside the checkout, parents before children. An
+    /// older reader would ignore this field, which is why an archive that has
+    /// any declares [`ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_worktrees: Vec<LinkedWorktreeManifest>,
 }
 
 /// Controller-owned, materialized state captured at a checkpoint barrier.
@@ -444,6 +519,28 @@ pub enum PayloadRole {
     /// `git rev-parse --git-path` names them.
     GitOperationStateTar {
         repository_id: String,
+    },
+    /// The payloads of the repository's `worktree`th linked worktree, which
+    /// are those of the checkout itself for that worktree's directory.
+    GitLinkedWorktreeStagedPatch {
+        repository_id: String,
+        worktree: u32,
+    },
+    GitLinkedWorktreeUnstagedPatch {
+        repository_id: String,
+        worktree: u32,
+    },
+    GitLinkedWorktreeUntrackedTar {
+        repository_id: String,
+        worktree: u32,
+    },
+    GitLinkedWorktreeConflictedWorktreeTar {
+        repository_id: String,
+        worktree: u32,
+    },
+    GitLinkedWorktreeOperationStateTar {
+        repository_id: String,
+        worktree: u32,
     },
 }
 

@@ -785,6 +785,7 @@ pub(super) fn merge_step_outcome(
         .entry(session_id.to_owned())
         .or_insert_with(|| CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: session_id.to_owned(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -814,6 +815,7 @@ pub(super) fn merge_step_outcome(
 fn unknown_renewal_outcome(session_id: &str) -> CredentialSyncOutcome {
     CredentialSyncOutcome {
         unchanged_login: None,
+        current_access_token: None,
         session_id: session_id.to_owned(),
         outcome: Ok(Vec::new()),
         step_failures: vec![StepFailure {
@@ -955,6 +957,8 @@ pub(super) enum GithubSync {
 /// failed.
 pub(super) struct SessionSync {
     pub(super) unchanged_login: Option<CredentialSnapshot>,
+    /// Access-token hash of the profile's login as this sync read it.
+    pub(super) current_access_token: Option<String>,
     pub(super) actions: Vec<CredentialSyncAction>,
     pub(super) failures: Vec<StepFailure>,
     /// The AWS profile the session's worker was staged with, when the work
@@ -1176,6 +1180,7 @@ async fn reconcile_target(
             actions,
             failures,
             unchanged_login,
+            current_access_token,
             ..
         })) => {
             if let Some(failure) = joined_failures(&failures) {
@@ -1192,6 +1197,7 @@ async fn reconcile_target(
                 clean: failures.is_empty(),
                 outcome: Some(CredentialSyncOutcome {
                     unchanged_login,
+                    current_access_token,
                     session_id: target.session_id.clone(),
                     outcome: Ok(actions),
                     step_failures: failures,
@@ -1211,6 +1217,7 @@ async fn reconcile_target(
                 clean: false,
                 outcome: Some(CredentialSyncOutcome {
                     unchanged_login: None,
+                    current_access_token: None,
                     session_id: target.session_id.clone(),
                     outcome: Err(format!("{error:#}")),
                     step_failures: Vec::new(),
@@ -1314,6 +1321,7 @@ pub(super) async fn aws_cycle(
                     partial: true,
                     outcomes: vec![CredentialSyncOutcome {
                         unchanged_login: None,
+                        current_access_token: None,
                         session_id: session_id.clone(),
                         outcome: Ok(held.actions.clone()),
                         step_failures: failures,
@@ -1345,6 +1353,7 @@ pub(super) async fn aws_cycle(
                 session_id,
                 Ok(Some(SessionSync {
                     unchanged_login: None,
+                    current_access_token: None,
                     actions: withdrawn,
                     failures: vec![StepFailure {
                         step: SyncStep::Aws,
@@ -1557,6 +1566,7 @@ impl RenewalTasks {
                 partial: true,
                 outcomes: vec![CredentialSyncOutcome {
                     unchanged_login: None,
+                    current_access_token: None,
                     session_id: session_id.clone(),
                     outcome: Ok(Vec::new()),
                     step_failures: vec![StepFailure {
@@ -1685,6 +1695,7 @@ pub(super) async fn renew_session_aws(
         let mut report = outcomes.remove(&target.session_id).or_else(|| {
             checked.then(|| CredentialSyncOutcome {
                 unchanged_login: None,
+                current_access_token: None,
                 session_id: target.session_id.clone(),
                 outcome: Ok(Vec::new()),
                 step_failures: Vec::new(),
@@ -2057,6 +2068,28 @@ pub(super) enum PassLogin {
     },
 }
 
+/// Hash of the access token in the profile's Claude login as its store holds
+/// it now, or `None` when the profile is not a Claude login or it cannot be
+/// read. This is the answer to "is the token that failed still current?" for
+/// every consumer that is not itself a sync pass (#1547).
+pub async fn current_claude_access_token(
+    profile: &mj_core::config::HarnessProfile,
+) -> Option<String> {
+    if profile.kind != mj_core::config::HarnessKind::Claude
+        || !profile.auth_scheme().uses_native_login_file()
+    {
+        return None;
+    }
+    let store = profile
+        .kind
+        .login_store(mj_core::config::HarnessHost::current(), &profile.home);
+    let (_, bytes) = LoginAccess::bounded(store)
+        .read_blocking(profile.kind)
+        .await
+        .ok()?;
+    mj_core::credentials::claude_access_token_fingerprint(&bytes)
+}
+
 /// Decide where the pass finds the profile's login, and read it when that is
 /// the Keychain and any of the pass's sessions needs it.
 async fn login_for_pass(targets: &[CredentialSyncTarget]) -> PassLogin {
@@ -2243,6 +2276,7 @@ async fn run_work(
         SyncWork::Aws(aws) => {
             let mut sync = SessionSync {
                 unchanged_login: None,
+                current_access_token: None,
                 actions: Vec::new(),
                 failures: Vec::new(),
                 staged_profile: None,
@@ -2272,6 +2306,7 @@ async fn run_work(
             );
             Ok(SessionSync {
                 unchanged_login: None,
+                current_access_token: None,
                 actions: Vec::new(),
                 failures: Vec::new(),
                 staged_profile: Some(profile),
@@ -2293,6 +2328,7 @@ pub(super) async fn reconcile_on(
 ) -> Result<SessionSync> {
     let mut sync = SessionSync {
         unchanged_login: None,
+        current_access_token: None,
         actions: Vec::new(),
         failures: Vec::new(),
         staged_profile: None,
@@ -2302,6 +2338,7 @@ pub(super) async fn reconcile_on(
         actions,
         failures,
         unchanged_login,
+        current_access_token,
         ..
     } = &mut sync;
     let mut note = |step: SyncStep, label: &str, error: String| {
@@ -2315,6 +2352,8 @@ pub(super) async fn reconcile_on(
     if !target.skips_login_file_sync {
         match &canonical.login {
             Ok(login) => {
+                *current_access_token =
+                    mj_core::credentials::claude_access_token_fingerprint(&login.bytes);
                 match reconcile_credentials(
                     client,
                     target,
@@ -2325,7 +2364,15 @@ pub(super) async fn reconcile_on(
                 )
                 .await
                 {
-                    Ok(snapshot) => *unchanged_login = snapshot,
+                    Ok(snapshot) => {
+                        *unchanged_login = snapshot;
+                        // A pull made the session's copy the profile's, so the
+                        // login read above is no longer the profile's: the
+                        // verdict is unknown, never "renewed" or "refused".
+                        if actions.contains(&CredentialSyncAction::Pulled) {
+                            *current_access_token = None;
+                        }
+                    }
                     Err(error) => note(
                         SyncStep::HarnessLogin,
                         "harness login",

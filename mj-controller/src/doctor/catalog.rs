@@ -177,6 +177,7 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             codex_profile: None,

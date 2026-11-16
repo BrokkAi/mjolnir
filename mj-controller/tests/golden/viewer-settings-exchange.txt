@@ -319,6 +319,17 @@
                 "path": [
                   "profiles",
                   "claude",
+                  "load_balancing_may_consume_credits"
+                ],
+                "label": "Load balancing may consume credits",
+                "help": "When this subscription profile has used up its quota for a model, let load balancing still pick it and spend its paid credits. Off: it is skipped until the quota resets. Does not affect a session you pin to this profile.",
+                "control": "checkbox",
+                "checked": false
+              },
+              {
+                "path": [
+                  "profiles",
+                  "claude",
                   "claude_permission_mode"
                 ],
                 "label": "Claude permission mode",

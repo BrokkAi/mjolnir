@@ -13,7 +13,13 @@ pub(super) fn oracle_launch_enabled(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::controller) enum WorkerFilePreparation {
     Install,
+    /// Restage the profile into a retained home, and replace the worker
+    /// binary when the retained worker's build differs.
     RefreshProfile,
+    /// Restage the profile into a retained home before a stopped worker
+    /// starts, so it starts with the profile's current login (#1547). The
+    /// worker binary is the caller's business.
+    RefreshProfileOnly,
 }
 
 /// The session history a launch continues. A restore deletes the worker's
@@ -382,7 +388,7 @@ impl Controller {
             }
         }
         let shared_login = shared_profile_login(profile, backend);
-        if preparation == WorkerFilePreparation::RefreshProfile {
+        if preparation != WorkerFilePreparation::Install {
             clear_profile_configuration(
                 executor,
                 backend,
@@ -401,6 +407,7 @@ impl Controller {
                     ownership: &ownership_path,
                     profile: &profile_stage,
                     shared_login: shared_login.as_ref(),
+                    shared_paths: &shared_profile_paths(profile.kind),
                 },
             )?;
             if upgrade_retained_worker {
@@ -422,6 +429,7 @@ impl Controller {
             &ownership_path,
             &profile_stage,
             shared_login.as_ref(),
+            &shared_profile_paths(profile.kind),
         )?;
         if session.build_cache.is_some() {
             self.install_build_cache_shim(session, backend, &launch, executor)
@@ -800,9 +808,8 @@ impl Controller {
                 tracing::warn!(session_id, missing = %missing,
                     "review choice cannot be resolved through the parent chain; launching without review tools");
             }
-            self.config
-                .review
-                .for_session(self.state.effective_review_or_off(session_id))
+            self.state
+                .effective_review_config(&self.config.review, session_id)
                 .trigger()
         } else {
             Default::default()

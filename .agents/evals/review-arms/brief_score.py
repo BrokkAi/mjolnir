@@ -5,8 +5,10 @@ Usage:
       blind judge batches of stored no-brief and brief sessions -> $REVIEW_ARMS_DIR/<name>/
       (stage B: --arms OT,OS,BT,BS --name brief-judge-b, so oracle and blind are scored apart
        and stage A's batches and key are kept)
-      (run brief/workflow-judge.js with the args it prints; save its result as
-       brief-judge/workflow-out.json)
+      (run `verify_driver.py <name> --kind judge`, which writes <name>/workflow-out.json;
+       stages A and B ran brief/workflow-judge.js with the args build prints instead)
+      --bugs-from <jobs file>: only the diffs of that jobs file ([{"bug", "arm"}]); kept in the key,
+      so collect and score use the same subset (round G of brief/PLAN-ablation.md)
   python3 brief_score.py collect
       merges the two judges; writes brief-judge/handcheck.jsonl (every caught or partial verdict
       from either judge and every disagreement) for a hand check
@@ -32,6 +34,14 @@ BASELINE_ARMS = ("A", "B", "D", "D2")
 MODELS = ("gpt-6.1-terra", "gpt-6.1-sol")
 # Set from --name: each judging round (stage A, stage B) has its own batches and key.
 J = KEY = None
+# Set from --bugs-from, or from the round's key: the diffs this round covers (None: all 30).
+BUGS = None
+
+
+def scoped_sets():
+    """brief_oracle.sets() restricted to the round's diffs; groups left empty are dropped."""
+    s = {g: [b for b in bugs if BUGS is None or b in BUGS] for g, bugs in brief_oracle.sets().items()}
+    return {g: bugs for g, bugs in s.items() if bugs}
 
 
 def latency(session_dir):
@@ -46,7 +56,7 @@ def latency(session_dir):
 def sessions(arms):
     """Every finished high-effort Terra or Sol session with output on the 30 Hard-won diffs."""
     out = []
-    for bug in sum(brief_oracle.sets().values(), []):
+    for bug in sum(scoped_sets().values(), []):
         for arm in (*BASELINE_ARMS, *arms):
             done = ROOT / "runs" / bug / arm / "done.json"
             if not done.exists():
@@ -79,7 +89,7 @@ def require_complete(rows, arms):
     planned = collections.Counter((BRIEF_ARMS[arm], m.split(":")[0]) for arm in arms for m in ARMS[arm])
     have = collections.Counter((r["bug"], r["condition"], r["model"]) for r in rows)
     gaps = []
-    for bug in sum(brief_oracle.sets().values(), []):
+    for bug in sum(scoped_sets().values(), []):
         for model in MODELS:
             if have[(bug, "no-brief", model)] < 3:
                 gaps.append(f"{bug} no-brief {model}: {have[(bug, 'no-brief', model)]} of at least 3")
@@ -120,7 +130,7 @@ def build(arms, per_batch):
         save(J / f"batch-{n // per_batch}.json", batch)
         batches.append({"n": n // per_batch, "ids": [o["output_id"] for b in batch for o in b["outputs"]]})
     (J / "SPEC.md").write_text((SCRIPTS / "judge/SPEC.md").read_text())
-    save(KEY, {"arms": list(arms), "outputs": key})
+    save(KEY, {"arms": list(arms), "outputs": key, **({"bugs": sorted(BUGS)} if BUGS is not None else {})})
     print(json.dumps({"dir": str(J), "batches": batches}))
     print(json.dumps({"outputs": len(key), "by_condition_model": collections.Counter(
         f"{r['condition']}/{r['model']}" for r in rows)}), file=sys.stderr)
@@ -196,6 +206,46 @@ def decide(rate):
                           for k, m in per_model.items()}}
 
 
+def decide_c(rate):
+    """Stage C decision of brief/PLAN-bifrost.md. E = F - N and G = B - F per model on P, with paired
+    bootstrap intervals over the diffs; control 1 on C (F - N < 10 points for both models), else E is
+    taken net of the C gain as in stage A. Terra/high decides; outcomes are checked in plan order."""
+    terra, sol = MODELS
+    per_model = {}
+    for model in MODELS:
+        f, n, b = (rate[("P", cond, model)] for cond in ("bifrost", "no-brief", "blind"))
+        c_f, c_n = rate[("C", "bifrost", model)], rate[("C", "no-brief", model)]
+        e = [f[x][0] - n[x][0] for x in sorted(f)]
+        g = [b[x][0] - f[x][0] for x in sorted(f)]
+        c = [c_f[x][0] - c_n[x][0] for x in sorted(c_f)]
+        per_model[model] = {"effect": statistics.fmean(e), "ci": boot(e), "gap": statistics.fmean(g),
+                            "gap_ci": boot(g), "control_gain": statistics.fmean(c), "e": e, "c": c}
+    control_passes = all(m["control_gain"] < 0.10 for m in per_model.values())
+    for m in per_model.values():
+        if control_passes:
+            m["decision_effect"], m["decision_ci"] = m["effect"], m["ci"]
+        else:
+            m["decision_effect"] = m["effect"] - m["control_gain"]
+            m["decision_ci"] = boot_difference(m["e"], m["c"])
+    t = per_model[terra]
+    if t["decision_effect"] >= 0.30 and t["gap"] <= 0.10 and control_passes:
+        decision = "location is enough"
+    elif all(m["decision_effect"] < 0.15 and m["decision_ci"][1] < 0.30 for m in per_model.values()):
+        decision = "site context needed"
+    elif t["decision_effect"] >= 0.15 and t["gap_ci"][0] > 0:
+        decision = "relations add"
+    else:
+        decision = "inconclusive"
+    pts = lambda x: round(100 * x, 1)
+    return {"decision": decision, "control_1_passes": control_passes, "primary_model": terra,
+            "per_model": {k: {"effect_points": pts(m["effect"]), "ci95_points": [pts(x) for x in m["ci"]],
+                              "gap_points": pts(m["gap"]), "gap_ci95_points": [pts(x) for x in m["gap_ci"]],
+                              "control_gain_points": pts(m["control_gain"]),
+                              "decision_effect_points": pts(m["decision_effect"]),
+                              "decision_ci95_points": [pts(x) for x in m["decision_ci"]]}
+                          for k, m in per_model.items()}}
+
+
 def boot(diff_values, n=10000):
     """95% bootstrap interval of the mean over diffs."""
     rng = random.Random(1)
@@ -204,8 +254,10 @@ def boot(diff_values, n=10000):
 
 
 def score():
+    global BUGS
     saved = json.loads(KEY.read_text())
     key = saved["outputs"]
+    BUGS = set(saved["bugs"]) if "bugs" in saved else None
     require_complete(list(key.values()), saved["arms"])
     decided = json.loads((J / "handcheck-decisions.json").read_text())
     final = {}
@@ -216,7 +268,7 @@ def score():
         else:
             assert r["labels"] == ["missed", "missed"], f"{r['output_id']} needs a hand-check decision"
             final[r["output_id"]] = "missed"
-    sets = brief_oracle.sets()
+    sets = scoped_sets()
     conds = conditions(saved["arms"])
     rate = collections.defaultdict(dict)  # (set, condition, model) -> bug -> catch share
     for group, bugs in sets.items():
@@ -260,6 +312,8 @@ def score():
                                       "median_tool_calls": statistics.median(k["tool_calls"] for k in ks)})
     if "oracle" in conds:
         report["stage_a"] = decide(rate)
+    if "bifrost" in conds and "blind" in conds:
+        report["stage_c"] = decide_c(rate)
     save(J / "score.json", report)
     print(json.dumps(report, indent=1))
 
@@ -269,9 +323,14 @@ if __name__ == "__main__":
     p.add_argument("step", choices=["build", "collect", "score"])
     p.add_argument("--arms", default="OT,OS")
     p.add_argument("--bugs-per-batch", type=int, default=3)
+    p.add_argument("--bugs-from", help="build: jobs file ([{bug, arm}]) whose diffs the round covers")
     p.add_argument("--name", default="brief-judge", help="judging round: batches in <name>/, key in private/")
     a = p.parse_args()
     J, KEY = ROOT / a.name, ROOT / "private" / f"key-{a.name}.json"
+    if a.bugs_from:
+        if a.step != "build":
+            raise SystemExit("--bugs-from applies to build; collect and score read the subset from the key")
+        BUGS = {j["bug"] for j in json.loads(open(a.bugs_from).read())}
     if a.step == "build":
         build(tuple(a.arms.split(",")), a.bugs_per_batch)
     else:

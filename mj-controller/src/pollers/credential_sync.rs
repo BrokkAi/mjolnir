@@ -1,8 +1,12 @@
 use super::*;
-use mj_core::credentials::SyncStep;
+use mj_core::credentials::{AuthenticationVerdict, SyncStep};
 
-/// One immediate sync and notice per session per cooldown, so a harness that
-/// repeats the same failed turn does not flood the UI.
+/// One immediate sync and notice per session per cooldown for an empty prompt
+/// response, so a harness that repeats it does not flood the UI. An
+/// authentication failure is never held back (#1547): repeating it is
+/// idempotent (a push happens only when the profile's token differs from the
+/// session's, a refusal is recorded once per token), and holding it let the
+/// decision run on a later snapshot that mistook a renewal for a refusal.
 pub const IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,14 +53,17 @@ impl CredentialSyncSignalTracker {
     pub(super) fn drain_due(
         &mut self,
         now: Instant,
-    ) -> Vec<(String, String, CredentialSyncReason)> {
+    ) -> Vec<(String, String, CredentialSyncReason, Option<String>)> {
         let due = self
             .pending
             .keys()
             .filter(|session_id| {
-                self.last_attempts.get(*session_id).is_none_or(|previous| {
-                    now.saturating_duration_since(*previous) >= IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN
-                })
+                self.pending[*session_id].signal.reason
+                    == CredentialSyncReason::AuthenticationFailure
+                    || self.last_attempts.get(*session_id).is_none_or(|previous| {
+                        now.saturating_duration_since(*previous)
+                            >= IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -69,7 +76,12 @@ impl CredentialSyncSignalTracker {
                 self.handled_ordinals
                     .insert(session_id.clone(), pending.signal.ordinal);
                 self.last_attempts.insert(session_id.clone(), now);
-                (session_id, pending.profile_id, pending.signal.reason)
+                (
+                    session_id,
+                    pending.profile_id,
+                    pending.signal.reason,
+                    pending.signal.login_fingerprint,
+                )
             })
             .collect()
     }
@@ -80,10 +92,14 @@ pub fn schedule_due_credential_syncs(
     credential_sync: &CredentialSyncHandle,
     now: Instant,
 ) {
-    for (session_id, profile_id, reason) in tracker.drain_due(now) {
+    for (session_id, profile_id, reason, login_fingerprint) in tracker.drain_due(now) {
         credential_sync.sync_profile_now(
             &profile_id,
-            Some(CredentialSyncCause { session_id, reason }),
+            Some(CredentialSyncCause {
+                session_id,
+                reason,
+                login_fingerprint,
+            }),
         );
     }
 }
@@ -164,8 +180,9 @@ impl CredentialSyncNotices {
             routine: false,
         };
         let advice = setup_token_advice(&result.profile_id, harness);
-        // Completed event-triggered syncs always speak: the upstream
-        // per-session cooldown, not this dedup, is what keeps them rare.
+        // Completed event-triggered syncs always speak. An authentication
+        // failure is handled once per failed turn; only an empty response
+        // waits out the per-session cooldown upstream.
         if let Some(trigger) = &result.trigger {
             let session_id = &trigger.session_id;
             let session = state.session_notice_name(session_id);
@@ -199,10 +216,28 @@ impl CredentialSyncNotices {
             // scrolls off, so the profile leads and the advice trails.
             return Some(warning(
                 match (trigger.reason, result.pushed_to(session_id)) {
+                    (CredentialSyncReason::AuthenticationFailure, true)
+                        if result.authentication_verdict()
+                            == Some(AuthenticationVerdict::LoginRenewed) =>
+                    {
+                        format!(
+                            "Auth failure on profile {} (session {}): the login was renewed and the current login was pushed. If it repeats run `mj login --profile {}`{advice}.",
+                            result.profile_id, session, result.profile_id
+                        )
+                    }
                     (CredentialSyncReason::AuthenticationFailure, true) => format!(
                         "Auth failure on profile {} (session {}); refreshed credentials were pushed. If the session remains stopped, retry the prompt; if it repeats run `mj login --profile {}`{advice}.",
                         result.profile_id, session, result.profile_id
                     ),
+                    (CredentialSyncReason::AuthenticationFailure, false)
+                        if result.authentication_verdict()
+                            == Some(AuthenticationVerdict::LoginRenewed) =>
+                    {
+                        format!(
+                            "Auth failure on profile {} (session {}): the login was renewed and the session already holds the current login. If it repeats run `mj login --profile {}`{advice}.",
+                            result.profile_id, session, result.profile_id
+                        )
+                    }
                     (CredentialSyncReason::AuthenticationFailure, false) => format!(
                         "Auth failure on profile {} (session {}); nothing fresher to push. Run `mj login --profile {}`{advice}.",
                         result.profile_id, session, result.profile_id

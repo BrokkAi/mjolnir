@@ -254,7 +254,8 @@ pub(super) fn session_capabilities(
         rename: !session.transitioning,
         // A Move that holds the source environment refuses Resume; it is
         // retried or the session is destroyed.
-        resume: !session.lifecycle.is_dashboard_visible()
+        resume: session.has_resume_source()
+            && !session.lifecycle.is_dashboard_visible()
             && !mutation_busy
             && !session
                 .move_recovery
@@ -607,6 +608,7 @@ pub(super) fn viewer_snapshot_selected(
         .map(|workspace| crate::server::ViewerWorkspace {
             id: workspace.id.clone(),
             name: workspace.name.clone(),
+            last_opened_at: workspace.last_opened_at.clone(),
         })
         .collect();
     let now = std::time::SystemTime::now()

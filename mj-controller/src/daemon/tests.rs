@@ -945,6 +945,7 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
     let error = handle_action(
         DaemonAction::ProbeQuotaProfiles {
             profile_ids: vec!["missing".into()],
+            forced: false,
         },
         &metadata,
         &state,
@@ -959,6 +960,7 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
     handle_action(
         DaemonAction::ProbeQuotaProfiles {
             profile_ids: vec!["dsh".into()],
+            forced: true,
         },
         &metadata,
         &state,
@@ -966,9 +968,10 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
     )
     .await
     .expect("probe the disabled profile");
-    let Some(QuotaRefreshIntent::ProbeProfiles(requests)) = woken.try_recv().ok() else {
+    let Some(QuotaRefreshIntent::ProbeProfiles { requests, forced }) = woken.try_recv().ok() else {
         panic!("the poller receives the probe");
     };
+    assert!(forced, "the force flag reaches the poller");
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].profile_id, "dsh");
 }
@@ -1369,6 +1372,8 @@ pub(super) struct TestRemoteManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
     pub(super) publisher: RemoteSessionPublisher,
+    /// Background tasks the daemon asked a worker to stop, in order.
+    pub(super) stopped_tasks: Vec<String>,
     _shutdown: SessionManagerShutdown,
     _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
 }
@@ -1380,18 +1385,31 @@ impl TestRemoteManager {
 
     /// A manager whose one session is `session_id`.
     pub(super) async fn for_session(session_id: &str) -> Self {
+        Self::for_sessions(&[session_id]).await
+    }
+
+    /// A manager whose sessions are `session_ids`; the first is the one the
+    /// tests wait on.
+    pub(super) async fn for_sessions(session_ids: &[&str]) -> Self {
+        let session_id = session_ids[0];
         let channels =
             crate::session_manager::spawn_remote_session_manager().expect("remote manager");
-        channels.targets.send_replace(vec![RelaySessionTarget {
-            session_id: session_id.to_owned(),
-            spec: CommandSpec::new("true", Vec::<String>::new()),
-            worker_recovery: None,
-            project_memory: None,
-        }]);
+        channels.targets.send_replace(
+            session_ids
+                .iter()
+                .map(|id| RelaySessionTarget {
+                    session_id: (*id).to_owned(),
+                    spec: CommandSpec::new("true", Vec::<String>::new()),
+                    worker_recovery: None,
+                    project_memory: None,
+                })
+                .collect(),
+        );
         let manager = Self {
             control: channels.control,
             requests: channels.requests,
             publisher: channels.publisher,
+            stopped_tasks: Vec::new(),
             _shutdown: channels.shutdown,
             _targets: channels.targets,
         };
@@ -1405,7 +1423,89 @@ impl TestRemoteManager {
             .wait_for_session(session_id, Duration::from_secs(5))
             .await
             .expect("remote manager creates test session");
+        for other in &session_ids[1..] {
+            manager
+                .publisher
+                .publish((*other).to_owned(), ManagedSessionView::default())
+                .await
+                .expect("publish test session view");
+            manager
+                .control
+                .wait_for_session(other, Duration::from_secs(5))
+                .await
+                .expect("remote manager creates test session");
+        }
         manager
+    }
+
+    /// Accepts every command the daemon submits until none arrives for a
+    /// moment, and returns them with the session each went to. Run it beside
+    /// the call under test, which waits for each acceptance.
+    /// The session manager's control, for starting the delegation loop on it.
+    pub(super) fn control_for_test(&self) -> SessionManagerControl {
+        self.control.clone()
+    }
+
+    /// The next command the daemon submits, left unanswered so a test decides
+    /// when it is acknowledged: the session, the command id and the reply.
+    pub(super) async fn next_submit(
+        &mut self,
+    ) -> (
+        String,
+        String,
+        tokio::sync::oneshot::Sender<std::result::Result<u64, mj_client::session::SubmitFailure>>,
+    ) {
+        loop {
+            let request = tokio::time::timeout(Duration::from_secs(10), self.requests.recv())
+                .await
+                .expect("the daemon submits a command")
+                .expect("the manager is running");
+            if let crate::session_manager::RemoteSessionRequest::Submit {
+                session_id,
+                command_id,
+                reply,
+                ..
+            } = request
+            {
+                return (session_id, command_id, reply);
+            }
+        }
+    }
+
+    /// The first submissions fail with `failures`, in order, before the worker
+    /// accepts anything.
+    pub(super) async fn answer_submissions(
+        &mut self,
+        failures: Vec<mj_client::session::SubmitFailure>,
+    ) -> Vec<(String, String, mj_core::relay::RelayCommand)> {
+        let mut failures = failures.into_iter();
+        let mut accepted = Vec::new();
+        while let Ok(Some(request)) =
+            tokio::time::timeout(Duration::from_millis(300), self.requests.recv()).await
+        {
+            if let crate::session_manager::RemoteSessionRequest::Submit {
+                session_id,
+                command_id,
+                command,
+                reply,
+            } = request
+            {
+                let _ = reply.send(match failures.next() {
+                    Some(failure) => Err(failure),
+                    None => Ok(99),
+                });
+                accepted.push((session_id, command_id, command));
+            } else if let crate::session_manager::RemoteSessionRequest::StopBackgroundTask {
+                background_task_id,
+                reply,
+                ..
+            } = request
+            {
+                self.stopped_tasks.push(background_task_id);
+                let _ = reply.send(Ok(()));
+            }
+        }
+        accepted
     }
 }
 
@@ -3753,6 +3853,8 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         assessment: None,
         open_request: None,
         person_input_through: 0,
+        work_liveness: None,
+        undelivered_mailbox_event_keys: Vec::new(),
         assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),
@@ -3770,6 +3872,7 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         goal: Default::default(),
         capacity_retry: None,
         retry_assessment_pending: false,
+        authentication_retry_waiting: None,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,
         store_id: None,
@@ -6273,6 +6376,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             models: Default::default(),
@@ -7151,6 +7255,14 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
     let restored = crate::database::load_state().unwrap();
     let retained = &restored.sessions[&session.id];
     assert_eq!(retained.target, session.target);
+    assert_eq!(retained.state, SessionState::Error);
+    let message = retained.public_error().unwrap();
+    assert!(
+        message.contains("could not contact the worker"),
+        "{message}"
+    );
+    assert!(message.contains("Resume the session"), "{message}");
+    assert!(message.contains("Reference "), "{message}");
     assert!(
         retained
             .public_error()
@@ -7178,6 +7290,642 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
         !root.path().join(&session.id).exists(),
         "diagnosis must not create worker state"
     );
+}
+
+// Hard-won: #1542: Suspend superseding a Move mid-clone left the session in Closing indefinitely
+#[cfg(unix)]
+#[tokio::test]
+async fn suspend_superseding_move_before_worker_install_settles_the_source() {
+    const NAME: &str = "suspend_superseding_move_before_worker_install_settles_the_source";
+    const CHILD: &str = "MJ_TEST_SUPERSEDED_MOVE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let bin = directory.path().join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        mj_core::test_hooks::install_fake_command(
+            &bin,
+            "aws",
+            r#"
+printf '%s\n' "$*" >> "$MJ_TEST_MOVE_AWS_LOG"
+case "$*" in
+  *"ec2 terminate-instances"*|*"ec2 wait instance-terminated"*) exit 0 ;;
+  *) exit 92 ;;
+esac
+"#,
+        );
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .isolated_store(directory.path())
+        .env(CHILD, "1")
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("PATH", path)
+        .env("MJ_TEST_MOVE_AWS_LOG", directory.path().join("aws-calls"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Superseded Move").unwrap();
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Origin {
+        Suspend,
+        Cancel,
+        StaleCancel,
+    }
+    for (retained_workspace, restart, sealed, origin) in [
+        (false, false, true, Origin::Suspend),
+        (true, false, true, Origin::Suspend),
+        (false, true, true, Origin::Suspend),
+        (true, true, true, Origin::Suspend),
+        (true, false, false, Origin::Suspend),
+        (true, true, false, Origin::Suspend),
+        (true, true, true, Origin::Cancel),
+        (true, true, true, Origin::StaleCancel),
+    ] {
+        let requested_close = origin == Origin::Suspend;
+        let root = tempfile::tempdir().unwrap();
+        let id = match origin {
+            Origin::Cancel => "15420000000000000000000000000007",
+            Origin::StaleCancel => "15420000000000000000000000000008",
+            Origin::Suspend => match (retained_workspace, restart, sealed) {
+                (false, false, true) => "15420000000000000000000000000001",
+                (true, false, true) => "15420000000000000000000000000002",
+                (false, true, true) => "15420000000000000000000000000003",
+                (true, true, true) => "15420000000000000000000000000004",
+                (_, false, false) => "15420000000000000000000000000005",
+                (_, true, false) => "15420000000000000000000000000006",
+            },
+        };
+        let source_root = root.path().join("source").join(id);
+        let mut destination_root = root.path().join("destination").join(id);
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(&destination_root).unwrap();
+        std::fs::write(
+            source_root.join("uncheckpointed-work"),
+            "keep source workspace",
+        )
+        .unwrap();
+        std::fs::write(
+            destination_root.join("clone.partial"),
+            "unfinished checkout",
+        )
+        .unwrap();
+        let checkpoint =
+            crate::controller::test_support::write_checkpoint_gate_archive(root.path(), id, 7);
+        let mut source = runtime_test_session(id, &workspace.id, SessionState::Stopped);
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: source_root.clone(),
+        }));
+        source.checkpoint = Some(Box::new(checkpoint.clone()));
+        crate::database::save_session(&source).unwrap();
+        let mut operation = mj_core::state::MoveOperation {
+            quota_stop_reason: None,
+            quota_continuation: None,
+            prepared_destination: (retained_workspace && sealed).then(|| {
+                let mut runtime = mj_core::state::TargetRuntimeSettings::from(
+                    &mj_core::config::TargetTemplate::LocalBare,
+                );
+                runtime.kind = "aws-ec2".into();
+                runtime.connection = mj_core::state::TargetConnection::Aws {
+                    profile: "isolated-fixture".into(),
+                    region: "us-east-1".into(),
+                    ssh_user: "fixture".into(),
+                    identity_file: None,
+                    ssh_args: Vec::new(),
+                };
+                mj_core::state::PreparedMoveDestination {
+                    launch_args: Vec::new(),
+                    runtime,
+                    state: if restart {
+                        mj_core::state::PreparedDestinationState::CleanupPending {
+                            instance_id: Some(format!("i-{id}")),
+                        }
+                    } else {
+                        mj_core::state::PreparedDestinationState::Created {
+                            instance_id: format!("i-{id}"),
+                        }
+                    },
+                }
+            }),
+            accepted_preparation: None,
+            acknowledge_interruption: false,
+            workspace_transfer: retained_workspace.then(|| {
+                mj_core::move_workspace::WorkspaceTransfer {
+                    assessment: Default::default(),
+                    source: Box::new(source.clone()),
+                    source_stage: root.path().join("source-stage"),
+                    controller_stage: root.path().join("controller-stage"),
+                    phase: mj_core::move_workspace::WorkspaceTransferPhase::SourceStopped,
+                }
+            }),
+            handoff: retained_workspace.then(|| checkpoint.clone()),
+            source_checkpoint_only: false,
+            in_place: false,
+            operation_id: format!("mid-clone-{id}"),
+            selection: mj_core::state::MoveSelection {
+                session_id: id.into(),
+                profile_id: Some("codex".into()),
+                target_template_id: Some("local".into()),
+                workspace: Default::default(),
+                clear_resource_allocation: false,
+                additional_mounts: None,
+                resource_allocation: None,
+                subagents: None,
+                oracle: None,
+                oracle_choice: None,
+            },
+            source_profile_id: source.last_profile.clone(),
+            source_target_template_id: source.target_template_id.clone(),
+            source_target: source.target.clone().map(|target| *target),
+            source_native_session_id: None,
+            inherited_resource_allocation: None,
+            inherited_additional_mounts: Vec::new(),
+            source_additional_mounts: Vec::new(),
+            source_resource_allocation: None,
+            destination_target: None,
+            destination_native_session_id: None,
+            destination_store_id: None,
+            configuration_fingerprint: "mid-clone".into(),
+            checkpoint: Some(checkpoint.clone()),
+            recovery_session: sealed.then(|| source.clone()),
+            queue: mj_core::state::ResumeQueueDisposition::Discard,
+            phase: mj_core::state::MovePhase::ResumingDestination,
+            queue_admission_started: false,
+            queue_admission_finished: false,
+            cancellation_requested: false,
+            created_at: source.created_at.clone(),
+            updated_at: source.updated_at.clone(),
+            error: None,
+        };
+        crate::database::save_move_operation(&operation).unwrap();
+        let mut destination = source.clone();
+        destination.state = SessionState::Provisioning;
+        destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: destination_root.clone(),
+        }));
+        crate::database::save_resumed_session(&destination, None).unwrap();
+        if restart {
+            operation.phase = mj_core::state::MovePhase::Cancelled;
+            operation.cancellation_requested = true;
+            crate::database::save_move_operation(&operation).unwrap();
+            destination.state = SessionState::Closing;
+            crate::database::save_lifecycle_session(&destination).unwrap();
+        }
+        if requested_close && restart && sealed {
+            // Restore can publish Running just before Move records StartingQueue.
+            // Closing and that destination's readiness must become durable together.
+            destination.state = SessionState::Running;
+            crate::database::save_lifecycle_session(&destination).unwrap();
+            let mut ready_operation = operation.clone();
+            ready_operation.prepared_destination = None;
+            crate::database::save_move_operation(&ready_operation).unwrap();
+            let ready = test_runtime_state_loading_the_store();
+            ready.prepare_suspension(id).await.unwrap();
+            let saved = crate::database::load_session_record(id).unwrap().unwrap();
+            let saved_move = crate::database::load_move_operation(id).unwrap().unwrap();
+            assert_eq!(saved.state, SessionState::Closing);
+            assert_eq!(
+                saved_move.destination_target.as_ref(),
+                destination.target.as_deref()
+            );
+            let mut controller = Controller::load().unwrap();
+            assert!(
+                !controller
+                    .settle_superseded_move_for_close(
+                        id,
+                        &RefusingExecutor("a ready destination must never be rolled back"),
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            );
+            let destination_archives = root.path().join("destination-checkpoints");
+            std::fs::create_dir(&destination_archives).unwrap();
+            let destination_checkpoint =
+                crate::controller::test_support::write_checkpoint_gate_archive(
+                    &destination_archives,
+                    id,
+                    17,
+                );
+            controller.state.sessions.get_mut(id).unwrap().checkpoint =
+                Some(Box::new(destination_checkpoint.clone()));
+            crate::database::save_checkpointed_session(&controller.state.sessions[id]).unwrap();
+            // The daemon stopped after committing verified teardown, before
+            // publishing Stopped. Startup must give this cut to close, not Move.
+            controller.state.sessions.get_mut(id).unwrap().state = SessionState::Destroying;
+            crate::database::save_lifecycle_session(&controller.state.sessions[id]).unwrap();
+            controller
+                .record_failed_close(
+                    id,
+                    &format!(
+                        "{}: Teardown was interrupted; retry suspension.",
+                        mj_core::state::CLOSE_FAILURE_PREFIX
+                    ),
+                )
+                .unwrap();
+            let teardown = test_runtime_state_loading_the_store();
+            let (teardown_moves, close_operations) = crate::database::load_move_recovery().unwrap();
+            let owners = teardown
+                .recover_moves(teardown_moves, &close_operations)
+                .unwrap();
+            assert!(!owners.moves.contains(id));
+            assert!(owners.closes.contains(id));
+            tokio::time::timeout(Duration::from_secs(30), teardown.suspend_session(id.into()))
+                .await
+                .unwrap()
+                .unwrap();
+            let closed = crate::database::load_session_record(id).unwrap().unwrap();
+            let resolved = crate::database::load_move_operation(id).unwrap().unwrap();
+            assert_eq!(closed.state, SessionState::Stopped);
+            assert_eq!(closed.checkpoint.as_deref(), Some(&destination_checkpoint));
+            assert!(resolved.is_resolved());
+            assert!(
+                !resolved.holds_source_environment(),
+                "Resume must accept the destination checkpoint"
+            );
+            // Return to the earlier clone cut for the restart assertion below.
+            crate::database::save_move_operation(&operation).unwrap();
+            destination_root = root.path().join("destination-after-close").join(id);
+            destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+                worker_root: destination_root.clone(),
+            }));
+            std::fs::create_dir_all(&destination_root).unwrap();
+            std::fs::write(
+                destination_root.join("clone.partial"),
+                "unfinished checkout",
+            )
+            .unwrap();
+            destination.state = SessionState::Closing;
+            crate::database::save_resumed_session(&destination, None).unwrap();
+        }
+        if requested_close && restart {
+            test_runtime_state_loading_the_store()
+                .prepare_suspension(id)
+                .await
+                .unwrap();
+        }
+        if requested_close && restart && retained_workspace && sealed {
+            let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+            connection.execute_batch("CREATE TRIGGER reject_move_settlement BEFORE UPDATE OF operation_json ON session_moves
+                WHEN json_extract(NEW.operation_json, '$.queue_admission_finished')=1
+                BEGIN SELECT RAISE(ABORT, 'injected Move resolution failure'); END;").unwrap();
+            let source_environment =
+                crate::database::move_source_environment(&operation.operation_id)
+                    .unwrap()
+                    .unwrap();
+            let mut restored = source.clone();
+            restored.state = SessionState::Error;
+            // Hard-won: 59b3ff0: restoring the source before resolving Move blocked Resume after a crash.
+            assert!(
+                crate::database::settle_superseded_move_source(
+                    &restored,
+                    Some(&source_environment.id),
+                    &operation.operation_id
+                )
+                .is_err()
+            );
+            let unchanged = crate::database::load_session_record(id).unwrap().unwrap();
+            assert_eq!(unchanged.target, destination.target);
+            assert_eq!(unchanged.state, SessionState::Closing);
+            assert!(
+                !crate::database::load_move_operation(id)
+                    .unwrap()
+                    .unwrap()
+                    .is_resolved()
+            );
+            connection
+                .execute_batch("DROP TRIGGER reject_move_settlement")
+                .unwrap();
+        }
+        if !requested_close {
+            let (_, close_operations) = crate::database::load_move_recovery().unwrap();
+            assert!(
+                !close_operations.contains(&operation.operation_id),
+                "NULL grants no close authority"
+            );
+            if origin == Origin::StaleCancel {
+                let raw = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+                raw.execute("UPDATE session_moves SET close_requested_operation_id='stale-other-operation' WHERE session_id=?1", [id]).unwrap();
+            }
+            let (operations, close_operations) = crate::database::load_move_recovery().unwrap();
+            assert!(!close_operations.contains(&operation.operation_id));
+            let cancelled = test_runtime_state_loading_the_store();
+            // Hard-won: 4c3c932: plain Move cancellation incorrectly granted Suspend authority after restart.
+            let owners = cancelled
+                .recover_moves(operations, &close_operations)
+                .unwrap();
+            assert!(owners.moves.contains(id));
+            assert!(!owners.closes.contains(id));
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while cancelled
+                    .owner()
+                    .lifecycle
+                    .get(id)
+                    .is_some_and(|active| active.is_running())
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let kept = crate::database::load_session_record(id).unwrap().unwrap();
+            assert_eq!(kept.state, SessionState::Error);
+            assert_eq!(kept.target, source.target);
+            assert!(source_root.join("uncheckpointed-work").exists());
+            assert!(!destination_root.exists());
+            let kept_move = crate::database::load_move_operation(id).unwrap().unwrap();
+            assert!(
+                !kept_move.is_resolved(),
+                "plain cancellation must keep Move retry authority"
+            );
+            assert!(matches!(
+                kept_move.prepared_destination.unwrap().state,
+                mj_core::state::PreparedDestinationState::Released
+            ));
+            continue;
+        }
+        let state = test_runtime_state_loading_the_store();
+        let cloning = Arc::new(tokio::sync::Notify::new());
+        let active_move = if restart {
+            state.prepare_suspension(id).await.unwrap();
+            // Even with every archive gone, GC must retain the durable owner
+            // until close publishes its terminal outcome.
+            let raw = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+            let before_gc = crate::database::load_move_operation(id).unwrap().unwrap();
+            raw.execute(
+                "UPDATE session_moves SET operation_json=json_set(operation_json, '$.checkpoint', NULL, '$.handoff', NULL, '$.prepared_destination', NULL) WHERE session_id=?1",
+                [id],
+            ).unwrap();
+            crate::database::reap_finished_move_intents().unwrap();
+            assert!(
+                crate::database::load_move_operation(id).unwrap().is_some(),
+                "pending close must retain its Move even without an archive"
+            );
+            crate::database::save_move_operation(&before_gc).unwrap();
+            let (operations, close_operations) = crate::database::load_move_recovery().unwrap();
+            let owned = state.recover_moves(operations, &close_operations).unwrap();
+            assert!(
+                !owned.moves.contains(id),
+                "startup must leave superseded Move to close"
+            );
+            assert!(owned.closes.contains(id));
+            assert!(
+                interrupted_suspend_session_ids(&Controller::load().unwrap())
+                    .contains(&id.to_owned())
+            );
+            None
+        } else {
+            Some(
+                state
+                    .start_or_join_lifecycle(id.into(), LifecycleKind::Move, {
+                        let cloning = cloning.clone();
+                        move |_, _, cancelled| async move {
+                            // Hold the destination-cloning cut before any worker is installed.
+                            cloning.notify_one();
+                            while !cancelled.load(Ordering::Acquire) {
+                                tokio::time::sleep(Duration::from_millis(1)).await;
+                            }
+                            operation.phase = mj_core::state::MovePhase::Cancelled;
+                            operation.cancellation_requested = true;
+                            crate::database::save_move_operation(&operation)?;
+                            bail!("clone cancelled by Suspend")
+                        }
+                    })
+                    .unwrap(),
+            )
+        };
+        if !restart {
+            cloning.notified().await;
+        }
+        let result =
+            tokio::time::timeout(Duration::from_secs(30), state.suspend_session(id.into()))
+                .await
+                .unwrap();
+        assert_eq!(result.is_err(), retained_workspace, "{result:?}");
+        if let Some(active_move) = active_move {
+            assert!(
+                RuntimeState::wait_lifecycle_result(active_move)
+                    .await
+                    .is_err()
+            );
+        }
+        let stored = crate::database::load_state().unwrap();
+        let record = &stored.sessions[id];
+        assert_eq!(
+            record.state,
+            if retained_workspace {
+                SessionState::Error
+            } else {
+                SessionState::Stopped
+            }
+        );
+        assert!(checkpoint.archive_path.exists());
+        assert_eq!(record.checkpoint.as_deref(), Some(&checkpoint));
+        assert_eq!(
+            destination_root.exists(),
+            !sealed,
+            "an unsealed source keeps every placement; a sealed source permits destination cleanup ({id})"
+        );
+        let settled = crate::database::load_move_operation(id).unwrap().unwrap();
+        assert!(
+            !crate::database::load_move_recovery()
+                .unwrap()
+                .1
+                .contains(&settled.operation_id),
+            "terminal outcome must consume Suspend intent"
+        );
+        if retained_workspace && sealed {
+            assert!(matches!(
+                settled.prepared_destination.as_ref().unwrap().state,
+                mj_core::state::PreparedDestinationState::Released
+            ));
+            let calls =
+                std::fs::read_to_string(std::env::var_os("MJ_TEST_MOVE_AWS_LOG").unwrap()).unwrap();
+            assert!(
+                calls
+                    .lines()
+                    .any(|call| call.contains("terminate-instances") && call.contains(id)),
+                "{calls}"
+            );
+            assert!(
+                calls
+                    .lines()
+                    .any(|call| call.contains("instance-terminated") && call.contains(id)),
+                "{calls}"
+            );
+        }
+        assert_eq!(settled.is_resolved(), sealed);
+        assert!(
+            !settled.holds_source_environment(),
+            "Resume must not be blocked by Move"
+        );
+        if !sealed {
+            assert_eq!(record.target, destination.target);
+            assert!(source_root.join("uncheckpointed-work").exists());
+            let message = record.public_error().unwrap();
+            assert!(
+                message.contains("could not establish a sealed Move checkpoint"),
+                "{message}"
+            );
+            assert!(message.contains("Resume the session"), "{message}");
+            assert!(message.contains("Reference "), "{message}");
+        } else if retained_workspace {
+            assert_eq!(record.target, source.target);
+            assert_eq!(
+                std::fs::read_to_string(source_root.join("uncheckpointed-work")).unwrap(),
+                "keep source workspace"
+            );
+            let message = record.public_error().unwrap();
+            assert!(message.contains("source workspace was kept"), "{message}");
+            assert!(message.contains("Resume the session"), "{message}");
+            assert!(message.contains("Reference "), "{message}");
+        } else {
+            assert!(record.target.is_none());
+            assert!(!source_root.exists());
+        }
+    }
+    // Historical Moves must not turn a workerless cleanup into interrupted
+    // checkpoint recovery merely because their rows are still retained.
+    let historical = crate::database::load_move_operation("15420000000000000000000000000008")
+        .unwrap()
+        .unwrap();
+    for (index, lifecycle) in [
+        SessionState::Provisioning,
+        SessionState::Parked,
+        SessionState::StartupCleanup,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for phase in [
+            mj_core::state::MovePhase::Completed,
+            mj_core::state::MovePhase::Cancelled,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let id = format!(
+                "1542{:028x}",
+                16 + 2 * index + usize::from(phase == mj_core::state::MovePhase::Cancelled)
+            );
+            let worker_root = root.path().join(&id);
+            std::fs::create_dir(&worker_root).unwrap();
+            std::fs::write(worker_root.join("partial-checkout"), "unfinished startup").unwrap();
+            let mut record = runtime_test_session(&id, &workspace.id, lifecycle);
+            record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+                worker_root: worker_root.clone(),
+            }));
+            crate::database::save_session(&record).unwrap();
+            if index == 0 && phase == mj_core::state::MovePhase::Completed {
+                for moving_state in [SessionState::Provisioning, SessionState::Closing] {
+                    record.state = moving_state;
+                    crate::database::save_lifecycle_session(&record).unwrap();
+                    let mut pending = retained_startup_test_move(&record);
+                    pending.operation_id = format!("unaccepted-{id}");
+                    crate::database::save_move_operation(&pending).unwrap();
+                    crate::controller::move_session::restore_move_queue_hold(&pending);
+                    let refused = test_runtime_state_loading_the_store();
+                    let error = match refused.start_suspend_session(id.clone(), true, false).await {
+                        Err(error) => error,
+                        Ok(mut started) => started.confirm_acceptance().await.unwrap_err(),
+                    };
+                    assert!(error.to_string().contains("Move queue admission"));
+                    let unchanged = crate::database::load_session_record(&id).unwrap().unwrap();
+                    assert_eq!(
+                        unchanged.state, moving_state,
+                        "an unaccepted close cannot change another lifecycle's state"
+                    );
+                    assert_eq!(unchanged.target, record.target);
+                    assert_eq!(unchanged.last_error, record.last_error);
+                    assert_eq!(unchanged.updated_at, record.updated_at);
+                    assert!(worker_root.exists());
+                    crate::controller::move_session::release_move_queue_hold(&id);
+                }
+                record.state = lifecycle;
+                crate::database::save_lifecycle_session(&record).unwrap();
+            }
+            let mut completed = historical.clone();
+            completed.selection.session_id = id.clone();
+            completed.operation_id = format!("historical-{id}");
+            completed.phase = phase;
+            completed.queue_admission_started = false;
+            completed.queue_admission_finished = true;
+            completed.prepared_destination = None;
+            crate::database::save_move_operation(&completed).unwrap();
+            // A crash during a later ordinary close must leave close recovery
+            // in charge even while its historical Move row remains.
+            record.state = SessionState::Closing;
+            crate::database::save_lifecycle_session(&record).unwrap();
+            for exact_historical_intent in [false, true] {
+                let recovering = test_runtime_state_loading_the_store();
+                let close_ids = if exact_historical_intent {
+                    BTreeSet::from([completed.operation_id.clone()])
+                } else {
+                    BTreeSet::new()
+                };
+                let owners = recovering
+                    .recover_moves(vec![completed.clone()], &close_ids)
+                    .unwrap();
+                assert!(!owners.moves.contains(&id));
+                assert!(!owners.closes.contains(&id));
+                assert!(
+                    interrupted_suspend_session_ids(&Controller::load().unwrap()).contains(&id)
+                );
+            }
+            record.state = lifecycle;
+            crate::database::save_lifecycle_session(&record).unwrap();
+            let runtime = test_runtime_state_loading_the_store();
+            if lifecycle == SessionState::Provisioning {
+                // An older writer can preserve a now-historical exact marker.
+                // It cannot authorize a rejected action to fail a new startup.
+                let raw = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+                raw.execute("UPDATE session_moves SET close_requested_operation_id=operation_id WHERE session_id=?1", [&id]).unwrap();
+                let before = crate::database::load_session_record(&id).unwrap().unwrap();
+                let cancelled = LifecycleControl::default();
+                cancelled.cancelled.store(true, Ordering::Release);
+                assert!(
+                    runtime
+                        .start_suspend_session_controlled(id.clone(), true, false, cancelled)
+                        .await
+                        .is_err()
+                );
+                let unchanged = crate::database::load_session_record(&id).unwrap().unwrap();
+                assert_eq!(unchanged.state, before.state);
+                assert_eq!(unchanged.last_error, before.last_error);
+                assert_eq!(unchanged.updated_at, before.updated_at);
+                assert_eq!(raw.query_row("SELECT close_requested_operation_id FROM session_moves WHERE session_id=?1", [&id], |row| row.get::<_, String>(0)).unwrap(), completed.operation_id);
+            }
+            runtime.prepare_suspension(&id).await.unwrap();
+            assert_eq!(
+                crate::database::load_session_record(&id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                lifecycle,
+                "resolved Move must preserve the existing cleanup route"
+            );
+            assert!(
+                !crate::database::load_move_recovery()
+                    .unwrap()
+                    .1
+                    .contains(&completed.operation_id)
+            );
+            tokio::time::timeout(Duration::from_secs(30), runtime.suspend_session(id.clone()))
+                .await
+                .unwrap()
+                .unwrap();
+            let closed = crate::database::load_session_record(&id).unwrap().unwrap();
+            assert_eq!(closed.state, SessionState::Stopped);
+            assert!(closed.target.is_none());
+            assert!(!worker_root.exists());
+        }
+    }
 }
 
 /// #1191: `mj destroy` is answered "accepted" before the destroy finishes,
@@ -7483,9 +8231,16 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     .await
     .unwrap()
     .unwrap_err();
-    assert!(format!("{error:#}").contains("stop sub-agent"));
+    let message = format!("{error:#}");
+    assert!(message.contains("stop sub-agent"), "{message}");
+    assert!(message.contains(stuck_id), "{message}");
+    assert!(message.contains(oracle_id), "{message}");
 
     let stored = crate::database::load_state().unwrap();
+    assert!(
+        !stored.sessions.contains_key(finished_id) && !stored.subagents.contains_key(finished_id),
+        "a succeeded child stop still settles and removes the child when siblings fail"
+    );
     assert_ne!(stored.sessions[parent_id].state, SessionState::Stopped);
     for child in [stuck_id, oracle_id] {
         assert!(
@@ -7529,6 +8284,73 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             .unwrap()
             .is_none()
     );
+}
+
+/// A finished reviewer is destroyed, not left as a stopped sub-agent of the
+/// session that asked for the review (the shape the earlier suspend-only close
+/// left behind). Its usage stays in the accounting table.
+#[cfg(unix)]
+#[tokio::test]
+async fn destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting() {
+    const NAME: &str = "destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting";
+    const CHILD: &str = "MJ_TEST_DESTROY_FINISHED_REVIEWER";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .env(
+            mj_core::config::SESSION_INDEX_ENV,
+            directory.path().join("sessionwiki"),
+        )
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Reviewer destroy").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let reviewer_id = "44444444444444444444444444444444";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    }));
+    crate::database::save_session(&parent).unwrap();
+    let reviewer = runtime_test_session(reviewer_id, &workspace.id, SessionState::Stopped);
+    let mut relation = runtime_test_subagent(reviewer_id, parent_id);
+    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+    relation.task_name = "review".into();
+    crate::database::save_subagent_session(&reviewer, &relation).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.destroy_reviewer_child(reviewer_id.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert!(!stored.sessions.contains_key(reviewer_id));
+    assert!(!stored.subagents.contains_key(reviewer_id));
+    assert!(stored.sessions.contains_key(parent_id));
+    let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+    let accounted: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM subagent_accounting WHERE child_session_id=?1 AND task_name='review'",
+            [reviewer_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(accounted, 1);
 }
 
 /// Marks the isolated child a [`live_parent_with_a_working_sub_agent`] test
@@ -7630,7 +8452,7 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     let hel = worker_root.join("hel");
     std::fs::write(
         &hel,
-        "#!/bin/sh\ncat >/dev/null\necho 'No space left on device' >&2\nexit 1\n",
+        "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\ncat >/dev/null\necho 'No space left on device' >&2\nexit 1\n",
     )
     .unwrap();
     std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -7857,6 +8679,7 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
         &hel,
         format!(
             "#!/bin/sh\n\
+             [ \"$2\" = stop ] && exit 0\n\
              [ \"$1 $2\" = 'worker export-checkpoint' ] || \
              {{ echo \"the stand-in worker only exports: $*\" >&2; exit 2; }}\n\
              {STAND_IN_EXPORT}=1 '{program}' --exact '{test}' --nocapture | grep '^{{'\n",
@@ -8634,6 +9457,108 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     recovery.shutdown().await.unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_parent_close() {
+    const NAME: &str =
+        "suspending_a_parent_stops_sub_agents_concurrently_before_finishing_parent_close";
+    const CHILD: &str = "MJ_TEST_SUSPEND_CONCURRENT_SUBAGENTS";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Concurrent sub-agent stop").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_a = "44444444444444444444444444444444";
+    let child_b = "55555555555555555555555555555555";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    }));
+    crate::database::save_session(&parent).unwrap();
+    for child_id in [child_a, child_b] {
+        let mut child = runtime_test_session(child_id, &workspace.id, SessionState::Running);
+        child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.path().join(child_id),
+        }));
+        crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
+            .unwrap();
+    }
+
+    let mut state = test_runtime_state_loading_the_store();
+    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
+    Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
+    let attempt_a = state.recovery_observer.gate.try_start(child_a).unwrap();
+    let attempt_b = state.recovery_observer.gate.try_start(child_b).unwrap();
+
+    let mut suspend = tokio::spawn({
+        let state = state.clone();
+        async move { state.suspend_session(parent_id.to_owned()).await }
+    });
+
+    // Both children must enter StopSubagent concurrently while each is held.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let active = state.active_lifecycles();
+            let has_a = active.iter().any(|view| view.session_id == child_a);
+            let has_b = active.iter().any(|view| view.session_id == child_b);
+            if has_a && has_b {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both sub-agent stops must be in flight concurrently");
+
+    drop(attempt_a);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if !crate::database::load_state()
+                .unwrap()
+                .sessions
+                .contains_key(child_a)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first child stop should settle while sibling is still held");
+
+    // Parent suspend must not complete while child_b is still in flight.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut suspend)
+            .await
+            .is_err(),
+        "parent suspend must wait for every in-flight sub-agent stop"
+    );
+    assert_ne!(
+        crate::database::load_state().unwrap().sessions[parent_id].state,
+        SessionState::Stopped
+    );
+
+    drop(attempt_b);
+    tokio::time::timeout(Duration::from_secs(60), suspend)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
+    assert!(!stored.sessions.contains_key(child_b));
+    recovery.shutdown().await.unwrap();
+}
+
 /// Run the named test alone, with a store and a SessionWiki index of its own
 /// and an empty home. Returns whether this process is that run.
 #[cfg(unix)]
@@ -8673,7 +9598,7 @@ fn parked_child(root: &Path, child_id: &str, parent_id: &str, workspace_id: &str
     std::fs::write(
         &hel,
         format!(
-            "#!/bin/sh\necho started >> {}\n",
+            "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\necho started >> {}\n",
             root.join("started").display()
         ),
     )
@@ -8715,7 +9640,13 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     // No handback tool and no finished turn on record: only being parked
     // says this child's parent already has what it will get from it.
     parked_child(root.path(), child_id, parent_id, &workspace.id);
-    assert!(crate::controller::subagent_has_handed_back(child_id).unwrap());
+    assert!(
+        crate::controller::subagent_has_handed_back(
+            child_id,
+            &mj_core::subagent::Liveness::Known(None)
+        )
+        .unwrap()
+    );
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();
@@ -9218,9 +10149,10 @@ async fn exercise_child_close_with_a_nested_workspace(
     if failed_reviewer {
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
+                // A failed reviewer is destroyed once its role has failed.
                 if crate::database::load_session_record(LATCH_RELAY_SESSION)
                     .unwrap()
-                    .is_some_and(|child| child.state == SessionState::Stopped)
+                    .is_none()
                 {
                     break;
                 }
@@ -9228,7 +10160,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             }
         })
         .await
-        .expect("startup closes a failed reviewer without any manual suspension");
+        .expect("startup destroys a failed reviewer without any manual suspension");
         assert!(
             crate::database::try_commit_container_upgrade(parent_id, "upgrade-after-failed-review")
                 .unwrap()
@@ -9256,13 +10188,15 @@ async fn exercise_child_close_with_a_nested_workspace(
     }
     channels.shutdown.shutdown().await.unwrap();
     let stored = crate::database::load_state().unwrap();
-    let closed = &stored.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(closed.state, SessionState::Stopped);
-    assert!(closed.target.is_none() && closed.checkpoint.is_none());
-    assert!(
-        worker_root.exists(),
-        "private roots remain owned until the environment retires"
-    );
+    if !failed_reviewer {
+        let closed = &stored.sessions[LATCH_RELAY_SESSION];
+        assert_eq!(closed.state, SessionState::Stopped);
+        assert!(closed.target.is_none() && closed.checkpoint.is_none());
+        assert!(
+            worker_root.exists(),
+            "private roots remain owned until the environment retires"
+        );
+    }
     assert_eq!(stored.sessions[parent_id], parent);
     assert_eq!(
         std::fs::read_to_string(parent_root.join("private")).unwrap(),
@@ -9276,19 +10210,23 @@ async fn exercise_child_close_with_a_nested_workspace(
         std::fs::read_to_string(reports.join("result.txt")).unwrap(),
         "child report"
     );
-    let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
-        .unwrap()
-        .unwrap();
-    assert!(
-        serde_json::to_string(&history)
+    if failed_reviewer {
+        assert!(!stored.subagents.contains_key(LATCH_RELAY_SESSION));
+    } else {
+        let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
             .unwrap()
-            .contains(&conversation)
-    );
-    assert_eq!(
-        history.execution,
-        mj_core::state::MaterializedExecutionState::Closed
-    );
-    assert!(stored.subagents.contains_key(LATCH_RELAY_SESSION));
+            .unwrap();
+        assert!(
+            serde_json::to_string(&history)
+                .unwrap()
+                .contains(&conversation)
+        );
+        assert_eq!(
+            history.execution,
+            mj_core::state::MaterializedExecutionState::Closed
+        );
+        assert!(stored.subagents.contains_key(LATCH_RELAY_SESSION));
+    }
 }
 
 // Hard-won: #1444: an unreachable Closing child could lose its final journal when cleanup skipped relay recovery.
@@ -9324,7 +10262,7 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
     seed_live_session(root.path(), &child_root);
     use std::os::unix::fs::PermissionsExt;
     let proxy = child_root.join("hel");
-    std::fs::write(&proxy, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::write(&proxy, "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\nexit 1\n").unwrap();
     std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
     let last_event = "journal-only child output ".repeat(4096);
     let mut journal =

@@ -1084,6 +1084,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
             Some(mj_core::credentials::CredentialSyncCause {
                 session_id: other.session_id.clone(),
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint: None,
             }),
         );
         let explicit = tokio::time::timeout(Duration::from_secs(5), coordinator.result())
@@ -1651,6 +1652,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
             outcomes,
             [CredentialSyncOutcome {
                 unchanged_login: None,
+                current_access_token: None,
                 session_id: "remote".into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
                 step_failures: Vec::new(),
@@ -3156,6 +3158,7 @@ async fn credential_sync_reconciles_newer_destinations_before_reporting_auth_rec
             trigger: Some(mj_core::credentials::CredentialSyncCause {
                 session_id: "login-race".into(),
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint: None,
             }),
             failure: None,
             partial: false,
@@ -3505,6 +3508,7 @@ async fn a_stalled_triggered_renewal_does_not_hold_the_profiles_other_syncs() {
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "stalled".into(),
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
     );
     wait_for("the trigger's pass", &|| {
@@ -3820,6 +3824,7 @@ async fn a_trigger_whose_renewal_is_stopped_reports_the_outcome_as_unknown() {
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "replaced".into(),
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
     );
     wait_for("the trigger's pass", &|| {
@@ -4686,6 +4691,7 @@ async fn an_auth_trigger_reinstalls_deleted_scoped_credentials_at_once() {
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "auth-session".into(),
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
     );
     let triggered = tokio::time::timeout(Duration::from_secs(20), async {
@@ -4753,6 +4759,7 @@ fn a_failed_login_step_keeps_the_aws_steps_actions_in_the_outcome() {
         "session".to_owned(),
         CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "session".into(),
             outcome: Err("worker proxy disconnected".into()),
             step_failures: Vec::new(),
@@ -4871,6 +4878,7 @@ async fn the_coordinator_runs_a_trigger_for_a_held_session_once_it_is_free() {
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "held-session".into(),
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
     );
     std::fs::write(&release, "").unwrap();
@@ -4926,6 +4934,7 @@ async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change(
                 mj_core::config::HarnessKind::Codex,
                 &codex_login("2026-09-25T20:00:00.000Z"),
             )),
+            current_access_token: None,
             session_id: SESSION_ID.into(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -4966,6 +4975,7 @@ async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
             .iter()
             .map(|session| CredentialSyncOutcome {
                 unchanged_login: None,
+                current_access_token: None,
                 session_id: (*session).into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
                 step_failures: Vec::new(),
@@ -5498,6 +5508,187 @@ for line in sys.stdin:
                     ReplicaReplaceOutcome::Replaced
                 );
             }
+        }
+    }
+}
+
+// Hard-won: #1542: a 15 s per-RPC deadline that counted worker queueing failed Suspend on a loaded host
+#[tokio::test(start_paused = true)]
+async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
+    use mj_core::project_memory::ProjectMemorySnapshot;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as Reply,
+    };
+
+    for outcome in ["complete", "cancel", "drop", "disconnect", "legacy_drop"] {
+        let legacy = outcome == "legacy_drop";
+        let (controller, worker) = tokio::io::duplex(4096);
+        let (output, input) = tokio::io::split(controller);
+        let mut client = RelayClient {
+            child: None,
+            input: Some(Box::new(input)),
+            output: BufReader::new(Box::new(output)),
+            request_timeout: RELAY_RPC_TIMEOUT,
+            abandoned: None,
+            cancellation: None,
+            next_request: 1,
+            connection_nonce: 1,
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            session_id: SESSION_ID.into(),
+            relay_version: "queued-memory-peer".into(),
+            worker_build: None,
+            latest_ordinal: 0,
+            latest_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            subagent_acknowledged: None,
+            subagent_queue: BTreeMap::new(),
+            subagent_publication: None,
+            known_state: None,
+            ssh_session: None,
+        };
+        if legacy {
+            client.protocol_version = mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL - 1;
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        client.set_cancellation(Some(cancelled.clone()));
+        let queue = Arc::new(tokio::sync::Semaphore::new(0));
+        let worker_queue = queue.clone();
+        let (queued, mut waiting) = mpsc::channel(1);
+        let peer = tokio::spawn(async move {
+            let bytes = mj_core::relay::ProjectMemoryWireSnapshot::encode(
+                ProjectMemorySnapshot::default(),
+                ProjectMemorySnapshot::default(),
+                RELAY_PROTOCOL_VERSION,
+            )
+            .unwrap();
+            let (reader, mut writer) = tokio::io::split(worker);
+            let mut reader = BufReader::new(reader);
+            for page in [false, true] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+                let expected = if page {
+                    Action::ReadSnapshotPage {
+                        transfer_id: 1,
+                        offset: 0,
+                    }
+                } else {
+                    Action::BeginSnapshot
+                };
+                if legacy {
+                    assert_eq!(request.request, RelayRequest::ProjectMemorySnapshot);
+                } else {
+                    assert_eq!(
+                        request.request,
+                        RelayRequest::ProjectMemoryTransfer { action: expected }
+                    );
+                }
+                // Model the worker's I/O semaphore queue before it can reply.
+                queued.send(()).await.unwrap();
+                worker_queue.acquire().await.unwrap().forget();
+                let result = if page {
+                    Reply::SnapshotPage {
+                        transfer_id: 1,
+                        offset: 0,
+                        next_offset: bytes.len() as u64,
+                        complete: true,
+                        chunk: BASE64.encode(&bytes),
+                    }
+                } else {
+                    Reply::SnapshotStarted {
+                        transfer_id: 1,
+                        total_bytes: bytes.len() as u64,
+                    }
+                };
+                let response = RelayResponseEnvelope {
+                    request_id: request.request_id,
+                    protocol_version: RELAY_PROTOCOL_VERSION,
+                    body: RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::ProjectMemoryTransfer { result },
+                    },
+                };
+                let mut frame = serde_json::to_vec(&response).unwrap();
+                frame.push(b'\n');
+                writer.write_all(&frame).await.unwrap();
+            }
+            let mut extra = String::new();
+            reader.read_line(&mut extra).await.unwrap();
+            assert!(extra.is_empty(), "unexpected abort after transfer: {extra}");
+        });
+        let dropped = tokio_util::sync::CancellationToken::new();
+        let drop_transfer = dropped.clone();
+        let transfer = tokio::spawn(async move {
+            let result = tokio::select! {
+                result = client.project_memory_snapshot() => result,
+                () = drop_transfer.cancelled() => Err(anyhow!("checkpoint was cancelled")),
+            };
+            (client, result)
+        });
+        waiting.recv().await.unwrap();
+        tokio::time::advance(Duration::from_secs(16)).await;
+        assert!(
+            !transfer.is_finished(),
+            "snapshot start expired in the worker queue"
+        );
+        if !legacy {
+            queue.add_permits(1);
+            waiting.recv().await.unwrap();
+            tokio::time::advance(Duration::from_secs(16)).await;
+            assert!(
+                !transfer.is_finished(),
+                "snapshot page expired in the worker queue"
+            );
+        }
+        match outcome {
+            "complete" => queue.add_permits(1),
+            "cancel" => cancelled.store(true, Ordering::Release),
+            "drop" | "legacy_drop" => dropped.cancel(),
+            "disconnect" => {
+                peer.abort();
+            }
+            _ => unreachable!(),
+        }
+        let (client, result) = if outcome == "complete" {
+            transfer.await.unwrap()
+        } else {
+            tokio::time::timeout(Duration::from_millis(100), transfer)
+                .await
+                .expect("cancellation or disconnect must not wait for the worker queue")
+                .unwrap()
+        };
+        if outcome == "complete" {
+            assert_eq!(
+                result.unwrap(),
+                (
+                    ProjectMemorySnapshot::default(),
+                    ProjectMemorySnapshot::default()
+                )
+            );
+            assert!(client.abandoned.is_none());
+        } else {
+            let error = result.unwrap_err();
+            if outcome == "cancel" {
+                assert!(
+                    error
+                        .downcast_ref::<crate::session_manager::RelayJobDeferred>()
+                        .is_some()
+                );
+            } else if outcome == "disconnect" {
+                assert!(error.downcast_ref::<RelayTransportDead>().is_some());
+            } else {
+                assert_eq!(error.to_string(), "checkpoint was cancelled");
+            }
+            assert!(!format!("{error:#}").contains("abort project-memory transfer failed"));
+            assert!(client.abandoned.is_some());
+            assert!(client.input.is_none());
+        }
+        drop(client);
+        if outcome == "complete" {
+            peer.await.unwrap();
+        } else if outcome != "disconnect" {
+            peer.abort();
+            assert!(peer.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(peer.await.unwrap_err().is_cancelled());
         }
     }
 }

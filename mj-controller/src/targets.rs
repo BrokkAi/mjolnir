@@ -58,6 +58,7 @@ use container::*;
 pub(crate) use container_upgrade::container_upgrade_test_plan;
 pub(crate) use container_upgrade::{
     RetainedContainer, inspect_retained_container, recover_removed_container,
+    retained_workspace_volume_exists,
 };
 use nitro::*;
 pub use nitro::{

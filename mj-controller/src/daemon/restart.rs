@@ -909,12 +909,7 @@ impl RuntimeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RestartTargetAvailability {
-    Reachable,
-    Missing,
-    Unreachable,
-}
+pub(super) use crate::controller::environment::TargetAvailability as RestartTargetAvailability;
 
 pub(super) fn restart_checkpoint_matches(
     record: &SessionRecord,
@@ -958,114 +953,7 @@ pub(super) fn restart_target_availability(
     session_id: &str,
     executor: &impl CommandExecutor,
 ) -> Result<RestartTargetAvailability> {
-    let record = controller
-        .state
-        .sessions
-        .get(session_id)
-        .with_context(|| format!("unknown session {session_id}"))?;
-    let Some(locator) = record.target.as_ref() else {
-        return Ok(RestartTargetAvailability::Missing);
-    };
-    let locator = crate::controller::backend_locator(locator, record, &controller.config)?;
-
-    if let Some(plan) = crate::targets::target_recovery_plan(&locator, session_id)? {
-        let output = executor
-            .execute(&plan.exists)
-            .context("check retained target before Restart")?;
-        match output.status {
-            0 => match crate::targets::ensure_recovery_target_running(executor, Some(&plan))? {
-                crate::targets::TargetRecoveryOutcome::Missing => {
-                    Ok(RestartTargetAvailability::Missing)
-                }
-                crate::targets::TargetRecoveryOutcome::AlreadyRunning
-                | crate::targets::TargetRecoveryOutcome::Started
-                | crate::targets::TargetRecoveryOutcome::NotRequired => {
-                    Ok(RestartTargetAvailability::Reachable)
-                }
-            },
-            1 => Ok(RestartTargetAvailability::Missing),
-            125 => Ok(RestartTargetAvailability::Unreachable),
-            255 if locator_is_remote(&locator) => Ok(RestartTargetAvailability::Unreachable),
-            status => bail!(
-                "could not confirm retained target availability before Restart (status {status}): {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        }
-    } else if let mj_core::targets::TargetLocator::AppleContainer { container_id, .. }
-    | mj_core::targets::TargetLocator::SshAppleContainer { container_id, .. } = &locator
-    {
-        // Listing runs on the host that owns the runtime, which for a remote
-        // target is the other side of ssh.
-        let engine = locator.container_engine().expect("Apple container locator");
-        let arguments = vec![
-            engine.to_owned(),
-            "list".to_owned(),
-            "--all".to_owned(),
-            "--quiet".to_owned(),
-        ];
-        let list = match &locator {
-            mj_core::targets::TargetLocator::SshAppleContainer { ssh, .. } => {
-                crate::targets::ssh_command_owned(ssh, arguments)
-            }
-            _ => {
-                let mut arguments = arguments.into_iter();
-                CommandSpec::new(
-                    arguments.next().expect("engine"),
-                    arguments.collect::<Vec<_>>(),
-                )
-            }
-        }
-        .purpose("check retained Apple container before Restart");
-        let output = executor
-            .execute(&list)
-            .context("list retained Apple target before Restart")?;
-        if output.status == 255 && locator_is_remote(&locator) {
-            return Ok(RestartTargetAvailability::Unreachable);
-        }
-        ensure!(
-            output.status == 0,
-            "could not confirm Apple target availability before Restart (status {}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let listed = String::from_utf8(output.stdout)
-            .context("decode Apple container list before Restart")?;
-        if listed.lines().any(|id| id.trim() == container_id) {
-            Ok(RestartTargetAvailability::Reachable)
-        } else {
-            Ok(RestartTargetAvailability::Missing)
-        }
-    } else {
-        let probe = crate::targets::command_on_locator(
-            &locator,
-            session_id,
-            vec!["true".into()],
-            "probe retained target before Restart",
-        )?;
-        let output = executor
-            .execute(&probe)
-            .context("probe retained target before Restart")?;
-        match output.status {
-            0 => Ok(RestartTargetAvailability::Reachable),
-            255 if locator_is_remote(&locator) => Ok(RestartTargetAvailability::Unreachable),
-            status => bail!(
-                "could not confirm retained target availability before Restart (status {status}); refusing destructive fallback: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        }
-    }
-}
-
-fn locator_is_remote(locator: &mj_core::targets::TargetLocator) -> bool {
-    matches!(
-        locator,
-        mj_core::targets::TargetLocator::AwsEc2 { .. }
-            | mj_core::targets::TargetLocator::SshBare { .. }
-            | mj_core::targets::TargetLocator::SshPodman { .. }
-            | mj_core::targets::TargetLocator::SshDocker { .. }
-            | mj_core::targets::TargetLocator::SshAppleContainer { .. }
-            | mj_core::targets::TargetLocator::SshNitro { .. }
-    )
+    crate::controller::environment::target_availability(controller, session_id, executor)
 }
 
 fn ensure_target_unavailable_for_fallback(

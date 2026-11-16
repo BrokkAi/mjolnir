@@ -563,7 +563,7 @@ fn gh_script(script: &str) -> bool {
 ///
 /// Antigravity's `mcp_<server>_<tool>` titles are ambiguous in the same way,
 /// so it gets no answers here either. agy has a grant that names the server,
-/// which the worker stages instead (`stage_antigravity_mcp_grants`).
+/// which the worker stages instead (`stage_antigravity_grants`).
 #[derive(Debug, Clone, Default)]
 pub(super) struct OwnedMcpApprovals {
     /// The permission title of each owned server's tool calls, without any

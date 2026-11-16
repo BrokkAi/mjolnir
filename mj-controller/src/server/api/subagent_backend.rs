@@ -170,11 +170,21 @@ pub trait SubagentBackend: Send + Sync {
     /// newest task; see [`crate::controller::subagent_has_handed_back`].
     fn subagent_handed_back(&self, child_session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
         Box::pin(async move {
+            let liveness = self.subagent_work_liveness(child_session_id.clone()).await;
             tokio::task::spawn_blocking(move || {
-                crate::controller::subagent_has_handed_back(&child_session_id)
+                crate::controller::subagent_has_handed_back(&child_session_id, &liveness)
             })
             .await?
         })
+    }
+    /// Whether the processes a child's last turn left are still alive, as its
+    /// worker published it. The store does not carry it, so a backend without
+    /// live sessions publishes none.
+    fn subagent_work_liveness(
+        &self,
+        _child_session_id: String,
+    ) -> BoxFuture<'_, mj_core::subagent::Liveness> {
+        Box::pin(async { mj_core::subagent::Liveness::Known(None) })
     }
     fn read_context_file(
         &self,
@@ -186,7 +196,16 @@ pub trait SubagentBackend: Send + Sync {
                 .read_file(session_id, path, mj_checkpoint::archive::FetchMode::Content)
                 .await?;
             match fetched.kind {
-                mj_checkpoint::archive::FetchedKind::File => Ok(fetched.bytes),
+                mj_checkpoint::archive::FetchedKind::File => {
+                    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+                        let mut bytes = Vec::new();
+                        std::io::Read::read_to_end(&mut fetched.reader(), &mut bytes)?;
+                        Ok(bytes)
+                    })
+                    .await
+                    .map_err(|error| ExportError::Failed(error.into()))?
+                    .map_err(ExportError::Failed)
+                }
                 _ => Err(ExportError::Refused(format!(
                     "{} is a directory, not a file",
                     fetched.path

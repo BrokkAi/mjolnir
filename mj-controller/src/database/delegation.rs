@@ -227,6 +227,48 @@ pub(crate) fn enqueue_subagent_reports(
     Ok(())
 }
 
+/// Where the parent's copy of a child's latest report stands in the mailbox
+/// outbox: the event key and the journal ordinal at which the parent's worker
+/// accepted it, once it has. `None` when no report was enqueued for the
+/// child's latest finish.
+pub(crate) struct ReportMail {
+    pub key: String,
+    pub accepted_ordinal: Option<u64>,
+}
+
+pub(crate) fn load_report_mail(parent: &str, child: &str) -> Result<Option<ReportMail>> {
+    let Some(identity) = load_subagent(child)?.and_then(|relation| relation.reported_finish) else {
+        return Ok(None);
+    };
+    let key = subagent_report_key(parent, child, &identity)?;
+    let connection = open_reader(&database_path())?;
+    let row = connection
+        .query_row(
+            "SELECT accepted_ordinal FROM mailbox_outbox WHERE event_key=?1",
+            [&key],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?;
+    Ok(row.map(|accepted| ReportMail {
+        key,
+        accepted_ordinal: accepted.and_then(|ordinal| u64::try_from(ordinal).ok()),
+    }))
+}
+
+/// Whether the parent has put a message (`subagent-message-<request>`) into
+/// the child's mailbox that the child's worker has not accepted yet. A park that stopped the worker under
+/// it would drop the child's next task.
+pub(crate) fn child_has_undelivered_mail(child: &str) -> Result<bool> {
+    let connection = open_reader(&database_path())?;
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mailbox_outbox
+         WHERE target_session_id=?1 AND accepted_at IS NULL
+           AND event_key LIKE 'subagent-message-%')",
+        [child],
+        |row| row.get(0),
+    )?)
+}
+
 fn subagent_report_key(
     parent: &str,
     child: &str,

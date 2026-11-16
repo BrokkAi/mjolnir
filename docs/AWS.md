@@ -36,8 +36,10 @@ gateway; use `--subnet` for another public subnet in that zone. The command
 creates a tagged Elastic IP (stable across stop/start), a dedicated SSH key,
 and a security group allowing SSH only from the
 controller's discovered public IPv4, or the explicit `--ssh-cidr`. It requires
-IMDSv2 and uses an encrypted 200 GiB gp3 root disk. `--disk-gib` sets its size,
-`--disk-mbps` sets throughput in MiB/s, and `--disk-iops` sets provisioned IOPS.
+IMDSv2 and attaches an encrypted 16 GiB gp3 OS root disk plus an encrypted
+200 GiB gp3 data disk formatted as XFS (`reflink=1`, mounted at `/mnt/ebs`).
+`--disk-gib` sets the data disk size, `--disk-mbps` sets its throughput in
+MiB/s, and `--disk-iops` sets its provisioned IOPS.
 Omitted performance options use AWS's gp3 defaults (125 MiB/s and 3,000 IOPS).
 AWS validates the requested size/performance combination against its
 [gp3 limits](https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html).
@@ -48,20 +50,24 @@ mj ec2 create c8id.16xlarge --zone us-east-1a --name builder \
   --disk-gib 512 --disk-mbps 500 --disk-iops 12000
 ```
 
-The image supplies the root filesystem (ext4); it is separate from local SSDs.
+`/tmp` and `/home/ubuntu` are bind-mounted onto `/mnt/ebs` by filesystem UUID,
+keeping repository caches, staged uploads, and temporary files off the OS disk.
+Every Podman host gets mj's pinned `mbx` and `mold` (`path:/usr/bin/mold`);
+without local NVMe SSDs, Podman uses rootless native OverlayFS under
+`/home/ubuntu/.local/share/containers/storage` and `mbx` uses `/mnt/ebs/mbx` on
+the XFS EBS volume.
 
 Instances with local NVMe SSDs, such as C8id or M8id, automatically use those
 SSDs for a striped ZFS pool. Only devices identified as EC2 instance storage
-enter the pool; EBS remains the OS disk. `--zfs-cache` additionally refuses an
+enter the pool; EBS remains the OS and home disk. `--zfs-cache` additionally refuses an
 instance type without suitable local NVMe storage.
 
 The pool mounts at `/mnt/nvme` with lz4 compression, 128 KiB records,
 `xattr=sa`, and relative access times. Podman's writable layers and named
 volumes live at `/mnt/nvme/podman`, using rootless OverlayFS through
 `fuse-overlayfs`. Each mj container has its own Podman volume mounted at `/tmp`,
-so both its workspace layer and temporary files use NVMe. mbx lives at
-`/mnt/nvme/mbx`; the host gets mj's pinned mbx and mold and selects
-`path:/usr/bin/mold`. The standard agent image includes mold too.
+so both its workspace layer and temporary files use NVMe. On local-NVMe hosts, `mbx` lives at
+`/mnt/nvme/mbx`. The standard agent image includes mold too.
 
 Local SSD contents survive a reboot but are lost on stop/start, hibernation,
 or termination, including all container workspaces and `/tmp` volumes. Suspend
@@ -84,7 +90,7 @@ recoverable through the same operation's AWS tags; do not manually retry an
 uncertain launch with a fresh client token.
 
 `destroy` accepts a target name, instance ID, or operation ID. It permanently
-terminates the selected managed VM, including all sessions and its root disk,
+terminates the selected managed VM, including all sessions and its EBS disks,
 then releases its tagged Elastic IP and removes only its tagged security
 group/key pair, matching mj configuration,
 and local key files. It preserves credentials and configuration until cloud

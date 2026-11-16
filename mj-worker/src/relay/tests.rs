@@ -5005,6 +5005,35 @@ fn a_requested_stop_acknowledgement_does_not_open_a_harness_turn() {
     assert!(state.harness_turn.is_some());
 }
 
+// Hard-won: review round 3: the adapter wraps the acknowledgement in a blockquote paragraph,
+// so a stop requested on an idle session opened a harness turn that never settled.
+#[test]
+fn an_idle_stop_acknowledgement_in_the_adapters_blockquote_shape_opens_no_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay_with_stoppable_task(temp.path());
+    relay
+        .background_task_stop_target("air:4:root:sleeper")
+        .unwrap();
+    // As recorded from claude-agent-acp: noticeTranscriptText through transcriptBlock.
+    let recorded =
+        "\n\n> **Task stopped by user:** python3 -c \"import time; time.sleep(100020)\".\n\n";
+    relay
+        .record_session_update(agent_text_chunk(recorded))
+        .unwrap();
+    let state = relay.operational_state();
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert!(
+        state.harness_turn.is_none(),
+        "no model cycle follows a requested stop, so no result would settle a turn"
+    );
+    // Without a pending stop the same text is ordinary agent output.
+    let mut other = claude_relay(temp.path().join("other").as_path());
+    other
+        .record_session_update(agent_text_chunk(recorded))
+        .unwrap();
+    assert!(other.operational_state().harness_turn.is_some());
+}
+
 // Hard-won: 460153f3: Claude renamed tasks between the stop request and its stop acknowledgement.
 #[test]
 fn a_stop_acknowledgement_matches_whatever_name_the_adapter_now_uses() {
@@ -6273,6 +6302,45 @@ fn clearable_relay(root: &Path) -> DurableRelay {
     relay
 }
 
+// The admission gate and the published capability must agree per harness:
+// Kimi clears like Codex and Claude; every other harness still refuses.
+#[test]
+fn clear_admission_matches_the_published_capability_per_harness() {
+    for (harness, supported) in [
+        (HarnessKind::Codex, true),
+        (HarnessKind::Claude, true),
+        (HarnessKind::Kimi, true),
+        (HarnessKind::Grok, false),
+        (HarnessKind::Muse, false),
+        (HarnessKind::OpenCode, false),
+        (HarnessKind::Dsh, false),
+        (HarnessKind::Antigravity, false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        relay.set_turn_verdict_harness(harness);
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "original".into(),
+                resumed: false,
+                native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
+            })
+            .unwrap();
+        relay.mark_native_session_used().unwrap();
+        assert_eq!(
+            relay.operational_state().clear_context,
+            supported,
+            "{harness:?}"
+        );
+        let admitted = relay
+            .submit_command("clear-request", RelayCommand::ClearContext)
+            .unwrap()
+            .is_ok();
+        assert_eq!(admitted, supported, "{harness:?}");
+    }
+}
+
 // The conversation that held an open request is discarded by /clear, so the
 // request must not reappear as a question in the fresh conversation.
 #[test]
@@ -7126,6 +7194,7 @@ fn a_turn_verdict_keeps_the_completion_identity_a_handback_reminder_names() {
         let reminder = RelayCommand::HandbackReminder {
             completed_command_id: "first-command".into(),
             completed_ordinal: completed,
+            running: Vec::new(),
         };
         assert!(
             relay
@@ -8339,6 +8408,7 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
             RelayCommand::HandbackReminder {
                 completed_command_id: "harness-turn-0".into(),
                 completed_ordinal: completion.completed_ordinal,
+                running: Vec::new(),
             },
         )
         .unwrap();
@@ -8349,8 +8419,42 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
         RelayCommand::HandbackReminder {
             completed_command_id: id,
             completed_ordinal: completion.completed_ordinal,
+            running: Vec::new(),
         },
     );
+}
+
+// A follow-up for a completion the child has moved past is refused for good,
+// so the daemon can tell it from a worker that merely cannot take a prompt yet.
+#[test]
+fn a_hold_follow_up_for_a_completion_that_is_no_longer_current_is_refused_for_good() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    relay.open_harness_turn_if_allowed().unwrap();
+    let id = relay.originating_command_id().unwrap();
+    relay.settle_harness_turn(None, "end_turn").unwrap();
+    let completion = relay.operational_state().turn_completion.unwrap();
+    let follow_up = |completed_command_id: String| RelayCommand::HoldFollowUp {
+        completed_command_id,
+        completed_ordinal: completion.completed_ordinal,
+        kind: mj_core::subagent::HoldFollowUpKind::ProcessesExited,
+        running: Vec::new(),
+    };
+    let refused = relay
+        .submit_command("stale-hold", follow_up("harness-turn-0".into()))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code, RelayErrorCode::InvalidState);
+    assert!(
+        !refused.retryable,
+        "a stale completion never succeeds later"
+    );
+    submit_relay(&mut relay, "current-hold", follow_up(id));
 }
 
 #[test]
@@ -8475,4 +8579,156 @@ fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
         let current = DurableRelay::open(root.path(), SESSION, "test").unwrap();
         assert!(current.snapshot.open_request().is_none());
     }
+}
+
+// Hard-won: bd6363001 review: reopening a dead relay promoted work before Resume could discard it.
+// Hard-won: 926625478 review: discard must apply to a seed left by an earlier recovery attempt.
+#[test]
+fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(&mut relay, "old-active", prompt("old active turn"));
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(
+        &mut relay,
+        "explicitly-discarded",
+        prompt("must never execute"),
+    );
+    assert!(
+        queued_command_ids(&relay)
+            .iter()
+            .any(|id| id == "explicitly-discarded")
+    );
+    drop(relay);
+    let owner = crate::worker_runtime::WorkerRootOwner::acquire(temp.path()).unwrap();
+    assert!(
+        crate::checkpoint::discard_queued_prompts_before_start(
+            temp.path(),
+            SESSION,
+            "resume-discard"
+        )
+        .is_err()
+    );
+    drop(owner);
+    crate::checkpoint::discard_queued_prompts_before_start(temp.path(), SESSION, "resume-discard")
+        .unwrap();
+    let mut reopened = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(
+        !reopened
+            .claim_pending_commands(true)
+            .unwrap()
+            .iter()
+            .any(|command| command.command_id == "explicitly-discarded")
+    );
+    assert!(
+        !queued_command_ids(&reopened)
+            .iter()
+            .any(|id| id == "explicitly-discarded")
+    );
+    let ordinal = reopened.snapshot.handled_commands["resume-discard"].accepted_ordinal;
+    drop(reopened);
+    crate::checkpoint::discard_queued_prompts_before_start(temp.path(), SESSION, "resume-discard")
+        .unwrap();
+    let repeated = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        repeated.snapshot.handled_commands["resume-discard"].accepted_ordinal,
+        ordinal
+    );
+    drop(repeated);
+    let seed_root = tempfile::tempdir().unwrap();
+    let seed = mj_core::relay::RestoredRelaySeed {
+        command_ledger: None,
+        assessment_state: None,
+        event_frontier: 7,
+        event_frontier_digest: "a".repeat(64),
+        queued_prompts: vec![mj_core::archive::CanonicalQueuedPrompt {
+            command_id: "seed-queued".into(),
+            kind: mj_core::archive::CanonicalQueuedCommandKind::Prompt,
+            content: vec![
+                serde_json::json!({"type":"text", "text":"must not execute from an old seed"}),
+            ],
+            queued_at_ms: 1,
+        }],
+        accepted_config: [("model".into(), "kept-model".into())]
+            .into_iter()
+            .collect(),
+        native_session_unused: true,
+    };
+    fs::write(
+        mj_core::relay::restored_relay_seed_path(seed_root.path()),
+        serde_json::to_vec(&seed).unwrap(),
+    )
+    .unwrap();
+    crate::checkpoint::discard_queued_prompts_before_start(
+        seed_root.path(),
+        SESSION,
+        "discard-retried-seed",
+    )
+    .unwrap();
+    let mut recovered =
+        DurableRelay::open_for_harness(seed_root.path(), SESSION, "test", HarnessKind::Codex, &[])
+            .unwrap();
+    assert!(
+        !recovered
+            .claim_pending_commands(true)
+            .unwrap()
+            .iter()
+            .any(|command| command.command_id == "seed-queued")
+    );
+    assert!(queued_command_ids(&recovered).is_empty());
+    assert_eq!(recovered.snapshot.recovery_floor_ordinal, 7);
+    assert_eq!(
+        recovered.snapshot.config.get("model").map(String::as_str),
+        Some("kept-model")
+    );
+}
+
+// A turn Claude starts on its own ends a managed child's turn like a prompt
+// does: its facts set `work_liveness` with the settlement's ordinal, the
+// watcher can recount its processes, and the next prompt clears them.
+#[test]
+fn an_autonomous_harness_turn_settling_records_work_facts_and_liveness() {
+    use mj_core::work_facts::{Observed, ProcessFacts, ProcessIdentity, WorkFacts};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay.record_session_update(tool_call_update()).unwrap();
+    let result = mj_core::acp::RuntimeEvent::ClaudeTurnResult(cycle_result("task-notification"));
+    assert!(relay.event_settles_autonomous_turn(&result));
+    let identity = ProcessIdentity {
+        pid: 4242,
+        start: "boot-1".into(),
+    };
+    let facts = WorkFacts {
+        observed_at_ms: 77,
+        processes: Observed::Known(ProcessFacts {
+            running: 1,
+            shown: Vec::new(),
+            omitted: 1,
+            identities: vec![identity.clone()],
+            unattributed: 0,
+        }),
+        worktree: Observed::unavailable("not read"),
+    };
+    relay.offer_settle_facts(Some(facts.clone()));
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    let settled = observations(&relay)
+        .into_iter()
+        .find_map(|observation| match observation {
+            RelayObservation::HarnessTurnSettled {
+                autonomous: Some(turn),
+                ..
+            } => Some(turn),
+            _ => None,
+        })
+        .expect("an autonomous settlement");
+    assert_eq!(settled.work_facts.as_deref(), Some(&facts));
+    let completion = relay.operational_state().turn_completion.unwrap();
+    let liveness = relay.operational_state().work_liveness.unwrap();
+    assert_eq!(liveness.completed_ordinal, completion.completed_ordinal);
+    assert_eq!((liveness.alive, liveness.checked_at_ms), (1, 77));
+    let (watched, identities) = relay.watched_work().unwrap();
+    assert_eq!(watched, liveness);
+    assert_eq!(identities, vec![identity]);
 }

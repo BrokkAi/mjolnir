@@ -224,6 +224,20 @@ pub(super) fn checkpoint_repository_bytes(repositories: &[RepositorySnapshot]) -
                     payloads.state_tar.len(),
                 ]
             }))
+            .chain(repository.linked_worktrees.iter().flat_map(|worktree| {
+                [
+                    worktree.staged_patch.len(),
+                    worktree.unstaged_patch.len(),
+                    worktree.untracked_tar.len(),
+                ]
+                .into_iter()
+                .chain(worktree.operation_payloads.iter().flat_map(|payloads| {
+                    [
+                        payloads.conflicted_worktree_tar.len(),
+                        payloads.state_tar.len(),
+                    ]
+                }))
+            }))
             .try_fold(total, |total, size| total.checked_add(size as u64))
         })
         .context("repository checkpoint size overflow")
@@ -282,6 +296,53 @@ pub(super) fn write_staged_repositories(
                         (Some(worktree_path), Some(state_path))
                     }
                 };
+            let linked_worktrees = repository
+                .linked_worktrees
+                .into_iter()
+                .enumerate()
+                .map(|(worktree_index, worktree)| {
+                    let worktree_root = root.join(format!("worktrees/{worktree_index:08}"));
+                    let staged_patch_path = worktree_root.join("staged.patch");
+                    let unstaged_patch_path = worktree_root.join("unstaged.patch");
+                    let untracked_tar_path = worktree_root.join("untracked.tar");
+                    for (path, data) in [
+                        (&staged_patch_path, &worktree.staged_patch),
+                        (&unstaged_patch_path, &worktree.unstaged_patch),
+                        (&untracked_tar_path, &worktree.untracked_tar),
+                    ] {
+                        write_private_file(stage_root, path, data, 0o600)?;
+                    }
+                    let (conflicted_worktree_tar_path, operation_state_tar_path) =
+                        match &worktree.operation_payloads {
+                            None => (None, None),
+                            Some(payloads) => {
+                                let worktree_path = worktree_root.join("conflicted-worktree.tar");
+                                let state_path = worktree_root.join("operation-state.tar");
+                                write_private_file(
+                                    stage_root,
+                                    &worktree_path,
+                                    &payloads.conflicted_worktree_tar,
+                                    0o600,
+                                )?;
+                                write_private_file(
+                                    stage_root,
+                                    &state_path,
+                                    &payloads.state_tar,
+                                    0o600,
+                                )?;
+                                (Some(worktree_path), Some(state_path))
+                            }
+                        };
+                    Ok(StagedLinkedWorktree {
+                        metadata: worktree.metadata,
+                        staged_patch_path,
+                        unstaged_patch_path,
+                        untracked_tar_path,
+                        conflicted_worktree_tar_path,
+                        operation_state_tar_path,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
             Ok(StagedRepository {
                 metadata: repository.metadata,
                 committed_bundle_path,
@@ -290,6 +351,7 @@ pub(super) fn write_staged_repositories(
                 untracked_tar_path,
                 conflicted_worktree_tar_path,
                 operation_state_tar_path,
+                linked_worktrees,
             })
         })
         .collect()
@@ -584,6 +646,53 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                         }
                         _ => bail!("staged repository has only one of its Git operation payloads"),
                     },
+                    linked_worktrees: repository
+                        .linked_worktrees
+                        .into_iter()
+                        .map(|worktree| {
+                            Ok(crate::archive::LinkedWorktreeSnapshot {
+                                metadata: worktree.metadata,
+                                staged_patch: read_staged_file(
+                                    &stage_path,
+                                    &worktree.staged_patch_path,
+                                    u64::MAX,
+                                )?,
+                                unstaged_patch: read_staged_file(
+                                    &stage_path,
+                                    &worktree.unstaged_patch_path,
+                                    u64::MAX,
+                                )?,
+                                untracked_tar: read_staged_file(
+                                    &stage_path,
+                                    &worktree.untracked_tar_path,
+                                    u64::MAX,
+                                )?,
+                                operation_payloads: match (
+                                    &worktree.conflicted_worktree_tar_path,
+                                    &worktree.operation_state_tar_path,
+                                ) {
+                                    (None, None) => None,
+                                    (Some(worktree_path), Some(state_path)) => {
+                                        Some(crate::archive::GitOperationPayloads {
+                                            conflicted_worktree_tar: read_staged_file(
+                                                &stage_path,
+                                                worktree_path,
+                                                u64::MAX,
+                                            )?,
+                                            state_tar: read_staged_file(
+                                                &stage_path,
+                                                state_path,
+                                                u64::MAX,
+                                            )?,
+                                        })
+                                    }
+                                    _ => bail!(
+                                        "staged linked worktree has only one of its Git operation payloads"
+                                    ),
+                                },
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -864,6 +973,17 @@ fn collect_checkpoint_repositories_with_policy(
             };
             reject_dirty_submodules(git, &path)
                 .with_context(|| format!("repository '{}'", repository.id))?;
+            for worktree in crate::archive::linked_worktree_directories(git, &path)
+                .with_context(|| format!("repository '{}'", repository.id))?
+            {
+                reject_dirty_submodules(git, &worktree).with_context(|| {
+                    format!(
+                        "repository '{}' linked worktree {}",
+                        repository.id,
+                        worktree.display()
+                    )
+                })?;
+            }
             let mut snapshot = crate::archive::collect_git_snapshot_with_progress(
                 git,
                 &path,

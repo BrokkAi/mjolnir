@@ -556,6 +556,18 @@ fn checkpoint_has_file_changes(
     // An unfinished merge, rebase or other operation exists only in the
     // archive, even when both patches are empty.
     repository.metadata.git_operation.is_some()
+        // A linked worktree's detached HEAD and dirty files exist only in the
+        // archive as well, and so does an operation it was in the middle of.
+        || repository.linked_worktrees.iter().any(|worktree| {
+            worktree.metadata.branch.is_none()
+                || worktree.metadata.git_operation.is_some()
+                || manifest.payloads.iter().any(|payload| {
+                    (payload.path == worktree.untracked_tar_path && payload.size > 1024)
+                        || ((payload.path == worktree.staged_patch_path
+                            || payload.path == worktree.unstaged_patch_path)
+                            && payload.size > 0)
+                })
+        })
         || manifest.payloads.iter().any(|payload| {
             if payload.path == repository.untracked_tar_path {
                 // An empty tar contains two zero blocks.

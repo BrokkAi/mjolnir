@@ -991,10 +991,13 @@ cites, such as a sub-agent's report or a probe in `/tmp`.
 After symlinks are resolved, the path must lie in that boundary, in the
 directory holding the session's sub-agent report directories, or in the
 target's temporary directory. An empty path is `400`. A path outside those
-directories is `409`, as is a path that does not exist, a file over 16 MiB, a
-directory whose archive would pass 16 MiB or whose files hold more than
-128 MiB, a listing over 16 MiB, and a worker installed before directories
-could be fetched; resuming the session upgrades the worker.
+directories is `409`, as is a path that does not exist and a worker installed
+before directories could be fetched; resuming the session upgrades the worker.
+Files, directory archives, and listings have no fetch size limit. File and
+archive responses are streamed with a content length; daemon shutdown ends
+an active stream. Clients may retry this read after reconnecting to the
+replacement daemon. The CLI and MCP fetch tool retry interrupted transfers
+automatically after daemon replacement.
 
 `export` takes the form you want:
 

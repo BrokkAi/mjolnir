@@ -72,16 +72,16 @@ impl RuntimeState {
                     // An ordinary sub-agent reviews under its parent's choice; a
                     // parent chain that cannot be followed reviews as Off, the
                     // same as its launch, which offered no review tools.
-                    let choice = committed_sessions.as_ref().and_then(|committed| {
-                        committed.borrow().as_ref().ok().map(|committed| {
-                            committed.state.effective_review_or_off(session_id).cloned()
-                        })
-                    });
-                    let choice = choice.flatten();
-                    installed
+                    let review = installed
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .for_session(choice.as_ref())
+                        .clone();
+                    let committed = committed_sessions.as_ref().and_then(|committed| {
+                        committed.borrow().as_ref().ok().map(|committed| {
+                            committed.state.effective_review_config(&review, session_id)
+                        })
+                    });
+                    committed.unwrap_or(review)
                 })
             },
             revisions.notifier(),
@@ -119,6 +119,7 @@ impl RuntimeState {
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(inactivity),
             inactivity_changed: tokio::sync::Notify::new(),
+            mbx_install_wake: crate::controller::mbx::service::InstallWake::default(),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
             profile_catalog,
             recovery_observer,
@@ -174,9 +175,8 @@ impl RuntimeState {
         worker
             && mj_core::worker_launch::offers_review_tools(
                 controller
-                    .config
-                    .review
-                    .for_session(controller.state.effective_review_or_off(child_id))
+                    .state
+                    .effective_review_config(&controller.config.review, child_id)
                     .trigger(),
                 session.harness_kind,
             )
@@ -663,8 +663,8 @@ impl RuntimeState {
     /// The sentence is written for the person, not copied from the error
     /// chain: `last_error` is published, and a close failure's chain names
     /// project paths and SSH hosts. A failure that said what the caller can do
-    /// about it supplies that sentence; every other one points at the daemon
-    /// log entry that carries the whole reason.
+    /// about it supplies that sentence; other failures use the trusted
+    /// lifecycle boundary's cause and next action, followed by a log reference.
     pub(super) async fn record_failed_close(
         self: &Arc<Self>,
         session_id: &str,
@@ -687,12 +687,7 @@ impl RuntimeState {
         failure: &LifecycleFailure,
         prefix: &str,
     ) {
-        let cause = match &failure.refusal {
-            Some(refusal) => format!("{prefix}: {refusal}"),
-            None => {
-                format!("{prefix}; the daemon log records the reason under reference {reference}")
-            }
-        };
+        let cause = failure.public_message(prefix, reference);
         let applied = blocking({
             let session_id = session_id.to_owned();
             let cause = cause.clone();
@@ -861,6 +856,16 @@ impl RuntimeState {
 
     pub fn revisions(&self) -> tokio::sync::watch::Receiver<u64> {
         self.revisions.subscribe()
+    }
+
+    pub(crate) fn mbx_install_wake(&self) -> &crate::controller::mbx::service::InstallWake {
+        &self.mbx_install_wake
+    }
+
+    pub(crate) fn notify_mbx_installed(&self, machine: &mj_core::config::Machine) {
+        if let Some(host_key) = crate::controller::mbx::machine_cache_host_key(machine) {
+            self.mbx_install_wake.wake_host(host_key);
+        }
     }
 
     /// Read the config the daemon serves right now. A task on a schedule reads

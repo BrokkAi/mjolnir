@@ -2503,11 +2503,6 @@ mod tests {
                     .map(|index| (format!("workspace-{index}"), format!("Project {index:02}")))
                     .collect(),
             );
-            dashboard.order_workspaces(
-                &(0..48)
-                    .map(|index| format!("workspace-{index}"))
-                    .collect::<Vec<_>>(),
-            );
             dashboard.set_active_workspace(Some("workspace-0".into()));
             let lines = render_combined_golden(&mut dashboard, width, height);
             let workspace = dashboard.workspace_pane_area.expect("workspaces fit");

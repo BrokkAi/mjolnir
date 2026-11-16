@@ -46,6 +46,20 @@ pub struct RepositorySnapshot {
     pub untracked_tar: Vec<u8>,
     /// Present exactly when `metadata.git_operation` is.
     pub operation_payloads: Option<GitOperationPayloads>,
+    /// Linked worktrees inside the checkout, parents before children.
+    pub linked_worktrees: Vec<LinkedWorktreeSnapshot>,
+}
+
+/// What a linked worktree holds beyond the commits in the repository's bundle:
+/// the same dirty state the checkout itself captures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedWorktreeSnapshot {
+    pub metadata: mj_core::archive::LinkedWorktreeMetadata,
+    pub staged_patch: Vec<u8>,
+    pub unstaged_patch: Vec<u8>,
+    pub untracked_tar: Vec<u8>,
+    /// Present exactly when `metadata.git_operation` is.
+    pub operation_payloads: Option<GitOperationPayloads>,
 }
 
 /// The files of an unfinished Git operation that are not index entries.
@@ -495,6 +509,7 @@ pub fn verify_archive_streaming_cancellable(
         len: file.metadata()?.len(),
         file: std::sync::Arc::new(file),
         position: 0,
+        start: 0,
         cancelled: Some(cancelled),
     };
     Ok(VerifiedArchiveMetadata {
@@ -930,6 +945,105 @@ fn prepare_archive_view_with_part_size(
                 (Some(worktree_path), Some(state_path))
             }
         };
+        let mut linked_worktrees = Vec::with_capacity(repository.linked_worktrees.len());
+        let mut worktree_paths = BTreeSet::new();
+        for (index, worktree) in repository.linked_worktrees.iter().enumerate() {
+            validate_linked_worktree_metadata(&worktree.metadata)
+                .with_context(|| format!("repository '{}'", repository.metadata.id))?;
+            ensure!(
+                worktree_paths.insert(worktree.metadata.path.clone()),
+                "repository '{}' lists linked worktree '{}' twice",
+                repository.metadata.id,
+                worktree.metadata.path.display()
+            );
+            validate_untracked_tar(&worktree.untracked_tar)?;
+            let worktree_root = format!("{root}/worktrees/{index:08}");
+            let id = repository.metadata.id.clone();
+            let worktree_index = index as u32;
+            let staged_patch_path = format!("{worktree_root}/staged.patch");
+            let unstaged_patch_path = format!("{worktree_root}/unstaged.patch");
+            let untracked_tar_path = format!("{worktree_root}/untracked.tar");
+            for (path, data, role) in [
+                (
+                    &staged_patch_path,
+                    &worktree.staged_patch,
+                    PayloadRole::GitLinkedWorktreeStagedPatch {
+                        repository_id: id.clone(),
+                        worktree: worktree_index,
+                    },
+                ),
+                (
+                    &unstaged_patch_path,
+                    &worktree.unstaged_patch,
+                    PayloadRole::GitLinkedWorktreeUnstagedPatch {
+                        repository_id: id.clone(),
+                        worktree: worktree_index,
+                    },
+                ),
+                (
+                    &untracked_tar_path,
+                    &worktree.untracked_tar,
+                    PayloadRole::GitLinkedWorktreeUntrackedTar {
+                        repository_id: id.clone(),
+                        worktree: worktree_index,
+                    },
+                ),
+            ] {
+                push_payload(
+                    &mut payloads,
+                    path.clone(),
+                    Cow::Borrowed(data.as_slice()),
+                    0o600,
+                    role,
+                )?;
+            }
+            let (conflicted_worktree_tar_path, operation_state_tar_path) = match (
+                &worktree.metadata.git_operation,
+                &worktree.operation_payloads,
+            ) {
+                (None, None) => (None, None),
+                (Some(_), Some(operation)) => {
+                    validate_conflicted_worktree_tar(&operation.conflicted_worktree_tar)?;
+                    validate_operation_state_tar(&operation.state_tar)?;
+                    let worktree_path = format!("{worktree_root}/conflicted-worktree.tar");
+                    let state_path = format!("{worktree_root}/operation-state.tar");
+                    push_payload(
+                        &mut payloads,
+                        worktree_path.clone(),
+                        Cow::Borrowed(operation.conflicted_worktree_tar.as_slice()),
+                        0o600,
+                        PayloadRole::GitLinkedWorktreeConflictedWorktreeTar {
+                            repository_id: id.clone(),
+                            worktree: worktree_index,
+                        },
+                    )?;
+                    push_payload(
+                        &mut payloads,
+                        state_path.clone(),
+                        Cow::Borrowed(operation.state_tar.as_slice()),
+                        0o600,
+                        PayloadRole::GitLinkedWorktreeOperationStateTar {
+                            repository_id: id.clone(),
+                            worktree: worktree_index,
+                        },
+                    )?;
+                    (Some(worktree_path), Some(state_path))
+                }
+                _ => bail!(
+                    "repository '{}' linked worktree '{}' Git operation metadata and payloads disagree",
+                    repository.metadata.id,
+                    worktree.metadata.path.display()
+                ),
+            };
+            linked_worktrees.push(mj_core::archive::LinkedWorktreeManifest {
+                metadata: worktree.metadata.clone(),
+                staged_patch_path,
+                unstaged_patch_path,
+                untracked_tar_path,
+                conflicted_worktree_tar_path,
+                operation_state_tar_path,
+            });
+        }
         repositories.push(RepositoryManifest {
             metadata: repository.metadata.clone(),
             committed_bundle_path,
@@ -938,6 +1052,7 @@ fn prepare_archive_view_with_part_size(
             untracked_tar_path,
             conflicted_worktree_tar_path,
             operation_state_tar_path,
+            linked_worktrees,
         });
     }
 
@@ -1000,7 +1115,9 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if carries_review_refs(&repositories) {
+        schema_version: if carries_linked_worktrees(&repositories) {
+            ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+        } else if carries_review_refs(&repositories) {
             ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
         } else if input
             .canonical_session
@@ -1069,7 +1186,12 @@ fn payload_compression(role: &PayloadRole) -> CompressionMethod {
         | PayloadRole::GitUnstagedPatch { .. }
         | PayloadRole::GitUntrackedTar { .. }
         | PayloadRole::GitConflictedWorktreeTar { .. }
-        | PayloadRole::GitOperationStateTar { .. } => CompressionMethod::Zstd,
+        | PayloadRole::GitOperationStateTar { .. }
+        | PayloadRole::GitLinkedWorktreeStagedPatch { .. }
+        | PayloadRole::GitLinkedWorktreeUnstagedPatch { .. }
+        | PayloadRole::GitLinkedWorktreeUntrackedTar { .. }
+        | PayloadRole::GitLinkedWorktreeConflictedWorktreeTar { .. }
+        | PayloadRole::GitLinkedWorktreeOperationStateTar { .. } => CompressionMethod::Zstd,
     }
 }
 
@@ -1077,18 +1199,24 @@ fn payload_compression(role: &PayloadRole) -> CompressionMethod {
 /// with the checker for each.
 fn tar_payload_validator(role: &PayloadRole) -> Option<fn(&mut dyn Read) -> Result<()>> {
     match role {
-        PayloadRole::GitUntrackedTar { .. } => Some(|reader| validate_untracked_tar_reader(reader)),
-        PayloadRole::GitConflictedWorktreeTar { .. } => {
+        PayloadRole::GitUntrackedTar { .. } | PayloadRole::GitLinkedWorktreeUntrackedTar { .. } => {
+            Some(|reader| validate_untracked_tar_reader(reader))
+        }
+        PayloadRole::GitConflictedWorktreeTar { .. }
+        | PayloadRole::GitLinkedWorktreeConflictedWorktreeTar { .. } => {
             Some(|reader| validate_conflicted_worktree_tar_reader(reader))
         }
-        PayloadRole::GitOperationStateTar { .. } => {
+        PayloadRole::GitOperationStateTar { .. }
+        | PayloadRole::GitLinkedWorktreeOperationStateTar { .. } => {
             Some(|reader| validate_operation_state_tar_reader(reader))
         }
         PayloadRole::CanonicalSession
         | PayloadRole::NativeArtifact { .. }
         | PayloadRole::GitBundle { .. }
         | PayloadRole::GitStagedPatch { .. }
-        | PayloadRole::GitUnstagedPatch { .. } => None,
+        | PayloadRole::GitUnstagedPatch { .. }
+        | PayloadRole::GitLinkedWorktreeStagedPatch { .. }
+        | PayloadRole::GitLinkedWorktreeUnstagedPatch { .. } => None,
     }
 }
 
@@ -1140,12 +1268,14 @@ fn write_zip(
         &mut Cursor::new(&manifest_bytes),
         &digest_bytes(&manifest_bytes),
     )?;
-    let mut spool_builder = tempfile::Builder::new();
+    let spool_builder = tempfile::Builder::new();
     #[cfg(unix)]
-    {
+    let spool_builder = {
         use std::os::unix::fs::PermissionsExt;
-        spool_builder.permissions(fs::Permissions::from_mode(0o700));
-    }
+        let mut builder = spool_builder;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+        builder
+    };
     let spool = spool_builder
         .tempdir_in(spool_parent)
         .context("create ZIP compression spool")?;
@@ -1390,6 +1520,7 @@ fn open_archive_cancellable(
         file: std::sync::Arc::new(file),
         len,
         position: 0,
+        start: 0,
         cancelled,
     })
     .context("open Mjolnir archive ZIP")
@@ -1403,6 +1534,7 @@ struct ArchiveFile {
     file: std::sync::Arc<File>,
     len: u64,
     position: u64,
+    start: u64,
 }
 
 impl Read for ArchiveFile {
@@ -1414,10 +1546,18 @@ impl Read for ArchiveFile {
         {
             return Err(std::io::Error::other("archive verification cancelled"));
         }
+        let count = usize::try_from(self.len.saturating_sub(self.position))
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        let offset = self
+            .start
+            .checked_add(self.position)
+            .ok_or_else(|| std::io::Error::other("file read offset overflow"))?;
         #[cfg(unix)]
-        let read = std::os::unix::fs::FileExt::read_at(&*self.file, buf, self.position)?;
+        let read = std::os::unix::fs::FileExt::read_at(&*self.file, &mut buf[..count], offset)?;
         #[cfg(windows)]
-        let read = std::os::windows::fs::FileExt::seek_read(&*self.file, buf, self.position)?;
+        let read =
+            std::os::windows::fs::FileExt::seek_read(&*self.file, &mut buf[..count], offset)?;
         self.position += read as u64;
         Ok(read)
     }
@@ -1804,7 +1944,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -1845,6 +1986,14 @@ fn carries_checkout_subdirectory(repositories: &[RepositoryManifest]) -> bool {
         .any(|repository| repository.metadata.checkout_subdirectory.is_some())
 }
 
+/// Whether an archive holds a linked worktree, which only a build that
+/// restores them may read.
+fn carries_linked_worktrees(repositories: &[RepositoryManifest]) -> bool {
+    repositories
+        .iter()
+        .any(|repository| !repository.linked_worktrees.is_empty())
+}
+
 fn carries_review_refs(repositories: &[RepositoryManifest]) -> bool {
     repositories.iter().any(|repository| {
         repository.metadata.review_refs_metadata_only
@@ -1859,7 +2008,9 @@ fn carries_review_refs(repositories: &[RepositoryManifest]) -> bool {
 
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     let expected_schema =
-        if carries_review_refs(&manifest.repositories) {
+        if carries_linked_worktrees(&manifest.repositories) {
+            ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+        } else if carries_review_refs(&manifest.repositories) {
             ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
         } else if carries_checkout_subdirectory(&manifest.repositories) {
             ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
@@ -1874,10 +2025,14 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         };
     ensure!(
         manifest.schema_version == expected_schema
-            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+            || (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES)
             || (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
-                && expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS)
-            || (expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES)
+            || (expected_schema != ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_CLONE_REFS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
@@ -2034,7 +2189,74 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
                 metadata.id
             ),
         };
-        for (path, role) in expected.into_iter().chain(operation_payloads) {
+        let mut worktree_payloads = Vec::new();
+        let mut worktree_paths = BTreeSet::new();
+        for (index, worktree) in repository.linked_worktrees.iter().enumerate() {
+            validate_linked_worktree_metadata(&worktree.metadata)
+                .with_context(|| format!("repository '{}'", metadata.id))?;
+            ensure!(
+                worktree_paths.insert(worktree.metadata.path.as_path()),
+                "repository '{}' lists linked worktree '{}' twice",
+                metadata.id,
+                worktree.metadata.path.display()
+            );
+            let id = metadata.id.clone();
+            let worktree_index = index as u32;
+            worktree_payloads.push((
+                worktree.staged_patch_path.as_str(),
+                PayloadRole::GitLinkedWorktreeStagedPatch {
+                    repository_id: id.clone(),
+                    worktree: worktree_index,
+                },
+            ));
+            worktree_payloads.push((
+                worktree.unstaged_patch_path.as_str(),
+                PayloadRole::GitLinkedWorktreeUnstagedPatch {
+                    repository_id: id.clone(),
+                    worktree: worktree_index,
+                },
+            ));
+            worktree_payloads.push((
+                worktree.untracked_tar_path.as_str(),
+                PayloadRole::GitLinkedWorktreeUntrackedTar {
+                    repository_id: id.clone(),
+                    worktree: worktree_index,
+                },
+            ));
+            match (
+                &worktree.conflicted_worktree_tar_path,
+                &worktree.operation_state_tar_path,
+                &worktree.metadata.git_operation,
+            ) {
+                (None, None, None) => {}
+                (Some(worktree_path), Some(state_path), Some(_)) => {
+                    worktree_payloads.push((
+                        worktree_path.as_str(),
+                        PayloadRole::GitLinkedWorktreeConflictedWorktreeTar {
+                            repository_id: id.clone(),
+                            worktree: worktree_index,
+                        },
+                    ));
+                    worktree_payloads.push((
+                        state_path.as_str(),
+                        PayloadRole::GitLinkedWorktreeOperationStateTar {
+                            repository_id: id,
+                            worktree: worktree_index,
+                        },
+                    ));
+                }
+                _ => bail!(
+                    "repository '{}' linked worktree '{}' Git operation metadata and payloads disagree",
+                    metadata.id,
+                    worktree.metadata.path.display()
+                ),
+            }
+        }
+        for (path, role) in expected
+            .into_iter()
+            .chain(operation_payloads)
+            .chain(worktree_payloads)
+        {
             ensure!(
                 manifest
                     .payloads
@@ -2065,6 +2287,32 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
                 );
                 Some(repository_id)
             }
+            PayloadRole::GitLinkedWorktreeStagedPatch {
+                repository_id,
+                worktree,
+            }
+            | PayloadRole::GitLinkedWorktreeUnstagedPatch {
+                repository_id,
+                worktree,
+            }
+            | PayloadRole::GitLinkedWorktreeUntrackedTar {
+                repository_id,
+                worktree,
+            } => {
+                ensure_linked_worktree_exists(manifest, payload, repository_id, *worktree)?;
+                Some(repository_id)
+            }
+            PayloadRole::GitLinkedWorktreeConflictedWorktreeTar {
+                repository_id,
+                worktree,
+            }
+            | PayloadRole::GitLinkedWorktreeOperationStateTar {
+                repository_id,
+                worktree,
+            } => {
+                ensure_linked_worktree_exists(manifest, payload, repository_id, *worktree)?;
+                Some(repository_id)
+            }
             PayloadRole::CanonicalSession | PayloadRole::NativeArtifact { .. } => None,
         };
         if let Some(repository_id) = repository_id {
@@ -2075,6 +2323,42 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
                 repository_id
             );
         }
+    }
+    Ok(())
+}
+
+fn ensure_linked_worktree_exists(
+    manifest: &ArchiveManifest,
+    payload: &PayloadDescriptor,
+    repository_id: &str,
+    worktree: u32,
+) -> Result<()> {
+    ensure!(
+        manifest.repositories.iter().any(|repository| {
+            repository.metadata.id == repository_id
+                && (worktree as usize) < repository.linked_worktrees.len()
+        }),
+        "payload '{}' holds linked worktree {worktree} that repository '{repository_id}' does not record",
+        payload.path
+    );
+    Ok(())
+}
+
+/// A linked worktree's directory is below the checkout and names nothing
+/// outside it, and its commit and lock reason are ones Git can have written.
+fn validate_linked_worktree_metadata(
+    worktree: &mj_core::archive::LinkedWorktreeMetadata,
+) -> Result<()> {
+    validate_worktree_relative_path(&worktree.path)
+        .with_context(|| format!("linked worktree '{}'", worktree.path.display()))?;
+    ensure!(
+        mj_core::remote_git::is_object_id(&worktree.head_commit),
+        "linked worktree '{}' has an invalid head commit",
+        worktree.path.display()
+    );
+    if let Some(operation) = &worktree.git_operation {
+        validate_saved_git_operation(operation)
+            .with_context(|| format!("linked worktree '{}'", worktree.path.display()))?;
     }
     Ok(())
 }
@@ -2370,14 +2654,17 @@ pub fn read_session_file(root: &Path, relative: &Path) -> Result<Vec<u8>, Sessio
 
 mod fetch;
 pub use fetch::{
-    FetchMode, FetchedKind, FetchedPath, ListedEntry, ListedKind, MAX_FETCHED_DIRECTORY_BYTES,
-    SavedFetch, SessionListing, fetch_session_path,
+    FetchMode, FetchedKind, FetchedPath, ListedEntry, ListedKind, SavedFetch, SessionListing,
+    create_fetch_spool, fetch_session_path,
 };
 mod file_input;
 pub use file_input::{read_session_file_input, write_session_file};
 
 mod git;
 
+pub(crate) use git::linked_worktree_directories;
+#[cfg(test)]
+pub(crate) use git::restore_linked_worktrees as restore_linked_worktrees_for_test;
 pub use git::{
     EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode,
     GitOutput, GitSnapshotProgress, MergeConflicts, NON_INTERACTIVE_GIT_ENV,
@@ -2385,11 +2672,11 @@ pub use git::{
     ReviewPoint, SessionDiff, SessionExportError, SystemGit, UntrackedFiles, capture_paths,
     capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
     collect_git_snapshot_with_progress, collect_plain_directory_snapshot, diff_between_trees,
-    empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref, numstat_between_trees,
-    pin_review_tree, push_branch, push_review_base_ref, read_head_reflog, read_review_point,
-    record_overridden_tree, record_review_point, record_reviewed_tree, remote_workspace_base,
-    restore_git_snapshot, session_diff, session_diff_details, session_start_scope,
-    tree_without_paths, validate_symlink_target,
+    empty_tree_id, has_origin_refs, managed_base_is_available, merge_trees, migrate_review_ref,
+    numstat_between_trees, pin_review_tree, push_branch, push_review_base_ref, read_head_reflog,
+    read_review_point, record_overridden_tree, record_review_point, record_reviewed_tree,
+    remote_workspace_base, restore_git_snapshot, session_diff, session_diff_details,
+    session_start_scope, tree_without_paths, validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

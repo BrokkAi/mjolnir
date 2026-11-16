@@ -685,6 +685,7 @@ mod tests {
             harness,
             choices: catalog_profile(&["sonnet"]),
             quota,
+            may_consume_credits: false,
             unhealthy: BTreeMap::new(),
         };
         let candidates = SubagentCandidates {
@@ -721,7 +722,10 @@ mod tests {
                 Ok(catalog_profile(&[&model]))
             })
             .await;
-        assert_eq!(picked(&configured), [("gpt-6.1-terra", None); 3]);
+        assert_eq!(
+            picked(&configured),
+            [("gpt-6.1-terra", None), ("gpt-6.1-sol", None)]
+        );
     }
 
     #[tokio::test(start_paused = true)]

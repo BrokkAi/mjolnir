@@ -17,6 +17,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 pub use types::*;
 
+/// Observed harness startup allowance: first launches can take minutes.
+/// The worker owns expiry; controller request waits use the same allowance.
+pub const NATIVE_SESSION_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// Serialized bytes of observations allowed in one attach response, well under
 /// `MAX_FRAME_BYTES` to leave room for the envelope.
@@ -150,7 +154,20 @@ pub const RELAY_ATTENTION_PROTOCOL: u32 = 63;
 pub const RELAY_OPEN_REQUEST_PROTOCOL: u32 = 64;
 /// Structured lifecycle notices for sessions following a pull request.
 pub const RELAY_FOLLOWED_LIFECYCLE_PROTOCOL: u32 = 65;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_FOLLOWED_LIFECYCLE_PROTOCOL;
+/// 66 gives harness startup expiry to the worker. Older workers require the
+/// daemon's legacy deadline; workers at this version have exactly one owner.
+pub const RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL: u32 = 66;
+/// 67 lets a worker publish whether a finished child turn's work processes are
+/// still alive (`work_liveness`) and adds `HoldFollowUp` and the process list on
+/// `HandbackReminder`. Older workers publish no liveness, so the daemon neither
+/// holds nor delays the park of their children.
+pub const RELAY_WORK_LIVENESS_PROTOCOL: u32 = 67;
+/// 68 carries a managed child's work facts on the settlement of a turn the
+/// harness started on its own, and sets `work_liveness` from them as it does
+/// for a prompted turn. The settlement's bytes change, so an older reader would
+/// fail the event's digest.
+pub const RELAY_HARNESS_TURN_FACTS_PROTOCOL: u32 = 68;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_HARNESS_TURN_FACTS_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -188,7 +205,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 23 is breaking: older writers lose requests and the person-input frontier,
 // and cannot replay child ownership or question-target observations.
 // Revision 24 is breaking: open turns own their autonomous fact; older readers reject the new field.
-pub const RELAY_STATE_VERSION: u32 = 24;
+// Revision 25 is breaking: older readers reject it. Upgrading seeds `withdrawn_ordinal` from the legacy flag.
+pub const RELAY_STATE_VERSION: u32 = 25;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

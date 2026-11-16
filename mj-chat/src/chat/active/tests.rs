@@ -334,6 +334,8 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 assessment: None,
                 open_request: None,
                 person_input_through: 0,
+                work_liveness: None,
+                undelivered_mailbox_event_keys: Vec::new(),
                 assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),
@@ -352,6 +354,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
 
                 capacity_retry: None,
                 retry_assessment_pending: false,
+                authentication_retry_waiting: None,
                 activity_turn_started_at_ms: None,
                 store_id: None,
                 idle_since_ms: None,

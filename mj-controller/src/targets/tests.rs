@@ -2981,23 +2981,12 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
         local.commands[0].args[1].clone(),
         remote.commands[0].args.last().unwrap().clone(),
     ] {
-        let kill = script
-            .find("hel_signal TERM")
-            .expect("cleanup signals the worker");
+        let stop = script
+            .find("worker stop --kill --root")
+            .expect("cleanup stops the worker through its installed binary");
         let remove = script.find("rm -rf").expect("cleanup removes the root");
-        assert!(kill < remove, "the worker must die before its root does");
-        // The pidfile is the identity check; a reused PID running
-        // something else must survive.
-        assert!(script.contains("worker.pid"));
-        assert!(script.contains(r#"hel_match="hel worker run --root $hel_root""#));
-        assert!(script.contains(r#"hel_match_home="hel worker run --root $HOME/$hel_root""#));
-        assert!(script.contains("hel_is_worker"));
-        assert!(script.contains("hel_signal KILL"));
-        assert!(script.contains("worker still running after stop"));
-        assert!(
-            !script.contains("grep -F"),
-            "leftover detection must not grep the match string; grep's own argv contains it"
-        );
+        assert!(stop < remove, "the worker must die before its root does");
+        assert!(script.contains("--kill"), "retirement kills at once");
         assert!(!script.contains("pkill"));
     }
     assert!(
@@ -3007,86 +2996,6 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
             .unwrap()
             .contains(&format!(".local/share/hel/workers/{SESSION}")),
     );
-}
-
-// Hard-won: ed3e0b29: Stop failed after a successful worker kill because grep matched itself.
-#[cfg(unix)]
-#[test]
-fn stop_worker_script_kills_a_matching_daemon_and_is_idempotent() {
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::process::ExitStatusExt;
-
-    let directory = tempfile::Builder::new()
-        .prefix("hel-stop-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let worker_root = directory.path().canonicalize().unwrap().join("worker");
-    std::fs::create_dir_all(&worker_root).unwrap();
-    let fake_hel = worker_root.join("hel");
-    std::fs::write(&fake_hel, "#!/bin/sh\nwhile true; do sleep 1; done\n").unwrap();
-    std::fs::set_permissions(&fake_hel, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let root = worker_root.to_str().unwrap();
-    // Interpret the fixture so a concurrent fork retaining its write fd cannot
-    // make the kernel reject a freshly written executable with ETXTBSY.
-    let mut child = std::process::Command::new("sh")
-        .arg(&fake_hel)
-        .args(["worker", "run", "--root", root, "--config", "launch.json"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("start fake worker");
-    std::fs::write(worker_root.join("worker.pid"), format!("{}\n", child.id())).unwrap();
-
-    let liveness = std::process::Command::new("sh")
-        .args(["-c", &worker_daemon_liveness_script(root)])
-        .output()
-        .expect("probe starting fake worker");
-    assert!(liveness.status.success());
-    assert_eq!(liveness.stdout, b"starting\n");
-
-    let _relay = std::os::unix::net::UnixListener::bind(worker_root.join("control.sock"))
-        .expect("publish fake worker relay socket");
-    let liveness = std::process::Command::new("sh")
-        .args(["-c", &worker_daemon_liveness_script(root)])
-        .output()
-        .expect("probe live fake worker");
-    assert!(liveness.status.success());
-    assert_eq!(liveness.stdout, b"alive\n");
-
-    let script = stop_worker_daemon_script(root);
-    let output = std::process::Command::new("sh")
-        .args(["-c", &script])
-        .output()
-        .expect("run stop script");
-    assert!(
-        output.status.success(),
-        "stop must kill the matching daemon: status={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let status = child.wait().expect("reap fake worker");
-    assert!(
-        !status.success() || status.signal().is_some(),
-        "fake worker should have been signaled, got {status:?}"
-    );
-
-    let output = std::process::Command::new("sh")
-        .args(["-c", &script])
-        .output()
-        .expect("run stop script again");
-    assert!(
-        output.status.success(),
-        "second stop must be a no-op: status={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let liveness = std::process::Command::new("sh")
-        .args(["-c", &worker_daemon_liveness_script(root)])
-        .output()
-        .expect("probe stopped fake worker");
-    assert!(liveness.status.success());
-    assert_eq!(liveness.stdout, b"dead\n");
 }
 
 /// Resume reuses a bare target's worker root, so anything left writing
@@ -3107,7 +3016,7 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
         "stop a leaked local Mjolnir worker and clear its relay state"
     );
     let script = &local.args[1];
-    assert!(script.contains("hel_signal TERM"));
+    assert!(script.contains("worker stop --root"));
     assert!(script.contains(&format!(
         "rm -rf -- '/var/lib/hel/workers/{SESSION}/relay-state.json' \
              '/var/lib/hel/workers/{SESSION}/relay-journal'"
@@ -3219,7 +3128,7 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
     assert_eq!(local.stage, Some(ProvisionStage::Syncing));
     assert_eq!(local.program, "sh");
     let script = &local.args[1];
-    assert!(script.contains("hel_signal TERM"), "{script}");
+    assert!(script.contains("worker stop --root"), "{script}");
     assert!(
         script.contains(&format!(
             "rm -rf -- '{local_root}/relay-state.json' '{local_root}/relay-journal'"
@@ -3344,6 +3253,7 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
         guardian_review_model: None,
         codex_profile: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
         ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
@@ -3425,6 +3335,7 @@ fn a_session_never_runs_from_the_profile_home_itself() {
         guardian_review_model: None,
         codex_profile: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
         ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
@@ -5404,40 +5315,153 @@ pub(crate) fn unwrapped_remote_line(remote: &str) -> &str {
         .unwrap_or_else(|| panic!("{remote:?} does not run under the macOS system PATH"))
 }
 
-// Hard-won: #1508: a failed ps was reported as worker death, allowing duplicate boots.
+// Hard-won: #1508: a failed process probe was reported as worker death, allowing duplicate boots.
 #[cfg(unix)]
 #[test]
-fn worker_liveness_does_not_report_death_when_ps_fails() {
+fn worker_liveness_does_not_report_death_when_the_probe_fails() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
-    let bin = root.path().join("bin");
-    std::fs::create_dir(&bin).unwrap();
-    let ps = bin.join("ps");
+    let hel = root.path().join("hel");
     std::fs::write(
-        &ps,
-        "#!/bin/sh\nprintf 'process listing unavailable\\n' >&2\nexit 71\n",
+        &hel,
+        "#!/bin/sh\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
     )
     .unwrap();
-    std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let path = std::env::join_paths(
-        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-    )
-    .unwrap();
-    let worker_root = root.path().join("worker");
-    std::fs::create_dir(&worker_root).unwrap();
-    for pid in [None, Some("999999\n")] {
-        if let Some(pid) = pid {
-            std::fs::write(worker_root.join(mj_core::relay::WORKER_PID_FILE), pid).unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            &worker_daemon_liveness_script(root.path().to_str().unwrap()),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(71));
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires rootless Podman and cached ghcr.io/brokkai/mjolnir/agent-dev:latest image"]
+fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout() {
+    struct ContainerGuard(String);
+    impl Drop for ContainerGuard {
+        fn drop(&mut self) {
+            let command = CommandSpec::new("podman", ["rm", "--force", "--ignore", &self.0]);
+            let _ = ProcessExecutor.execute_cleanup(&command);
         }
-        let output = std::process::Command::new("sh")
-            .args([
-                "-c",
-                &worker_daemon_liveness_script(worker_root.to_str().unwrap()),
-            ])
-            .env("PATH", &path)
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(71));
-        assert!(output.stdout.is_empty(), "{output:?}");
     }
+
+    let session = mj_core::state::new_session_id().unwrap();
+    let name = resource_name(&session).unwrap();
+    let _guard = ContainerGuard(name.clone());
+
+    let run = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            [
+                "run",
+                "-d",
+                "--name",
+                &name,
+                "--label",
+                "dev.mj.managed=true",
+                "--label",
+                &format!("dev.mj.session={session}"),
+                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "sleep",
+                "300",
+            ],
+        ))
+        .unwrap();
+    assert_eq!(run.status, 0, "{}", String::from_utf8_lossy(&run.stderr));
+    let cid = String::from_utf8_lossy(&run.stdout).trim().to_owned();
+
+    let exec = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            ["exec", "-d", &name, "sleep", "300"],
+        ))
+        .unwrap();
+    assert_eq!(exec.status, 0, "{}", String::from_utf8_lossy(&exec.stderr));
+    let exec_id = String::from_utf8_lossy(&exec.stdout).trim().to_owned();
+
+    // Give conmon a moment to register, then kill the exec session's conmon
+    // and its exec'd process so Podman hits readExecExitCode()'s 5s timeout.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let ps = ProcessExecutor
+        .execute(&CommandSpec::new("ps", ["-eo", "pid,comm,args"]))
+        .unwrap();
+    assert_eq!(ps.status, 0);
+    let exec_conmon = String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .find(|line| {
+            let mut parts = line.split_whitespace();
+            let _pid = parts.next();
+            let comm = parts.next();
+            comm == Some("conmon")
+                && line.contains(&cid)
+                && line.contains(&exec_id)
+                && line.contains(" -e ")
+        })
+        .and_then(|line| line.split_whitespace().next())
+        .expect("exec conmon pid")
+        .to_owned();
+    let kill_conmon = ProcessExecutor
+        .execute(&CommandSpec::new("kill", ["-9", &exec_conmon]))
+        .unwrap();
+    assert_eq!(kill_conmon.status, 0);
+
+    let kill_exec_proc = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            [
+                "exec",
+                &name,
+                "sh",
+                "-c",
+                "for p in $(pgrep sleep); do [ \"$p\" != 1 ] && kill -9 \"$p\"; done",
+            ],
+        ))
+        .unwrap();
+    assert_eq!(kill_exec_proc.status, 0);
+
+    let locator = TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: name.clone(),
+        workspace_storage: Default::default(),
+    };
+
+    let quiesce = quiesce_plan(&locator, &session).unwrap().unwrap();
+    let outputs = quiesce.execute(&ProcessExecutor).unwrap();
+    let stderr = String::from_utf8_lossy(&outputs[0].stderr);
+    assert!(
+        stderr.contains("timed out waiting for file"),
+        "expected Podman's exec-exit timeout warning on stderr, got: {stderr}"
+    );
+    let running = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            [
+                "container",
+                "inspect",
+                "--format",
+                "{{.State.Running}}",
+                &name,
+            ],
+        ))
+        .unwrap();
+    assert_eq!(running.status, 0);
+    assert_eq!(String::from_utf8_lossy(&running.stdout).trim(), "false");
+
+    let cleanup = podman_cleanup_plan(&locator, &session).unwrap();
+    let remove_output = mj_core::targets::checked_command_output(
+        &cleanup.commands[0],
+        ProcessExecutor.execute(&cleanup.commands[0]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(remove_output.status, 0);
+    let exists = ProcessExecutor
+        .execute(&CommandSpec::new("podman", ["container", "exists", &name]))
+        .unwrap();
+    assert_eq!(exists.status, 1, "container should be absent after removal");
 }

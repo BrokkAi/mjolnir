@@ -268,12 +268,7 @@ fn native_acp_args(
         .into_iter()
         .map(str::to_owned)
         .collect();
-    if harness == HarnessKind::Antigravity {
-        let home = environment
-            .get(harness.home_env())
-            .context("Antigravity staged home is missing")?;
-        args.extend(["--gemini-dir".into(), home.clone()]);
-    }
+    args.extend(harness.home_cli_args_from_environment(environment)?);
     Ok(args)
 }
 

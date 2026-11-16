@@ -1016,8 +1016,8 @@ def main():
         assert "outside the directories a session shares" in refused.stderr, refused.stderr
 
         # Fetch is available through the real MCP server with delegation off
-        # or native. The reply stays small even at the full 16 MiB file limit.
-        binary = bytes(range(256)) * (16 * 1024 * 1024 // 256)
+        # or native. The reply stays small for payloads larger than the old cap.
+        binary = bytes(range(256)) * (17 * 1024 * 1024 // 256)
         large_source = source.with_name("fetch binary λ.dat")
         large_source.write_bytes(binary)
         for policy in ["none", "native"]:

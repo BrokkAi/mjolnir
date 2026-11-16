@@ -44,6 +44,11 @@ impl GitCommandRunner for CollectionGit {
                 )
             }
             Some("show-ref") => (1, Vec::new()),
+            // Only the checkout itself: no linked worktrees.
+            Some("worktree") => (
+                0,
+                format!("worktree {}\n", repository.display()).into_bytes(),
+            ),
             Some("rev-parse")
                 if arguments
                     .iter()
@@ -161,6 +166,7 @@ fn repository(id: &str) -> RepositorySnapshot {
         unstaged_patch: format!("unstaged-{id}").into_bytes(),
         untracked_tar: tar_with_file("scripts/tool.sh", b"#!/bin/sh\n", 0o755),
         operation_payloads: None,
+        linked_worktrees: Vec::new(),
     }
 }
 
@@ -1545,8 +1551,14 @@ fn untracked_tar_preserves_executable_mode_and_safe_symlink() {
     let paths = b"scripts/tool\0scripts/current\0".to_vec();
     #[cfg(not(unix))]
     let paths = b"scripts/tool\0".to_vec();
-    let tar =
-        build_untracked_tar(source.path(), &paths, UntrackedFiles::Include, &|_| Ok(())).unwrap();
+    let tar = build_untracked_tar(
+        source.path(),
+        &paths,
+        UntrackedFiles::Include,
+        &Default::default(),
+        &|_| Ok(()),
+    )
+    .unwrap();
     validate_untracked_tar(&tar).unwrap();
 
     let destination = tempfile::tempdir().unwrap();
@@ -1580,12 +1592,18 @@ fn untracked_tar_progress_can_cancel_before_opening_the_next_file() {
     let paths = b"first.txt\0missing.txt\0";
     let seen = std::sync::Mutex::new(Vec::new());
 
-    let error = build_untracked_tar(source.path(), paths, UntrackedFiles::Include, &|progress| {
-        let GitSnapshotProgress::UntrackedFile { current, total, .. } = progress;
-        seen.lock().unwrap().push((current, total));
-        ensure!(current < 2, "cancelled by test");
-        Ok(())
-    })
+    let error = build_untracked_tar(
+        source.path(),
+        paths,
+        UntrackedFiles::Include,
+        &Default::default(),
+        &|progress| {
+            let GitSnapshotProgress::UntrackedFile { current, total, .. } = progress;
+            seen.lock().unwrap().push((current, total));
+            ensure!(current < 2, "cancelled by test");
+            Ok(())
+        },
+    )
     .unwrap_err();
 
     assert!(error.to_string().contains("cancelled by test"));
@@ -2612,11 +2630,10 @@ fn nested_worktree_checkpoint_names_the_directory_and_explicit_scratch_exclusion
     initialize_repository(source.path());
     commit_file(source.path(), "tracked.txt", b"base\n", "base");
     let base = git_line(source.path(), &["rev-parse", "HEAD"]);
+    // An independent clone is a different repository: its work cannot travel
+    // in this one's snapshot. (A linked worktree of this repository can.)
     let nested = ".mj/csharp-parity/bin-src";
-    git(
-        source.path(),
-        &["worktree", "add", "--detach", nested, "HEAD"],
-    );
+    git(source.path(), &["clone", "--no-hardlinks", ".", nested]);
     fs::write(
         source.path().join(nested).join("valuable.txt"),
         b"nested work\n",
@@ -2745,6 +2762,7 @@ fn system_git_round_trip_restores_commits_index_worktree_and_untracked() {
     }
 }
 
+// Hard-won: #1542: adding base retention must preserve pinless legacy archive restores.
 #[test]
 fn remote_workspace_restore_keeps_published_history_push_urls_and_dirty_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -2859,6 +2877,13 @@ fn remote_workspace_restore_keeps_published_history_push_urls_and_dirty_state() 
     );
     assert_eq!(git_line(&destination, &["config", "mj.baseCommit"]), base);
     assert_eq!(
+        git_line(
+            &destination,
+            &["rev-parse", mj_core::targets::HistoryCutoff::BASE_REF]
+        ),
+        base
+    );
+    assert_eq!(
         git_line(&destination, &["config", "push.default"]),
         "current"
     );
@@ -2888,6 +2913,72 @@ fn remote_workspace_restore_keeps_published_history_push_urls_and_dirty_state() 
     assert!(!repeated.committed_bundle.is_empty());
     assert_eq!(repeated.staged_patch, snapshot.staged_patch);
     assert_eq!(repeated.unstaged_patch, snapshot.unstaged_patch);
+    // A pre-retention archive can restore HEAD while its unrelated launch
+    // commit is no longer available at origin or in the archived delta.
+    let abandoned = clone_repository(directory.path(), &origin, "old-launch");
+    commit_file(
+        &abandoned,
+        "abandoned.txt",
+        b"old launch\n",
+        "abandoned launch base",
+    );
+    let missing_base = git_line(&abandoned, &["rev-parse", "HEAD"]);
+    let mut legacy_snapshot = snapshot.clone();
+    legacy_snapshot.metadata.base_commit = missing_base.clone();
+    assert!(legacy_snapshot.metadata.saved_refs.is_empty());
+    let mut legacy_input = input();
+    legacy_input.bundle.primary_repository = "repo".into();
+    legacy_input.repositories = vec![legacy_snapshot];
+    let legacy_archive = directory.path().join("old-workspace.hel.zip");
+    write_archive_atomic(&legacy_archive, &legacy_input).unwrap();
+    let legacy_workspace = directory.path().join("legacy-restored");
+    fs::create_dir_all(&legacy_workspace).unwrap();
+    let legacy_destination = clone_repository(&legacy_workspace, &origin, "repo");
+    let missing = SystemGit
+        .run(
+            &legacy_destination,
+            &GitCommand {
+                arguments: vec![
+                    "rev-parse".into(),
+                    "--verify".into(),
+                    "--quiet".into(),
+                    format!("{missing_base}^{{commit}}").into(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(missing.status, 1);
+    crate::checkpoint::restore_repositories(&legacy_archive, &legacy_workspace, &SystemGit)
+        .unwrap();
+    assert_eq!(git_line(&legacy_destination, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        git_line(&legacy_destination, &["config", "mj.baseCommit"]),
+        missing_base
+    );
+    assert_eq!(
+        git_line(&legacy_destination, &["config", "mj.remoteWorkspace"]),
+        "true"
+    );
+    assert_eq!(
+        fs::read(legacy_destination.join("dirty.txt")).unwrap(),
+        large
+    );
+    let absent_ref = SystemGit
+        .run(
+            &legacy_destination,
+            &GitCommand {
+                arguments: vec![
+                    "show-ref".into(),
+                    "--verify".into(),
+                    "--quiet".into(),
+                    mj_core::targets::HistoryCutoff::BASE_REF.into(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(absent_ref.status, 1);
 }
 
 /// Enough text that the capture's patch crosses the 64 KiB pipe buffer a

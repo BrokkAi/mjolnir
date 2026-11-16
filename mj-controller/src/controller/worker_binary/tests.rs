@@ -1119,54 +1119,6 @@ fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
     assert_eq!(probe.to_string(), "the worker exited: panic");
 }
 
-/// A running worker is found by the process for its root, and a root with
-/// no records yet reads as a running worker that recorded nothing.
-#[test]
-#[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
-fn probing_a_running_worker_reports_its_process() {
-    struct Child(std::process::Child);
-    impl Drop for Child {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("hel worker");
-    std::fs::create_dir_all(&root).unwrap();
-    let root = root.to_str().unwrap();
-    // The trailing `:` keeps `sh` from replacing itself with `sleep`, so its
-    // command line keeps the worker's arguments.
-    let worker = Child(
-        std::process::Command::new("sh")
-            .args([
-                "-c",
-                "sleep 60; :",
-                &format!("hel worker run --root {root}"),
-            ])
-            .spawn()
-            .unwrap(),
-    );
-    std::fs::write(
-        std::path::Path::new(root).join(mj_core::relay::WORKER_PID_FILE),
-        worker.0.id().to_string(),
-    )
-    .unwrap();
-    let locator = targets::TargetLocator::LocalBare {
-        worker_root: root.into(),
-    };
-
-    let probe = probe_worker(&ProcessExecutor, &locator, root).unwrap();
-
-    assert_eq!(probe.pids, vec![worker.0.id()]);
-    assert_eq!(probe.step(), None);
-    assert_eq!(
-        probe.to_string(),
-        "the worker is running and recorded no startup step"
-    );
-}
-
 /// Output that is not the probe's document is an error, not a worker with
 /// nothing to report.
 #[test]
@@ -1384,21 +1336,14 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     let script = commands[0]
         .args
         .iter()
-        .find(|argument| argument.contains("worker run --root"))
+        .find(|argument| argument.contains("worker stop --root"))
         .unwrap_or_else(|| panic!("stop script missing from {commands:?}"));
     assert!(
-        script.contains("hel_match=\"hel worker run --root $hel_root\""),
-        "stop must match only this session's worker: {script}"
-    );
-    assert!(
-        script.contains("hel_match_home=\"hel worker run --root $HOME/$hel_root\""),
-        "stop must also match a login-home-absolute --root: {script}"
-    );
-    assert!(
-        !script.contains("grep -F"),
-        "leftover detection must not grep the match string: {script}"
+        script.contains("worker stop --root"),
+        "stop must go through the installed worker binary: {script}"
     );
 }
+
 #[test]
 fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
     struct RecordingExecutor {
@@ -1541,8 +1486,19 @@ impl CommandExecutor for SshHostExecutor {
         let mut stdout = Vec::new();
         let remote = command.args.last().cloned().unwrap_or_default();
         if command.purpose == "publish shared Mjolnir worker" {
-            let words = remote.split_whitespace().collect::<Vec<_>>();
-            let directory = words[words.len() - 2].trim_matches('\'');
+            // Publication now shares one shell batch with verification and
+            // discard. Its directory is an argument inside the quoted script.
+            let unquoted = remote.replace(['\'', '\\', '"'], "");
+            let directory = unquoted
+                .split_whitespace()
+                .find(|word| {
+                    word.rsplit_once("worker-binaries/")
+                        .is_some_and(|(_, digest)| {
+                            digest.len() == 64
+                                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                })
+                .expect("published worker store directory");
             self.host_files
                 .borrow_mut()
                 .insert(format!("{directory}/hel"));
@@ -1573,6 +1529,10 @@ impl CommandExecutor for SshHostExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
+        if command.purpose == "query host profile content" {
+            std::io::copy(input, &mut std::io::sink())?;
+            return self.execute(command);
+        }
         // The transport boundary receives a complete archive, rather than a
         // test-only fallback to file-by-file copy.
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(input));
@@ -1600,6 +1560,7 @@ fn install_on_ssh_host(
         &fixture.ownership,
         &fixture.profile_stage,
         None,
+        &[],
     )
     .unwrap();
     rendered(&executor.commands.take())
@@ -1733,6 +1694,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             &fixture.ownership,
             &fixture.profile_stage,
             None,
+            &[],
         )?;
         let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
             &session,
@@ -2043,6 +2005,7 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
             &fixture.ownership,
             &fixture.profile_stage,
             None,
+            &[],
         )?;
         as_root(&format!("test ! -e {unused}"))?;
         execute_checked(
@@ -2665,6 +2628,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
@@ -2752,6 +2716,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
@@ -2846,6 +2811,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
     }
@@ -3151,6 +3117,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
     }
@@ -3510,6 +3477,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
@@ -3771,13 +3739,15 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     );
     assert!(shim.contains("# mjolnir-mbx-shim"), "{shim}");
     assert!(
-        shim.contains("exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""),
+        shim.contains(&targets::posix_quote(
+            "exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""
+        )),
         "both wrappers execute the synchronized cache copy: {shim}"
     );
     assert!(!commands.iter().any(|line| line.contains(" cp ")));
     assert!(
         commands.iter().any(|line| {
-            line.contains("exec -i hel-session sh -c") && line.contains("config/mbx")
+            line.contains("'exec' '-i' 'hel-session' 'sh' '-c'") && line.contains("config/mbx")
         }),
         "the machine mbx configuration is linked into the container: {commands:#?}"
     );
@@ -3849,6 +3819,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         guardian_review_model: None,
         codex_profile: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
     }
@@ -5452,6 +5423,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
@@ -5615,6 +5587,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
@@ -5776,6 +5749,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())

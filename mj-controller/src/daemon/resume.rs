@@ -535,17 +535,8 @@ impl RuntimeState {
             }
         })
         .await?;
-        for child_id in children {
-            // A sub-agent borrows its parent's worker and never owns a managed
-            // worktree, so it has no branch of its own to keep.
-            Box::pin(self.force_destroy_indexed_session(
-                child_id.clone(),
-                BranchDisposition::Keep,
-                LifecycleKind::StopSubagent,
-            ))
-            .await
-            .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
-        }
+        self.stop_subagents(children, LifecycleKind::StopSubagent, None)
+            .await?;
         self.wait_for_deferred_cleanup(&session_id).await?;
         let exists = blocking({
             let session_id = session_id.clone();
@@ -727,21 +718,55 @@ impl RuntimeState {
             .await
     }
 
-    /// [`Self::force_destroy_session`] once the session and its sub-agents
-    /// have been indexed. `kind` is `ForceDestroy`, or `StopSubagent` for a
-    /// sub-agent its parent's suspend stops; its own sub-agents go the same
-    /// way.
-    pub(super) async fn force_destroy_indexed_session(
-        self: &Arc<Self>,
-        session_id: String,
-        branch: BranchDisposition,
-        kind: LifecycleKind,
-    ) -> Result<()> {
-        let requested_session_id = session_id.clone();
-        self.destroy_indexed_tree(session_id, branch, kind, requested_session_id)
+    /// Destroys one finished reviewer child the way a parent's suspend stops
+    /// its sub-agents. The review host's closer owns the decision that the
+    /// review is over and retries this with backoff; a child already gone is
+    /// the caller's business, not an error here.
+    pub(crate) async fn destroy_reviewer_child(self: &Arc<Self>, child: String) -> Result<()> {
+        self.stop_subagents(vec![child], LifecycleKind::StopSubagent, None)
             .await
     }
 
+    /// Destroy a parent's sub-agents, each with its own subtree, all at once.
+    /// Each child has its own lifecycle entry, worker and record, so nothing
+    /// orders them; one after another, a tree of a few hundred descendants
+    /// took minutes. Every child settles before this returns, so the caller
+    /// never tears down the parent under a child still stopping, and every
+    /// failure is reported. `requested_session_id` names the session the user
+    /// acted on, for notices; without it each child is its own request.
+    pub(super) async fn stop_subagents(
+        self: &Arc<Self>,
+        children: Vec<String>,
+        kind: LifecycleKind,
+        requested_session_id: Option<&str>,
+    ) -> Result<()> {
+        let results = futures::future::join_all(children.into_iter().map(|child_id| {
+            let requested = requested_session_id.map_or_else(|| child_id.clone(), str::to_owned);
+            async move {
+                // A sub-agent borrows its parent's worker and never owns a
+                // managed worktree, so it has no branch of its own to keep.
+                self.destroy_indexed_tree(
+                    child_id.clone(),
+                    BranchDisposition::Keep,
+                    kind,
+                    requested,
+                )
+                .await
+                .with_context(|| format!("stop sub-agent {child_id}"))
+            }
+        }))
+        .await;
+        let failures: Vec<String> = results
+            .into_iter()
+            .filter_map(|result| result.err().map(|error| format!("{error:#}")))
+            .collect();
+        ensure!(failures.is_empty(), "{}", failures.join("; "));
+        Ok(())
+    }
+
+    /// [`Self::force_destroy_session`] for `session_id` and, first, its
+    /// sub-agents. `kind` is `ForceDestroy`, or `StopSubagent` for a sub-agent
+    /// its parent's suspend stops; its own sub-agents go the same way.
     fn destroy_indexed_tree(
         self: &Arc<Self>,
         session_id: String,
@@ -790,15 +815,9 @@ impl RuntimeState {
                 if index {
                     state.index_before_destroy(&session_id).await;
                 }
-                for child_id in children {
-                    Box::pin(state.destroy_indexed_tree(
-                        child_id,
-                        BranchDisposition::Keep,
-                        kind,
-                        requested_session_id.clone(),
-                    ))
+                state
+                    .stop_subagents(children, kind, Some(&requested_session_id))
                     .await?;
-                }
 
                 let exists = blocking({
                     let session_id = session_id.clone();

@@ -47,6 +47,7 @@ pub struct RuntimeStateUpdate {
     pub launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
     pub unread_frontiers: SnapshotMap<String, u64>,
     pub notification_dismissals: SnapshotMap<String, mj_core::attention::NotificationDismissal>,
+    pub form_holders: SnapshotMap<String, String>,
     pub session_attention: SnapshotMap<String, mj_core::attention::SessionAttention>,
     pub recent_launch: Option<mj_core::go::RecentLaunch>,
     pub container_upgrade_sessions: std::collections::BTreeSet<String>,

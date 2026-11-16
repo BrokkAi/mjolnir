@@ -140,35 +140,78 @@ pub fn collect_git_snapshot_with_progress(
         GitHistoryMode::CloneFrom(base) => Some(collect_clone_refs(runner, repository, base)?),
         _ => None,
     };
-    let mut history = match &clone_state {
-        Some(state) => state.history.clone(),
-        None => select_git_history(runner, repository, &spec.history, &identity.head_commit)?,
+    // Temporary refs made for linked worktrees; removed with the clone's on
+    // every exit path below.
+    let mut worktree_refs = Vec::new();
+    let captured = (|| -> Result<RepositorySnapshot> {
+        let mut history = match &clone_state {
+            Some(state) => state.history.clone(),
+            None => select_git_history(runner, repository, &spec.history, &identity.head_commit)?,
+        };
+        let review_refs = if clone_state.is_none() {
+            collect_review_refs(runner, repository)?
+        } else {
+            BTreeMap::new()
+        };
+        include_review_history(&mut history, &review_refs);
+        let linked = discover_linked_worktrees(runner, repository)?;
+        let linked_directories = linked
+            .iter()
+            .map(|worktree| worktree.directory.clone())
+            .collect::<BTreeSet<_>>();
+        let prepared =
+            prepare_linked_worktrees(runner, linked, clone_state.is_some(), &mut worktree_refs)?;
+        include_worktree_history(
+            runner,
+            repository,
+            &spec.history,
+            &mut history,
+            &prepared,
+            &worktree_refs,
+        )?;
+        let unmerged_paths = clone_state
+            .as_ref()
+            .and_then(|state| state.operation.as_ref())
+            .map(operation::CollectedOperation::unmerged_paths)
+            .unwrap_or_default();
+        let mut snapshot = collect_git_contents(
+            runner,
+            &checkout,
+            spec,
+            identity,
+            history,
+            &unmerged_paths,
+            untracked_files,
+            &linked_directories,
+            progress,
+        )?;
+        snapshot.linked_worktrees = collect_linked_worktree_contents(
+            runner,
+            prepared,
+            untracked_files,
+            &linked_directories,
+            progress,
+        )?;
+        if clone_state.is_none() && !review_refs.is_empty() {
+            snapshot.metadata.review_baseline_ref = Some(session_start_scope(runner, repository)?);
+        }
+        snapshot.metadata.saved_refs = review_refs;
+        Ok(snapshot)
+    })();
+    let mut temporary_refs = worktree_refs;
+    if let Some(state) = &clone_state {
+        temporary_refs.extend(state.temporary_refs.iter().cloned());
+    }
+    let cleanup = remove_temporary_refs(runner, repository, &temporary_refs);
+    let mut snapshot = match (captured, cleanup) {
+        (Ok(snapshot), Ok(())) => snapshot,
+        (Ok(_), Err(cleanup)) => return Err(cleanup),
+        (Err(error), Ok(())) => return Err(error),
+        (Err(error), Err(cleanup)) => {
+            return Err(error.context(format!("also failed to remove temporary refs: {cleanup:#}")));
+        }
     };
-    let review_refs = if clone_state.is_none() {
-        collect_review_refs(runner, repository)?
-    } else {
-        BTreeMap::new()
-    };
-    include_review_history(&mut history, &review_refs);
-    let unmerged_paths = clone_state
-        .as_ref()
-        .and_then(|state| state.operation.as_ref())
-        .map(operation::CollectedOperation::unmerged_paths)
-        .unwrap_or_default();
-    let result = collect_git_contents(
-        runner,
-        &checkout,
-        spec,
-        identity,
-        history,
-        &unmerged_paths,
-        untracked_files,
-        progress,
-    );
     if let Some(state) = clone_state {
-        let cleanup = remove_temporary_refs(runner, repository, &state.temporary_refs);
-        let mut snapshot = result?;
-        cleanup?;
         if state
             .saved_refs
             .keys()
@@ -182,15 +225,8 @@ pub fn collect_git_snapshot_with_progress(
             snapshot.metadata.git_operation = Some(operation.metadata);
             snapshot.operation_payloads = Some(operation.payloads);
         }
-        Ok(snapshot)
-    } else {
-        let mut snapshot = result?;
-        if !review_refs.is_empty() {
-            snapshot.metadata.review_baseline_ref = Some(session_start_scope(runner, repository)?);
-        }
-        snapshot.metadata.saved_refs = review_refs;
-        Ok(snapshot)
     }
+    Ok(snapshot)
 }
 
 /// Collect only enough Git identity to associate native harness state with an
@@ -205,6 +241,9 @@ pub fn collect_git_metadata_snapshot(
     validate_archive_relative_path(&spec.relative_destination)?;
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
     let saved_refs = collect_review_refs(runner, repository)?;
+    // Move handoffs omit workspace payloads but still own the immutable base
+    // needed to finalize the independently transferred destination checkout.
+    let managed_base = remote_workspace_base(runner, repository)?;
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
             // Every capture here is metadata only, whether or not it carries
@@ -224,9 +263,9 @@ pub fn collect_git_metadata_snapshot(
             checkout_subdirectory: None,
             origin: identity.origin,
             push_urls: identity.push_urls,
-            remote_workspace: false,
+            remote_workspace: managed_base.is_some(),
             plain_directory: false,
-            base_commit: identity.head_commit.clone(),
+            base_commit: managed_base.unwrap_or_else(|| identity.head_commit.clone()),
             head_commit: identity.head_commit,
             branch: identity.branch,
         },
@@ -235,6 +274,7 @@ pub fn collect_git_metadata_snapshot(
         unstaged_patch: Vec::new(),
         untracked_tar: Vec::new(),
         operation_payloads: None,
+        linked_worktrees: Vec::new(),
     })
 }
 
@@ -275,6 +315,7 @@ pub fn collect_plain_directory_snapshot(spec: &GitCollectionSpec) -> Result<Repo
         unstaged_patch: Vec::new(),
         untracked_tar: Vec::new(),
         operation_payloads: None,
+        linked_worktrees: Vec::new(),
     })
 }
 
@@ -429,6 +470,31 @@ pub fn remote_workspace_base(
         "managed workspace is marked true but mj.baseCommit is empty"
     );
     Ok(Some(base))
+}
+
+/// Whether the recorded managed base is an available commit in this checkout.
+/// A missing legacy object is distinct from a Git execution/storage failure.
+pub fn managed_base_is_available(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: &str,
+) -> Result<bool> {
+    let output = run_git(
+        runner,
+        repository,
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base}^{{commit}}"),
+        ],
+        &[],
+    )?;
+    match output.status {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(git_failure("inspect managed base object", &output)),
+    }
 }
 
 fn merge_base(
@@ -1702,16 +1768,20 @@ fn remove_temporary_refs(
     repository: &Path,
     names: &[String],
 ) -> Result<()> {
+    // Every ref is attempted, so one failure leaves no others behind.
+    let mut first_failure = None;
     for name in names {
-        git_bytes(
+        if let Err(error) = git_bytes(
             runner,
             repository,
             ["update-ref", "-d", name],
             &[],
             "remove temporary checkpoint ref",
-        )?;
+        ) {
+            first_failure.get_or_insert(error);
+        }
     }
-    Ok(())
+    first_failure.map_or(Ok(()), Err)
 }
 
 fn select_git_history(
@@ -1776,27 +1846,12 @@ fn select_git_history(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn collect_git_contents(
-    runner: &dyn GitCommandRunner,
-    checkout: &CheckoutLocation,
-    spec: &GitCollectionSpec,
-    identity: CollectedGitIdentity,
-    history: GitHistorySelection,
-    unmerged_paths: &[PathBuf],
-    untracked_files: UntrackedFiles,
-    progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
-) -> Result<RepositorySnapshot> {
-    let repository = checkout.top_level.as_path();
-    let GitHistorySelection {
-        base_commit,
-        bundle_arguments,
-    } = history;
-    // Git describes an unmerged path as "Unmerged path" or as a combined
-    // diff, neither of which `git apply` accepts. The operation capture
-    // carries those paths, so both patches leave them out and keep
-    // everything else, such as the files a merge staged cleanly.
-    let patch_command = |arguments: &[&str]| GitCommand {
+/// Git describes an unmerged path as "Unmerged path" or as a combined diff,
+/// neither of which `git apply` accepts. The operation capture carries those
+/// paths, so both patches leave them out and keep everything else, such as the
+/// files a merge staged cleanly.
+fn patch_command(arguments: &[&str], unmerged_paths: &[PathBuf]) -> GitCommand {
+    GitCommand {
         arguments: arguments
             .iter()
             .map(OsString::from)
@@ -1809,7 +1864,81 @@ fn collect_git_contents(
             .collect(),
         stdin: Vec::new(),
         env: Vec::new(),
-    };
+    }
+}
+
+fn collect_staged_patch(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    unmerged_paths: &[PathBuf],
+) -> Result<Vec<u8>> {
+    git_success(
+        runner,
+        repository,
+        patch_command(
+            &["diff", "--binary", "--cached", "--no-ext-diff"],
+            unmerged_paths,
+        ),
+        "collect staged Git patch",
+    )
+}
+
+fn collect_unstaged_patch(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    unmerged_paths: &[PathBuf],
+) -> Result<Vec<u8>> {
+    git_success(
+        runner,
+        repository,
+        patch_command(&["diff", "--binary", "--no-ext-diff"], unmerged_paths),
+        "collect unstaged Git patch",
+    )
+}
+
+fn collect_untracked_tar(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    untracked_files: UntrackedFiles,
+    linked_worktrees: &BTreeSet<PathBuf>,
+    progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
+) -> Result<Vec<u8>> {
+    if untracked_files == UntrackedFiles::Exclude {
+        return Ok(Vec::new());
+    }
+    let untracked = git_bytes(
+        runner,
+        repository,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        &[],
+        "list nonignored untracked files",
+    )?;
+    build_untracked_tar(
+        repository,
+        &untracked,
+        untracked_files,
+        linked_worktrees,
+        progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_git_contents(
+    runner: &dyn GitCommandRunner,
+    checkout: &CheckoutLocation,
+    spec: &GitCollectionSpec,
+    identity: CollectedGitIdentity,
+    history: GitHistorySelection,
+    unmerged_paths: &[PathBuf],
+    untracked_files: UntrackedFiles,
+    linked_worktrees: &BTreeSet<PathBuf>,
+    progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
+) -> Result<RepositorySnapshot> {
+    let repository = checkout.top_level.as_path();
+    let GitHistorySelection {
+        base_commit,
+        bundle_arguments,
+    } = history;
     // These commands only inspect repository state and produce independent
     // payloads. Nested joins share Rayon's bounded worker pool, including when
     // several repositories are being collected at once.
@@ -1825,38 +1954,20 @@ fn collect_git_contents(
                     ),
                     None => Ok(Vec::new()),
                 },
-                || {
-                    git_success(
-                        runner,
-                        repository,
-                        patch_command(&["diff", "--binary", "--cached", "--no-ext-diff"]),
-                        "collect staged Git patch",
-                    )
-                },
+                || collect_staged_patch(runner, repository, unmerged_paths),
             )
         },
         || {
             rayon::join(
+                || collect_unstaged_patch(runner, repository, unmerged_paths),
                 || {
-                    git_success(
+                    collect_untracked_tar(
                         runner,
                         repository,
-                        patch_command(&["diff", "--binary", "--no-ext-diff"]),
-                        "collect unstaged Git patch",
+                        untracked_files,
+                        linked_worktrees,
+                        progress,
                     )
-                },
-                || {
-                    if untracked_files == UntrackedFiles::Exclude {
-                        return Ok(Vec::new());
-                    }
-                    let untracked = git_bytes(
-                        runner,
-                        repository,
-                        ["ls-files", "--others", "--exclude-standard", "-z"],
-                        &[],
-                        "list nonignored untracked files",
-                    )?;
-                    build_untracked_tar(repository, &untracked, untracked_files, progress)
                 },
             )
         },
@@ -1889,7 +2000,327 @@ fn collect_git_contents(
         unstaged_patch,
         untracked_tar,
         operation_payloads: None,
+        linked_worktrees: Vec::new(),
     })
+}
+
+/// A linked worktree of the captured repository that lives inside the
+/// captured checkout.
+#[derive(Clone)]
+struct LinkedWorktreeDirectory {
+    /// The directory below the checkout's top level.
+    relative: PathBuf,
+    /// The directory, with symbolic links resolved.
+    directory: PathBuf,
+}
+
+/// A linked worktree whose state has been read and whose commits are held by
+/// temporary refs.
+struct PreparedWorktree {
+    location: LinkedWorktreeDirectory,
+    head_commit: String,
+    branch: Option<String>,
+    lock_reason: Option<String>,
+    operation: Option<operation::CollectedOperation>,
+}
+
+/// The linked worktrees of `repository`'s checkout that live inside it, at any
+/// depth, parents before children.
+///
+/// A worktree is "ours" by Git's own definition of the same repository: the
+/// common Git directory that `git rev-parse` names inside it is the checkout's.
+/// A registered worktree outside the checkout, or whose directory is gone,
+/// holds nothing this checkout's session owns and is left out; this never
+/// prunes a registration.
+fn discover_linked_worktrees(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<Vec<LinkedWorktreeDirectory>> {
+    let top_level = fs::canonicalize(repository)
+        .with_context(|| format!("resolve {}", repository.display()))?;
+    let (_, common_directory) = git_directories(runner, repository)?;
+    // Git 2.31 has no `worktree list -z`; a path with a newline in it cannot
+    // be listed there, and is left out like any other unlistable directory.
+    let listed = git_bytes(
+        runner,
+        repository,
+        ["worktree", "list", "--porcelain"],
+        &[],
+        "list linked worktrees",
+    )?;
+    let mut found = Vec::new();
+    for line in listed.split(|byte| *byte == b'\n') {
+        let Some(path) = line.strip_prefix(b"worktree ") else {
+            continue;
+        };
+        let path = mj_core::path_input::from_git_bytes(path)?;
+        // `worktree list` names the user's worktrees anywhere on disk. Only a
+        // path that can lie inside the checkout may fail the capture, so
+        // decide that lexically, against the top level as given and resolved.
+        if !path.starts_with(repository) && !path.starts_with(&top_level) {
+            continue;
+        }
+        let directory = match fs::canonicalize(&path) {
+            Ok(directory) => directory,
+            // Registered, but the directory is gone: nothing to capture.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("resolve {}", path.display()));
+            }
+        };
+        let Ok(relative) = directory.strip_prefix(&top_level) else {
+            continue;
+        };
+        if relative.as_os_str().is_empty() || !directory.join(".git").is_file() {
+            continue;
+        }
+        let relative = relative.to_path_buf();
+        validate_worktree_relative_path(&relative)?;
+        // A directory Git no longer reads as a repository is not one of ours.
+        let Ok((_, common)) = git_directories(runner, &directory) else {
+            continue;
+        };
+        if !same_directory(&common, &common_directory)? {
+            continue;
+        }
+        found.push(LinkedWorktreeDirectory {
+            relative,
+            directory,
+        });
+    }
+    found.sort_by(|left, right| left.relative.cmp(&right.relative));
+    Ok(found)
+}
+
+/// The absolute directories of the checkout's linked worktrees, for checks
+/// that must run in each of them.
+pub(crate) fn linked_worktree_directories(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<Vec<PathBuf>> {
+    let checkout = locate_checkout(runner, repository)?;
+    Ok(discover_linked_worktrees(runner, &checkout.top_level)?
+        .into_iter()
+        .map(|worktree| worktree.directory)
+        .collect())
+}
+
+/// Reads each worktree's HEAD, lock and (for a clone) operation, and makes
+/// temporary refs so the committed bundle carries every worktree's commits,
+/// including a detached HEAD that no branch holds. Each ref is added to
+/// `temporary_refs` as soon as it exists, so the caller removes it on every
+/// path.
+fn prepare_linked_worktrees(
+    runner: &dyn GitCommandRunner,
+    worktrees: Vec<LinkedWorktreeDirectory>,
+    capture_operations: bool,
+    temporary_refs: &mut Vec<String>,
+) -> Result<Vec<PreparedWorktree>> {
+    if worktrees.is_empty() {
+        return Ok(Vec::new());
+    }
+    let capture_id = mj_core::state::new_session_id()?;
+    let mut prepared = Vec::with_capacity(worktrees.len());
+    for (index, location) in worktrees.into_iter().enumerate() {
+        let directory = location.directory.as_path();
+        let name = location.relative.display().to_string();
+        let describe = |action: &str| format!("{action} of linked worktree {name}");
+        let head_commit = git_text(
+            runner,
+            directory,
+            ["rev-parse", "--verify", "HEAD^{commit}"],
+        )
+        .with_context(|| describe("read the HEAD"))?;
+        let symbolic = run_git(runner, directory, ["symbolic-ref", "--quiet", "HEAD"], &[])?;
+        let branch = match symbolic.status {
+            0 => {
+                let reference = trim_output(&symbolic.stdout, "decode worktree branch")?;
+                Some(
+                    reference
+                        .strip_prefix("refs/heads/")
+                        .with_context(|| {
+                            format!("linked worktree {name} has HEAD at {reference}, not a branch")
+                        })?
+                        .to_owned(),
+                )
+            }
+            1 => None,
+            _ => {
+                return Err(git_failure(
+                    "read the branch of a linked worktree",
+                    &symbolic,
+                ));
+            }
+        };
+        let locked = operation::git_paths(runner, directory, ["locked"].into_iter())
+            .with_context(|| describe("find the lock"))?;
+        let lock_reason = match fs::read(&locked[0].1) {
+            Ok(reason) => Some(
+                String::from_utf8(reason)
+                    .with_context(|| describe("decode the lock reason"))?
+                    .trim_end_matches('\n')
+                    .to_owned(),
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| describe("read the lock"));
+            }
+        };
+        let pin = format!("refs/mj-checkpoint/{capture_id}/worktree/{index:08}");
+        git_bytes(
+            runner,
+            directory,
+            ["update-ref", &pin, &head_commit],
+            &[],
+            "preserve a linked worktree HEAD for the checkpoint bundle",
+        )?;
+        temporary_refs.push(pin);
+        let operation = if capture_operations {
+            let operation = operation::collect(runner, directory)
+                .with_context(|| describe("capture the Git operation"))?;
+            if let Some(operation) = &operation {
+                operation.carry_objects(
+                    runner,
+                    directory,
+                    &format!("refs/mj-checkpoint/{capture_id}/worktree-operation/{index:08}"),
+                    temporary_refs,
+                )?;
+            }
+            operation
+        } else {
+            None
+        };
+        prepared.push(PreparedWorktree {
+            location,
+            head_commit,
+            branch,
+            lock_reason,
+            operation,
+        });
+    }
+    Ok(prepared)
+}
+
+/// Adds every worktree's temporary refs to the committed bundle as tips, with
+/// the same exclusions the checkout's own history uses.
+fn include_worktree_history(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    mode: &GitHistoryMode,
+    history: &mut GitHistorySelection,
+    worktrees: &[PreparedWorktree],
+    tips: &[String],
+) -> Result<()> {
+    if worktrees.is_empty() {
+        return Ok(());
+    }
+    let exclusions = match mode {
+        GitHistoryMode::SessionDelta => vec!["--not".to_owned(), "--remotes=origin".to_owned()],
+        GitHistoryMode::CloneFrom(_) | GitHistoryMode::DeltaFrom(_) => {
+            vec![format!("^{}", history.base_commit)]
+        }
+        // Origin serves all committed history.
+        GitHistoryMode::NoBundle => return Ok(()),
+    };
+    if let Some(arguments) = &mut history.bundle_arguments {
+        // Before any exclusion: these are positive tips.
+        arguments.splice(3..3, tips.iter().cloned());
+        return Ok(());
+    }
+    let mut count_arguments = vec!["rev-list".to_owned(), "--count".to_owned()];
+    count_arguments.extend(tips.iter().cloned());
+    count_arguments.extend(exclusions.iter().cloned());
+    let count = String::from_utf8(git_bytes_owned(
+        runner,
+        repository,
+        &count_arguments,
+        "count linked worktree commits",
+    )?)?
+    .trim()
+    .parse::<u64>()
+    .context("count linked worktree commits")?;
+    let carries_tags = worktrees.iter().any(|worktree| {
+        worktree
+            .operation
+            .as_ref()
+            .is_some_and(operation::CollectedOperation::carries_tags)
+    });
+    if count > 0 || carries_tags {
+        let mut arguments = vec!["bundle".to_owned(), "create".to_owned(), "-".to_owned()];
+        arguments.extend(tips.iter().cloned());
+        arguments.extend(exclusions);
+        history.bundle_arguments = Some(arguments);
+    }
+    Ok(())
+}
+
+fn collect_linked_worktree_contents(
+    runner: &dyn GitCommandRunner,
+    worktrees: Vec<PreparedWorktree>,
+    untracked_files: UntrackedFiles,
+    linked_worktrees: &BTreeSet<PathBuf>,
+    progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
+) -> Result<Vec<LinkedWorktreeSnapshot>> {
+    worktrees
+        .into_par_iter()
+        .map(|worktree| {
+            let directory = worktree.location.directory.as_path();
+            let unmerged_paths = worktree
+                .operation
+                .as_ref()
+                .map(operation::CollectedOperation::unmerged_paths)
+                .unwrap_or_default();
+            let relative = worktree.location.relative.as_path();
+            let worktree_progress = |event: GitSnapshotProgress| match event {
+                GitSnapshotProgress::UntrackedFile {
+                    current,
+                    total,
+                    path,
+                } => progress(GitSnapshotProgress::UntrackedFile {
+                    current,
+                    total,
+                    path: relative.join(path),
+                }),
+            };
+            let ((staged_patch, unstaged_patch), untracked_tar) = rayon::join(
+                || {
+                    rayon::join(
+                        || collect_staged_patch(runner, directory, &unmerged_paths),
+                        || collect_unstaged_patch(runner, directory, &unmerged_paths),
+                    )
+                },
+                || {
+                    collect_untracked_tar(
+                        runner,
+                        directory,
+                        untracked_files,
+                        linked_worktrees,
+                        &worktree_progress,
+                    )
+                },
+            );
+            let (git_operation, operation_payloads) = match worktree.operation {
+                Some(operation) => (Some(operation.metadata), Some(operation.payloads)),
+                None => (None, None),
+            };
+            Ok(LinkedWorktreeSnapshot {
+                metadata: mj_core::archive::LinkedWorktreeMetadata {
+                    path: worktree.location.relative.clone(),
+                    head_commit: worktree.head_commit,
+                    branch: worktree.branch,
+                    lock_reason: worktree.lock_reason,
+                    git_operation,
+                },
+                staged_patch: staged_patch
+                    .with_context(|| format!("linked worktree {}", relative.display()))?,
+                unstaged_patch: unstaged_patch
+                    .with_context(|| format!("linked worktree {}", relative.display()))?,
+                untracked_tar: untracked_tar
+                    .with_context(|| format!("linked worktree {}", relative.display()))?,
+                operation_payloads,
+            })
+        })
+        .collect()
 }
 
 /// A worktree name changes when a session moves into another checkout. Keep
@@ -1993,6 +2424,12 @@ pub(crate) fn restore_git_snapshot_for_session(
         (Some(operation), Some(payloads)) => Some((operation, payloads)),
         _ => bail!("the snapshot's Git operation metadata and payloads disagree"),
     };
+    // A bundle fetched through HEAD cannot carry a linked worktree's commits,
+    // and it may have no HEAD of its own, so such a bundle is only unpacked
+    // and the checkout names its commit.
+    let imports_without_head = !snapshot.metadata.saved_refs.is_empty()
+        || !snapshot.metadata.stash_stack.is_empty()
+        || !snapshot.linked_worktrees.is_empty();
     if !snapshot.committed_bundle.is_empty() {
         let mut bundle = tempfile::NamedTempFile::new_in(repository)
             .with_context(|| format!("create temporary Git bundle in {}", repository.display()))?;
@@ -2001,13 +2438,11 @@ pub(crate) fn restore_git_snapshot_for_session(
             .context("write temporary Git bundle")?;
         bundle.flush().context("flush temporary Git bundle")?;
         let bundle_path = bundle.path().as_os_str().to_os_string();
-        let clone_refs =
-            !snapshot.metadata.saved_refs.is_empty() || !snapshot.metadata.stash_stack.is_empty();
         git_success(
             runner,
             repository,
             GitCommand {
-                arguments: if clone_refs {
+                arguments: if imports_without_head {
                     vec![
                         OsString::from("bundle"),
                         OsString::from("unbundle"),
@@ -2029,7 +2464,7 @@ pub(crate) fn restore_git_snapshot_for_session(
     let clone_refs =
         !snapshot.metadata.saved_refs.is_empty() || !snapshot.metadata.stash_stack.is_empty();
     if restore_contents {
-        let checkout_target = if snapshot.committed_bundle.is_empty() || clone_refs {
+        let checkout_target = if snapshot.committed_bundle.is_empty() || imports_without_head {
             snapshot.metadata.head_commit.as_str()
         } else {
             "FETCH_HEAD"
@@ -2194,7 +2629,293 @@ pub(crate) fn restore_git_snapshot_for_session(
     if let Some((operation, payloads)) = operation {
         operation::restore(runner, repository, operation, payloads)?;
     }
+    // After the checkout is whole: a worktree cannot take a branch the
+    // checkout holds, and its directory must not exist when it is added.
+    restore_linked_worktrees(runner, repository, &snapshot.linked_worktrees)
+}
+
+/// Recreates the checkout's linked worktrees, parents before children, each
+/// with the HEAD, index, files, operation and lock it was captured with.
+pub(crate) fn restore_linked_worktrees(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    worktrees: &[LinkedWorktreeSnapshot],
+) -> Result<()> {
+    let mut ordered = worktrees.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        let depth = |worktree: &LinkedWorktreeSnapshot| worktree.metadata.path.components().count();
+        (depth(left), &left.metadata.path).cmp(&(depth(right), &right.metadata.path))
+    });
+    for worktree in ordered {
+        restore_linked_worktree(runner, repository, worktree).with_context(|| {
+            format!(
+                "restore linked worktree {}",
+                worktree.metadata.path.display()
+            )
+        })?;
+    }
     Ok(())
+}
+
+/// One entry of `git worktree list --porcelain`.
+struct ListedWorktree {
+    path: PathBuf,
+    branch: Option<String>,
+    locked: bool,
+}
+
+fn list_worktrees(runner: &dyn GitCommandRunner, repository: &Path) -> Result<Vec<ListedWorktree>> {
+    let listed = git_bytes(
+        runner,
+        repository,
+        ["worktree", "list", "--porcelain"],
+        &[],
+        "list restore worktrees",
+    )?;
+    let mut worktrees: Vec<ListedWorktree> = Vec::new();
+    for line in listed.split(|byte| *byte == b'\n') {
+        if let Some(path) = line.strip_prefix(b"worktree ") {
+            worktrees.push(ListedWorktree {
+                path: mj_core::path_input::from_git_bytes(path)?,
+                branch: None,
+                locked: false,
+            });
+        } else if let Some(worktree) = worktrees.last_mut() {
+            if let Some(branch) = line.strip_prefix(b"branch refs/heads/") {
+                worktree.branch = Some(
+                    String::from_utf8(branch.to_vec()).context("decode a worktree branch name")?,
+                );
+            } else if line == b"locked" || line.starts_with(b"locked ") {
+                worktree.locked = true;
+            }
+        }
+    }
+    Ok(worktrees)
+}
+
+fn restore_linked_worktree(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    worktree: &LinkedWorktreeSnapshot,
+) -> Result<()> {
+    let metadata = &worktree.metadata;
+    validate_worktree_relative_path(&metadata.path)?;
+    ensure_no_symlink_ancestors(repository, &metadata.path)?;
+    let directory = repository.join(&metadata.path);
+    git_bytes(
+        runner,
+        repository,
+        [
+            "cat-file",
+            "-e",
+            &format!("{}^{{commit}}", metadata.head_commit),
+        ],
+        &[],
+        "verify the linked worktree's commit",
+    )?;
+    match fs::symlink_metadata(&directory) {
+        Ok(_) => {
+            // A retry finds what an earlier attempt made; anything else
+            // there is not ours to overwrite.
+            ensure!(
+                is_restored_linked_worktree(runner, repository, &directory, &metadata.head_commit)?,
+                "{} already exists and is not a worktree of this repository at {}",
+                directory.display(),
+                metadata.head_commit
+            );
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect {}", directory.display()));
+        }
+    }
+
+    let canonical_repository = fs::canonicalize(repository)
+        .with_context(|| format!("resolve {}", repository.display()))?;
+    let target = canonical_repository.join(&metadata.path);
+    let listed = list_worktrees(runner, repository)?;
+    // A registration whose directory is gone is reused rather than refused.
+    let stale = listed.iter().find(|entry| entry.path == target);
+    let mut arguments = vec![OsString::from("worktree"), OsString::from("add")];
+    if let Some(stale) = stale {
+        arguments.push(OsString::from("-f"));
+        if stale.locked {
+            arguments.push(OsString::from("-f"));
+        }
+    }
+    let mut branch_arguments = None;
+    if let Some(branch) = &metadata.branch {
+        git_bytes(
+            runner,
+            repository,
+            ["check-ref-format", "--branch", branch],
+            &[],
+            "validate the linked worktree's branch",
+        )?;
+        let current = run_git(
+            runner,
+            repository,
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}^{{commit}}"),
+            ],
+            &[],
+        )?;
+        let existing = match current.status {
+            0 => Some(trim_output(
+                &current.stdout,
+                "decode a worktree branch commit",
+            )?),
+            1 => None,
+            _ => return Err(git_failure("read the linked worktree's branch", &current)),
+        };
+        let held_elsewhere = listed
+            .iter()
+            .any(|entry| entry.path != target && entry.branch.as_deref() == Some(branch));
+        match existing {
+            _ if held_elsewhere => tracing::warn!(
+                worktree = %metadata.path.display(), branch = %branch,
+                "linked worktree restored detached: its branch is checked out in another worktree"
+            ),
+            Some(commit) if commit != metadata.head_commit => tracing::warn!(
+                worktree = %metadata.path.display(), branch = %branch,
+                "linked worktree restored detached: its branch moved since the checkpoint"
+            ),
+            Some(_) => branch_arguments = Some(vec![OsString::from(branch)]),
+            None => {
+                branch_arguments = Some(Vec::new());
+                arguments.extend([OsString::from("-b"), OsString::from(branch)]);
+            }
+        }
+    }
+    arguments.push(directory.clone().into_os_string());
+    match branch_arguments {
+        // An existing branch is named; a new one is made from the commit.
+        Some(named) if !named.is_empty() => arguments.extend(named),
+        Some(_) => arguments.push(OsString::from(&metadata.head_commit)),
+        None => arguments.extend([
+            OsString::from("--detach"),
+            OsString::from(&metadata.head_commit),
+        ]),
+    }
+    git_success(
+        runner,
+        repository,
+        GitCommand {
+            arguments,
+            stdin: Vec::new(),
+            env: Vec::new(),
+        },
+        "add the linked worktree",
+    )?;
+    // All or nothing: a worktree left half-restored would be taken for a
+    // finished one by a retry, which skips it and loses its dirty state.
+    if let Err(error) = restore_linked_worktree_state(runner, repository, &directory, worktree) {
+        let removed = git_success(
+            runner,
+            repository,
+            GitCommand {
+                arguments: vec![
+                    OsString::from("worktree"),
+                    OsString::from("remove"),
+                    OsString::from("--force"),
+                    OsString::from("--force"),
+                    directory.clone().into_os_string(),
+                ],
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+            "remove the partly restored linked worktree",
+        );
+        return Err(match removed {
+            Ok(_) => error,
+            Err(removal) => error.context(format!("also failed to clean up: {removal:#}")),
+        });
+    }
+    Ok(())
+}
+
+/// Applies a linked worktree's dirty state, operation and lock to its fresh
+/// checkout of the recorded commit.
+fn restore_linked_worktree_state(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    directory: &Path,
+    worktree: &LinkedWorktreeSnapshot,
+) -> Result<()> {
+    let metadata = &worktree.metadata;
+    let directory = directory.to_path_buf();
+    if !worktree.staged_patch.is_empty() {
+        git_bytes(
+            runner,
+            &directory,
+            ["apply", "--binary", "--index", "-"],
+            &worktree.staged_patch,
+            "restore the linked worktree's staged Git patch",
+        )?;
+    }
+    if !worktree.unstaged_patch.is_empty() {
+        git_bytes(
+            runner,
+            &directory,
+            ["apply", "--binary", "-"],
+            &worktree.unstaged_patch,
+            "restore the linked worktree's unstaged Git patch",
+        )?;
+    }
+    restore_untracked_tar(&directory, &worktree.untracked_tar)?;
+    match (&metadata.git_operation, &worktree.operation_payloads) {
+        (None, None) => {}
+        (Some(operation), Some(payloads)) => {
+            operation::verify_objects(runner, &directory, operation)?;
+            operation::restore(runner, &directory, operation, payloads)?;
+        }
+        _ => bail!("the linked worktree's Git operation metadata and payloads disagree"),
+    }
+    if let Some(reason) = &metadata.lock_reason {
+        let mut arguments = vec![OsString::from("worktree"), OsString::from("lock")];
+        if !reason.is_empty() {
+            arguments.extend([OsString::from("--reason"), OsString::from(reason)]);
+        }
+        arguments.push(directory.into_os_string());
+        git_success(
+            runner,
+            repository,
+            GitCommand {
+                arguments,
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+            "lock the linked worktree",
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether `directory` is already a worktree of `repository` at `head_commit`.
+fn is_restored_linked_worktree(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    directory: &Path,
+    head_commit: &str,
+) -> Result<bool> {
+    let Ok((_, common)) = git_directories(runner, directory) else {
+        return Ok(false);
+    };
+    let (_, expected) = git_directories(runner, repository)?;
+    if !same_directory(&common, &expected)? {
+        return Ok(false);
+    }
+    let head = run_git(
+        runner,
+        directory,
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+        &[],
+    )?;
+    Ok(head.status == 0 && trim_output(&head.stdout, "decode worktree HEAD")? == head_commit)
 }
 
 /// Rebuild the Git configuration that makes a managed network workspace
@@ -2274,31 +2995,31 @@ fn restore_remote_workspace_configuration(
             "restore Git push URL",
         )?;
     }
-    for (key, value) in [
-        ("mj.remoteWorkspace", "true"),
-        ("mj.baseCommit", metadata.base_commit.as_str()),
-        ("push.default", "current"),
-        ("push.autoSetupRemote", "true"),
-        ("remote.pushDefault", "origin"),
-        ("remote.origin.mirror", "false"),
-    ] {
-        git_success(
-            runner,
-            repository,
-            GitCommand {
-                arguments: vec![
-                    "config".into(),
-                    "--local".into(),
-                    "--replace-all".into(),
-                    key.into(),
-                    value.into(),
-                ],
-                stdin: Vec::new(),
-                env: Vec::new(),
-            },
-            "restore managed Git configuration",
-        )?;
+    // Older archives could retain the recorded base without carrying its
+    // object. Adding a GC root must not turn those existing restores into
+    // failures; their marker/config behavior remains unchanged.
+    let retain_base = managed_base_is_available(runner, repository, &metadata.base_commit)?;
+    if !retain_base {
+        tracing::warn!(repository = %repository.display(), base_commit = %metadata.base_commit,
+            "legacy checkpoint base object is absent; preserving its recorded base without a GC ref");
     }
+    mj_core::remote_git::finalize_managed_checkout(
+        &metadata.base_commit,
+        retain_base,
+        |arguments| {
+            git_success(
+                runner,
+                repository,
+                GitCommand {
+                    arguments: arguments.iter().map(OsString::from).collect(),
+                    stdin: Vec::new(),
+                    env: Vec::new(),
+                },
+                "restore managed Git configuration",
+            )?;
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -2472,10 +3193,14 @@ impl WorktreeTar {
     }
 }
 
+/// `linked_worktrees` are the directories of this repository's linked
+/// worktrees, which are captured as entries of their own, so a walk skips them
+/// instead of refusing them as foreign nested repositories.
 pub(super) fn build_untracked_tar(
     repository: &Path,
     nul_paths: &[u8],
     policy: UntrackedFiles,
+    linked_worktrees: &BTreeSet<PathBuf>,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<Vec<u8>> {
     let paths = nul_paths
@@ -2498,6 +3223,16 @@ pub(super) fn build_untracked_tar(
             ensure_no_symlink_ancestors(repository, &relative)?;
             let metadata = fs::symlink_metadata(&source)
                 .with_context(|| format!("stat untracked path {}", source.display()))?;
+            if !linked_worktrees.is_empty()
+                && metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && linked_worktrees.contains(
+                    &fs::canonicalize(&source)
+                        .with_context(|| format!("resolve {}", source.display()))?,
+                )
+            {
+                continue;
+            }
             if policy == UntrackedFiles::IgnoreNestedRepositories
                 && is_nested_repository(&source, &metadata)?
             {

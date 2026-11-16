@@ -79,6 +79,13 @@ impl StandaloneSession {
         self.client.protocol_version()
     }
 
+    pub async fn attachment_present(
+        &mut self,
+        reference: &mj_core::attachment::AttachmentRef,
+    ) -> Result<bool> {
+        self.client.attachment_present(reference).await
+    }
+
     pub async fn reserve_idle(&mut self, command_id: String) -> Result<bool> {
         self.client.reserve_idle(command_id).await
     }
@@ -654,6 +661,7 @@ impl StandaloneSession {
                             credential_sync_signal = Some(CredentialSyncSignal {
                                 ordinal: event.ordinal,
                                 reason,
+                                login_fingerprint: relay_event_login_fingerprint(event),
                             });
                         }
                     }
@@ -731,7 +739,12 @@ impl StandaloneSession {
             self.project_memory = None;
             return Ok(());
         }
-        let (baseline, replica) = match self.client.project_memory_snapshot().await {
+        let snapshot = tokio::select! {
+            biased;
+            () = cancel.cancelled() => anyhow::bail!("project-memory synchronization for checkpoint was cancelled"),
+            result = self.client.project_memory_snapshot() => result,
+        };
+        let (baseline, replica) = match snapshot {
             Ok(snapshot) => snapshot,
             // Upgraded workers receive the current matching memory launch config.
             // Transfer-state errors on their new transport must remain visible.
@@ -759,7 +772,7 @@ impl StandaloneSession {
             &baseline,
             &replica,
             &resolver,
-            cancel,
+            cancel.clone(),
         )
         .await?;
         let sync = match sync {
@@ -790,13 +803,16 @@ impl StandaloneSession {
                 "project memory conflict source text"
             );
         }
-        let install = crate::project_memory_merge::install_merged_tree(
-            &mut self.client,
-            &baseline,
-            &replica,
-            sync.tree,
-        )
-        .await?;
+        let install = tokio::select! {
+            biased;
+            () = cancel.cancelled() => anyhow::bail!("project-memory synchronization for checkpoint was cancelled"),
+            result = crate::project_memory_merge::install_merged_tree(
+                &mut self.client,
+                &baseline,
+                &replica,
+                sync.tree,
+            ) => result?,
+        };
         if install == Some(crate::project_memory_merge::WorkerInstallOutcome::ReplicaChanged) {
             tracing::debug!(
                 session_id = self.materialized.session_id,

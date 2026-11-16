@@ -1908,26 +1908,29 @@ fn inherited_git_setting_commands(
     if matches!(locator, targets::TargetLocator::SshBare { .. }) {
         return Ok(Vec::new());
     }
-    settings
-        .into_iter()
-        .map(|(key, value)| {
-            let args = vec![
+    if settings.is_empty() {
+        return Ok(Vec::new());
+    }
+    let steps = settings.into_iter().map(|(key, value)| {
+        targets::CommandStep::new(
+            format!("inherit Git setting {key}"),
+            vec![
                 "git".into(),
                 "config".into(),
                 "--global".into(),
                 "--replace-all".into(),
                 "--".into(),
-                key.clone(),
+                key,
                 value,
-            ];
-            targets::command_on_locator(
-                locator,
-                session_id,
-                args,
-                format!("inherit Git setting {key}"),
-            )
-        })
-        .collect()
+            ],
+        )
+    });
+    Ok(vec![targets::command_on_locator(
+        locator,
+        session_id,
+        targets::step_script(steps),
+        "inherit session Git settings",
+    )?])
 }
 
 fn controller_git_settings() -> Result<BTreeMap<String, String>> {

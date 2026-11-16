@@ -79,6 +79,17 @@ pub(super) fn is_agent_output(update: &SessionUpdate) -> bool {
 /// (`taskStopped`, via `noticeTranscriptText`) on 2026-09-22.
 pub(super) const CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX: &str = "**Task stopped by user:** ";
 
+/// Whether `text` is the adapter's stop acknowledgement. The adapter renders
+/// the notice with `transcriptBlock` (`dist/session-notices.js`, claude-agent-acp
+/// 0.102.0 and later): a blockquote paragraph with blank lines on both sides,
+/// `"\n\n> **Task stopped by user:** <name>.\n\n"`, so the marker is not at
+/// the start of the chunk. The bare form is what older adapters sent.
+fn is_stop_acknowledgement_text(text: &str) -> bool {
+    let text = text.trim_start();
+    let text = text.strip_prefix("> ").unwrap_or(text);
+    text.starts_with(CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX)
+}
+
 /// The text of an agent message chunk whose content is a single text block.
 pub(super) fn agent_chunk_text(update: &SessionUpdate) -> Option<&str> {
     match update {
@@ -228,6 +239,35 @@ impl DurableRelay {
             .chain(self.kimi_provisional_tasks.keys().map(String::as_str))
             .filter_map(|tool_call_id| self.bound_agent_terminal(Some(tool_call_id)))
             .collect()
+    }
+
+    /// Whether `update` is the terminal edge of the task that owns the open
+    /// harness turn, which ends that turn (see `air_task_changed`).
+    pub(super) fn air_update_settles_turn(
+        &self,
+        session_id: &str,
+        update: &crate::acp::AirTaskUpdate,
+    ) -> bool {
+        use crate::acp::AirTaskUpdate;
+        let AirTaskUpdate::Finished { task_id, .. } = update else {
+            return false;
+        };
+        self.background_work == BackgroundWorkPolicy::AirTasks
+            && !matches!(
+                self.snapshot.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
+            && self
+                .air_tasks
+                .get(&air_task_key(session_id, task_id))
+                .and_then(AirTaskEntry::turn_ordinal)
+                .is_some_and(|ordinal| {
+                    self.snapshot.active_prompt.is_none()
+                        && self
+                            .snapshot
+                            .harness_turn
+                            .is_some_and(|turn| turn.first_ordinal == ordinal)
+                })
     }
 
     /// Apply AIR lifecycle changes at the single owner of live background work.
@@ -621,8 +661,7 @@ impl DurableRelay {
                     .get(id)
                     .is_some_and(|pending| !pending.is_empty())
             })
-            && agent_chunk_text(update)
-                .is_some_and(|text| text.starts_with(CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX))
+            && agent_chunk_text(update).is_some_and(is_stop_acknowledgement_text)
     }
 
     pub(super) fn is_claude_stop_acknowledgement(&self, update: &SessionUpdate) -> bool {

@@ -119,6 +119,7 @@ fn concurrent_sessions_share_one_verified_upload_and_swaps_leave_other_links_unc
         &config,
         &profile,
         None,
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -626,6 +627,7 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
         &config,
         &profile,
         None,
+        &[],
     )
     .unwrap();
     super::super::upgrade::replace_target_worker_binary_if_stale(

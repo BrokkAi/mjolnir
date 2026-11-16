@@ -493,6 +493,7 @@ fn batch(generation: u64, refresh: bool, ids: &[&str]) -> QuotaRefreshBatch {
         extra: Vec::new(),
         grants: Vec::new(),
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     }
 }
 
@@ -671,6 +672,67 @@ async fn an_explicit_refresh_probes_every_profile_even_when_fresh() {
         next_update(&mut updates).await,
         QuotaUpdate::Finished { generation: 2 }
     ));
+}
+
+/// A named refresh probes even a fresh report, and a forced extra answers
+/// again. The pulse is consumed once: the next batch change re-probes nothing.
+#[tokio::test]
+async fn a_forced_profile_probe_answers_now_and_only_once() {
+    let (profiles, mut updates) = poller_with_store(vec![stored_report("a", 60)]);
+    profiles.send_replace(batch(1, false, &["a"]));
+    // The fresh stored report is published without a probe.
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Report(_)
+    ));
+    assert_quiet(&mut updates).await;
+
+    let forced_map: std::collections::BTreeMap<String, u64> =
+        [("a".to_owned(), 1), ("extra".to_owned(), 1)]
+            .into_iter()
+            .collect();
+    let mut forced = batch(2, false, &["a"]);
+    forced.extra = vec![probeless_request("extra")];
+    forced.forced_probes = forced_map.clone();
+    profiles.send_replace(forced);
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 2 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
+
+    // A batch carrying the same requests again — one a coalesced channel
+    // never delivered — answers nothing twice.
+    let mut quiet = batch(3, false, &["a"]);
+    quiet.extra = vec![probeless_request("extra")];
+    quiet.forced_probes = forced_map;
+    profiles.send_replace(quiet);
+    assert_quiet(&mut updates).await;
+
+    // A new request for the same profiles is a new sequence and answers again.
+    let mut again = batch(4, false, &["a"]);
+    again.extra = vec![probeless_request("extra")];
+    again.forced_probes = [("a".to_owned(), 2), ("extra".to_owned(), 2)]
+        .into_iter()
+        .collect();
+    profiles.send_replace(again);
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 4 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
 }
 
 #[tokio::test]
@@ -1004,6 +1066,7 @@ async fn a_held_claude_profile_still_renews_its_grant_early() {
         extra: Vec::new(),
         grants: vec![grant_only],
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     });
     // The held report is published and the usage API is not asked.
     let QuotaUpdate::Report(outcome) = next_update(&mut updates).await else {
@@ -1053,6 +1116,7 @@ async fn the_poller_wakes_for_every_renewal_with_only_grant_only_profiles() {
         extra: Vec::new(),
         grants: vec![request],
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     for renewal in ["access-2", "access-3"] {
@@ -1151,6 +1215,7 @@ async fn a_due_claude_renewal_is_skipped_while_a_handoff_waits() {
         extra: Vec::new(),
         grants: vec![request],
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     });
     spawn_claude_grant_refresher(
         receiver,
@@ -1197,6 +1262,7 @@ async fn a_reconfigured_claude_profile_is_renewed_under_its_new_home_at_once() {
         extra: Vec::new(),
         grants: vec![request],
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     };
     profiles.send_replace(batch(old_home));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1236,6 +1302,7 @@ async fn a_replaced_claude_login_with_a_sooner_expiry_is_renewed_within_a_rechec
         extra: Vec::new(),
         grants: Vec::new(),
         rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     });
     spawn_claude_grant_refresher(
         receiver,
@@ -1686,74 +1753,77 @@ async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
     );
 }
 
+// Hard-won: #1547: a cooldown held an authentication failure until the profile had been renewed, so the decision mistook the renewal for a refusal.
 #[test]
-fn a_new_credential_signal_waits_out_the_cooldown_without_being_lost() {
-    let signal = |ordinal, reason| CredentialSyncSignal { ordinal, reason };
+fn an_authentication_failure_is_handled_at_once_but_an_empty_response_waits_out_the_cooldown() {
+    let signal = |ordinal, reason, token: Option<&str>| CredentialSyncSignal {
+        ordinal,
+        reason,
+        login_fingerprint: token.map(str::to_owned),
+    };
     let mut tracker = CredentialSyncSignalTracker::default();
     let started = Instant::now();
     tracker.observe(
         "session",
         "work",
-        signal(41, CredentialSyncReason::AuthenticationFailure),
+        signal(41, CredentialSyncReason::AuthenticationFailure, Some("old")),
     );
     assert_eq!(
         tracker.drain_due(started),
         vec![(
             "session".into(),
             "work".into(),
-            CredentialSyncReason::AuthenticationFailure
+            CredentialSyncReason::AuthenticationFailure,
+            Some("old".into())
         )]
+    );
+
+    // A second failure inside the old cooldown is still handled at once.
+    tracker.observe(
+        "session",
+        "work",
+        signal(42, CredentialSyncReason::AuthenticationFailure, None),
+    );
+    assert_eq!(
+        tracker.drain_due(started + Duration::from_secs(1)),
+        vec![(
+            "session".into(),
+            "work".into(),
+            CredentialSyncReason::AuthenticationFailure,
+            None
+        )]
+    );
+    // An observation already handled is not handled twice.
+    tracker.observe(
+        "session",
+        "work",
+        signal(42, CredentialSyncReason::AuthenticationFailure, None),
+    );
+    assert!(
+        tracker
+            .drain_due(started + Duration::from_secs(2))
+            .is_empty()
     );
 
     tracker.observe(
         "session",
-        "work",
-        signal(42, CredentialSyncReason::AuthenticationFailure),
+        "new-profile",
+        signal(43, CredentialSyncReason::EmptyPromptResponse, None),
     );
     assert!(
         tracker
             .drain_due(started + Duration::from_secs(60))
             .is_empty()
     );
-    tracker.observe(
-        "session",
-        "new-profile",
-        signal(43, CredentialSyncReason::EmptyPromptResponse),
-    );
-    assert_eq!(tracker.pending["session"].signal.ordinal, 43);
-
     // No repeated observation is needed: the loop timer drains the sticky
     // failure once its cooldown expires.
     assert_eq!(
-        tracker.drain_due(started + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
+        tracker.drain_due(started + Duration::from_secs(1) + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
         vec![(
             "session".into(),
             "new-profile".into(),
-            CredentialSyncReason::EmptyPromptResponse
-        )]
-    );
-    tracker.observe(
-        "session",
-        "new-profile",
-        signal(43, CredentialSyncReason::EmptyPromptResponse),
-    );
-    assert!(
-        tracker
-            .drain_due(started + (IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN * 2))
-            .is_empty()
-    );
-
-    tracker.observe(
-        "other",
-        "personal",
-        signal(1, CredentialSyncReason::AuthenticationFailure),
-    );
-    assert_eq!(
-        tracker.drain_due(started + Duration::from_secs(60)),
-        vec![(
-            "other".into(),
-            "personal".into(),
-            CredentialSyncReason::AuthenticationFailure
+            CredentialSyncReason::EmptyPromptResponse,
+            None
         )]
     );
 }
@@ -1783,6 +1853,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
                 guardian_review_model: None,
                 codex_profile: None,
                 legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
@@ -1880,6 +1951,7 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
                 guardian_review_model: None,
                 codex_profile: None,
                 legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
@@ -2077,10 +2149,12 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -2111,6 +2185,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
     let failed = CredentialSyncResult {
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err("worker proxy disconnected".into()),
             step_failures: Vec::new(),
@@ -2136,10 +2211,12 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::EmptyPromptResponse,
+            login_fingerprint: None,
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures: Vec::new(),
@@ -2163,6 +2240,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
         failure: Some("controller credential file is unreadable".into()),
         outcomes: Vec::new(),
@@ -2189,6 +2267,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err(detail.to_owned()),
             step_failures: Vec::new(),
@@ -2231,6 +2310,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures: Vec::new(),
@@ -2257,6 +2337,7 @@ fn a_result_clears_only_the_failures_of_the_steps_it_checked() {
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures,
@@ -2804,12 +2885,14 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             trigger: Some(CredentialSyncCause {
                 session_id: session_id.into(),
                 reason,
+                login_fingerprint: None,
             }),
             failure: failure.map(str::to_owned),
             outcomes: outcome
                 .map(|outcome| {
                     vec![CredentialSyncOutcome {
                         unchanged_login: None,
+                        current_access_token: None,
                         session_id: session_id.into(),
                         outcome,
                         step_failures: Vec::new(),
@@ -2855,6 +2938,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             failure: None,
             outcomes: vec![CredentialSyncOutcome {
                 unchanged_login: None,
+                current_access_token: None,
                 session_id: session_id.into(),
                 outcome: Err("worker proxy disconnected".into()),
                 step_failures: Vec::new(),
@@ -2916,6 +3000,7 @@ fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
             trigger: Some(CredentialSyncCause {
                 session_id: "parked-child".into(),
                 reason,
+                login_fingerprint: None,
             }),
             failure: None,
             outcomes: Vec::new(),
@@ -3067,6 +3152,7 @@ fn a_result_about_one_sessions_aws_renewal_does_not_end_other_sessions_failures(
 
     let outcome = |session: &str, detail: Option<&str>| CredentialSyncOutcome {
         unchanged_login: None,
+        current_access_token: None,
         session_id: session.into(),
         outcome: Ok(Vec::new()),
         step_failures: detail

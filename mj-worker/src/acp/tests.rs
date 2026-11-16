@@ -404,7 +404,7 @@ fn antigravity_owned_mcp_servers_are_granted_in_its_project_file() {
             "projectResources": {},
             "permissionGrants": {
                 "permissionGrants": {
-                    "allow": ["command(gh pr list)", "mcp(mj-review/*)"],
+                    "allow": ["command(gh pr list)", "read_file(/personal-notes/)", "mcp(mj-review/*)"],
                     "deny": ["command(rm)"]
                 },
                 "v2Migrated": true
@@ -419,6 +419,10 @@ fn antigravity_owned_mcp_servers_are_granted_in_its_project_file() {
         "MJ_ANTIGRAVITY_HOME".into(),
         home.path().to_string_lossy().into_owned(),
     );
+    let user_home = home.path().join("user-home");
+    let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    spec.environment
+        .insert(home_variable.into(), user_home.to_str().unwrap().into());
     spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Child));
     spec.project_memory = Some(ProjectMemoryLaunchConfig {
         history_socket: Some("/worker/history.sock".into()),
@@ -434,14 +438,37 @@ fn antigravity_owned_mcp_servers_are_granted_in_its_project_file() {
         command: "analyzer".into(),
         args: vec![],
     })];
-    stage_antigravity_mcp_grants(&spec).unwrap();
+    stage_antigravity_grants(&spec).unwrap();
     let staged = std::fs::read_to_string(&project).unwrap();
     assert_eq!(
-        staged,
+        staged.replace(
+            &serde_json::to_string(&format!("read_file({})", user_home.join("").display()))
+                .unwrap(),
+            "\"read_file(@USER_HOME@)\"",
+        ),
         include_str!("testdata/antigravity_project_grants.json")
     );
     // Every worker start stages again.
-    stage_antigravity_mcp_grants(&spec).unwrap();
+    stage_antigravity_grants(&spec).unwrap();
+    assert_eq!(std::fs::read_to_string(&project).unwrap(), staged);
+    // A later launch of this profile with another home replaces the earlier
+    // home's grant rather than leaving both homes readable.
+    let other_home = home.path().join("other-home");
+    spec.environment
+        .insert(home_variable.into(), other_home.to_str().unwrap().into());
+    stage_antigravity_grants(&spec).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&project).unwrap(),
+        staged.replace(
+            &serde_json::to_string(&format!("read_file({})", user_home.join("").display()))
+                .unwrap(),
+            &serde_json::to_string(&format!("read_file({})", other_home.join("").display()))
+                .unwrap(),
+        )
+    );
+    spec.environment
+        .insert(home_variable.into(), user_home.to_str().unwrap().into());
+    stage_antigravity_grants(&spec).unwrap();
     assert_eq!(std::fs::read_to_string(&project).unwrap(), staged);
     // The worker itself answers nothing for agy.
     let request = RequestPermissionRequest::new(
@@ -463,10 +490,29 @@ fn antigravity_owned_mcp_servers_are_granted_in_its_project_file() {
             .response(&request)
             .is_none()
     );
+    // Missing or root-valued launch homes must fail visibly, never grant `/`.
+    spec.environment.remove(home_variable);
+    assert!(
+        stage_antigravity_grants(&spec)
+            .unwrap_err()
+            .to_string()
+            .contains(home_variable)
+    );
+    spec.environment.insert(
+        home_variable.into(),
+        user_home
+            .ancestors()
+            .last()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into(),
+    );
+    assert!(stage_antigravity_grants(&spec).is_err());
     // Unconstrained targets run agy with its skip-permissions flag instead.
     spec.execution_policy = ExecutionPolicy::Unconstrained;
     std::fs::write(&project, "unchanged").unwrap();
-    stage_antigravity_mcp_grants(&spec).unwrap();
+    stage_antigravity_grants(&spec).unwrap();
     assert_eq!(std::fs::read_to_string(&project).unwrap(), "unchanged");
 }
 
@@ -7913,6 +7959,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
 async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
     exercise_context_clear(false, HarnessKind::Codex).await;
     exercise_context_clear(false, HarnessKind::Claude).await;
+    exercise_context_clear(false, HarnessKind::Kimi).await;
 }
 
 /// I1-13: a resumed Claude session reports its model as a raw id that its own
@@ -7999,6 +8046,7 @@ for line in sys.stdin:
 async fn failed_clear_reloads_the_previous_native_session() {
     exercise_context_clear(true, HarnessKind::Codex).await;
     exercise_context_clear(true, HarnessKind::Claude).await;
+    exercise_context_clear(true, HarnessKind::Kimi).await;
 }
 
 async fn exercise_context_clear(fail_replacement: bool, harness: HarnessKind) {

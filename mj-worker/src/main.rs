@@ -47,6 +47,29 @@ enum WorkerCommand {
     /// Move-only inventory and disk-backed workspace transfer utilities.
     #[command(hide = true)]
     MoveWorkspace,
+    /// Print `alive`, `starting` or `dead` for the worker that owns a root,
+    /// decided by the lock on its `worker.lock`.
+    #[command(hide = true)]
+    Liveness {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Print the pid of the worker holding a root's lock, or nothing.
+    #[command(hide = true)]
+    Holder {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Stop the worker that owns a root and every process it started, and
+    /// return only when its lock is free and none of them is left.
+    #[command(hide = true)]
+    Stop {
+        #[arg(long)]
+        root: PathBuf,
+        /// Kill at once instead of allowing the TERM grace.
+        #[arg(long)]
+        kill: bool,
+    },
     /// Print this worker's compatibility identity. The controller asks an
     /// image's worker this before linking a session to it.
     #[command(hide = true)]
@@ -94,6 +117,24 @@ enum WorkerCommand {
     RestoreCheckpoint {
         #[arg(long)]
         spec: PathBuf,
+        /// Restore only missing parent state; never modify checkout or child reports.
+        #[arg(long, conflicts_with = "missing_checkout")]
+        missing_parent: bool,
+        #[arg(long)]
+        missing_checkout: bool,
+        /// Current controller-owned queue/frontier, for partial parent recovery.
+        #[arg(long, requires = "missing_parent")]
+        relay_seed: Option<PathBuf>,
+    },
+    /// Journal queue discard while the worker is stopped, before any dispatch.
+    #[command(hide = true)]
+    DiscardQueuedPrompts {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        command_id: String,
     },
     /// Install one streamed resource directory on a remote target.
     InstallResource {
@@ -561,6 +602,24 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             println!("{}", mj_worker::move_workspace::execute(command)?);
             Ok(())
         }
+        WorkerCommand::Liveness { root } => {
+            println!("{}", mj_worker::worker_stop::liveness(&root)?.token());
+            Ok(())
+        }
+        WorkerCommand::Holder { root } => {
+            if let Some(pid) = mj_worker::worker_stop::holder(&root)? {
+                println!("{pid}");
+            }
+            Ok(())
+        }
+        WorkerCommand::Stop { root, kill } => mj_worker::worker_stop::stop(
+            &root,
+            if kill {
+                std::time::Duration::ZERO
+            } else {
+                mj_worker::worker_stop::TERM_GRACE
+            },
+        ),
         WorkerCommand::BuildId => {
             println!("{}", mj_core::worker_build::WORKER_BUILD_ID);
             Ok(())
@@ -582,9 +641,29 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             println!("{}", serde_json::to_string(&checkpoint)?);
             Ok(())
         }
-        WorkerCommand::RestoreCheckpoint { spec } => {
-            mj_worker::checkpoint::restore_from_spec_file(&spec)
+        WorkerCommand::RestoreCheckpoint {
+            spec,
+            missing_parent,
+            missing_checkout,
+            relay_seed,
+        } => {
+            if missing_parent {
+                mj_worker::checkpoint::restore_missing_from_spec_file(&spec, relay_seed.as_deref())
+            } else if missing_checkout {
+                mj_worker::checkpoint::restore_checkout_from_spec_file(&spec)
+            } else {
+                mj_worker::checkpoint::restore_from_spec_file(&spec)
+            }
         }
+        WorkerCommand::DiscardQueuedPrompts {
+            root,
+            session_id,
+            command_id,
+        } => mj_worker::checkpoint::discard_queued_prompts_before_start(
+            &root,
+            &session_id,
+            &command_id,
+        ),
         WorkerCommand::InstallResource { destination } => {
             mj_checkpoint::resources::install_resource_stream(std::io::stdin(), &destination)
         }
@@ -654,11 +733,16 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             } else {
                 mj_checkpoint::archive::FetchMode::Content
             };
-            write_stdout(
-                &mj_checkpoint::archive::fetch_session_path(&path, &roots, temp, mode)
-                    .map_err(export_error)?
-                    .encode()?,
+            let fetched = mj_checkpoint::archive::fetch_session_path(
+                &path,
+                &roots,
+                temp,
+                mode,
+                mj_checkpoint::archive::create_fetch_spool()?,
             )
+            .map_err(export_error)?;
+            mj_core::test_hooks::reach_test_hook("fetch_source_ready")?;
+            fetched.write_to(std::io::stdout().lock())
         }
         WorkerCommand::StoreFetch {
             session,
@@ -666,25 +750,20 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             directory,
             length,
         } => {
-            let bytes = mj_checkpoint::archive::read_session_file_input(std::io::stdin().lock())
-                .map_err(export_error)?;
-            anyhow::ensure!(
-                bytes.len() == length,
-                "incomplete fetch transfer: expected {length} bytes, received {}",
-                bytes.len()
-            );
-            let fetched = mj_checkpoint::archive::FetchedPath {
-                kind: if directory {
-                    mj_checkpoint::archive::FetchedKind::Directory
-                } else {
-                    mj_checkpoint::archive::FetchedKind::File
-                },
-                path: source,
-                bytes,
+            let kind = if directory {
+                mj_checkpoint::archive::FetchedKind::Directory
+            } else {
+                mj_checkpoint::archive::FetchedKind::File
             };
-            write_stdout(&serde_json::to_vec(
-                &fetched.save(&std::env::temp_dir(), &session)?,
-            )?)
+            let saved = mj_checkpoint::archive::FetchedPath::store(
+                kind,
+                source,
+                &std::env::temp_dir(),
+                &session,
+                length as u64,
+                std::io::stdin().lock(),
+            )?;
+            write_stdout(&serde_json::to_vec(&saved)?)
         }
         WorkerCommand::WriteFile {
             root,
@@ -895,13 +974,14 @@ mod tests {
         assert!(failed.downcast_ref::<ExportRefused>().is_none());
     }
 
+    // Hard-won: #1543: the receiving worker also capped fetched artifacts at 16 MiB.
     #[test]
-    fn fetch_storage_streams_the_maximum_file_and_refuses_truncated_input() {
+    fn fetch_storage_accepts_large_files_and_refuses_truncated_input() {
         use mj_core::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};
         const CHILD_ROOT: &str = "MJ_TEST_FETCH_STORAGE_ROOT";
         const SOURCE: &str = "/workspace/λ binary.dat";
         const SESSION: &str = "source-session";
-        const LENGTH: usize = mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize;
+        const LENGTH: usize = 17 * 1024 * 1024;
         if std::env::var_os(CHILD_ROOT).is_some() {
             tokio::runtime::Runtime::new()
                 .unwrap()
@@ -922,7 +1002,7 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let bytes: Vec<u8> = (0..LENGTH).map(|i| (i % 251) as u8).collect();
-        let name = "tests::fetch_storage_streams_the_maximum_file_and_refuses_truncated_input";
+        let name = "tests::fetch_storage_accepts_large_files_and_refuses_truncated_input";
         let mut command = CommandSpec::new(
             std::env::current_exe().unwrap().to_string_lossy(),
             ["--exact", name, "--nocapture", "--quiet"],
@@ -956,7 +1036,7 @@ mod tests {
                 .starts_with(root.path().join("mjolnir").join(SESSION))
         );
         assert_eq!(saved.source, SOURCE);
-        assert_eq!(saved.bytes, LENGTH);
+        assert_eq!(saved.bytes, LENGTH as u64);
         assert_eq!(std::fs::read(&saved.path).unwrap(), bytes);
         let truncated = command.with_sensitive_stdin(vec![0; 128 * 1024]);
         let output = execute(&truncated);

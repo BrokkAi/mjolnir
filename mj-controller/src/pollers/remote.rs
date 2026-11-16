@@ -164,6 +164,7 @@ fn runtime_state_update(
         moves: snapshot.moves,
         subagents: snapshot.subagents,
         launch_recency: metadata.launch_recency.into_inner(),
+        form_holders: metadata.form_holders,
         session_attention: metadata.session_attention,
         unread_frontiers: metadata.unread_frontiers,
         notification_dismissals: metadata.notification_dismissals,

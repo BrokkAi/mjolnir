@@ -119,6 +119,10 @@ pub(super) fn spawn_quota_refresher_with(
         // One-shot extras already probed, by profile and identity. They never
         // join the batch's schedule; a forced cycle re-probes them.
         let mut probed_extra: std::collections::BTreeMap<String, String> = Default::default();
+        // The named forced probes this poller has answered, by profile. The
+        // batch retains its requests, so comparing sequences instead of
+        // clearing a flag survives the channel coalescing rapid publishes.
+        let mut consumed_forced: std::collections::BTreeMap<String, u64> = Default::default();
         loop {
             let now = epoch_seconds();
             let wake = batch
@@ -148,7 +152,14 @@ pub(super) fn spawn_quota_refresher_with(
                     let report = quotas.report(&request.profile_id);
                     // A hold outranks even an explicit refresh: probing an
                     // endpoint that just said 429 only extends the limit.
-                    !on_hold(report, now) && (batch.refresh || next_probe_at(report) <= now)
+                    !on_hold(report, now)
+                        && (batch.refresh
+                            || batch.forced_probes.get(&request.profile_id).is_some_and(
+                                |sequence| {
+                                    consumed_forced.get(&request.profile_id) < Some(sequence)
+                                },
+                            )
+                            || next_probe_at(report) <= now)
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -157,6 +168,12 @@ pub(super) fn spawn_quota_refresher_with(
                 .iter()
                 .filter(|request| {
                     batch.refresh
+                        || batch
+                            .forced_probes
+                            .get(&request.profile_id)
+                            .is_some_and(|sequence| {
+                                consumed_forced.get(&request.profile_id) < Some(sequence)
+                            })
                         || probed_extra.get(&request.profile_id) != Some(&request.cache_identity())
                 })
                 .filter(|request| !on_hold(quotas.report(&request.profile_id), now))
@@ -171,6 +188,9 @@ pub(super) fn spawn_quota_refresher_with(
             let generation = batch.generation;
             let forced = batch.refresh;
             batch.refresh = false;
+            for (profile_id, sequence) in std::mem::take(&mut batch.forced_probes) {
+                consumed_forced.insert(profile_id, sequence);
+            }
             if (!due.is_empty() || forced)
                 && !refresh_profile_quotas(&mut quotas, generation, &due, &updates_tx).await
             {

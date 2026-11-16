@@ -248,6 +248,9 @@ struct FakeEnvironment {
     /// While set, every close fails, and each attempt is counted.
     close_fails: std::sync::atomic::AtomicBool,
     close_attempts: std::sync::atomic::AtomicUsize,
+    /// Closes running now, and the most that ever ran together.
+    closes_in_flight: std::sync::atomic::AtomicUsize,
+    most_closes_in_flight: std::sync::atomic::AtomicUsize,
     start_error: Mutex<Option<String>>,
     /// What the store says about each reviewer child; absent means live with
     /// no handback.
@@ -340,6 +343,8 @@ impl FakeEnvironment {
             close_error: Mutex::new(None),
             close_fails: std::sync::atomic::AtomicBool::new(false),
             close_attempts: std::sync::atomic::AtomicUsize::new(0),
+            closes_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            most_closes_in_flight: std::sync::atomic::AtomicUsize::new(0),
             start_error: Mutex::new(None),
             standings: Mutex::new(std::collections::BTreeMap::new()),
             standing_errors: Mutex::new(std::collections::BTreeMap::new()),
@@ -534,6 +539,14 @@ impl ReviewEnvironment for FakeEnvironment {
         Box::pin(async move {
             self.close_attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let running = self
+                .closes_in_flight
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.most_closes_in_flight
+                .fetch_max(running, std::sync::atomic::Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            let _done = scopeguard_decrement(&self.closes_in_flight);
             if self.close_fails.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("worker restart queue is full".into());
             }
@@ -2216,6 +2229,61 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
     assert!(environment.state().active.is_some());
 }
 
+struct DecrementOnDrop<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for DecrementOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn scopeguard_decrement(counter: &std::sync::atomic::AtomicUsize) -> DecrementOnDrop<'_> {
+    DecrementOnDrop(counter)
+}
+
+// A restart finds every finished reviewer of an old store at once (19,196 in
+// the live one). The sweep closes them concurrently up to its measured width,
+// and a close that fails retries on its own instead of holding the queue.
+#[tokio::test]
+async fn startup_sweep_closes_finished_reviewers_concurrently_within_its_width_past_a_failing_one()
+{
+    let session = session_id("sweep-many");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    for index in 0..200 {
+        environment
+            .child_relations
+            .lock()
+            .unwrap()
+            .push(ReviewerChildRelation {
+                parent_session_id: session.clone(),
+                request_key: format!("reviewer:old-{index}"),
+                child_session_id: format!("old-child-{index}"),
+            });
+    }
+    *environment.close_error.lock().unwrap() = Some("worker unreachable".into());
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while environment.closed.lock().unwrap().len() < 200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("every finished reviewer is closed, the failed one on its retry");
+    let most = environment
+        .most_closes_in_flight
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        most > 1 && most <= super::reviewer_child::SWEEP_CLOSE_WIDTH,
+        "the sweep closes concurrently but never past its width: {most}"
+    );
+    host.shutdown().await.unwrap();
+}
+
 /// A group restored from the store with one busy child per role, as a new
 /// daemon finds it. Returns once every child has been started.
 async fn restore_busy_group(
@@ -3027,6 +3095,68 @@ async fn push_path_reaches_capture_and_old_worker_refuses_it() {
         *environment.registered_working_directories.lock().unwrap(),
         vec![Some(PathBuf::from("/workspace/linked"))]
     );
+    host.shutdown().await.unwrap();
+}
+
+// A request from a session whose review is off is accepted without choosing
+// reviewers, and the pushed tree is recorded so an already-installed gate
+// does not block the push.
+#[tokio::test]
+async fn a_review_request_with_review_off_records_the_tree_and_chooses_no_reviewer() {
+    let session = session_id("reviewoff");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let off: ReviewConfigSource = Arc::new(|_| ReviewConfig::default());
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), off, environment.clone());
+    let mut running = view(
+        &session,
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL);
+    manager
+        .publisher
+        .publish(session.clone(), running)
+        .await
+        .unwrap();
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.begin_push(&session, None).await })
+    };
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    reply
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: "/workspace/repo".into(),
+                base_commit: Some("aaaaaaa123".into()),
+                head_commit: Some("bbbbbbb456".into()),
+                current_tree: "newtree".into(),
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    let (_, action, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordOverridden { .. }))
+        .await;
+    let ReviewerAction::RecordOverridden { trees } = action else {
+        unreachable!()
+    };
+    assert_eq!(
+        trees.get(&PathBuf::from("/workspace/repo")),
+        Some(&("newtree".to_owned(), "bbbbbbb456".to_owned()))
+    );
+    reply.send(Ok(ReviewerOutcome::BaselineAdvanced)).unwrap();
+    let accepted = request.await.unwrap().unwrap();
+    assert_eq!(accepted["accepted"], true);
+    assert_eq!(accepted["review"], "off");
+    assert!(environment.children.lock().unwrap().is_empty());
     host.shutdown().await.unwrap();
 }
 

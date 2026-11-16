@@ -59,7 +59,7 @@ pub struct ProcessFacts {
     pub shown: Vec<RunningProcess>,
     /// `running` minus `shown.len()`.
     pub omitted: u32,
-    /// Identity of every counted process, for the park's later liveness check.
+    /// Identity of every counted process, for the worker's liveness watcher, which republishes how many are still alive (see [`WorkLiveness`]).
     pub identities: Vec<ProcessIdentity>,
     /// Processes of the same user outside the harness's tree whose environment
     /// could not be read, so that whether they carry this session's marker, and
@@ -116,6 +116,40 @@ pub struct ChangedPath {
     /// `?` for untracked, `U` for a conflict.
     pub status: String,
     pub path: String,
+}
+
+/// Whether the work processes a finished turn left running are still alive.
+///
+/// The worker owns this fact: it watches the process identities recorded in
+/// that turn's [`WorkFacts`] and republishes the count as they exit, because
+/// only the worker can see its own process namespace (a remote host or a
+/// container). The daemon reads it from the relay snapshot to hold a child
+/// that is waiting on its own background work, and to delay a park that would
+/// stop those processes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkLiveness {
+    /// `completed_ordinal` of the turn whose work facts are watched.
+    pub completed_ordinal: u64,
+    /// How many of that turn's process identities are still alive.
+    pub alive: u32,
+    /// Wall-clock time of the check that produced `alive`.
+    pub checked_at_ms: u64,
+}
+
+impl WorkLiveness {
+    /// The one rule for starting to watch a finished turn's work: facts that
+    /// list live process identities, however the turn was started.
+    pub fn from_turn_facts(completed_ordinal: u64, facts: Option<&WorkFacts>) -> Option<Self> {
+        let facts = facts?;
+        match &facts.processes {
+            Observed::Known(processes) if !processes.identities.is_empty() => Some(Self {
+                completed_ordinal,
+                alive: u32::try_from(processes.identities.len()).unwrap_or(u32::MAX),
+                checked_at_ms: facts.observed_at_ms,
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl WorkFacts {

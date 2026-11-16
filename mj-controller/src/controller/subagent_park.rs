@@ -253,6 +253,18 @@ impl Controller {
                         .context("parked child has no target")?,
                 )?;
             }
+            // The parked home holds the login the child had when it parked; a
+            // renewal since then revoked it. Stage the profile again so the
+            // worker starts with the current login (#1547).
+            self.prepare_worker_files_for(
+                session_id,
+                &backend,
+                &worker_root,
+                executor,
+                super::worker_binary::WorkerFilePreparation::RefreshProfileOnly,
+                super::worker_binary::LaunchHistory::Stored,
+            )
+            .context("stage the current profile login for the parked sub-agent")?;
             let launch = self.current_worker_launch_config(session_id, &backend)?;
             refresh_installed_worker_binary(executor, &backend, session_id)
                 .context(RESTART_FROM_PARKED.replace)?;
@@ -308,6 +320,8 @@ impl Controller {
                         reconnect: &reconnect,
                         launch: Some(&launch),
                         prepared: true,
+                        discard_queued_prompts: None,
+                        swap_admission: None,
                         messages: &RESTART_FROM_PARKED,
                     },
                 )
@@ -590,6 +604,7 @@ mod tests {
                 guardian_review_model: None,
                 codex_profile: None,
                 legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)
@@ -678,6 +693,40 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|p| p == "stop Mjolnir worker daemon")
+        );
+    }
+
+    // Hard-won: #1547: a woken child started with the login it parked with, which a renewal had revoked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unpark_starts_the_worker_with_the_profiles_current_login() {
+        if !isolated("unpark_starts_the_worker_with_the_profiles_current_login") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let controller = waking_controller(root.path(), 0);
+        let profile = controller.config.profiles["codex"].clone();
+        let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
+        let staged = std::path::PathBuf::from(crate::controller::target_profile_home_for_test(
+            &backend,
+            LATCH_RELAY_SESSION,
+            &profile,
+        ))
+        .join(profile.kind.credential_file_name());
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(&staged, b"{\"login\":\"the one the child parked with\"}").unwrap();
+        std::fs::write(
+            profile.authentication_marker(),
+            b"{\"login\":\"renewed while it was parked\"}",
+        )
+        .unwrap();
+        controller
+            .unpark_subagent_worker(LATCH_RELAY_SESSION, &WakeTarget::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&staged).unwrap(),
+            b"{\"login\":\"renewed while it was parked\"}"
         );
     }
 

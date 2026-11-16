@@ -261,7 +261,6 @@ mod tests {
             ("other".to_owned(), "Other".to_owned()),
             ("third".to_owned(), "Third".to_owned()),
         ]));
-        dashboard.order_workspaces(&["default".into(), "other".into(), "third".into()]);
         dashboard.focus_sessions();
         dashboard
     }
@@ -323,7 +322,6 @@ mod tests {
             ("default".to_owned(), "Default".to_owned()),
             ("other".to_owned(), "Other".to_owned()),
         ]));
-        dashboard.order_workspaces(&["default".into(), "other".into()]);
         dashboard.focus_sessions();
         dashboard
     }
@@ -414,7 +412,6 @@ mod tests {
                 .map(|id| (id.clone(), format!("Workspace {id}")))
                 .collect(),
         );
-        dashboard.order_workspaces(&ids);
         dashboard.focus_sessions();
         dashboard.dispatch_command(CommandId::ChangeWorkspace);
         let lines = drawn(&mut dashboard, 120, 40);

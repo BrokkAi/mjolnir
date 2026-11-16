@@ -612,6 +612,10 @@ pub enum DashboardAction {
     },
     /// Empty `[quota] prefer`.
     ClearLoadBalancingPreferences,
+    /// Probe one profile's quota now, even a disabled profile's.
+    ProbeQuotaProfile {
+        profile_id: String,
+    },
     OpenResumeDialog,
     ImportSession {
         profile_id: String,
@@ -944,6 +948,7 @@ pub struct DashboardPasteTarget {
 }
 
 pub struct DashboardState {
+    pub(crate) form_holders: mj_core::snapshot_map::SnapshotMap<String, String>,
     pub(crate) unread_frontiers: mj_core::snapshot_map::SnapshotMap<String, u64>,
     pub(crate) notification_dismissals:
         mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::NotificationDismissal>,
@@ -1341,6 +1346,7 @@ impl DashboardState {
             stopped_records: Default::default(),
             unread_frontiers: Default::default(),
             notification_dismissals: Default::default(),
+            form_holders: Default::default(),
             served_attention: Tracked::new(Default::default()),
             launch_recency,
             recent_launch: None,

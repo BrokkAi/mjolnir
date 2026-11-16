@@ -144,6 +144,9 @@ for line in sys.stdin:
         .unwrap(),
     )
     .unwrap();
+    // Lifecycle commands run the session's worker build from its root.
+    std::fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_mj-worker"), root.join("hel")).unwrap();
     let mut command = CommandSpec::new(
         env!("CARGO_BIN_EXE_mj-worker"),
         [

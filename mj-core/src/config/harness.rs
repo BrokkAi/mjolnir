@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{Environment, default_true, is_true, validate_id};
+use super::{Environment, default_true, is_false, is_true, validate_id};
 use crate::codex_provider::{BuiltInCodexProvider, CodexProvider, CodexProviderDefinition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -530,6 +530,37 @@ impl HarnessKind {
         } else {
             value.as_ref().to_path_buf()
         }
+    }
+
+    /// Extra CLI arguments required to point this harness's ACP or login
+    /// command at `home`, in addition to [`Self::configure_home_environment`].
+    pub fn home_cli_args(self, home: &Path) -> Vec<String> {
+        match self {
+            Self::Antigravity => vec!["--gemini-dir".into(), crate::target_path::text(home)],
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh => Vec::new(),
+        }
+    }
+
+    /// Extra CLI arguments for `self` derived from `environment`, failing if a
+    /// harness that requires a CLI home argument is missing its home variable.
+    pub fn home_cli_args_from_environment(
+        self,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>> {
+        let args = match environment.get(self.home_env()) {
+            Some(value) => self.home_cli_args(&self.home_from_environment(value)),
+            None => Vec::new(),
+        };
+        if self == Self::Antigravity && args.is_empty() {
+            bail!("Antigravity staged home is missing");
+        }
+        Ok(args)
     }
 
     pub const ALL: [Self; 8] = [
@@ -1258,6 +1289,12 @@ pub struct HarnessProfile {
     /// Mjolnir generates the catalog only for those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_review_model: Option<String>,
+    /// Whether load balancing may pick this subscription profile once its
+    /// quota for the requested model is gone and only paid credits remain.
+    /// Off by default: a profile out of subscription quota is not offered
+    /// until the quota resets. Usage-priced profiles are unaffected.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub load_balancing_may_consume_credits: bool,
     /// A Codex profile overlay, `<home>/<name>.config.toml`, layered over the
     /// home's `config.toml` as `codex --profile <name>` would layer it. See
     /// [`crate::codex_provider::effective_config`].
@@ -1378,6 +1415,7 @@ impl HarnessProfile {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             models: Default::default(),

@@ -202,3 +202,114 @@ fn restored_seed(relay_root: &Path) -> mj_core::relay::RestoredRelaySeed {
     serde_json::from_slice(&fs::read(mj_core::relay::restored_relay_seed_path(relay_root)).unwrap())
         .unwrap()
 }
+
+// Hard-won: 055d8a772 review: recovery of one component must preserve newer parent state and current files.
+#[test]
+fn checkout_recovery_publishes_only_the_staged_checkout_and_preserves_a_new_current_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut source, archive_path) = fixture(temp.path());
+    git(
+        &source.workspace_root,
+        &["clone", "--quiet", "app", "second"],
+    );
+    source.repositories.push(CheckpointRepositorySpec {
+        id: "second".into(),
+        relative_destination: "second".into(),
+        capture: CheckpointRepositoryCapture::DeltaFrom {
+            base_commit: git(
+                &source.workspace_root.join("second"),
+                &["rev-parse", "HEAD"],
+            )
+            .trim()
+            .into(),
+        },
+        origin_override: None,
+    });
+    fs::write(
+        source.workspace_root.join("second/README.md"),
+        b"archived second repository work",
+    )
+    .unwrap();
+    export_checkpoint(&source).unwrap();
+    let stage = temp.path().join("checkout-stage");
+    fs::create_dir(&stage).unwrap();
+    git(
+        &stage,
+        &[
+            "clone",
+            "--quiet",
+            source.workspace_root.join("app").to_str().unwrap(),
+            "app",
+        ],
+    );
+    git(
+        &stage,
+        &[
+            "clone",
+            "--quiet",
+            source.workspace_root.join("second").to_str().unwrap(),
+            "second",
+        ],
+    );
+    let parent_native = temp.path().join("current-native");
+    fs::create_dir(&parent_native).unwrap();
+    fs::write(parent_native.join("sentinel"), b"newer native state").unwrap();
+    let parent_relay = temp.path().join("current-relay");
+    fs::create_dir(&parent_relay).unwrap();
+    fs::write(
+        parent_relay.join(mj_core::relay::RELAY_STATE_FILE),
+        b"current relay",
+    )
+    .unwrap();
+    let destination = temp.path().join("checkout-current");
+    let spec = CheckoutRecoverySpec {
+        version: 1,
+        checkpoint_sha256: verify_archive_streaming(&archive_path)
+            .unwrap()
+            .archive_sha256,
+        staging_root: stage.clone(),
+        staged_checkout: stage.join("app"),
+        destination_checkout: destination.join("app"),
+        additional_checkouts: vec![CheckoutRecoveryPublication {
+            staged_checkout: stage.join("second"),
+            destination_checkout: destination.join("second"),
+        }],
+        restore: CheckpointRestoreSpec {
+            archive_path,
+            workspace_root: stage.clone(),
+            report_root: None,
+            relay_root: parent_relay.clone(),
+            harness_home: parent_native.clone(),
+            restore_repositories: true,
+            restore_native: false,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+    };
+    let spec_path = temp.path().join("checkout-recovery.json");
+    fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+    crate::checkpoint::restore_checkout_from_spec_file(&spec_path).unwrap();
+    assert!(destination.join("app/.git").is_dir());
+    assert!(!stage.join("app").exists());
+    assert!(!stage.join("second").exists());
+    assert_eq!(
+        fs::read(destination.join("second/README.md")).unwrap(),
+        b"archived second repository work"
+    );
+    fs::write(destination.join("app/current-work"), b"new current files").unwrap();
+    // An interrupted caller can retry after publication; it must not replay
+    // the archive over the now-current checkout, even without its old staging.
+    crate::checkpoint::restore_checkout_from_spec_file(&spec_path).unwrap();
+    assert_eq!(
+        fs::read(destination.join("app/current-work")).unwrap(),
+        b"new current files"
+    );
+    assert_eq!(
+        fs::read(parent_native.join("sentinel")).unwrap(),
+        b"newer native state"
+    );
+    assert_eq!(
+        fs::read(parent_relay.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+        b"current relay"
+    );
+}
