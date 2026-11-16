@@ -1,7 +1,7 @@
-use super::{MAX_SESSION_FILE_BYTES, SessionExportError, ensure_no_symlink_ancestors};
+use super::{MAX_SESSION_FILE_BYTES, SessionExportError};
 use anyhow::Context;
-use std::fs;
-use std::io::{Read, Write};
+use mj_core::confined_path::{ConfinedDir, Publish, PublishError};
+use std::io::Read;
 use std::path::Path;
 
 /// Bound input on both sides of the transport, including stdin with no length.
@@ -35,82 +35,36 @@ pub fn write_session_file(
         )));
     }
     let root = root.canonicalize().context("resolve session workspace")?;
-    ensure_no_symlink_ancestors(&root, relative).map_err(refuse)?;
-    let destination = root.join(relative);
-    let existing = match fs::symlink_metadata(&destination) {
-        Ok(metadata) => {
-            if !metadata.is_file() || metadata.file_type().is_symlink() {
-                return Err(SessionExportError::Refused(
-                    "destination is not a regular file".into(),
-                ));
-            }
-            if !overwrite {
-                return Err(SessionExportError::Refused(
-                    "file already exists; request overwrite explicitly".into(),
-                ));
-            }
-            Some(metadata.permissions())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(anyhow::Error::new(error)
-                .context("inspect file destination")
-                .into());
-        }
-    };
-    let parent = destination
-        .parent()
-        .context("file destination has no parent")?;
-    fs::create_dir_all(parent).context("create session file parent directories")?;
-    ensure_no_symlink_ancestors(&root, relative).map_err(refuse)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).context("stage session file")?;
-    temporary
-        .write_all(bytes)
-        .context("write staged session file")?;
-    if let Some(permissions) = existing {
-        temporary
-            .as_file()
-            .set_permissions(permissions)
-            .context("preserve file permissions")?;
-    }
-    temporary
-        .as_file()
-        .sync_all()
-        .context("sync staged session file")?;
-    ensure_no_symlink_ancestors(&root, relative).map_err(refuse)?;
-    match fs::symlink_metadata(&destination) {
-        Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
-            return Err(SessionExportError::Refused(
-                "destination is not a regular file".into(),
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(anyhow::Error::new(error)
-                .context("recheck file destination")
-                .into());
-        }
-    }
-    let result = if overwrite {
-        temporary.persist(&destination)
+    // The workspace's own processes can rename and relink its directories
+    // while this runs, so every step resolves from handles opened without
+    // following a link rather than from path text (#1419).
+    let root = ConfinedDir::open_root(&root)?.context("session workspace disappeared")?;
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let name = relative
+        .file_name()
+        .context("file destination has no name")?;
+    let directory = root.create_dir_all(parent).map_err(refuse)?;
+    let publish = if overwrite {
+        Publish::Replace
     } else {
-        temporary.persist_noclobber(&destination)
+        Publish::CreateNew
     };
-    match result {
-        Ok(_) => Ok(()),
-        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Err(
-            SessionExportError::Refused("file already exists; request overwrite explicitly".into()),
-        ),
-        Err(error) => Err(anyhow::Error::new(error.error)
-            .context("publish session file")
-            .into()),
+    match directory.write_atomically(name, bytes, publish) {
+        Ok(()) => Ok(()),
+        Err(PublishError::NotARegularFile) => Err(SessionExportError::Refused(
+            "destination is not a regular file".into(),
+        )),
+        Err(PublishError::AlreadyExists) => Err(SessionExportError::Refused(
+            "file already exists; request overwrite explicitly".into(),
+        )),
+        Err(PublishError::Failed(error)) => Err(error.context("publish session file").into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn file_injection_is_binary_bounded_and_requires_explicit_overwrite() {

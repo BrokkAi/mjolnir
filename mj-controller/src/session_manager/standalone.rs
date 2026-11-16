@@ -661,6 +661,7 @@ impl StandaloneSession {
                             credential_sync_signal = Some(CredentialSyncSignal {
                                 ordinal: event.ordinal,
                                 reason,
+                                login_fingerprint: relay_event_login_fingerprint(event),
                             });
                         }
                     }

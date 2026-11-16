@@ -205,7 +205,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 23 is breaking: older writers lose requests and the person-input frontier,
 // and cannot replay child ownership or question-target observations.
 // Revision 24 is breaking: open turns own their autonomous fact; older readers reject the new field.
-pub const RELAY_STATE_VERSION: u32 = 24;
+// Revision 25 is breaking: older readers reject it. Upgrading seeds `withdrawn_ordinal` from the legacy flag.
+pub const RELAY_STATE_VERSION: u32 = 25;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

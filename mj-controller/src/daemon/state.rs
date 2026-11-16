@@ -72,16 +72,16 @@ impl RuntimeState {
                     // An ordinary sub-agent reviews under its parent's choice; a
                     // parent chain that cannot be followed reviews as Off, the
                     // same as its launch, which offered no review tools.
-                    let choice = committed_sessions.as_ref().and_then(|committed| {
-                        committed.borrow().as_ref().ok().map(|committed| {
-                            committed.state.effective_review_or_off(session_id).cloned()
-                        })
-                    });
-                    let choice = choice.flatten();
-                    installed
+                    let review = installed
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .for_session(choice.as_ref())
+                        .clone();
+                    let committed = committed_sessions.as_ref().and_then(|committed| {
+                        committed.borrow().as_ref().ok().map(|committed| {
+                            committed.state.effective_review_config(&review, session_id)
+                        })
+                    });
+                    committed.unwrap_or(review)
                 })
             },
             revisions.notifier(),
@@ -175,9 +175,8 @@ impl RuntimeState {
         worker
             && mj_core::worker_launch::offers_review_tools(
                 controller
-                    .config
-                    .review
-                    .for_session(controller.state.effective_review_or_off(child_id))
+                    .state
+                    .effective_review_config(&controller.config.review, child_id)
                     .trigger(),
                 session.harness_kind,
             )

@@ -14,7 +14,9 @@ use crate::database::{
 };
 use crate::worker_client::{RelayClient, RelayEventPage, RelayRejected, RelayTransportDead};
 use mj_checkpoint::archive::verify_archive_streaming;
-use mj_core::credentials::{CredentialSyncSignal, relay_event_credential_sync_reason};
+use mj_core::credentials::{
+    CredentialSyncSignal, relay_event_credential_sync_reason, relay_event_login_fingerprint,
+};
 use mj_core::elicitation::ElicitationResponse;
 use mj_core::state::{ManagedSessionSnapshot, MaterializedSession};
 use mj_transcript::projection::{

@@ -1753,74 +1753,77 @@ async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
     );
 }
 
+// Hard-won: #1547: a cooldown held an authentication failure until the profile had been renewed, so the decision mistook the renewal for a refusal.
 #[test]
-fn a_new_credential_signal_waits_out_the_cooldown_without_being_lost() {
-    let signal = |ordinal, reason| CredentialSyncSignal { ordinal, reason };
+fn an_authentication_failure_is_handled_at_once_but_an_empty_response_waits_out_the_cooldown() {
+    let signal = |ordinal, reason, token: Option<&str>| CredentialSyncSignal {
+        ordinal,
+        reason,
+        login_fingerprint: token.map(str::to_owned),
+    };
     let mut tracker = CredentialSyncSignalTracker::default();
     let started = Instant::now();
     tracker.observe(
         "session",
         "work",
-        signal(41, CredentialSyncReason::AuthenticationFailure),
+        signal(41, CredentialSyncReason::AuthenticationFailure, Some("old")),
     );
     assert_eq!(
         tracker.drain_due(started),
         vec![(
             "session".into(),
             "work".into(),
-            CredentialSyncReason::AuthenticationFailure
+            CredentialSyncReason::AuthenticationFailure,
+            Some("old".into())
         )]
+    );
+
+    // A second failure inside the old cooldown is still handled at once.
+    tracker.observe(
+        "session",
+        "work",
+        signal(42, CredentialSyncReason::AuthenticationFailure, None),
+    );
+    assert_eq!(
+        tracker.drain_due(started + Duration::from_secs(1)),
+        vec![(
+            "session".into(),
+            "work".into(),
+            CredentialSyncReason::AuthenticationFailure,
+            None
+        )]
+    );
+    // An observation already handled is not handled twice.
+    tracker.observe(
+        "session",
+        "work",
+        signal(42, CredentialSyncReason::AuthenticationFailure, None),
+    );
+    assert!(
+        tracker
+            .drain_due(started + Duration::from_secs(2))
+            .is_empty()
     );
 
     tracker.observe(
         "session",
-        "work",
-        signal(42, CredentialSyncReason::AuthenticationFailure),
+        "new-profile",
+        signal(43, CredentialSyncReason::EmptyPromptResponse, None),
     );
     assert!(
         tracker
             .drain_due(started + Duration::from_secs(60))
             .is_empty()
     );
-    tracker.observe(
-        "session",
-        "new-profile",
-        signal(43, CredentialSyncReason::EmptyPromptResponse),
-    );
-    assert_eq!(tracker.pending["session"].signal.ordinal, 43);
-
     // No repeated observation is needed: the loop timer drains the sticky
     // failure once its cooldown expires.
     assert_eq!(
-        tracker.drain_due(started + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
+        tracker.drain_due(started + Duration::from_secs(1) + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
         vec![(
             "session".into(),
             "new-profile".into(),
-            CredentialSyncReason::EmptyPromptResponse
-        )]
-    );
-    tracker.observe(
-        "session",
-        "new-profile",
-        signal(43, CredentialSyncReason::EmptyPromptResponse),
-    );
-    assert!(
-        tracker
-            .drain_due(started + (IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN * 2))
-            .is_empty()
-    );
-
-    tracker.observe(
-        "other",
-        "personal",
-        signal(1, CredentialSyncReason::AuthenticationFailure),
-    );
-    assert_eq!(
-        tracker.drain_due(started + Duration::from_secs(60)),
-        vec![(
-            "other".into(),
-            "personal".into(),
-            CredentialSyncReason::AuthenticationFailure
+            CredentialSyncReason::EmptyPromptResponse,
+            None
         )]
     );
 }
@@ -2146,10 +2149,12 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -2180,6 +2185,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
     let failed = CredentialSyncResult {
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err("worker proxy disconnected".into()),
             step_failures: Vec::new(),
@@ -2205,10 +2211,12 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::EmptyPromptResponse,
+            login_fingerprint: None,
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures: Vec::new(),
@@ -2232,6 +2240,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
         failure: Some("controller credential file is unreadable".into()),
         outcomes: Vec::new(),
@@ -2258,6 +2267,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err(detail.to_owned()),
             step_failures: Vec::new(),
@@ -2300,6 +2310,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures: Vec::new(),
@@ -2326,6 +2337,7 @@ fn a_result_clears_only_the_failures_of_the_steps_it_checked() {
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures,
@@ -2873,12 +2885,14 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             trigger: Some(CredentialSyncCause {
                 session_id: session_id.into(),
                 reason,
+                login_fingerprint: None,
             }),
             failure: failure.map(str::to_owned),
             outcomes: outcome
                 .map(|outcome| {
                     vec![CredentialSyncOutcome {
                         unchanged_login: None,
+                        current_access_token: None,
                         session_id: session_id.into(),
                         outcome,
                         step_failures: Vec::new(),
@@ -2924,6 +2938,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             failure: None,
             outcomes: vec![CredentialSyncOutcome {
                 unchanged_login: None,
+                current_access_token: None,
                 session_id: session_id.into(),
                 outcome: Err("worker proxy disconnected".into()),
                 step_failures: Vec::new(),
@@ -2985,6 +3000,7 @@ fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
             trigger: Some(CredentialSyncCause {
                 session_id: "parked-child".into(),
                 reason,
+                login_fingerprint: None,
             }),
             failure: None,
             outcomes: Vec::new(),
@@ -3136,6 +3152,7 @@ fn a_result_about_one_sessions_aws_renewal_does_not_end_other_sessions_failures(
 
     let outcome = |session: &str, detail: Option<&str>| CredentialSyncOutcome {
         unchanged_login: None,
+        current_access_token: None,
         session_id: session.into(),
         outcome: Ok(Vec::new()),
         step_failures: detail

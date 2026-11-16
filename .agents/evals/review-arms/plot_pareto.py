@@ -2,8 +2,8 @@
 
 Usage: uv run --with matplotlib python3 plot_pareto.py <out-dir> [--results results/stage4] [--no-greptile-combos]
 
-Reads pareto.csv (all confirmed problems) and pareto-sev-high-medium.csv
-(confirmed medium or high) written by pareto.py, draws each frontier as a line,
+Reads pareto.csv (all confirmed problems), pareto-sev-high-medium.csv
+(confirmed medium or high) and pareto-sev-high.csv (confirmed high) written by pareto.py, draws each frontier as a line,
 and adds Greptile Base ($1) and Plus ($3) alone for both measures even though
 they are off the frontier. Points are numbered; one option keeps its number on
 both lines, and the key names each option. No metric is recomputed here; with
@@ -46,7 +46,8 @@ def load(name):
     return rows
 
 SERIES = [("All confirmed", load("pareto.csv"), "#2a78d6"),
-          ("Medium or high only", load("pareto-sev-high-medium.csv"), "#eb6834")]
+          ("Medium or high only", load("pareto-sev-high-medium.csv"), "#eb6834"),
+          ("High only", load("pareto-sev-high.csv"), "#1baf7a")]
 EXTRA = {"Greptile/base": "Greptile Base ($1 per review)", "Greptile/plus": "Greptile Plus ($3 per review)"}
 
 def label(option):
@@ -72,7 +73,7 @@ key.set_axis_off()
 
 ax.set_xscale("log")
 ax.set_xlim(38, 320)
-ax.set_ylim(40, 250)
+ax.set_ylim(0, 250)
 ax.xaxis.set_major_locator(FixedLocator([40, 50, 60, 80, 100, 120, 150, 200, 250, 300]))
 ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:g}"))
 ax.xaxis.set_minor_locator(NullLocator())
@@ -100,6 +101,12 @@ for name, rows, color in SERIES:
         ax.scatter([x], [y], s=110, marker="D", facecolor=BG, edgecolor=color, linewidth=2, zorder=3)
         points.append((x, y, o, color))
 
+leg = ax.legend(handles=[Line2D([], [], color=c, linewidth=2, marker="o", markersize=7, markeredgecolor=BG, label=n)
+                   for n, _, c in SERIES] +
+          [Line2D([], [], linestyle="none", marker="D", markersize=8, markerfacecolor=BG,
+                  markeredgecolor=MUTED, markeredgewidth=2, label="Greptile alone (off the frontier)")],
+          loc="upper left", frameon=False, fontsize=12, labelcolor=INK)
+
 # Numbered labels placed in display space so no label covers a point or another label.
 fig.canvas.draw()
 renderer = fig.canvas.get_renderer()
@@ -109,7 +116,7 @@ for x, y, _, _ in points:
     point_boxes.append(Bbox.from_extents(px - 6, py - 6, px + 6, py + 6))
 box = ax.get_window_extent(renderer)
 safe = Bbox.from_extents(box.x0 + 3, box.y0 + 3, box.x1 - 3, box.y1 - 3)
-occupied = []
+occupied = [leg.get_window_extent(renderer).expanded(1.05, 1.1)]  # labels keep off the legend
 offsets = [(r * dx, r * dy) for r in (13, 22, 32, 44, 58, 74)
            for dx, dy in ((0, 1), (-.8, .8), (.8, .8), (-1, 0), (1, 0), (-.8, -.8), (.8, -.8), (0, -1))]
 for x, y, o, color in points:
@@ -130,17 +137,10 @@ for x, y, o, color in points:
     else:
         raise RuntimeError(f"no free place for the label of {o} at ({x}, {y})")
 
-ax.legend(handles=[Line2D([], [], color=c, linewidth=2, marker="o", markersize=7, markeredgecolor=BG, label=n)
-                   for n, _, c in SERIES] +
-          [Line2D([], [], linestyle="none", marker="D", markersize=8, markerfacecolor=BG,
-                  markeredgecolor=MUTED, markeredgewidth=2, label="Greptile alone (off the frontier)")],
-          loc="lower right", frameon=False, fontsize=12, labelcolor=INK)
-
 # Key: number, option, latency and both counts (blank where the option is off that frontier).
 key.text(0, 1.0, "Reviewers", fontsize=15, fontweight="bold", color=INK, va="bottom", transform=key.transAxes)
-key.text(.70, 1.0, "s", fontsize=11, color=MUTED, ha="right", va="bottom", transform=key.transAxes)
-key.text(.86, 1.0, "all", fontsize=11, color=MUTED, ha="right", va="bottom", transform=key.transAxes)
-key.text(1.0, 1.0, "med+", fontsize=11, color=MUTED, ha="right", va="bottom", transform=key.transAxes)
+for head, xx in (("s", .66), ("all", .78), ("med+", .90), ("high", 1.0)):
+    key.text(xx, 1.0, head, fontsize=11, color=MUTED, ha="right", va="bottom", transform=key.transAxes)
 step = .965 / len(order)
 for i, o in enumerate(order):
     yy = .975 - i * step
@@ -154,8 +154,8 @@ for i, o in enumerate(order):
     cells = [f"{number[o]:>2}", name, f"{lat:.0f}"]
     key.text(0, yy, cells[0], fontsize=11, fontweight="bold", color=INK, va="center", transform=key.transAxes)
     key.text(.06, yy, cells[1], fontsize=11, color=INK, va="center", transform=key.transAxes)
-    key.text(.70, yy, cells[2], fontsize=11, color=MUTED, ha="right", va="center", transform=key.transAxes)
-    for (sname, rows, color), xx in zip(SERIES, (.86, 1.0)):
+    key.text(.66, yy, cells[2], fontsize=11, color=MUTED, ha="right", va="center", transform=key.transAxes)
+    for (sname, rows, color), xx in zip(SERIES, (.78, .90, 1.0)):
         r = rows[o]
         shown = r["frontier"] == "True" or o in EXTRA
         key.text(xx, yy, f"{float(r['findings']):.0f}" if shown else "", fontsize=11, color=INK, ha="right",

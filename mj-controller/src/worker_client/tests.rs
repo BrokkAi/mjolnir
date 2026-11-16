@@ -1084,6 +1084,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
             Some(mj_core::credentials::CredentialSyncCause {
                 session_id: other.session_id.clone(),
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint: None,
             }),
         );
         let explicit = tokio::time::timeout(Duration::from_secs(5), coordinator.result())
@@ -1651,6 +1652,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
             outcomes,
             [CredentialSyncOutcome {
                 unchanged_login: None,
+                current_access_token: None,
                 session_id: "remote".into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
                 step_failures: Vec::new(),
@@ -3156,6 +3158,7 @@ async fn credential_sync_reconciles_newer_destinations_before_reporting_auth_rec
             trigger: Some(mj_core::credentials::CredentialSyncCause {
                 session_id: "login-race".into(),
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint: None,
             }),
             failure: None,
             partial: false,
@@ -3505,6 +3508,7 @@ async fn a_stalled_triggered_renewal_does_not_hold_the_profiles_other_syncs() {
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "stalled".into(),
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
     );
     wait_for("the trigger's pass", &|| {
@@ -3820,6 +3824,7 @@ async fn a_trigger_whose_renewal_is_stopped_reports_the_outcome_as_unknown() {
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "replaced".into(),
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
     );
     wait_for("the trigger's pass", &|| {
@@ -4686,6 +4691,7 @@ async fn an_auth_trigger_reinstalls_deleted_scoped_credentials_at_once() {
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "auth-session".into(),
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
     );
     let triggered = tokio::time::timeout(Duration::from_secs(20), async {
@@ -4753,6 +4759,7 @@ fn a_failed_login_step_keeps_the_aws_steps_actions_in_the_outcome() {
         "session".to_owned(),
         CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "session".into(),
             outcome: Err("worker proxy disconnected".into()),
             step_failures: Vec::new(),
@@ -4871,6 +4878,7 @@ async fn the_coordinator_runs_a_trigger_for_a_held_session_once_it_is_free() {
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "held-session".into(),
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
     );
     std::fs::write(&release, "").unwrap();
@@ -4926,6 +4934,7 @@ async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change(
                 mj_core::config::HarnessKind::Codex,
                 &codex_login("2026-09-25T20:00:00.000Z"),
             )),
+            current_access_token: None,
             session_id: SESSION_ID.into(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -4966,6 +4975,7 @@ async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
             .iter()
             .map(|session| CredentialSyncOutcome {
                 unchanged_login: None,
+                current_access_token: None,
                 session_id: (*session).into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
                 step_failures: Vec::new(),

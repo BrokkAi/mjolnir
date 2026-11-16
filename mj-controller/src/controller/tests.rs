@@ -1076,10 +1076,8 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     let id = registration.id;
 
     let stored = &controller.state.sessions[&id];
-    assert_eq!(
-        stored.review,
-        Some(Box::new(mj_core::config::SessionReview::Off))
-    );
+    // The automatic rule is not stored as the user's choice.
+    assert_eq!(stored.review, None);
     assert_eq!(stored.project_directory.as_deref(), Some(workspace.path()));
     assert!(stored.managed_worktree.is_none());
     let project = stored.project.as_ref().expect("plain project was recorded");
@@ -1102,7 +1100,18 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     );
     assert_eq!(
         controller.state.sessions[&no_reviewers.id].review,
-        Some(Box::new(mj_core::config::SessionReview::Off))
+        Some(Box::new(mj_core::config::SessionReview::Push {
+            reviewers: None
+        }))
+    );
+    // The record is also a plain directory, so the launch rule keeps review
+    // off for it however the global list changes.
+    assert_eq!(
+        controller
+            .state
+            .effective_review_config(&controller.config.review, &no_reviewers.id)
+            .trigger(),
+        mj_core::config::ReviewTrigger::Off
     );
 
     // The API shape `{"mode":"turn","reviewers":[]}` is an explicitly empty
@@ -1124,7 +1133,9 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     );
     assert_eq!(
         controller.state.sessions[&empty_list.id].review,
-        Some(Box::new(mj_core::config::SessionReview::Off))
+        Some(Box::new(
+            serde_json::from_str(r#"{"mode":"turn","reviewers":[]}"#).unwrap()
+        ))
     );
 }
 
