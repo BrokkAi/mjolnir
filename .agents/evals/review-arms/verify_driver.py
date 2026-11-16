@@ -1,4 +1,4 @@
-"""Runs Opus/high verifier sessions for every unverified batch in a verify dir.
+"""Runs verifier sessions (Opus/high by default) for every unverified batch in a verify dir.
 
 Usage: python3 verify_driver.py <verify-dir> [--concurrency 7]
        python3 verify_driver.py <judge-dir> --kind judge [--concurrency 7]
@@ -35,10 +35,14 @@ p = argparse.ArgumentParser()
 p.add_argument("verify")
 p.add_argument("--concurrency", type=int, default=7)
 p.add_argument("--kind", choices=["verify", "judge"], default="verify")
+# Model and profiles of the sessions; rounds A to F used Opus on the Claude profiles.
+p.add_argument("--model", default="opus")
+p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
 # Verifiers need later history (fixes) but must not reach this eval's results,
 # which map sessions to models. 3c3fa4b13 is master just before the first eval commit.
 p.add_argument("--repo-commit", default="3c3fa4b13")
 a = p.parse_args()
+PROFILES = a.profiles.split(",")
 V = ROOT / a.verify
 REPO = ROOT / "verify/repo"
 SOURCE = subprocess.check_output(["git", "-C", str(pathlib.Path(__file__).resolve().parent),
@@ -147,7 +151,7 @@ def run(batch_path, judge=None):
     out_path = V / "out" / (f"verify-out-{n}.json" if judge is None else f"verdicts-{tag}.json")
     rec_path = V / "sessions" / f"batch-{tag}.json"
     if out_path.exists():
-        return n, "done"
+        return tag, "done"
     if rec_path.exists():
         rec = json.loads(rec_path.read_text())
         sid = rec["session_id"]
@@ -165,7 +169,7 @@ def run(batch_path, judge=None):
         prompt.write_text(prompt_text(batch_path, judge))
         while not (session(sid).get("is_idle") and session(sid).get("lifecycle") == "live"):
             time.sleep(5)
-        for k, v in [("model", "opus"), ("effort", "high")]:
+        for k, v in [("model", a.model), ("effort", "high")]:
             # An idle, live session can still be initializing; mj then refuses with 409 until
             # initialization ends, so retry exactly that refusal.
             while True:
@@ -177,7 +181,7 @@ def run(batch_path, judge=None):
                         raise
                     time.sleep(10)
         cfg = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
-        assert cfg.get("model") == "opus" and cfg.get("effort") == "high", cfg
+        assert cfg.get("model") == a.model and cfg.get("effort") == "high", cfg
         # A stable command ID makes a resend after an interrupted run the same request,
         # which mj accepts once, instead of a second verifier turn.
         mj("message", "--session", sid, "--command-id", f"review-arms-{V.name}-batch-{tag}-{sid[:12]}",
