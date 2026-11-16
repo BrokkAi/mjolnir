@@ -3010,7 +3010,9 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
         SESSION,
     )
     .unwrap()
-    .expect("raw localhost reuses its worker root");
+    .expect("raw localhost reuses its worker root")
+    .commands[0]
+        .clone();
     assert_eq!(
         local.purpose,
         "stop a leaked local Mjolnir worker and clear its relay state"
@@ -3031,7 +3033,9 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
         SESSION,
     )
     .unwrap()
-    .expect("an SSH host reuses its worker root");
+    .expect("an SSH host reuses its worker root")
+    .commands[0]
+        .clone();
     assert_eq!(
         remote.purpose,
         "stop a leaked remote Mjolnir worker and clear its relay state"
@@ -3088,7 +3092,9 @@ fn resume_cleanup_unlinks_a_linked_staged_home_and_keeps_a_real_one() {
             SESSION,
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .commands[0]
+            .clone();
         let output = ProcessExecutor.execute(&cleanup).unwrap();
 
         assert_eq!(
@@ -3120,7 +3126,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         SESSION,
         &format!("{local_root}/profile"),
     )
-    .unwrap();
+    .unwrap()
+    .commands[0]
+        .clone();
     assert_eq!(
         local.purpose,
         "reset the worker root for an in-place harness replacement"
@@ -3157,7 +3165,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         SESSION,
         &format!(".local/share/hel/profiles/{SESSION}"),
     )
-    .unwrap();
+    .unwrap()
+    .commands[0]
+        .clone();
     assert_eq!(remote.program, "ssh");
     let remote_script = remote.args.last().unwrap();
     assert!(
@@ -3183,7 +3193,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         SESSION,
         &format!("/var/lib/hel/profiles/{SESSION}"),
     )
-    .unwrap();
+    .unwrap()
+    .commands[0]
+        .clone();
     assert_eq!(container.program, "podman");
     assert_eq!(
         container.args[..4],
@@ -3223,7 +3235,9 @@ fn in_place_reset_unlinks_a_linked_profile_home_without_following_it() {
         SESSION,
         &format!("{worker_root}/profile"),
     )
-    .unwrap();
+    .unwrap()
+    .commands[0]
+        .clone();
     let output = ProcessExecutor.execute(&reset).unwrap();
 
     assert_eq!(

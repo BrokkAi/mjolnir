@@ -198,6 +198,53 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current
     assert!(!root.exists());
 }
 
+// A plan that embeds the staged control worker stages it when it runs, so a
+// cleanup with no earlier probe or stop (a failed provisioning) still works.
+#[cfg(unix)]
+#[test]
+fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_FRESH_BARE_CLOSE_CHILD";
+    const SESSION: &str = "18181818181818181818181818181818";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-816ca1d77-fresh-close")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert!(!control.exists(), "nothing is staged yet");
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text,
+    };
+    let plan = targets::close_plan(&locator, SESSION).unwrap();
+    assert!(plan.stages_control_worker());
+    plan.execute(&ProcessExecutor).unwrap();
+    assert!(control.exists());
+    assert!(!root.exists());
+}
+
 #[test]
 fn stale_pins_are_re_resolved() {
     const CHILD: &str = "MJ_STALE_WORKER_PIN_CHILD";

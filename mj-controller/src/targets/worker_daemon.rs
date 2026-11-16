@@ -45,6 +45,62 @@ fi
     )
 }
 
+/// A plan whose commands may run the staged control worker. Running it stages
+/// that worker first (`controller::worker_binary::ensure_control_worker`), so no
+/// caller has to remember to. [`Self::declare`] decides by looking for the
+/// control path in the commands, so a builder cannot embed it without the plan
+/// requiring staging.
+#[derive(Debug, Clone)]
+pub struct WorkerControlPlan {
+    pub description: String,
+    pub commands: Vec<CommandSpec>,
+    control: Option<(TargetLocator, String)>,
+}
+
+impl WorkerControlPlan {
+    pub fn declare(plan: CommandPlan, locator: &TargetLocator, session_id: &str) -> Result<Self> {
+        let path = control_worker_path(&worker_root(locator, session_id)?);
+        let quoted = posix_quote(&path);
+        let embeds = plan.commands.iter().any(|command| {
+            std::iter::once(&command.program)
+                .chain(&command.args)
+                .any(|part| part.contains(&path) || part.contains(&quoted))
+        });
+        Ok(Self {
+            description: plan.description,
+            commands: plan.commands,
+            control: embeds.then(|| (locator.clone(), session_id.to_owned())),
+        })
+    }
+
+    /// Whether running this plan stages the control worker first.
+    pub fn stages_control_worker(&self) -> bool {
+        self.control.is_some()
+    }
+
+    /// Stage, then run every command with `executor`.
+    pub fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
+        self.execute_staging_with(executor, executor)
+    }
+
+    /// Stage with `staging`, then run the commands with `executor`: a caller
+    /// that bounds the commands with a timeout keeps staging outside it.
+    pub fn execute_staging_with(
+        &self,
+        staging: &impl CommandExecutor,
+        executor: &impl CommandExecutor,
+    ) -> Result<Vec<CommandOutput>> {
+        if let Some((locator, session_id)) = &self.control {
+            crate::controller::ensure_control_worker(staging, locator, session_id)?;
+        }
+        CommandPlan {
+            description: self.description.clone(),
+            commands: self.commands.clone(),
+        }
+        .execute(executor)
+    }
+}
+
 /// Print `absent` when the root never ran a worker (no `hel`), `present` when
 /// the staged control worker is this build, and `missing` otherwise.
 pub fn control_worker_state_script(worker_root: &str) -> String {
@@ -104,7 +160,7 @@ pub fn kill_worker_daemon_script(worker_root: &str) -> String {
 pub fn clear_relay_state_plan(
     locator: &TargetLocator,
     session_id: &str,
-) -> Result<Option<CommandSpec>> {
+) -> Result<Option<WorkerControlPlan>> {
     verify_locator(locator, session_id)?;
     let session_worker_root = worker_root(locator, session_id)?;
     let staged_home = posix_quote(&format!("{session_worker_root}/profile"));
@@ -120,7 +176,7 @@ pub fn clear_relay_state_plan(
             mj_core::relay::RELAY_JOURNAL_DIR
         )),
     );
-    Ok(match locator {
+    let command = match locator {
         TargetLocator::LocalBare { .. } => Some(
             CommandSpec::new("sh", ["-c", script.as_str()])
                 .purpose("stop a leaked local Mjolnir worker and clear its relay state"),
@@ -137,7 +193,42 @@ pub fn clear_relay_state_plan(
         | TargetLocator::SshAppleContainer { .. }
         | TargetLocator::SshNitro { .. }
         | TargetLocator::AwsEc2 { .. } => None,
-    })
+    };
+    command
+        .map(|command| {
+            WorkerControlPlan::declare(
+                CommandPlan {
+                    description: "clear a leaked worker's relay state".into(),
+                    commands: vec![command],
+                },
+                locator,
+                session_id,
+            )
+        })
+        .transpose()
+}
+
+/// Stop the session's worker with the staged control worker. The plan stages it
+/// first when it runs.
+pub fn stop_worker_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+    purpose: &str,
+) -> Result<WorkerControlPlan> {
+    let script = stop_worker_daemon_script(&worker_root(locator, session_id)?);
+    WorkerControlPlan::declare(
+        CommandPlan {
+            description: purpose.to_owned(),
+            commands: vec![command_on_locator(
+                locator,
+                session_id,
+                vec!["sh".into(), "-c".into(), script],
+                purpose,
+            )?],
+        },
+        locator,
+        session_id,
+    )
 }
 
 /// Everything an in-place harness replacement must remove before the new
@@ -155,7 +246,7 @@ pub fn in_place_worker_reset_plan(
     locator: &TargetLocator,
     session_id: &str,
     previous_profile_root: &str,
-) -> Result<CommandSpec> {
+) -> Result<WorkerControlPlan> {
     worker_reset_plan(locator, session_id, Some(previous_profile_root))
 }
 
@@ -164,7 +255,7 @@ pub fn in_place_worker_reset_plan(
 pub fn retained_native_worker_reset_plan(
     locator: &TargetLocator,
     session_id: &str,
-) -> Result<CommandSpec> {
+) -> Result<WorkerControlPlan> {
     worker_reset_plan(locator, session_id, None)
 }
 
@@ -172,7 +263,7 @@ fn worker_reset_plan(
     locator: &TargetLocator,
     session_id: &str,
     previous_profile_root: Option<&str>,
-) -> Result<CommandSpec> {
+) -> Result<WorkerControlPlan> {
     verify_locator(locator, session_id)?;
     let session_worker_root = worker_root(locator, session_id)?;
     // A root that is a link left for a session an earlier release started
@@ -214,10 +305,16 @@ fn worker_reset_plan(
             posix_quote(&session_worker_root),
         ));
     }
-    Ok(
-        locator_command(locator, vec!["sh".into(), "-c".into(), script])
-            .purpose("reset the worker root for an in-place harness replacement")
-            .stage(ProvisionStage::Syncing),
+    let command = locator_command(locator, vec!["sh".into(), "-c".into(), script])
+        .purpose("reset the worker root for an in-place harness replacement")
+        .stage(ProvisionStage::Syncing);
+    WorkerControlPlan::declare(
+        CommandPlan {
+            description: "reset the worker root".into(),
+            commands: vec![command],
+        },
+        locator,
+        session_id,
     )
 }
 
@@ -255,7 +352,7 @@ mod tests {
             &root.join("profile").to_string_lossy(),
         )
         .unwrap();
-        let (status, stdout) = run_script(&plan.args[1]);
+        let (status, stdout) = run_script(&plan.commands[0].args[1]);
         assert_eq!(status, 0, "{stdout}");
         assert_eq!(
             std::fs::read_to_string(record).unwrap(),

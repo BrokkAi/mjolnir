@@ -1,12 +1,23 @@
 use super::*;
 
-pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
-    close_plan_scoped(locator, session_id, true, None)
+pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<WorkerControlPlan> {
+    WorkerControlPlan::declare(
+        close_plan_scoped(locator, session_id, true, None)?,
+        locator,
+        session_id,
+    )
 }
 
 /// A Move can have two generations on one host. Shared session caches remain owned by the destination.
-pub fn retire_move_target_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
-    close_plan_scoped(locator, session_id, false, None)
+pub fn retire_move_target_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<WorkerControlPlan> {
+    WorkerControlPlan::declare(
+        close_plan_scoped(locator, session_id, false, None)?,
+        locator,
+        session_id,
+    )
 }
 
 /// Termination needs the durable AWS identity even before SSH has an address.
@@ -267,8 +278,12 @@ pub fn local_nested_profile_root(session_id: &str) -> PathBuf {
 pub fn borrowed_worker_cleanup_plan(
     locator: &TargetLocator,
     child_session_id: &str,
-) -> Result<CommandPlan> {
-    borrowed_worker_cleanup_plan_scoped(locator, child_session_id, None)
+) -> Result<WorkerControlPlan> {
+    WorkerControlPlan::declare(
+        borrowed_worker_cleanup_plan_scoped(locator, child_session_id, None)?,
+        locator,
+        child_session_id,
+    )
 }
 
 fn borrowed_worker_cleanup_plan_scoped(

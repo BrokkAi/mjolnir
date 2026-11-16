@@ -1075,21 +1075,12 @@ impl Controller {
         if operation.workspace_transfer.as_ref().unwrap().phase
             == WorkspaceTransferPhase::Downloaded
         {
-            let root = targets::worker_root(&layout.backend, id)?;
-            super::super::worker_binary::ensure_control_worker(executor, &layout.backend, id)?;
-            super::super::execute_checked(
-                executor,
-                targets::command_on_locator(
-                    &layout.backend,
-                    id,
-                    vec![
-                        "sh".into(),
-                        "-c".into(),
-                        targets::stop_worker_daemon_script(&root),
-                    ],
-                    "stop sealed Move source worker, retaining workspace",
-                )?,
-            )?;
+            targets::stop_worker_plan(
+                &layout.backend,
+                id,
+                "stop sealed Move source worker, retaining workspace",
+            )?
+            .execute(executor)?;
             operation.workspace_transfer.as_mut().unwrap().phase =
                 WorkspaceTransferPhase::SourceStopped;
             crate::database::save_move_operation(operation)?;

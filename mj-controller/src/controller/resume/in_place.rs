@@ -624,29 +624,19 @@ impl Controller {
                 );
                 let backend =
                     backend_locator(current.target.as_ref().unwrap(), current, &self.config)?;
-                let root = crate::targets::worker_root(&backend, session_id)?;
-                // Staging the current worker can take longer than the stop's
-                // own timeout, so it runs first and outside it.
-                let cleanup = super::super::worker_binary::ensure_control_worker(
-                    &crate::targets::ProcessExecutor,
+                // The plan stages the current worker first; that can take longer
+                // than the stop's own timeout, so it runs outside it.
+                let cleanup = crate::targets::stop_worker_plan(
                     &backend,
                     session_id,
+                    "stop failed in-place worker while retaining its environment",
                 )
-                .and_then(|()| {
-                    super::super::execute_checked(
+                .and_then(|plan| {
+                    plan.execute_staging_with(
+                        &crate::targets::ProcessExecutor,
                         &crate::targets::CancellableProcessExecutor::with_timeout(
                             std::time::Duration::from_secs(15),
                         ),
-                        crate::targets::command_on_locator(
-                            &backend,
-                            session_id,
-                            vec![
-                                "sh".into(),
-                                "-c".into(),
-                                crate::targets::stop_worker_daemon_script(&root),
-                            ],
-                            "stop failed in-place worker while retaining its environment",
-                        )?,
                     )
                 });
                 let mut retained = previous.clone();

@@ -253,15 +253,28 @@ pub(in crate::controller) fn worker_recovery(
     match answer(worker_recovery_command(locator, worker_root)).as_deref() {
         Some("recoverable" | "partial" | "checkout-partial") => WorkerRecovery::Recoverable,
         Some("nothing" | "absent") => {
-            match probe_worker_liveness(executor, locator, session_id, worker_root)
-                .ok()
-                .filter(|output| output.status == 0)
-                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-                .as_deref()
-            {
-                Some("dead") => WorkerRecovery::NothingToRecover,
-                Some("alive" | "starting") => WorkerRecovery::Recoverable,
-                _ => WorkerRecovery::Unknown,
+            // Unknown keeps the conservative outcome; the log says why.
+            let liveness = probe_worker_liveness(executor, locator, session_id, worker_root)
+                .and_then(|output| {
+                    ensure!(
+                        output.status == 0,
+                        "worker liveness probe exited with status {}: {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                });
+            match liveness.as_deref() {
+                Ok("dead") => WorkerRecovery::NothingToRecover,
+                Ok("alive" | "starting") => WorkerRecovery::Recoverable,
+                Ok(other) => {
+                    tracing::warn!(%session_id, %worker_root, answer = other, "worker liveness probe gave an unrecognised answer; recovery stays undetermined");
+                    WorkerRecovery::Unknown
+                }
+                Err(error) => {
+                    tracing::warn!(%session_id, %worker_root, error = %format!("{error:#}"), "could not probe worker liveness; recovery stays undetermined");
+                    WorkerRecovery::Unknown
+                }
             }
         }
         _ => WorkerRecovery::Unknown,
