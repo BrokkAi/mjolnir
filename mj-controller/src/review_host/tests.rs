@@ -3030,6 +3030,68 @@ async fn push_path_reaches_capture_and_old_worker_refuses_it() {
     host.shutdown().await.unwrap();
 }
 
+// A request from a session whose review is off is accepted without choosing
+// reviewers, and the pushed tree is recorded so an already-installed gate
+// does not block the push.
+#[tokio::test]
+async fn a_review_request_with_review_off_records_the_tree_and_chooses_no_reviewer() {
+    let session = session_id("reviewoff");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let off: ReviewConfigSource = Arc::new(|_| ReviewConfig::default());
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), off, environment.clone());
+    let mut running = view(
+        &session,
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL);
+    manager
+        .publisher
+        .publish(session.clone(), running)
+        .await
+        .unwrap();
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.begin_push(&session, None).await })
+    };
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    reply
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: "/workspace/repo".into(),
+                base_commit: Some("aaaaaaa123".into()),
+                head_commit: Some("bbbbbbb456".into()),
+                current_tree: "newtree".into(),
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    let (_, action, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordOverridden { .. }))
+        .await;
+    let ReviewerAction::RecordOverridden { trees } = action else {
+        unreachable!()
+    };
+    assert_eq!(
+        trees.get(&PathBuf::from("/workspace/repo")),
+        Some(&("newtree".to_owned(), "bbbbbbb456".to_owned()))
+    );
+    reply.send(Ok(ReviewerOutcome::BaselineAdvanced)).unwrap();
+    let accepted = request.await.unwrap().unwrap();
+    assert_eq!(accepted["accepted"], true);
+    assert_eq!(accepted["review"], "off");
+    assert!(environment.children.lock().unwrap().is_empty());
+    host.shutdown().await.unwrap();
+}
+
 async fn open_push(
     manager: &mut FakeManager,
     host: &TurnReviewHost,
