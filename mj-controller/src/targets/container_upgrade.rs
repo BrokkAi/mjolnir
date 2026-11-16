@@ -1063,12 +1063,10 @@ fn checked_container_state_change(
     goal: ContainerStateGoal,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    if host.engine() != "podman" {
-        checked(host, vec![verb.into(), container_id.to_owned()], executor)?;
-        return Ok(());
-    }
+    // Podman exits nonzero when a dead exec session's conmon never wrote its
+    // exit file, even though the container did stop; the state decides.
     let output = executor.execute(&host.command(
-        vec!["podman".into(), verb.into(), container_id.to_owned()],
+        vec![host.engine().into(), verb.into(), container_id.to_owned()],
         "upgrade container while retaining storage".into(),
     ))?;
     let inspected = inspect(host, container_id, executor)?;
@@ -1085,7 +1083,7 @@ fn checked_container_state_change(
                 verb,
                 status = output.status,
                 stderr = %warning,
-                "podman container state-change command succeeded by post-command state"
+                "container state-change command succeeded by post-command state"
             );
         }
         return Ok(());
