@@ -60,6 +60,9 @@ pub struct SubagentCandidate {
     pub harness: mj_core::config::HarnessKind,
     pub choices: mj_core::worker_launch::ProfileConfig,
     pub quota: CandidateQuota,
+    /// The profile's "Load balancing may consume credits" option. See
+    /// [`ineligibility`].
+    pub may_consume_credits: bool,
     /// The models this profile should not run now, by model id, from
     /// provider failures its sessions just had (#1361).
     pub unhealthy: std::collections::BTreeMap<String, crate::profile_health::Unhealthy>,
@@ -340,10 +343,112 @@ fn paid_weight(credits: Option<&mj_client::quota::PaidCredits>) -> Option<f64> {
     }
 }
 
-/// Capacity classification shared by launches and quota recovery.
-pub(crate) fn exhausted(candidate: &SubagentCandidate, model: &str, now_seconds: i64) -> bool {
-    matches!(
-        quota_rank(candidate, model, now_seconds),
-        QuotaRank::Exhausted
-    )
+/// Why load balancing must not offer a candidate for `model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ineligible {
+    /// The subscription is out of quota for the model and has no paid credits.
+    OutOfQuota,
+    /// The subscription is out of quota; only paid credits remain, and the
+    /// profile's option forbids load balancing from spending them.
+    CreditsNotAllowed,
+}
+
+impl Ineligible {
+    /// "profile codex2 is out of subscription quota for model ..." with what
+    /// the user can do about it.
+    pub(crate) fn describe(self, profile_id: &str, model: &str) -> String {
+        match self {
+            Self::OutOfQuota => {
+                format!("profile {profile_id} is out of subscription quota for model {model:?}")
+            }
+            Self::CreditsNotAllowed => format!(
+                "profile {profile_id} is out of subscription quota for model {model:?}; \
+                 enabling \"Load balancing may consume credits\" on the profile would let it \
+                 use its paid credits"
+            ),
+        }
+    }
+}
+
+/// The one decision whether load balancing may offer a candidate. A
+/// subscription out of quota for the model is excluded; one with only paid
+/// credits left is excluded unless its profile allows spending them.
+/// Usage-priced profiles bill per use by nature, and unknown quota is not
+/// evidence of exhaustion, so both stay eligible. A session pinned to a named
+/// profile is not load balancing and does not ask.
+pub(crate) fn ineligibility(
+    candidate: &SubagentCandidate,
+    model: &str,
+    now_seconds: i64,
+) -> Option<Ineligible> {
+    match quota_rank(candidate, model, now_seconds) {
+        QuotaRank::Exhausted => Some(Ineligible::OutOfQuota),
+        QuotaRank::Paid(_)
+            if matches!(candidate.quota, CandidateQuota::Subscription { .. })
+                && !candidate.may_consume_credits =>
+        {
+            Some(Ineligible::CreditsNotAllowed)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mj_client::quota::PaidCredits;
+
+    fn candidate(quota: CandidateQuota, may_consume_credits: bool) -> SubagentCandidate {
+        SubagentCandidate {
+            profile_id: "p".into(),
+            harness: mj_core::config::HarnessKind::Codex,
+            choices: mj_core::worker_launch::ProfileConfig {
+                model: None,
+                models: Vec::new(),
+                efforts: Vec::new(),
+                observed_at: 1,
+            },
+            quota,
+            may_consume_credits,
+            unhealthy: Default::default(),
+        }
+    }
+
+    fn subscription(remaining: u8, credits: Option<PaidCredits>) -> CandidateQuota {
+        CandidateQuota::Subscription {
+            monthly_price_usd: None,
+            windows: vec![crate::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(remaining),
+                duration_seconds: None,
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+            paid_credits: credits,
+            refreshed_at_epoch_seconds: 0,
+        }
+    }
+
+    #[test]
+    fn load_balancing_excludes_subscriptions_without_quota_unless_credits_are_allowed() {
+        let ask = |quota: CandidateQuota, option| ineligibility(&candidate(quota, option), "m", 0);
+        let credits = Some(PaidCredits::limited(5.0).expect("finite credits"));
+        for option in [false, true] {
+            assert_eq!(
+                ask(subscription(0, None), option),
+                Some(Ineligible::OutOfQuota)
+            );
+            assert_eq!(ask(subscription(50, None), option), None);
+            assert_eq!(ask(CandidateQuota::UsagePriced, option), None);
+            assert_eq!(ask(CandidateQuota::Unknown, option), None);
+        }
+        assert_eq!(
+            ask(subscription(0, credits.clone()), false),
+            Some(Ineligible::CreditsNotAllowed)
+        );
+        assert_eq!(ask(subscription(0, credits), true), None);
+    }
 }

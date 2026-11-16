@@ -101,6 +101,7 @@ impl TurnReviewHost {
                 persistence_task: Some(persistence_task),
                 child_closures: tokio::task::JoinSet::new(),
                 child_closure_owners: BTreeMap::new(),
+                sweep_queue: std::collections::VecDeque::new(),
                 reviews: BTreeMap::new(),
                 preparing: BTreeMap::new(),
                 pending_open: BTreeMap::new(),

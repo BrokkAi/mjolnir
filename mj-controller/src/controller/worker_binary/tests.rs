@@ -2683,6 +2683,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
@@ -2770,6 +2771,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
@@ -2864,6 +2866,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
     }
@@ -3169,6 +3172,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
     }
@@ -3528,6 +3532,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
@@ -3869,6 +3874,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         guardian_review_model: None,
         codex_profile: None,
         legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
         aws: None,
     }
@@ -5472,6 +5478,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
@@ -5635,6 +5642,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
@@ -5796,6 +5804,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             guardian_review_model: None,
             codex_profile: None,
             legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
