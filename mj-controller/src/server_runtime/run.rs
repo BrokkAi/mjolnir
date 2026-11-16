@@ -1145,20 +1145,16 @@ pub(crate) async fn run_server(
                             let known = capacity_state.contains_key(target_id);
                             // One queued nudge refreshes every target. Do not
                             // block the consumer while readings wait for it.
-                            let accepted = known && capacity_feed.request_refresh();
+                            let generation = known.then(|| capacity_feed.request_refresh()).flatten();
+                            let accepted = generation.is_some();
                             if known && !accepted {
                                 tracing::warn!("phone capacity refresh rejected: poller stopped");
                             }
                             if known {
-                                let after_results = capacity_states_rx
-                                    .borrow()
-                                    .get(target_id)
-                                    .map_or(0, |state| state.results);
                                 if let Some(entry) = capacity_state.get_mut(target_id) {
-                                    entry.refresh = if accepted {
-                                        PhoneRefresh::Waiting { after_results }
-                                    } else {
-                                        PhoneRefresh::Rejected { after_results }
+                                    entry.refresh = match generation {
+                                        Some(generation) => PhoneRefresh::Waiting { generation },
+                                        None => PhoneRefresh::Rejected,
                                     };
                                 }
                                 revision = daemon_runtime.allocate_revision();

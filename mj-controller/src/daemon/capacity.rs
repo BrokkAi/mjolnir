@@ -84,6 +84,10 @@ pub(crate) struct CapacityFeed {
     pub(crate) states:
         tokio::sync::watch::Receiver<BTreeMap<String, crate::targets::TargetCapacityState>>,
     refresh: tokio::sync::mpsc::Sender<()>,
+    /// Refresh requests made so far. The poller reads it when a probe starts
+    /// and reports the value with the result, so the feed owns the one
+    /// numbering of requests.
+    refresh_requests: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacityFeed {
@@ -147,12 +151,20 @@ impl CapacityFeed {
             .collect()
     }
 
-    /// Ask for a new reading of every host. A request that arrives while one
-    /// is queued is the same request.
-    pub(crate) fn request_refresh(&self) -> bool {
+    /// Ask for a new reading of every host. Returns the request's generation:
+    /// the target's `answered_refresh` reaches it once a probe that started
+    /// after this call has produced a result. A request that arrives while one
+    /// is queued is the same request. `None` means the poller has stopped.
+    pub(crate) fn request_refresh(&self) -> Option<u64> {
+        // Count first, then trigger: a probe that counts this request starts
+        // after it was made.
+        let generation = self
+            .refresh_requests
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
         match self.refresh.try_send(()) {
-            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => true,
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => false,
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => Some(generation),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => None,
         }
     }
 }
@@ -700,7 +712,9 @@ pub(super) fn spawn_capacity_service(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let (targets_tx, refresh, mut readings) = crate::pollers::spawn_dashboard_capacity_poller();
+    let refresh_requests = Arc::<std::sync::atomic::AtomicU64>::default();
+    let (targets_tx, refresh, mut readings) =
+        crate::pollers::spawn_daemon_capacity_poller(refresh_requests.clone());
     crate::target_storage::install_no_space_observer();
     crate::target_storage::attach_refresh(refresh.clone());
     let initial = state
@@ -713,6 +727,7 @@ pub(super) fn spawn_capacity_service(
         targets: targets_tx.subscribe(),
         states: states_rx,
         refresh,
+        refresh_requests,
     };
     if state.capacity.set(feed).is_err() {
         tracing::error!("the daemon capacity service was started twice");
@@ -767,7 +782,11 @@ pub(super) fn spawn_capacity_service(
                         states
                             .entry(reading.target_id.clone())
                             .or_default()
-                            .apply(&reading.result, reading.sampled_at_epoch_seconds);
+                            .apply(
+                                &reading.result,
+                                reading.sampled_at_epoch_seconds,
+                                reading.refresh_generation,
+                            );
                     });
                     if let Ok(Some(usage)) = &reading.result {
                         crate::target_storage::record_samples(
@@ -934,7 +953,8 @@ mod tests {
                 .set(CapacityFeed {
                     targets: targets.subscribe(),
                     states,
-                    refresh
+                    refresh,
+                    refresh_requests: Default::default(),
                 })
                 .is_ok()
         );
@@ -1458,6 +1478,7 @@ mod tests {
                     targets: targets.subscribe(),
                     states: latest_rx,
                     refresh,
+                    refresh_requests: Default::default(),
                 })
                 .is_ok()
         );

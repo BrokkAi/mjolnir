@@ -60,19 +60,29 @@ pub struct TargetCapacityState {
     /// The fleet answered and has no instances running. Cleared by a failed
     /// probe: after a failure the fleet's size is unknown, not zero.
     pub on_demand: bool,
-    /// How many probe results have been applied. A surface that nudges the
-    /// poller compares it to learn that a result has since arrived.
-    pub results: u64,
+    /// The newest refresh request that a probe began after. A result whose
+    /// probe started after request `n` answers every request up to `n`; one
+    /// that started earlier, or a scheduled round, does not answer a later
+    /// request. A surface that nudges the poller waits for this to reach the
+    /// generation it was given.
+    pub answered_refresh: u64,
 }
 
 impl TargetCapacityState {
+    /// Whether any probe has answered, successfully or not. Until then the
+    /// target is loading, not idle.
+    pub fn has_answered(&self) -> bool {
+        self.sampled_at_epoch_seconds.is_some() || self.probe_error.is_some()
+    }
+
     /// Fold one probe result into the state.
     pub fn apply(
         &mut self,
         result: &Result<Option<DeploymentCapacityUsage>, String>,
         sampled_at_epoch_seconds: u64,
+        refresh_generation: u64,
     ) {
-        self.results += 1;
+        self.answered_refresh = self.answered_refresh.max(refresh_generation);
         match result {
             Ok(usage) => {
                 self.on_demand = usage.is_none();

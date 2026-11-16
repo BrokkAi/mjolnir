@@ -338,7 +338,7 @@ impl DashboardState {
         self.capacity_details
             .values()
             .find(|detail| detail.target.target_ids.iter().any(|id| id == target_id))
-            .and_then(|detail| detail.usage.as_ref())
+            .and_then(|detail| detail.state.usage.as_ref())
             .map(|usage| (usage.logical_cores, usage.memory_total_bytes))
     }
 

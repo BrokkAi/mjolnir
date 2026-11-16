@@ -20,9 +20,9 @@ pub(crate) fn capacity_staleness(
     now_epoch_seconds: u64,
 ) -> Option<String> {
     mj_core::targets::capacity_staleness(
-        detail.usage.is_some(),
-        detail.probe_error.as_deref(),
-        detail.sampled_at_epoch_seconds,
+        detail.state.usage.is_some(),
+        detail.state.probe_error.as_deref(),
+        detail.state.sampled_at_epoch_seconds,
         now_epoch_seconds,
     )
 }
@@ -79,7 +79,7 @@ fn capacity_cpu_and_memory(detail: &CapacityDetail, stale: bool) -> (Line<'stati
         );
     }
     let unavailable = || Line::styled("unavailable", theme::muted());
-    match (&detail.target.kind, &detail.usage) {
+    match (&detail.target.kind, &detail.state.usage) {
         (DeploymentCapacityKind::Host, Some(usage)) => {
             let reading = |used_percent: u8| {
                 Line::styled(
@@ -112,7 +112,7 @@ fn capacity_cpu_and_memory(detail: &CapacityDetail, stale: bool) -> (Line<'stati
         ),
         // A fleet with nothing running has no capacity figures, and the
         // count is the whole answer.
-        (DeploymentCapacityKind::AwsFleet, None) if detail.on_demand => {
+        (DeploymentCapacityKind::AwsFleet, None) if detail.state.on_demand => {
             (Line::raw(fleet_vm_label(detail)), Line::default())
         }
         _ => (unavailable(), Line::default()),

@@ -51,19 +51,17 @@ pub(super) struct PhoneCapacity {
     pub(super) refresh: PhoneRefresh,
 }
 
-/// The phone's latest request for a new reading. Each variant names the
-/// service's result count when the request was made; a later count means a
-/// result has arrived and the request is over.
+/// The phone's latest request for a new reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PhoneRefresh {
     Idle,
+    /// Accepted with this generation; over once the target's
+    /// `answered_refresh` reaches it.
     Waiting {
-        after_results: u64,
+        generation: u64,
     },
-    /// The poller was gone and refused the nudge.
-    Rejected {
-        after_results: u64,
-    },
+    /// The poller was gone and refused the request.
+    Rejected,
 }
 
 /// Keep the state map in step with the targets the daemon's capacity service
@@ -103,13 +101,10 @@ pub(super) fn viewer_capacity(
         .map(|entry| {
             let reading = readings.get(&entry.target.id).cloned().unwrap_or_default();
             let usage = reading.usage.as_ref();
-            let rejected = matches!(
-                entry.refresh,
-                PhoneRefresh::Rejected { after_results } if after_results == reading.results
-            );
+            let rejected = entry.refresh == PhoneRefresh::Rejected;
             let waiting = matches!(
                 entry.refresh,
-                PhoneRefresh::Waiting { after_results } if after_results == reading.results
+                PhoneRefresh::Waiting { generation } if reading.answered_refresh < generation
             );
             let hosts = mj_core::targets::storage::capacity_storage_hosts(&entry.target, usage);
             let container_capacity = container_capacities
@@ -141,7 +136,7 @@ pub(super) fn viewer_capacity(
                 .then(|| u64::from(!reading.on_demand)),
                 sampled_at_epoch_seconds: reading.sampled_at_epoch_seconds,
                 // A target with no result yet is loading, not idle.
-                refreshing: !rejected && (waiting || reading.results == 0),
+                refreshing: !rejected && (waiting || !reading.has_answered()),
                 stale: reading.sampled_at_epoch_seconds.is_some_and(|sampled| {
                     mj_core::targets::capacity_sample_is_stale(sampled, now)
                 }),
