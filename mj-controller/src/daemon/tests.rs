@@ -6210,6 +6210,136 @@ async fn report_candidates_follow_committed_child_lifecycle_without_losing_faile
     assert_eq!(state.subagent_report_parent_ids(), [parent.id]);
 }
 
+/// A client waiting for a create across a daemon restart is told to ask again
+/// (the non-acceptance a draining daemon gives, which the client retries on a
+/// fresh connection), not that the create failed. A person's cancel is still
+/// a failure.
+#[tokio::test]
+async fn a_create_stopped_for_shutdown_answers_its_waiter_with_the_retryable_reply() {
+    const NAME: &str = "a_create_stopped_for_shutdown_answers_its_waiter_with_the_retryable_reply";
+    const CHILD: &str = "MJ_TEST_WAIT_CREATE_STOPPED";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let state = test_runtime_state_loading_the_store();
+    let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    for (session, stopped) in [("stopped-create", true), ("cancelled-create", false)] {
+        let control = LifecycleControl::default();
+        state
+            .start_or_join_lifecycle_controlled(
+                session.into(),
+                LifecycleKind::Create,
+                None,
+                None,
+                Some(control.clone()),
+                |_, _, cancelled| async move {
+                    while !cancelled.load(Ordering::Acquire) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    Err(anyhow::anyhow!("operation cancelled"))
+                },
+            )
+            .unwrap();
+        let waiting = handle_action(
+            DaemonAction::WaitCreateSession {
+                session_id: session.into(),
+            },
+            &metadata,
+            &state,
+            &shutdown,
+        );
+        tokio::pin!(waiting);
+        tokio::task::yield_now().await;
+        if stopped {
+            control.cancel_for_shutdown();
+        } else {
+            control.request_cancel("person cancellation");
+        }
+        let reply = tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .expect("the wait ends with the create");
+        if stopped {
+            assert!(matches!(reply.unwrap(), DaemonReply::UpgradePending));
+        } else {
+            assert!(reply.is_err(), "a cancelled create is a failure");
+        }
+    }
+}
+
+/// A create stopped by shutdown before the phone was told it exists is rolled
+/// back and leaves no intent, so the next daemon provisions nothing for it. One
+/// stopped after publication keeps its intent (see the restart end-to-end test).
+#[tokio::test]
+async fn a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resume() {
+    const NAME: &str = "a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resume";
+    const CHILD: &str = "MJ_TEST_CREATE_STOPPED_UNPUBLISHED";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Unpublished").unwrap();
+    let session = runtime_test_session(
+        "unpublished-create",
+        &workspace.id,
+        SessionState::Provisioning,
+    );
+    crate::database::save_new_session(&session, None, false, false).unwrap();
+    assert_eq!(
+        crate::database::load_session_create_intents()
+            .unwrap()
+            .len(),
+        1
+    );
+    let state = test_runtime_state_loading_the_store();
+    let control = LifecycleControl::default();
+    // The phone never publishes: the sender stays alive and silent.
+    let (_publisher, publication) = tokio::sync::oneshot::channel();
+    state
+        .start_create_lifecycle(
+            session.id.clone(),
+            control.clone(),
+            Some(publication),
+            false,
+            None,
+        )
+        .unwrap();
+    tokio::task::yield_now().await;
+    control.cancel_for_shutdown();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        state.wait_create_outcome(&session.id),
+    )
+    .await
+    .expect("the stopped create ends");
+    drop(outcome);
+    assert!(
+        crate::database::load_session_create_intents()
+            .unwrap()
+            .is_empty(),
+        "an unpublished create must not be left for the next daemon"
+    );
+    let record = crate::database::load_session_record(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, SessionState::Error);
+}
+
 /// With no create running, the daemon answers a create wait from the stored
 /// record, so a client never infers "still creating" from session state.
 #[tokio::test]

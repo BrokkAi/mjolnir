@@ -716,7 +716,11 @@ impl RuntimeState {
                         .unwrap_or_else(PoisonError::into_inner) = Some(admission);
                     Ok(())
                 };
-                let interrupted = || control.stopped_for_shutdown();
+                // A create stopped before the phone was told it exists is
+                // discarded by the ordinary rollback, not left for the next
+                // daemon to provision for a client that was never answered.
+                let published = publication_error.is_none();
+                let interrupted = || published && control.stopped_for_shutdown();
                 let provision = if recovering {
                     controller
                         .recover_interrupted_create(
@@ -811,8 +815,23 @@ impl RuntimeState {
         Ok(owned)
     }
 
+    /// Wait for a create and fail with its error, including the stop of a
+    /// daemon that is exiting. Clients of the wire protocol use
+    /// [`Self::wait_create_outcome`], which tells that stop apart.
     pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
-        let result = {
+        match self.wait_create_outcome(session_id).await? {
+            CreateWait::Finished => Ok(()),
+            CreateWait::StoppedForShutdown => {
+                bail!("the daemon stopped during session creation")
+            }
+        }
+    }
+
+    /// How a create wait ended. A create stopped by daemon shutdown has not
+    /// failed: the next daemon finishes it, so the one predicate for that,
+    /// `stopped_for_shutdown`, decides it, never the error text.
+    pub(crate) async fn wait_create_outcome(&self, session_id: &str) -> Result<CreateWait> {
+        let entry = {
             let lifecycle_owner = self.owner();
             match lifecycle_owner.lifecycle.get(session_id) {
                 Some(active) => {
@@ -820,12 +839,12 @@ impl RuntimeState {
                         active.kind == LifecycleKind::Create,
                         "session {session_id} is no longer being created"
                     );
-                    Some(active.result.clone())
+                    Some((active.result.clone(), active.control.clone()))
                 }
                 None => None,
             }
         };
-        let Some(result) = result else {
+        let Some((result, control)) = entry else {
             // No create is running: its outcome is already recorded. Every
             // create, including one a restart interrupted, is admitted before
             // the daemon serves clients, so the record says how it ended.
@@ -842,14 +861,17 @@ impl RuntimeState {
                 | mj_core::state::SessionState::Disconnected => Err(anyhow::anyhow!(
                     "no create operation exists for session {session_id}"
                 )),
-                _ => Ok(()),
+                _ => Ok(CreateWait::Finished),
             };
         };
         let channel = result.clone();
         let outcome = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&channel);
+        if outcome.is_err() && control.stopped_for_shutdown() {
+            return Ok(CreateWait::StoppedForShutdown);
+        }
         match outcome? {
-            DaemonLifecycleResult::Done => Ok(()),
+            DaemonLifecycleResult::Done => Ok(CreateWait::Finished),
             DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
                 unreachable!("cleanup cannot return a move outcome")
             }
@@ -858,6 +880,13 @@ impl RuntimeState {
             }
         }
     }
+}
+
+/// How a wait for a session's creation ended.
+pub(crate) enum CreateWait {
+    Finished,
+    /// The daemon is stopping; the next daemon finishes the create.
+    StoppedForShutdown,
 }
 
 fn validate_minimum_container_allocation(

@@ -44,6 +44,8 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 - Decision: `wait_create_session` answers from the daemon when no create is running: the stored record gives the real failure (`Error`), success (any non-creating state), or a refusal naming an unowned create. The CLI waiter no longer reads session state; it retries only a lost connection. Rationale: one owner for "is this create still going". No protocol change. Date: 2026-11-16.
 - Decision: `reset_interrupted_create` removes no checkout when no environment exists, because planning only records `managed_worktree` and `execute_repository_setup` creates the checkout after the environment is reserved; the rollback helper would also fail there (it requires a durable environment). Date: 2026-11-16.
 
+- Decision: a create wait answers `UpgradePending` (the non-acceptance a draining daemon gives, which `DaemonClient::request` already retries on a fresh connection) when the create was stopped for shutdown, decided by `stopped_for_shutdown()` in `wait_create_outcome`. A create stopped before its phone publication completes is not `interrupted`, so it takes the ordinary rollback (record kept as Error, intent settled, no target work) instead of being resumed. The dashboard follow loop selects the wait against its cancellation. Date: 2026-11-16.
+
 
 ## Outcomes & Retrospective
 

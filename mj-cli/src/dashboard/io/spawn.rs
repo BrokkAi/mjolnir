@@ -1511,9 +1511,19 @@ async fn await_daemon_creation(
             bail!("operation cancelled");
         }
         let mut daemon = daemon::connect_or_start().await?;
-        let error = match daemon.wait_create_session(session_id.to_owned()).await {
-            Ok(()) => return Ok(LifecycleSuccess::Created),
-            Err(error) => error,
+        // The wait blocks for the whole create, so the cancellation is
+        // watched beside it rather than between iterations.
+        let cancellation = async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        let error = tokio::select! {
+            outcome = daemon.wait_create_session(session_id.to_owned()) => match outcome {
+                Ok(()) => return Ok(LifecycleSuccess::Created),
+                Err(error) => error,
+            },
+            () = cancellation => bail!("operation cancelled"),
         };
         // A refusal is the daemon's answer, including the real failure of a
         // create that has ended; only a lost connection means "ask again".
