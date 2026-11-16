@@ -220,6 +220,14 @@ impl ProfileQuota {
         ))
     }
 
+    /// The refused-check label when there is no good reading behind it, so the
+    /// label stands in for the reading. With a good reading, the reading is
+    /// shown and the label is a note beside it.
+    pub fn refused_check_without_reading(&self, now: u64) -> Option<String> {
+        self.error.as_ref()?;
+        self.rate_limit_label(now)
+    }
+
     pub fn weekly_window(&self) -> Option<&QuotaWindow> {
         self.windows
             .iter()

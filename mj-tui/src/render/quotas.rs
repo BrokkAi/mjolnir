@@ -120,9 +120,7 @@ pub(crate) fn minimized_quota_line(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            if quota
-                .is_some_and(|quota| quota.error.is_some() && quota.rate_limit_label(now).is_some())
-            {
+            if quota.is_some_and(|quota| quota.refused_check_without_reading(now).is_some()) {
                 return Some(SummaryReading {
                     name: row.label(),
                     value: "check refused".into(),
@@ -438,10 +436,10 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                         // The provider refused the check and there is no good
                         // reading to show: the row says when the next check runs.
                         Some(quota)
-                            if quota.error.is_some() && quota.rate_limit_label(now).is_some() =>
+                            if let Some(label) = quota.refused_check_without_reading(now) =>
                         {
                             (
-                                Line::raw(quota.rate_limit_label(now).unwrap_or_default()),
+                                Line::raw(label),
                                 String::new(),
                                 Line::default(),
                                 String::new(),
