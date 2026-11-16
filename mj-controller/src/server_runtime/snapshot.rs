@@ -41,23 +41,28 @@ pub(super) struct PhoneSessionViews<'a> {
         &'a std::collections::BTreeMap<String, crate::review_host::RuntimeReviewView>,
 }
 
-/// What the phone server remembers about one probe target between readings.
-///
-/// The last good reading is kept beside any failure, because one failed probe
-/// is not a reason to forget what a machine was doing a minute ago; the phone
-/// is told both, and says so.
+/// What the phone server remembers about one probe target: the target itself
+/// and the phone's own nudge of the poller. The readings, their times and
+/// failures belong to the daemon's capacity service and are read from it, so
+/// the page can never disagree with `mj hosts`.
 #[derive(Debug, Clone)]
 pub(super) struct PhoneCapacity {
     pub(super) target: crate::targets::DeploymentCapacityTarget,
-    pub(super) usage: Option<crate::targets::DeploymentCapacityUsage>,
-    pub(super) on_demand: bool,
-    pub(super) sampled_at_epoch_seconds: Option<u64>,
-    pub(super) refreshing: bool,
-    pub(super) failed: bool,
+    pub(super) refresh: PhoneRefresh,
 }
 
-/// How old a reading may be before the page says so.
-pub(super) const CAPACITY_STALE_AFTER: Duration = Duration::from_secs(120);
+/// The phone's latest request for a new reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PhoneRefresh {
+    Idle,
+    /// Accepted with this generation; over once the target's
+    /// `answered_refresh` reaches it.
+    Waiting {
+        generation: u64,
+    },
+    /// The poller was gone and refused the request.
+    Rejected,
+}
 
 /// Keep the state map in step with the targets the daemon's capacity service
 /// probes.
@@ -72,12 +77,7 @@ pub(super) fn track_capacity_targets(
             .and_modify(|entry| entry.target = target.clone())
             .or_insert_with(|| PhoneCapacity {
                 target: target.clone(),
-                usage: None,
-                on_demand: false,
-                sampled_at_epoch_seconds: None,
-                // A target with no reading yet is loading, not idle.
-                refreshing: true,
-                failed: false,
+                refresh: PhoneRefresh::Idle,
             });
     }
 }
@@ -85,6 +85,7 @@ pub(super) fn track_capacity_targets(
 /// Project the capacity readings for the phone.
 pub(super) fn viewer_capacity(
     state: &std::collections::BTreeMap<String, PhoneCapacity>,
+    readings: &std::collections::BTreeMap<String, crate::targets::TargetCapacityState>,
     container_capacities: &std::collections::BTreeMap<
         String,
         mj_client::runtime_feed::RuntimeContainerCapacity,
@@ -98,7 +99,13 @@ pub(super) fn viewer_capacity(
     state
         .values()
         .map(|entry| {
-            let usage = entry.usage.as_ref();
+            let reading = readings.get(&entry.target.id).cloned().unwrap_or_default();
+            let usage = reading.usage.as_ref();
+            let rejected = entry.refresh == PhoneRefresh::Rejected;
+            let waiting = matches!(
+                entry.refresh,
+                PhoneRefresh::Waiting { generation } if reading.answered_refresh < generation
+            );
             let hosts = mj_core::targets::storage::capacity_storage_hosts(&entry.target, usage);
             let container_capacity = container_capacities
                 .get(&entry.target.id)
@@ -120,19 +127,18 @@ pub(super) fn viewer_capacity(
                 logical_cores: usage.map(|usage| usage.logical_cores),
                 container_capacity,
                 disk_total_bytes: usage.and_then(|usage| usage.disk_total_bytes),
-                // A fleet reports how many machines it is running; a plain host
-                // has no such count and says nothing rather than zero.
-                virtual_machines: matches!(
-                    entry.target.kind,
-                    crate::targets::DeploymentCapacityKind::AwsFleet
-                )
-                .then(|| u64::from(!entry.on_demand)),
-                sampled_at_epoch_seconds: entry.sampled_at_epoch_seconds,
-                refreshing: entry.refreshing,
-                stale: entry.sampled_at_epoch_seconds.is_some_and(|sampled| {
-                    now.saturating_sub(sampled) > CAPACITY_STALE_AFTER.as_secs()
+                // The same count `mj hosts` reports: absent for a plain host
+                // and for a fleet whose size is unknown.
+                virtual_machines: reading
+                    .fleet_instances(&entry.target)
+                    .map(|count| count as u64),
+                sampled_at_epoch_seconds: reading.sampled_at_epoch_seconds,
+                // A target with no result yet is loading, not idle.
+                refreshing: !rejected && (waiting || !reading.has_answered()),
+                stale: reading.sampled_at_epoch_seconds.is_some_and(|sampled| {
+                    mj_core::targets::capacity_sample_is_stale(sampled, now)
                 }),
-                has_error: entry.failed,
+                has_error: rejected || reading.probe_error.is_some(),
             }
         })
         .collect()

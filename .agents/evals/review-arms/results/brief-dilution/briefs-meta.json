@@ -1,0 +1,192 @@
+[
+ {
+  "id": "catalog-cache-key-collision",
+  "counts": {
+   "proposed": 165,
+   "form_ok": 165,
+   "truth_false": 1,
+   "dup_yes": 0,
+   "dup_partial": 18,
+   "kept": 164
+  },
+  "lines": {
+   "before": 37,
+   "after": 201
+  },
+  "bytes": {
+   "before": 7655,
+   "after": 50706
+  }
+ },
+ {
+  "id": "child-model-wrong-efforts",
+  "counts": {
+   "proposed": 131,
+   "form_ok": 131,
+   "truth_false": 1,
+   "dup_yes": 0,
+   "dup_partial": 3,
+   "kept": 130
+  },
+  "lines": {
+   "before": 37,
+   "after": 167
+  },
+  "bytes": {
+   "before": 7443,
+   "after": 47998
+  }
+ },
+ {
+  "id": "codex-effort-alias-lost",
+  "counts": {
+   "proposed": 165,
+   "form_ok": 165,
+   "truth_false": 5,
+   "dup_yes": 0,
+   "dup_partial": 4,
+   "kept": 160
+  },
+  "lines": {
+   "before": 25,
+   "after": 185
+  },
+  "bytes": {
+   "before": 3619,
+   "after": 49193
+  }
+ },
+ {
+  "id": "held-prompt-ignores-interrupt",
+  "counts": {
+   "proposed": 91,
+   "form_ok": 91,
+   "truth_false": 0,
+   "dup_yes": 0,
+   "dup_partial": 2,
+   "kept": 91
+  },
+  "lines": {
+   "before": 26,
+   "after": 117
+  },
+  "bytes": {
+   "before": 3741,
+   "after": 29845
+  }
+ },
+ {
+  "id": "metadata-checkpoint-overwrites-checkout",
+  "counts": {
+   "proposed": 139,
+   "form_ok": 139,
+   "truth_false": 7,
+   "dup_yes": 0,
+   "dup_partial": 16,
+   "kept": 132
+  },
+  "lines": {
+   "before": 36,
+   "after": 168
+  },
+  "bytes": {
+   "before": 7464,
+   "after": 45920
+  }
+ },
+ {
+  "id": "projection-mixed-sqlite-snapshots",
+  "counts": {
+   "proposed": 155,
+   "form_ok": 155,
+   "truth_false": 0,
+   "dup_yes": 0,
+   "dup_partial": 6,
+   "kept": 155
+  },
+  "lines": {
+   "before": 40,
+   "after": 195
+  },
+  "bytes": {
+   "before": 7531,
+   "after": 52252
+  }
+ },
+ {
+  "id": "stale-model-launch-spec",
+  "counts": {
+   "proposed": 152,
+   "form_ok": 152,
+   "truth_false": 3,
+   "dup_yes": 0,
+   "dup_partial": 6,
+   "kept": 149
+  },
+  "lines": {
+   "before": 24,
+   "after": 173
+  },
+  "bytes": {
+   "before": 3370,
+   "after": 52115
+  }
+ },
+ {
+  "id": "symbol-change-keeps-cached-transcript",
+  "counts": {
+   "proposed": 1550,
+   "form_ok": 1550,
+   "truth_false": 104,
+   "dup_yes": 0,
+   "dup_partial": 4,
+   "kept": 1446
+  },
+  "lines": {
+   "before": 39,
+   "after": 1485
+  },
+  "bytes": {
+   "before": 7346,
+   "after": 300915
+  }
+ },
+ {
+  "id": "terminal-id-reused",
+  "counts": {
+   "proposed": 174,
+   "form_ok": 174,
+   "truth_false": 0,
+   "dup_yes": 0,
+   "dup_partial": 5,
+   "kept": 174
+  },
+  "lines": {
+   "before": 41,
+   "after": 215
+  },
+  "bytes": {
+   "before": 6407,
+   "after": 47775
+  }
+ },
+ {
+  "id": "web-feed-self-deadlock",
+  "counts": {
+   "proposed": 121,
+   "form_ok": 121,
+   "truth_false": 2,
+   "dup_yes": 2,
+   "dup_partial": 9,
+   "kept": 117
+  },
+  "lines": {
+   "before": 40,
+   "after": 157
+  },
+  "bytes": {
+   "before": 7192,
+   "after": 39513
+  }
+ }
+]

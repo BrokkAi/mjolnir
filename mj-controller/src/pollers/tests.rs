@@ -1474,26 +1474,32 @@ struct CapacityPollerFixture {
     triggers: tokio::sync::mpsc::Sender<()>,
     updates: tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
     started: tokio::sync::mpsc::UnboundedReceiver<PendingCapacityProbe>,
+    requested: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacityPollerFixture {
     fn new() -> Self {
         let (started_tx, started) = tokio::sync::mpsc::unbounded_channel();
-        let (targets, triggers, updates) = spawn_capacity_poller_with(move |target| {
-            let started_tx = started_tx.clone();
-            async move {
-                let (finish, result) = tokio::sync::oneshot::channel();
-                started_tx
-                    .send(PendingCapacityProbe { target, finish })
-                    .unwrap();
-                result.await.context("test probe completion dropped")?
-            }
-        });
+        let requested = Arc::<std::sync::atomic::AtomicU64>::default();
+        let (targets, triggers, updates) = spawn_capacity_poller_with(
+            move |target| {
+                let started_tx = started_tx.clone();
+                async move {
+                    let (finish, result) = tokio::sync::oneshot::channel();
+                    started_tx
+                        .send(PendingCapacityProbe { target, finish })
+                        .unwrap();
+                    result.await.context("test probe completion dropped")?
+                }
+            },
+            requested.clone(),
+        );
         Self {
             targets,
             triggers,
             updates,
             started,
+            requested,
         }
     }
 
@@ -1517,6 +1523,32 @@ fn capacity_target(id: &str) -> DeploymentCapacityTarget {
         local_storage_paths: Vec::new(),
         probe_error: None,
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_request_is_answered_only_by_a_probe_that_started_after_it() {
+    let mut fixture = CapacityPollerFixture::new();
+    fixture.targets.send_replace(vec![capacity_target("local")]);
+    // A scheduled probe is already running when the request arrives.
+    let running = fixture.started.recv().await.unwrap();
+    fixture
+        .requested
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    fixture.triggers.send(()).await.unwrap();
+    running.finish.send(Ok(None)).unwrap();
+    // Its result began before the request, so it does not answer it.
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 0);
+    // The poller probes again at once, and that probe answers the request.
+    fixture
+        .started
+        .recv()
+        .await
+        .unwrap()
+        .finish
+        .send(Ok(None))
+        .unwrap();
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
+    fixture.assert_no_start().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -1635,12 +1667,15 @@ async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_disc
 #[tokio::test]
 async fn capacity_probe_panics_are_reported_and_do_not_prevent_retry() {
     let first = AtomicBool::new(true);
-    let (targets, triggers, mut updates) = spawn_capacity_poller_with(move |_| {
-        if first.swap(false, Ordering::SeqCst) {
-            panic!("test capacity probe panic");
-        }
-        async { Ok(None) }
-    });
+    let (targets, triggers, mut updates) = spawn_capacity_poller_with(
+        move |_| {
+            if first.swap(false, Ordering::SeqCst) {
+                panic!("test capacity probe panic");
+            }
+            async { Ok(None) }
+        },
+        Arc::default(),
+    );
     targets.send_replace(vec![capacity_target("local")]);
     let failure = updates.recv().await.unwrap();
     assert_eq!(failure.target_id, "local");

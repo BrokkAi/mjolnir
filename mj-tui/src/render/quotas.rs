@@ -35,7 +35,7 @@ pub(crate) fn minimized_targets_line(
                     color: None,
                 };
             }
-            let (value, cpu_percent) = match (&detail.target.kind, &detail.usage) {
+            let (value, cpu_percent) = match (&detail.target.kind, &detail.state.usage) {
                 (DeploymentCapacityKind::Host, Some(usage)) => match usage.cpu_percent {
                     Some(cpu) => (format!("{cpu}%"), Some(cpu)),
                     None => ("no CPU".to_string(), None),
@@ -43,7 +43,7 @@ pub(crate) fn minimized_targets_line(
                 // A fleet has no CPU percentage of its own, so what it reports
                 // is how many machines it is running.
                 (DeploymentCapacityKind::AwsFleet, Some(_)) => (fleet_vm_label(detail), None),
-                (DeploymentCapacityKind::AwsFleet, None) if detail.on_demand => {
+                (DeploymentCapacityKind::AwsFleet, None) if detail.state.on_demand => {
                     (fleet_vm_label(detail), None)
                 }
                 _ => ("unavailable".to_string(), None),

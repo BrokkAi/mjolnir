@@ -3027,6 +3027,78 @@ fn render_quota_at(
         .collect::<Vec<_>>()
         .join("\n"))
 }
+#[derive(Debug, Args)]
+pub(crate) struct HostsArgs {
+    /// Show only this host or fleet, named by its host or by a target it
+    /// contains; default lists every host.
+    #[arg(long)]
+    host: Option<String>,
+    /// Print the response as JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+/// Read the daemon capacity service's latest readings; this never samples a
+/// host itself. The TUI dashboard still samples hosts with its own poller, so
+/// its numbers come from separate samples and can differ by up to one round.
+pub(crate) async fn hosts(args: HostsArgs) -> Result<()> {
+    let mut daemon = crate::daemon::connect_or_start().await?;
+    let rows = daemon.host_capacity().await?;
+    println!(
+        "{}",
+        render_hosts(
+            &rows,
+            args.host.as_deref(),
+            args.json,
+            mj_core::clock::epoch_seconds()
+        )?
+    );
+    Ok(())
+}
+
+fn render_hosts(
+    rows: &[mj_core::targets::HostCapacityRow],
+    only: Option<&str>,
+    json: bool,
+    now: u64,
+) -> Result<String> {
+    let selected: Vec<_> = match only {
+        None => rows.to_vec(),
+        Some(name) => {
+            let found: Vec<_> = rows
+                .iter()
+                .filter(|row| row.matches(name))
+                .cloned()
+                .collect();
+            if found.is_empty() {
+                let known: std::collections::BTreeSet<&str> = rows
+                    .iter()
+                    .flat_map(|row| {
+                        std::iter::once(row.host.as_str())
+                            .chain(row.target_ids.iter().map(String::as_str))
+                    })
+                    .collect();
+                if known.is_empty() {
+                    bail!("no host or target {name:?}: the daemon has no hosts");
+                }
+                bail!(
+                    "no host or target {name:?}; known names: {}",
+                    known.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            found
+        }
+    };
+    if json {
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "now_epoch_seconds": now,
+            "hosts": selected,
+        }))
+        .context("serialize host capacity");
+    }
+    Ok(mj_core::targets::render_host_capacity(&selected, now))
+}
+
 pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
     let session = match (args.key, args.value) {
@@ -4900,5 +4972,114 @@ mod tests {
                 .to_string(),
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-quota", &output);
+    }
+    #[test]
+    fn api_hosts_matches_cli_golden() {
+        use mj_core::targets::storage::StorageCondition;
+        use mj_core::targets::{DeploymentCapacityKind, HostCapacityRow, HostFilesystemRow};
+        const GIB: u64 = 1 << 30;
+        let now = 1_700_000_000;
+        let filesystem =
+            |host: &str, mount: &str, available: u64, total: u64, condition| HostFilesystemRow {
+                host: host.into(),
+                mount: mount.into(),
+                available_bytes: available,
+                total_bytes: total,
+                condition,
+            };
+        let row = |id: &str, kind, targets: &[&str]| HostCapacityRow {
+            id: id.into(),
+            host: id.into(),
+            target_ids: targets.iter().map(|id| (*id).to_owned()).collect(),
+            kind,
+            fleet_instances: None,
+            has_reading: true,
+            cpu_percent: Some(12),
+            memory_used_bytes: 14 * GIB,
+            memory_total_bytes: 31 * GIB,
+            logical_cores: 16,
+            filesystems: Vec::new(),
+            sampled_at_epoch_seconds: Some(now - 20),
+            probe_error: None,
+            on_demand: false,
+        };
+        let mut local = row("local", DeploymentCapacityKind::Host, &["local", "podman"]);
+        local.filesystems = vec![
+            filesystem("local", "/", 300 * GIB, 900 * GIB, StorageCondition::Ok),
+            filesystem(
+                "local",
+                "/mnt/optane",
+                3 * GIB,
+                400 * GIB,
+                StorageCondition::Low,
+            ),
+        ];
+        let mut build = row("build.example", DeploymentCapacityKind::Host, &["build"]);
+        build.cpu_percent = None;
+        build.sampled_at_epoch_seconds = Some(now - 600);
+        build.probe_error = Some("ssh: connection timed out".into());
+        build.filesystems = vec![filesystem(
+            "build.example",
+            "/srv",
+            GIB / 2,
+            200 * GIB,
+            StorageCondition::Full,
+        )];
+        let mut fleet = row("ec2-fleet", DeploymentCapacityKind::AwsFleet, &["ec2"]);
+        fleet.fleet_instances = Some(2);
+        fleet.cpu_percent = None;
+        fleet.logical_cores = 96;
+        fleet.memory_total_bytes = 384 * GIB;
+        fleet.filesystems = vec![
+            filesystem(
+                "i-0a1",
+                "/mnt/ebs",
+                80 * GIB,
+                100 * GIB,
+                StorageCondition::Ok,
+            ),
+            filesystem(
+                "i-0b2",
+                "/mnt/ebs",
+                60 * GIB,
+                100 * GIB,
+                StorageCondition::Ok,
+            ),
+        ];
+        let mut idle = row("ec2-idle", DeploymentCapacityKind::AwsFleet, &["ec2-spare"]);
+        idle.fleet_instances = Some(0);
+        idle.has_reading = false;
+        idle.on_demand = true;
+        // The fleet last answered empty, then its probe failed: the size is
+        // unknown, so the row must not claim "0 VMs".
+        let mut failed_idle = row(
+            "ec2-failed",
+            DeploymentCapacityKind::AwsFleet,
+            &["ec2-broken"],
+        );
+        failed_idle.fleet_instances = Some(0);
+        failed_idle.has_reading = false;
+        failed_idle.probe_error = Some("describe-instances: access denied".into());
+        let mut fresh = row("new.example", DeploymentCapacityKind::Host, &["new"]);
+        fresh.has_reading = false;
+        fresh.sampled_at_epoch_seconds = None;
+        // The rows travel from the daemon as JSON.
+        let rows: Vec<HostCapacityRow> = serde_json::from_value(
+            serde_json::to_value(vec![local, build, fleet, idle, failed_idle, fresh]).unwrap(),
+        )
+        .unwrap();
+        let mut output = String::from("=== mj hosts ===\n");
+        output.push_str(&render_hosts(&rows, None, false, now).unwrap());
+        output.push_str("\n=== mj hosts --host podman ===\n");
+        output.push_str(&render_hosts(&rows, Some("podman"), false, now).unwrap());
+        output.push_str("\n=== mj hosts --host ec2-fleet --json ===\n");
+        output.push_str(&render_hosts(&rows, Some("ec2-fleet"), true, now).unwrap());
+        output.push_str("\n=== mj hosts --host missing ===\n");
+        output.push_str(
+            &render_hosts(&rows, Some("missing"), false, now)
+                .unwrap_err()
+                .to_string(),
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-hosts", &output);
     }
 }

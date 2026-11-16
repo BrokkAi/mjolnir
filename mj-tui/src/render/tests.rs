@@ -1501,7 +1501,7 @@ fn the_minimized_rows_stay_explicit_about_readings_they_do_not_have() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(host_usage(7))),
-        now_seconds() - CAPACITY_SAMPLE_STALE_AFTER_SECONDS - 60,
+        now_seconds() - mj_core::targets::CAPACITY_SAMPLE_STALE_AFTER_SECONDS - 60,
     );
     assert!(
         targets(&drawn(&mut dashboard, 120, 44)).contains("local 7% (stale)"),
