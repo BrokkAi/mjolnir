@@ -59,7 +59,7 @@ pub struct ProcessFacts {
     pub shown: Vec<RunningProcess>,
     /// `running` minus `shown.len()`.
     pub omitted: u32,
-    /// Identity of every counted process, for the park's later liveness check.
+    /// Identity of every counted process, for the worker's liveness watcher, which republishes how many are still alive (see [`WorkLiveness`]).
     pub identities: Vec<ProcessIdentity>,
     /// Processes of the same user outside the harness's tree whose environment
     /// could not be read, so that whether they carry this session's marker, and

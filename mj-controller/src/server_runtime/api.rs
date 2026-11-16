@@ -2056,6 +2056,7 @@ impl ApiBackend {
                     RelayCommand::HandbackReminder {
                         completed_command_id: last_turn.command_id.clone(),
                         completed_ordinal: last_turn.completed_ordinal,
+                        running: Vec::new(),
                     },
                 )
                 .await

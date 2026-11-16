@@ -157,7 +157,12 @@ pub const RELAY_FOLLOWED_LIFECYCLE_PROTOCOL: u32 = 65;
 /// 66 gives harness startup expiry to the worker. Older workers require the
 /// daemon's legacy deadline; workers at this version have exactly one owner.
 pub const RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL: u32 = 66;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL;
+/// 67 lets a worker publish whether a finished child turn's work processes are
+/// still alive (`work_liveness`) and adds `HoldFollowUp` and the process list on
+/// `HandbackReminder`. Older workers publish no liveness, so the daemon neither
+/// holds nor delays the park of their children.
+pub const RELAY_WORK_LIVENESS_PROTOCOL: u32 = 67;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_WORK_LIVENESS_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

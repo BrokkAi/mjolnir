@@ -119,6 +119,7 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
         RelayCommand::HandbackReminder {
             completed_command_id: assignment.into(),
             completed_ordinal,
+            running: Vec::new(),
         },
     );
     relay.claim_pending_commands(true).unwrap();

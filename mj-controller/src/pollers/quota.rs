@@ -154,12 +154,11 @@ pub(super) fn spawn_quota_refresher_with(
                     // endpoint that just said 429 only extends the limit.
                     !on_hold(report, now)
                         && (batch.refresh
-                            || batch
-                                .forced_probes
-                                .get(&request.profile_id)
-                                .is_some_and(|sequence| {
+                            || batch.forced_probes.get(&request.profile_id).is_some_and(
+                                |sequence| {
                                     consumed_forced.get(&request.profile_id) < Some(sequence)
-                                })
+                                },
+                            )
                             || next_probe_at(report) <= now)
                 })
                 .cloned()

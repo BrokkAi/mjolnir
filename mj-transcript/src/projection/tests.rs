@@ -3659,6 +3659,7 @@ fn a_handback_reminder_is_shown_as_the_prompt_that_started_its_turn() {
             command: RelayCommand::HandbackReminder {
                 completed_command_id: "task".into(),
                 completed_ordinal: 36,
+                running: Vec::new(),
             },
             created_at_ms: 10,
         },

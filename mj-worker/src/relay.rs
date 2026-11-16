@@ -842,6 +842,7 @@ impl DurableRelay {
             let payload = match &dispatch.command {
                 command @ (RelayCommand::Prompt { .. }
                 | RelayCommand::HandbackReminder { .. }
+                | RelayCommand::HoldFollowUp { .. }
                 | RelayCommand::MailboxWake { .. }
                 | RelayCommand::ContinueAuthorizedWork { .. }
                 | RelayCommand::ResumeAfterQuota { .. }) => StoredQueuedRelayPayload::Prompt {

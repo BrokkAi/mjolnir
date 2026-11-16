@@ -137,6 +137,7 @@ impl NativeHistoryEvidence {
             | RelayObservation::PermissionAutoApproved { .. }
             | RelayObservation::ElicitationRequested { .. } => self.used = true,
             RelayObservation::ManagedSubagentConfigured { .. }
+            | RelayObservation::WorkLivenessChanged { .. }
             | RelayObservation::NativeAgent { .. }
             | RelayObservation::AgentInitialized { .. }
             | RelayObservation::SessionConfigured { .. }
