@@ -95,9 +95,9 @@ pub(crate) use github_app::{
 pub use mbx::install::{
     MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
 };
-pub use mbx::preview_build_cache;
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
 pub(crate) use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
+pub use mbx::{MBX_VERSION, preview_build_cache};
 use provisioning::apply_failed_new_session_rollback;
 pub use provisioning::{GitIdentity, controller_git_identity, set_controller_git_identity};
 pub(crate) use worker_binary::{

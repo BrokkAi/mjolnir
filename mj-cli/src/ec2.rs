@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const MANAGER: &str = "mj-ec2";
-const CACHE_DIRECTORY: &str = "/mnt/nvme/mbx";
+const NVME_CACHE_DIRECTORY: &str = "/mnt/nvme/mbx";
+const EBS_CACHE_DIRECTORY: &str = "/mnt/ebs/mbx";
+const PODMAN_OS_DISK_GIB: u32 = 16;
+const PODMAN_DATA_DEVICE: &str = "/dev/sdf";
 
 #[derive(Debug, Args)]
 pub(crate) struct Ec2Args {
@@ -34,7 +37,7 @@ enum Ec2Command {
     Create(CreateArgs),
     /// List mj-managed VMs and unfinished local provisioning operations.
     List(ListArgs),
-    /// Terminate a managed VM and delete its disk, sessions, keys, and target.
+    /// Terminate a managed VM and delete its disks, sessions, keys, and target.
     /// Also cleans up an interrupted create; accepts its operation ID.
     Destroy(DestroyArgs),
     /// Re-apply mj's host tuning (kernel limits) to an existing managed host,
@@ -91,13 +94,13 @@ struct CreateArgs {
     /// Allowed SSH source CIDR. Omitted discovers this controller's public IPv4.
     #[arg(long)]
     ssh_cidr: Option<String>,
-    /// Encrypted gp3 root disk size in GiB; separate from local SSDs.
+    /// Encrypted gp3 data disk size in GiB (Podman adds a 16 GiB OS root disk); separate from local SSDs.
     #[arg(long, default_value_t = 200)]
     disk_gib: u32,
-    /// EBS gp3 throughput in MiB/s. Omitted uses the AWS default.
+    /// EBS gp3 throughput in MiB/s for the `--disk-gib` volume. Omitted uses the AWS default.
     #[arg(long)]
     disk_mbps: Option<u32>,
-    /// EBS gp3 provisioned IOPS. Omitted uses the AWS default.
+    /// EBS gp3 provisioned IOPS for the `--disk-gib` volume. Omitted uses the AWS default.
     #[arg(long)]
     disk_iops: Option<u32>,
     /// Require local NVMe storage (used automatically when available).
@@ -917,7 +920,7 @@ fn create_attempt(
         Ec2Runtime::Podman => bootstrap(local_nvme),
         Ec2Runtime::Nitro => nitro_bootstrap(ami_arch),
     };
-    let mut ebs = json!({
+    let mut data_ebs = json!({
         "VolumeSize": args.disk_gib,
         "VolumeType": "gp3",
         "Encrypted": true,
@@ -926,16 +929,34 @@ fn create_attempt(
     // AWS owns gp3 limits and the size/IOPS/throughput ratios, including
     // regional differences; omitted performance settings use its defaults.
     if let Some(mbps) = args.disk_mbps {
-        ebs["Throughput"] = mbps.into();
+        data_ebs["Throughput"] = mbps.into();
     }
     if let Some(iops) = args.disk_iops {
-        ebs["Iops"] = iops.into();
+        data_ebs["Iops"] = iops.into();
     }
+    let block_devices = match args.runtime {
+        Ec2Runtime::Podman => json!([
+            {
+                "DeviceName": root_device,
+                "Ebs": {
+                    "VolumeSize": PODMAN_OS_DISK_GIB,
+                    "VolumeType": "gp3",
+                    "Encrypted": true,
+                    "DeleteOnTermination": true,
+                },
+            },
+            {
+                "DeviceName": PODMAN_DATA_DEVICE,
+                "Ebs": data_ebs,
+            },
+        ]),
+        Ec2Runtime::Nitro => json!([{"DeviceName": root_device, "Ebs": data_ebs}]),
+    };
     let mut launch_request = json!({
         "ImageId":ami,"InstanceType":placement.instance_type,"MinCount":1,"MaxCount":1,
         "KeyName":key_name,"ClientToken":record.operation,"Placement":{"AvailabilityZone":placement.zone},
         "NetworkInterfaces":[{"DeviceIndex":0,"SubnetId":subnet_id,"Groups":[group_id],"AssociatePublicIpAddress":true,"DeleteOnTermination":true}],
-        "BlockDeviceMappings":[{"DeviceName":root_device,"Ebs":ebs}],
+        "BlockDeviceMappings":block_devices,
         "MetadataOptions":{"HttpTokens":"required","HttpEndpoint":"enabled"},
         "UserData":base64::engine::general_purpose::STANDARD.encode(bootstrap),
         "TagSpecifications":[tags(record,"instance"),tags(record,"volume")]
@@ -1002,15 +1023,17 @@ fn create_attempt(
         )?;
         "set -eu; version=$(uname -r | cut -d- -f1); printf '%s\\n' \"$version\" | awk -F. '{ if (($1*1000000+$2*1000+$3) < (6*1000000+18*1000+51)) exit 1 }' || { echo 'Nitro host kernel must be at least 6.18.51' >&2; exit 1; }; sudo dmesg | grep -F 'nitro_enclaves: CMA pool' || { echo 'Nitro Enclaves CMA pool was not initialized' >&2; exit 1; }".to_owned()
     } else {
-        format!("{CLOUD_INIT_WAIT}; podman info --format '{{{{.Host.Security.Rootless}}}}'")
+        format!(
+            "{CLOUD_INIT_WAIT}; podman info --format '{{{{.Host.Security.Rootless}}}}:{{{{.Store.GraphDriverName}}}}'"
+        )
     };
     let output = checked(&mut ssh_command(&ssh, &verify_command), &[])?;
     if args.runtime == Ec2Runtime::Podman {
         ensure!(
             String::from_utf8_lossy(&output.stdout)
                 .lines()
-                .any(|line| line.trim() == "true"),
-            "Podman did not report rootless operation"
+                .any(|line| line.trim() == "true:overlay"),
+            "Podman did not report rootless overlay operation"
         );
     }
     // Attach the persistent address after cloud-init's package downloads
@@ -1040,8 +1063,15 @@ fn create_attempt(
         &mj_controller::targets::ProcessExecutor,
         &(&ssh).into(),
     )?;
-    let cache = local_nvme.then(|| TargetBuildCache {
-        directory: Some(CACHE_DIRECTORY.into()),
+    let cache = (args.runtime == Ec2Runtime::Podman).then(|| TargetBuildCache {
+        directory: Some(
+            if local_nvme {
+                NVME_CACHE_DIRECTORY
+            } else {
+                EBS_CACHE_DIRECTORY
+            }
+            .into(),
+        ),
         ..Default::default()
     });
     let machine = Machine::Ssh {
@@ -1049,7 +1079,7 @@ fn create_attempt(
         workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
         build_cache: cache,
     };
-    if local_nvme && args.runtime == Ec2Runtime::Podman {
+    if args.runtime == Ec2Runtime::Podman {
         eprintln!("Installing mj's pinned mbx on the new host.");
         mj_controller::controller::install_mbx(&machine, &mj_controller::targets::ProcessExecutor)?;
     }
@@ -1483,7 +1513,7 @@ fn cleanup_record(cloud: &Cloud, record: &Record, root: &Path) -> Result<()> {
         record.operation
     );
     eprintln!(
-        "Destroying {} and its sessions, root disk, and owned cloud resources.",
+        "Destroying {} and its sessions, disks, and owned cloud resources.",
         record.target
     );
     if let Some(instance) = matches.first() {
@@ -1616,10 +1646,10 @@ fn tune(args: TuneArgs) -> Result<()> {
 }
 
 fn bootstrap(zfs_cache: bool) -> String {
-    let zfs = if zfs_cache {
+    let storage_setup = if zfs_cache {
         include_str!("ec2_zfs.sh")
     } else {
-        ""
+        include_str!("ec2_ebs_podman.sh")
     };
     format!(
         r#"#!/bin/bash
@@ -1628,14 +1658,16 @@ set -euxo pipefail
 {sysctl_setup}
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y podman uidmap slirp4netns fuse-overlayfs dbus-user-session git curl ca-certificates mold {packages}
+apt-get install -y podman uidmap slirp4netns fuse-overlayfs dbus-user-session git curl ca-certificates mold xfsprogs {packages}
+{ebs_setup}
+{storage_setup}
 loginctl enable-linger ubuntu
 systemctl start user@1000.service
-{zfs}
-sudo -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 podman info --format '{{{{.Host.Security.Rootless}}}}'
+sudo -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 podman info --format '{{{{.Host.Security.Rootless}}}}:{{{{.Store.GraphDriverName}}}}'
 "#,
         ssh_setup = include_str!("ec2_sshd.sh"),
         sysctl_setup = include_str!("ec2_sysctl.sh"),
+        ebs_setup = include_str!("ec2_ebs.sh"),
         packages = if zfs_cache { "zfsutils-linux" } else { "" }
     )
 }
@@ -1762,9 +1794,21 @@ elif op == 'create-security-group':
 elif op == 'run-instances':
     assert request['MinCount'] == request['MaxCount'] == 1
     assert request['MetadataOptions']['HttpTokens'] == 'required'
-    assert request['BlockDeviceMappings'][0]['Ebs']['DeleteOnTermination'] is True
-    assert request['BlockDeviceMappings'][0]['Ebs']['Encrypted'] is True
-    ebs = request['BlockDeviceMappings'][0]['Ebs']
+    mappings = request['BlockDeviceMappings']
+    if (root/'nitro').exists():
+        assert len(mappings) == 1
+        assert mappings[0]['DeviceName'] == '/dev/xvda'
+        ebs = mappings[0]['Ebs']
+    else:
+        assert len(mappings) == 2
+        assert mappings[0] == {
+            'DeviceName': '/dev/sda1',
+            'Ebs': {'VolumeSize': 16, 'VolumeType': 'gp3', 'Encrypted': True, 'DeleteOnTermination': True},
+        }
+        assert mappings[1]['DeviceName'] == '/dev/sdf'
+        ebs = mappings[1]['Ebs']
+    assert ebs['DeleteOnTermination'] is True
+    assert ebs['Encrypted'] is True
     if (root/'ebs-settings').exists():
         expected = json.loads((root/'ebs-settings').read_text())
         assert {key:ebs[key] for key in expected} == expected
@@ -1789,13 +1833,26 @@ elif op == 'run-instances':
         assert 'go-containerregistry_Linux_x86_64.tar.gz' in bootstrap
         assert '0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0' in bootstrap
         assert 'podman' not in bootstrap.lower() and 'zfs' not in bootstrap.lower()
+        assert '/mnt/ebs' not in bootstrap and 'xfsprogs' not in bootstrap
     elif (root/'nvme').exists():
+        assert 'cache_dir = "/mnt/nvme/mbx"' in bootstrap
         assert 'graphroot = "/mnt/nvme/podman"' in bootstrap
         assert 'mount_program = "/usr/bin/fuse-overlayfs"' in bootstrap
         assert 'Requires=mj-ec2-cache.service' in bootstrap
+        assert 'ln -sfn /mnt/nvme/podman /home/ubuntu/.local/share/containers' in bootstrap
     else:
+        assert 'cache_dir = "/mnt/ebs/mbx"' in bootstrap
+        assert 'graphroot = "/home/ubuntu/.local/share/containers/storage"' in bootstrap
+        assert 'mount_program' not in bootstrap
         assert '/mnt/nvme/podman' not in bootstrap
     if not (root/'nitro').exists():
+        assert ' xfsprogs ' in bootstrap
+        assert 'mkfs.xfs -m crc=1,reflink=1 "$ebs_disk"' in bootstrap
+        assert '/mnt/ebs/tmp /tmp none bind,x-systemd.requires-mounts-for=/mnt/ebs 0 0' in bootstrap
+        assert '/mnt/ebs/ubuntu /home/ubuntu none bind,x-systemd.requires-mounts-for=/mnt/ebs 0 0' in bootstrap
+        assert 'RequiresMountsFor=/mnt/ebs /home/ubuntu /tmp' in bootstrap
+        assert bootstrap.index('mountpoint -q /home/ubuntu || mount /home/ubuntu') < bootstrap.index('/home/ubuntu/.config/mbx/config.toml')
+        assert bootstrap.index('/home/ubuntu/.config/containers/storage.conf') < bootstrap.index('systemctl start user@1000.service')
         assert '/etc/sysctl.d/90-mj-limits.conf' in bootstrap
         for sysctl in ['fs.inotify.max_user_instances = 8192','fs.inotify.max_user_watches = 1048576','user.max_inotify_instances = 8192','kernel.keys.maxkeys = 4096','kernel.keys.maxbytes = 409600']:
             assert sysctl in bootstrap, sysctl
@@ -1838,8 +1895,8 @@ print(json.dumps(response))
 import fcntl, json, os, pathlib, sys
 root = pathlib.Path(__file__).parent
 args = sys.argv[1:]
-if args == ['info', '--format', '{{.Host.Security.Rootless}}']:
-    print('true')
+if args == ['info', '--format', '{{.Host.Security.Rootless}}:{{.Store.GraphDriverName}}']:
+    print('true:overlay')
 elif args[:2] == ['image', 'inspect']:
     if not (root/'image-ready').exists(): sys.exit(125)
     print('sha256:downloaded-image')
@@ -1881,13 +1938,55 @@ else:
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let bin = directory.path().join("bin");
+        let remote_bin = directory.path().join("remote-bin");
+        let remote_home = directory.path().join("remote-home");
         fs::create_dir(&bin).unwrap();
+        fs::create_dir(&remote_bin).unwrap();
+        fs::create_dir(&remote_home).unwrap();
+        let uname = remote_bin.join("uname");
+        fs::write(
+            &uname,
+            "#!/bin/sh\ncase \"$1\" in\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\n  -r) printf '6.18.56-126.188.amzn2023\\n' ;;\n  *) exec /usr/bin/uname \"$@\" ;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&uname, fs::Permissions::from_mode(0o700)).unwrap();
+        let mbx_version = mj_controller::controller::MBX_VERSION;
+        let cached_mbx = directory
+            .path()
+            .join("data")
+            .join("mbx")
+            .join(mbx_version)
+            .join("x86_64")
+            .join("mbx");
+        fs::create_dir_all(cached_mbx.parent().unwrap()).unwrap();
+        fs::write(
+            &cached_mbx,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'mbx %s\\n' '{mbx_version}'; exit 0; fi\nif [ \"$1\" = setup ] && [ \"$2\" = --yes ]; then exit 0; fi\necho \"unexpected mbx invocation: $*\" >&2\nexit 1\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&cached_mbx, fs::Permissions::from_mode(0o755)).unwrap();
         for (name, body) in [
             ("aws", AWS_FIXTURE),
+            (
+                "scp",
+                concat!(
+                    "#!/usr/bin/python3\nimport os, pathlib, shutil, sys\n",
+                    "source = pathlib.Path(sys.argv[-2])\n",
+                    "remote = sys.argv[-1].split(':', 1)[1]\n",
+                    "dest = pathlib.Path(os.environ['MJ_EC2_FIXTURE_CHILD']) / 'remote-home' / remote\n",
+                    "dest.parent.mkdir(parents=True, exist_ok=True)\n",
+                    "shutil.copyfile(source, dest)\n",
+                ),
+            ),
             (
                 "ssh",
                 concat!(
                     "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MJ_EC2_FIXTURE_CHILD/ssh-calls\"\n",
+                    "export HOME=\"$MJ_EC2_FIXTURE_CHILD/remote-home\" SHELL=/bin/bash\n",
+                    "export PATH=\"$MJ_EC2_FIXTURE_CHILD/remote-bin:$PATH\"\n",
+                    "unset XDG_CONFIG_HOME XDG_DATA_HOME\n",
                     "for remote_command do :; done\n",
                     // The host's boot ID lives in a fixture file that a reboot replaces.
                     "[ -e \"$MJ_EC2_FIXTURE_CHILD/boot_id\" ] || echo boot-1 > \"$MJ_EC2_FIXTURE_CHILD/boot_id\"\n",
@@ -2396,10 +2495,20 @@ else:
         // Hard-won: #1481: a terminated VM with the same target blocked teardown.
         fs::write(bin.join("historical"), "").unwrap();
         let before = Config::load().unwrap();
-        let Some(Machine::Ssh { ssh, .. }) = before.machines.get("builder") else {
+        let Some(Machine::Ssh {
+            ssh, build_cache, ..
+        }) = before.machines.get("builder")
+        else {
             panic!("missing SSH machine");
         };
         assert_eq!(ssh.host, "192.0.2.7");
+        assert_eq!(
+            build_cache
+                .as_ref()
+                .and_then(|cache| cache.directory.as_deref()),
+            Some(Path::new("/mnt/ebs/mbx"))
+        );
+        assert!(fixture.join("remote-home").join(".local/bin/mbx").is_file());
         assert!(matches!(
             before.targets.get("builder"),
             Some(TargetTemplate::SshPodman { .. })
@@ -2636,22 +2745,166 @@ else:
     }
 
     #[test]
-    fn zfs_setup_gives_ubuntu_its_config_directory_before_subdirectories() {
+    fn podman_storage_scripts_give_ubuntu_parent_directories_before_subdirectories() {
         // `install -d -o ubuntu .../.config/x` makes a missing ~/.config root-owned; the
-        // user-owned ~/.config must be created first or mbx setup cannot write beside it.
-        let lines: Vec<&str> = include_str!("ec2_zfs.sh").lines().map(str::trim).collect();
-        let first_child = lines
-            .iter()
-            .position(|line| line.contains("/home/ubuntu/.config/"))
-            .expect("the setup writes under /home/ubuntu/.config");
-        let parent = lines
-            .iter()
-            .position(|line| *line == "install -d -o ubuntu -g ubuntu /home/ubuntu/.config")
-            .expect("the setup creates /home/ubuntu/.config owned by ubuntu");
+        // user-owned parent must be created first or mbx setup/install cannot write beside it.
+        for (script_name, body) in [
+            ("ec2_zfs.sh", include_str!("ec2_zfs.sh")),
+            ("ec2_ebs_podman.sh", include_str!("ec2_ebs_podman.sh")),
+        ] {
+            let lines: Vec<&str> = body.lines().map(str::trim).collect();
+            for parent_dir in ["/home/ubuntu/.config", "/home/ubuntu/.local"] {
+                let child_prefix = format!("{parent_dir}/");
+                let first_child = lines
+                    .iter()
+                    .position(|line| line.contains(&child_prefix))
+                    .unwrap_or_else(|| panic!("{script_name} writes under {parent_dir}"));
+                let expected = format!("install -d -o ubuntu -g ubuntu {parent_dir}");
+                let parent = lines
+                    .iter()
+                    .position(|line| *line == expected)
+                    .unwrap_or_else(|| {
+                        panic!("{script_name} creates {parent_dir} owned by ubuntu")
+                    });
+                assert!(
+                    parent < first_child,
+                    "{script_name}: {parent_dir} must be created before {:?}",
+                    lines[first_child]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ebs_setup_selects_non_root_ebs_across_nvme_reordering_and_guards_signatures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        let sys_block = root.join("sys/block");
+        let dev = root.join("dev");
+        let fstab = root.join("fstab");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&dev).unwrap();
+        fs::write(&fstab, "# /tmp and /mnt/ebs comments must not suppress entries\nLABEL=cloudimg-rootfs / ext4 defaults 0 1\n").unwrap();
+        // Out-of-order Nitro enumeration: nvme0n1 is the secondary EBS disk,
+        // nvme1n1 backs /, and nvme2n1 is a local NVMe instance-store SSD.
+        for (disk, model) in [
+            ("nvme0n1", "Amazon Elastic Block Store\n"),
+            ("nvme1n1", "Amazon Elastic Block Store\n"),
+            ("nvme2n1", "Amazon EC2 NVMe Instance Storage\n"),
+        ] {
+            let model_dir = sys_block.join(disk).join("device");
+            fs::create_dir_all(&model_dir).unwrap();
+            fs::write(model_dir.join("model"), model).unwrap();
+            fs::write(dev.join(disk), "").unwrap();
+        }
+        for (tool, body) in [
+            ("udevadm", "#!/bin/sh\nexit 0\n"),
+            (
+                "findmnt",
+                "#!/bin/sh\nif [ \"$*\" = '-n -o SOURCE /' ]; then printf '%s/nvme1n1p1\\n' \"$MJ_TEST_DEV\"; else printf 'xfs\\n'; fi\n",
+            ),
+            ("lsblk", "#!/bin/sh\nprintf 'nvme1n1\\n'\n"),
+            (
+                "blkid",
+                "#!/bin/sh\nif [ \"$2\" = TYPE ]; then cat \"$MJ_TEST_STATE/fs_type\" 2>/dev/null || true; else printf '11111111-2222-3333-4444-555555555555\\n'; fi\n",
+            ),
+            (
+                "wipefs",
+                "#!/bin/sh\ncat \"$MJ_TEST_STATE/signatures\" 2>/dev/null || true\n",
+            ),
+            (
+                "mkfs.xfs",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MJ_TEST_STATE/mkfs-calls\"\nprintf 'xfs\\n' > \"$MJ_TEST_STATE/fs_type\"\n",
+            ),
+        ] {
+            let path = bin.join(tool);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let state = root.join("state");
+        fs::create_dir(&state).unwrap();
+        let script = include_str!("ec2_ebs.sh")
+            .split("mkdir -p /mnt/ebs")
+            .next()
+            .unwrap()
+            .replace("/sys/block", sys_block.to_str().unwrap())
+            .replace("\"/dev/", &format!("\"{}/", dev.display()));
+        let fstab_tail = include_str!("ec2_ebs.sh")
+            .split("cp -a /home/ubuntu/. /mnt/ebs/ubuntu/\nfi\n")
+            .nth(1)
+            .unwrap()
+            .split("install -d /etc/systemd/system")
+            .next()
+            .unwrap()
+            .replace("/etc/fstab", fstab.to_str().unwrap());
+        let combined = format!("set -euo pipefail\n{script}\n{fstab_tail}\n");
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let run_script = || {
+            Command::new("bash")
+                .args(["-c", &combined])
+                .env("PATH", std::env::join_paths(&paths).unwrap())
+                .env("MJ_TEST_DEV", &dev)
+                .env("MJ_TEST_STATE", &state)
+                .output()
+                .unwrap()
+        };
+
+        // Foreign signatures refuse formatting instead of overwriting data.
+        fs::write(state.join("signatures"), "LVM2_member\n").unwrap();
+        let refused = run_script();
+        assert!(!refused.status.success());
         assert!(
-            parent < first_child,
-            "~/.config must be created before {:?}",
-            lines[first_child]
+            String::from_utf8_lossy(&refused.stderr).contains("Refusing to format"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(!state.join("mkfs-calls").exists());
+
+        // Blank secondary EBS disk formats once with CRC + reflinks and writes UUID fstab lines.
+        fs::remove_file(state.join("signatures")).unwrap();
+        let first = run_script();
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("mkfs-calls")).unwrap(),
+            format!("-m crc=1,reflink=1 {}/nvme0n1\n", dev.display())
+        );
+
+        // Re-running on an already-formatted XFS volume neither reformats nor duplicates fstab lines.
+        let second = run_script();
+        assert!(
+            second.status.success(),
+            "{}",
+            String::from_utf8_lossy(&second.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("mkfs-calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        let fstab_lines: Vec<_> = fs::read_to_string(&fstab)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            fstab_lines,
+            [
+                "LABEL=cloudimg-rootfs / ext4 defaults 0 1",
+                "UUID=11111111-2222-3333-4444-555555555555 /mnt/ebs xfs defaults 0 2",
+                "/mnt/ebs/tmp /tmp none bind,x-systemd.requires-mounts-for=/mnt/ebs 0 0",
+                "/mnt/ebs/ubuntu /home/ubuntu none bind,x-systemd.requires-mounts-for=/mnt/ebs 0 0",
+            ]
         );
     }
 
@@ -2666,6 +2919,7 @@ else:
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
         let root = config_dir().join("ec2");
+        fs::write(bin.join("nvme"), "").unwrap();
         fs::write(bin.join("fail-image-pull"), "").unwrap();
         create(create_args(), &root).unwrap();
         assert!(!bin.join("image-ready").exists());
@@ -2673,7 +2927,15 @@ else:
         assert_eq!(record.instance_id.as_deref(), Some("i-test"));
         assert!(record.directory(&root).unwrap().join("id_ed25519").exists());
         let config = Config::load().unwrap();
-        assert!(config.machines.contains_key("builder"));
+        let Some(Machine::Ssh { build_cache, .. }) = config.machines.get("builder") else {
+            panic!("missing SSH machine");
+        };
+        assert_eq!(
+            build_cache
+                .as_ref()
+                .and_then(|cache| cache.directory.as_deref()),
+            Some(Path::new("/mnt/nvme/mbx"))
+        );
         assert!(matches!(
             config.targets.get("builder"),
             Some(TargetTemplate::SshPodman { .. })
