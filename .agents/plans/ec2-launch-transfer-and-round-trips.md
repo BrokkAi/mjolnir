@@ -84,6 +84,9 @@ After this change, the controller sends each distinct profile file to a host onc
   Rationale: code review of 09769fc85 found that a copy failure such as a full disk could otherwise depend on whether `find -exec … +` reports the failed invocation. Checking the result directly does not depend on how a given `find` implementation behaves.
   Date/Author: 2026-11-15, parent session.
 
+- Decision: remove the per-file process starts that caused the empty-store regression. Digests are verified with one `sha256sum` or `shasum` pass over all uploaded content files, compared by `awk`, with a count check that catches files a partial pass skipped. New content is published with batched `cp`, `chmod` and `mv` calls through `find -exec … +`, and `rmdir` of the upload directory proves every file moved. Placeholders are now relative symlinks (one `..` per path component) into `.mj-store`, a link the script creates in a private work directory beside the extracted tree. The archive also carries `.mj-keys`, the list of shared keys, so the missing-content check uses shell builtins only. One `cp -RL` then copies the whole tree into the destination with links dereferenced, under umask 077. This supersedes the per-link copy loop.
+  Rationale: on the m7i.xlarge test host, per-file process starts cost 1.3 s for digests and 2.2 s for copies over 725 files. They made the first launch on an empty store slower than the old single archive, and were most of the transfer time in every later launch. Checked on Linux by the three profile archive tests, and on macOS by running the script against a hand-built archive: first upload, repeat upload, missing content.
+  Date/Author: 2026-11-16, parent session.
 
 ## Outcomes & Retrospective
 
@@ -234,3 +237,5 @@ No new crates. Use the existing `tar` and `flate2` dependencies for the stream a
 Plan update (2026-11-15, Milestone 2): recorded batching implementation, preserved failure policies, the original-settings resolution lookup and corrected Cargo package selectors. Validation completed: the focused checks, both full crate suites and workspace clippy pass. The source revision stayed fixed during final validation; the final commit touches only this plan.
 
 Plan update (2026-11-16, parent): recorded the Milestone 3 live measurement and the cold-store regression.
+
+Plan update (2026-11-16, parent): replaced per-file process starts in the install script after the measured empty-store regression.

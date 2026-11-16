@@ -1170,79 +1170,55 @@ if [ ! -f "$store/.collected" ] || [ -n "$(find "$store/.collected" -mmin +60 -p
     touch -- "$store/.collected"
 fi"#;
 
+// The archive holds private files, `.mj-content/<key>` for content the host
+// lacked, `.mj-keys` (every shared key, one per line), and a relative symlink
+// per shared path into `.mj-store`, which this script points at the store from
+// a private work directory. One dereferencing `cp -RL` then materializes the
+// whole profile, so the cost does not grow with one process per file.
 const INSTALL_PROFILE_CONTENT: &str = r#"set -eu
 umask 077
 destination=$1
 store="$HOME/$2"
-# A repeat must discard earlier staging links before restricting private files.
 rm -rf -- "$destination"
-mkdir -p -- "$destination" "$store"
+mkdir -p -- "$store" "$(dirname -- "$destination")"
 chmod -- 700 "$store"
-tar -xzf - --no-same-owner --no-same-permissions -C "$destination"
-# Shared content is copied, not linked, below: a hard link would survive `podman cp`
-# and join identical files inside the session, where in-place writes would change both.
-find "$destination" -type d -exec chmod -- go-rwx {} +
-find "$destination" -type f -exec chmod -- go-rwx {} +
-for content in "$destination"/.mj-content/*; do
-    [ -f "$content" ] || continue
-    key=${content##*/}
-    digest=${key%.x}
-    case $(uname -s) in
-        Darwin) actual=$(shasum -a 256 < "$content");;
-        *) actual=$(sha256sum < "$content");;
-    esac
-    actual=${actual%% *}
-    [ "$actual" = "$digest" ] || { echo "profile content digest mismatch: $key" >&2; exit 1; }
-    if [ ! -f "$store/$key" ]; then
-        temporary=$(mktemp "$store/.upload-XXXXXXXXXX")
-        cp -- "$content" "$temporary"
-        case $key in *.x) chmod -- 700 "$temporary";; *) chmod -- 600 "$temporary";; esac
-        mv -f -- "$temporary" "$store/$key"
-    fi
-    touch -- "$store/$key"
-done
-# Copy through a temporary name, so any failure leaves the placeholder link.
-find "$destination" -type l -exec sh -c '
-    store=$1; shift
-    for path do
-        target=$(readlink "$path")
-        case $target in mj-profile-content/*) ;; *) continue;; esac
-        key=${target#mj-profile-content/}
-        [ -f "$store/$key" ] || continue
-        copy=$(mktemp "${path%/*}/.mj-copy-XXXXXXXXXX") || continue
-        # mktemp creates 0600, and cp keeps the mode of an existing file.
-        case $key in *.x) mode=700;; *) mode=600;; esac
-        if cp -- "$store/$key" "$copy" && chmod -- "$mode" "$copy" && mv -f -- "$copy" "$path"; then :; else rm -f -- "$copy"; fi
-    done
-' sh "$store" {} + || :
-# Decide completeness from the links that remain, not from find's exit status:
-# a remaining link whose content left the store is missing; any other failed.
-remaining="$destination/.mj-content-remaining"
-find "$destination" -type l -exec sh -c '
-    for path do
-        target=$(readlink "$path")
-        case $target in mj-profile-content/*) printf "%s\n" "${target#mj-profile-content/}";; esac
-    done
-' sh {} + > "$remaining"
-missing="$destination/.mj-content-missing"
-: > "$missing"
-failed=0
-while IFS= read -r key; do
-    if [ -f "$store/$key" ]; then failed=1; else printf '%s\n' "$key" >> "$missing"; fi
-done < "$remaining"
-rm -f -- "$remaining"
-if [ "$failed" -ne 0 ]; then
-    rm -f -- "$missing"
-    echo "could not copy stored profile content into $destination" >&2
-    exit 1
+work=$(mktemp -d "$destination.work-XXXXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+tree="$work/tree"
+mkdir -- "$tree"
+ln -s -- "$store" "$work/.mj-store"
+tar -xzf - --no-same-owner --no-same-permissions -C "$tree"
+content="$tree/.mj-content"
+if [ -d "$content" ]; then
+    case $(uname -s) in Darwin) sum='shasum -a 256';; *) sum=sha256sum;; esac
+    # One digest pass; the count check catches files a partial run skipped.
+    expected=$(find "$content" -type f | wc -l)
+    find "$content" -type f -exec $sum -- {} + > "$work/sums"
+    verified=$(awk '{ key = $0; sub(/.*\//, "", key); digest = key; sub(/\.x$/, "", digest);
+        if ($1 != digest) { print "profile content digest mismatch: " key > "/dev/stderr"; bad = 1 } n++ }
+        END { if (bad) exit 1; print n + 0 }' "$work/sums")
+    [ "$verified" -eq "$expected" ] || { echo "verified $verified of $expected profile content files" >&2; exit 1; }
+    upload=$(mktemp -d "$store/.upload-XXXXXXXXXX")
+    find "$content" -type f -exec sh -c 'cp -- "$@" "$0"' "$upload" {} +
+    find "$upload" -type f ! -name '*.x' -exec chmod -- 600 {} +
+    find "$upload" -type f -name '*.x' -exec chmod -- 700 {} +
+    # Each rename publishes one verified file atomically; rmdir proves all moved.
+    find "$upload" -type f -exec sh -c 'mv -f -- "$@" "$0"' "$store" {} +
+    rmdir -- "$upload"
 fi
-if [ -s "$missing" ]; then
-    cat -- "$missing"
-    rm -f -- "$missing"
+missing=
+if [ -f "$tree/.mj-keys" ]; then
+    while IFS= read -r key; do
+        [ -f "$store/$key" ] || missing="$missing$key
+"
+    done < "$tree/.mj-keys"
+fi
+if [ -n "$missing" ]; then
+    printf '%s' "$missing"
     exit 75
 fi
-rm -f -- "$missing"
-rm -rf -- "$destination/.mj-content""#;
+rm -rf -- "$content" "$tree/.mj-keys"
+cp -RL -- "$tree" "$destination" || { echo "could not copy stored profile content into $destination" >&2; exit 1; }"#;
 
 struct ProfileArchiveEntry {
     path: PathBuf,
@@ -1341,11 +1317,30 @@ fn build_profile_archive(
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_size(0);
             header.set_mode(0o700);
-            archive.append_link(&mut header, path, format!("mj-profile-content/{key}"))?;
+            // Relative to the link's directory: one `..` per path component
+            // reaches the work directory that holds `.mj-store`.
+            let depth = entry.path.components().count();
+            archive.append_link(
+                &mut header,
+                path,
+                format!("{}.mj-store/{key}", "../".repeat(depth)),
+            )?;
         } else {
             archive.append_path_with_name(absolute, path)?;
         }
     }
+    let mut keys: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| entry.key.as_deref())
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let list: String = keys.iter().map(|key| format!("{key}\n")).collect();
+    let mut header = tar::Header::new_gnu();
+    header.set_size(list.len() as u64);
+    header.set_mode(0o600);
+    header.set_cksum();
+    archive.append_data(&mut header, ".mj-keys", list.as_bytes())?;
     archive
         .into_inner()?
         .finish()
