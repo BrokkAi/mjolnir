@@ -5,8 +5,8 @@ Usage:
       blind judge batches of stored no-brief and brief sessions -> $REVIEW_ARMS_DIR/<name>/
       (stage B: --arms OT,OS,BT,BS --name brief-judge-b, so oracle and blind are scored apart
        and stage A's batches and key are kept)
-      (run brief/workflow-judge.js with the args it prints; save its result as
-       brief-judge/workflow-out.json)
+      (run `verify_driver.py <name> --kind judge`, which writes <name>/workflow-out.json;
+       stages A and B ran brief/workflow-judge.js with the args build prints instead)
   python3 brief_score.py collect
       merges the two judges; writes brief-judge/handcheck.jsonl (every caught or partial verdict
       from either judge and every disagreement) for a hand check
