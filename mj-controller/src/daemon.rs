@@ -121,6 +121,17 @@ impl LifecycleControl {
         self.resumable.store(true, Ordering::Release);
     }
 
+    /// Stop an operation a client action owns because the server is exiting.
+    /// A resumable create is interrupted, so the next daemon finishes it; any
+    /// other operation is cancelled as before.
+    pub(crate) fn stop_for_server_shutdown(&self) {
+        if self.is_resumable() {
+            self.interrupt_uncommitted_for_shutdown();
+        } else {
+            self.request_cancel("server shutdown");
+        }
+    }
+
     fn is_resumable(&self) -> bool {
         self.resumable.load(Ordering::Acquire)
     }

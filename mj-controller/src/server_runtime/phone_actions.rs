@@ -311,6 +311,17 @@ impl PhoneActionControl {
         }
     }
 
+    /// The server is exiting: a resumable create is interrupted for the next
+    /// daemon to finish, everything else is cancelled.
+    pub(super) fn stop_for_server_shutdown(&self) {
+        match &self.lifecycle {
+            Some(control) => control.stop_for_server_shutdown(),
+            None => {
+                self.request_cancel("server shutdown");
+            }
+        }
+    }
+
     pub(super) fn request_cancel(&self, cause: &'static str) -> bool {
         let accepted = self.lifecycle.as_ref().map_or_else(
             || {

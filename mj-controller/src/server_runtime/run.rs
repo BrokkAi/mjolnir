@@ -1585,7 +1585,7 @@ pub(crate) async fn run_server(
         // Every exit stops in-flight work, whether it was asked for or forced.
         crate::controller::profile_config::cancel_all();
         for control in action_cancellations.values() {
-            control.request_cancel("server shutdown");
+            control.stop_for_server_shutdown();
         }
         match failure {
             Some(failure) => Err(failure),

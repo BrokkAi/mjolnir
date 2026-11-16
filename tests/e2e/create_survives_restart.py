@@ -100,6 +100,9 @@ def main():
         print(json.dumps({"session": session, "restart_seconds": restart_seconds,
                           "artifacts": str(lab.root)}))
     finally:
+        # Keep the daemon logs with the artifacts; the runtime root is removed.
+        for log in (lab.data / "logs").glob("*.log"):
+            (lab.root / log.name).write_bytes(log.read_bytes())
         lab.cleanup_owned()
 
 

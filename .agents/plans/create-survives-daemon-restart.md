@@ -1,0 +1,112 @@
+# A session being created survives a daemon restart
+
+This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It follows `.agents/PLANS.md`. Tracking issue: BrokkAi/mjolnir#1548.
+
+
+## Purpose / Big Picture
+
+Mjolnir's daemon (`mj daemon-run`, crate `mj-controller`) creates a session in a background "lifecycle operation" of kind `Create`: it reserves an environment on the target, starts a container, clones the repository, installs the worker, starts the worker and harness, and only then marks the session `Running`. That takes 20 to 60 seconds or more. Today any daemon shutdown during that window (`mj daemon restart`, `mj daemon stop`, an automatic upgrade handoff) cancels the create, the session ends in state `error`, and nothing ever finishes it. On 2026-11-16 at 14:39:16Z two eval sessions on remote Podman hosts failed exactly this way because another agent ran `mj daemon restart`; worse, their failure cleanup ran on the same cancelled command executor, so it was cancelled too and left containers and reservations behind ("cleanup FAILED: ... operation cancelled while stop exact Podman session container ...").
+
+After this change a session that is being created when the daemon stops is finished by the next daemon. The person sees the session stay in its starting state across the restart and then become `Running`; a client that was waiting on the creation keeps waiting and receives the real outcome. Daemon shutdown and upgrade handoff do not wait for creates, so restarts stay fast. A create that fails for a real reason still cleans up, and that cleanup can no longer be cancelled by the shutdown.
+
+To see it: in an isolated instance, start `mj new` for a session, run `mj daemon restart` while `mj sessions --session <id>` still shows it provisioning, and observe that the session reaches `running` under the new daemon with no `error`.
+
+
+## Progress
+
+- [x] Milestone 1: failure cleanup uses an executor the shutdown cannot cancel, and keeps the target named until cleanup succeeds.
+- [x] Milestone 2: durable create intent (schema + data access), written at registration, removed at commit or terminal failure.
+- [x] Milestone 3: shutdown interrupts an uncommitted create without rolling it back; Create no longer holds non-deferrable handoff admission.
+- [x] Milestone 4: startup recovery retires the partial environment and re-runs the create; waiting clients re-attach.
+- [x] Milestone 5: tests (rule test extended, migration compatibility, end-to-end daemon restart mid-create `tests/e2e/create_survives_restart.py`); full validation recorded in Outcomes.
+
+
+## Surprises & Discoveries
+
+- The server's REST/phone action control (`PhoneActionControl`, `server_runtime/run.rs`) also cancelled the create's `LifecycleControl` with "server shutdown" before the lifecycle registry interrupted it, so shutdown cancelled and rolled back creates started through `mj new`. Found by the end-to-end test; fixed with `LifecycleControl::stop_for_server_shutdown`, which interrupts a resumable create.
+- Top-level creates only: `save_new_session` is the registration of top-level sessions; sub-agents register through `save_subagent_session` and keep their caller-driven replay, so they get no intent and their Create keeps the cancel-for-shutdown rule (the control is marked resumable only by `start_create_lifecycle`).
+- Rollback writes `StartupCleanup` first, and every session write outside Provisioning/Disconnected settles the intent, so an intent only ever coexists with a creating session; recovery re-admits only those and discards any other leftover.
+
+
+## Decision Log
+
+- Decision: recover by retiring whatever the interrupted create built and provisioning again from the registered record, rather than resuming from a recorded phase or adopting a live worker. Rationale: several provisioning steps are not safe to re-enter (the managed worktree planner returns nothing once `managed_worktree` is persisted, `podman run --name` fails if the container exists, the in-container clone fails on a populated workspace), while "retire then provision" reuses two code paths that already exist and are exercised: environment retirement (what failure cleanup does) and ordinary provisioning. The price is redoing the clone after a restart, which costs seconds to a minute once, versus today's permanent failure. A phase table would add a second source of truth for "how far did the create get" that must agree with the session record and the target. Adoption of a live but uncommitted worker can be added later if measurement shows it matters. Date: 2026-11-16.
+- Decision: the fact "this session's creation is unfinished" is owned by one durable row in a new table, `session_create_intents`, not inferred from the session's state. Rationale: the session record moves from `Provisioning` to `Disconnected` once the container exists, and `Disconnected` also describes every ordinary session whose worker connection dropped, so state alone cannot answer the question; inferring it would be two predicates for one fact. A separate table (rather than a new column on `sessions`) is preserved untouched by older daemons that rewrite session rows. Date: 2026-11-16.
+- Decision: startup recovery does not run `admit_container_launch` again (plan said it would). Rationale: the original create passed that gate; the check reads remote host capacity during daemon startup and a refusal would strand a session the person already has. Date: 2026-11-16.
+- Decision: the intent is settled by every session write (`insert_session`, `update_lifecycle_fields`, `mark_session_worker_connected`) rather than by a SQL trigger, because later migrations that rebuild `sessions` would silently drop a trigger. Date: 2026-11-16.
+- Decision: waiting for creates at shutdown is rejected (the user: "not acceptable, it's too slow"). Create stops holding the non-deferrable "session lifecycle" handoff admission while it provisions. Date: 2026-11-16.
+
+
+## Outcomes & Retrospective
+
+(not yet)
+
+
+## Context and Orientation
+
+All paths are repository-relative; line numbers are approximate as of commit a78ea5196. A read-only map with more detail is in the investigation report `.mj/agents/6b0439bea2710e93c0a6cd48bdc068a7/create-resume-map.md` (not checked in; everything needed is restated here).
+
+Terms. The daemon is the control plane: it owns the SQLite store, session records and lifecycle operations. A worker (`mj-worker`, one per session) is the data plane: it runs the harness (the coding agent) and survives daemon restarts. A lifecycle operation is a daemon-side task registered in the in-memory map `RuntimeState::owner().lifecycle`, started by `start_or_join_lifecycle_controlled` and controlled by a `LifecycleControl` (in `mj-controller/src/daemon.rs` around lines 95-190) whose state is OPEN, CANCELLED, CANCELLED_FOR_SHUTDOWN or COMMITTED. "Commit" (`grant_commit`) means the operation has passed the point where a person's cancel is refused. Handoff admission is the gate in `mj-controller/src/upgrade.rs`: daemon-owned work holds an "activity" with a label, and an automatic upgrade handoff waits for non-deferrable activities to finish; deferrable ones (`activity_unless_draining`) are refused while a handoff drains.
+
+How a create runs today. `start_create_session_inner` in `mj-controller/src/daemon/create.rs` (around line 424) validates the request, admits container capacity (`admit_container_launch`, warn-only for CPU), holds the "session admission" activity while it saves the durable `SessionRecord` with state `Provisioning` and `target = None` (`save_new_session` in `mj-controller/src/controller.rs`), then starts a `LifecycleKind::Create` operation. The operation body (create.rs around lines 585-660) builds a `CancellableProcessExecutor` tied to the control's `cancelled` flag and calls `provision_session_controlled_with_commit` in `mj-controller/src/controller/provisioning.rs` (line 163). Provisioning, in order: preflights; `plan_managed_raw_worktree` (`controller/worktree.rs` line 327), which may persist `managed_worktree` and rewrite `project_directory` to the clone path; reserve the environment (an `environments` row, then `session.target = Some(..)` persisted); tool cache, host-side git cache snapshot, build cache directory; run the container creation commands; record state `Disconnected` with the target (`apply_new_session_provisioning_result`); in parallel clone inside the container and install the worker payload; `connect_and_start_worker`, which uses the durable worker-restart intent (`start_worker_durably` in `controller/worker_binary/process.rs` line 282); then `grant_commit()` (create.rs line 651) and `mark_worker_connected`, which sets `Running`.
+
+What shutdown does today. `cancel_and_wait_lifecycles` (`mj-controller/src/daemon/views.rs` around line 170) calls `interrupt_for_shutdown` (daemon.rs around line 715) on every running lifecycle. For an uncommitted Create this is `cancel_for_shutdown`: the executor's commands fail with "operation cancelled", provisioning's failure arms run cleanup, and the record becomes `Error`. A committed Create is deliberately not interrupted. The next daemon's startup (`mj-controller/src/daemon/process.rs` around lines 553-600, `unowned_interrupted_lifecycles` and `pollers/lifecycle.rs` lines 75-93) fails every `Provisioning` session that no recovered operation owns, with text pointing at `mj recover scan`.
+
+The cleanup defect. In `provision_session_target_with_failure_disposition` (provisioning.rs around lines 839-885) two failure arms pass the create's own cancellable `executor` to `failed_environment_creation_cleanup` and `fail_new_session_with_cleanup` (controller.rs line 843), and the third arm sets `Error` with `target = None` even when cleanup failed. The correct pattern already exists in `rollback_failed_new_session` (provisioning.rs around line 481): it records `StartupCleanup` with the target still named, uses `failed_launch_cleanup_executor()` (`controller/subagent_park.rs` line 65, a fresh executor with its own 30-second bound), retires the environment, and only then writes `Error` with `target = None`. `StartupCleanup` is itself durable: `resume_startup_cleanups` (`daemon/close.rs` line 679) retries it at startup.
+
+Existing resumable operations to copy. Session restarts persist a row in `session_restart_intents` (`mj-controller/src/database/session_restart.rs`); at startup `load_session_restarts` feeds `recover_restarts` (`daemon/restart.rs` line 111), which re-admits a lifecycle with request key `recovery:<operation id>` and returns the session ids it owns; process.rs line 258 adds them to `lifecycle_owned` so the unowned reconciliation skips them. Recovery is admitted before the daemon serves clients.
+
+How callers learn the outcome. The TUI (`mj-cli/src/dashboard/io/spawn.rs` around lines 1398-1484) sends `StartCreateSession`, gets the registered session back, then `follow_daemon_creation` opens a connection and sends `WaitCreateSession`; the daemon's `wait_create_session` (create.rs line 680) requires a create entry in the lifecycle map. If the connection drops, the TUI reports the creation as failed. `StartCreateSession` has no command id and must never be replayed; `WaitCreateSession` is a read-only observation and is safe to repeat. REST `POST /sessions` returns after registration. Sub-agent creates (`start_subagent_session`, create.rs line 75) are replayed by the parent's spawn request key and join an existing create for a child still provisioning.
+
+
+## Plan of Work
+
+Milestone 1 fixes the cleanup defect on its own, because it is independently wrong and the later milestones rely on failure cleanup being trustworthy. In `provision_session_target_with_failure_disposition`, make every failure arm go through the same path as `rollback_failed_new_session`: record `StartupCleanup` with the target named, retire with `failed_launch_cleanup_executor()`, and set `Error` with `target = None` only after retirement succeeded; if retirement fails, leave `StartupCleanup` so `resume_startup_cleanups` retries it. Prefer deleting the divergent arms and calling the one rollback function over patching each arm. The existing test `a_cancelled_child_launch_still_stops_with_an_independent_executor` (`controller/provisioning/tests.rs` line 708) shows the shape for a top-level-create counterpart.
+
+Milestone 2 adds the durable intent. Add a migration creating `session_create_intents(session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE, operation_id TEXT NOT NULL, remember_launch_choices INTEGER NOT NULL, created_at TEXT NOT NULL)`; check how other session-scoped tables declare their foreign key and follow that. Classify it beside the migration as compatible: older daemons ignore the table, write session rows exactly as before, and an older daemon that meets a provisioning session fails it just as today; a leftover intent whose session an older daemon finished or failed is discarded by the new daemon's startup rule below. Advance the revision, do not raise the minimum compatible revision. Write the row in the same transaction as `save_new_session` for every create (top-level and sub-agent); it stores `remember_launch_choices` because the post-success "remember project directory" step currently reads that bool from the create closure, which a recovered create does not have. Delete the row in the same transaction that `mark_worker_connected` uses to set `Running` for a create, and in the transaction that writes the terminal `Error` after rollback. Destroying the session removes it by cascade.
+
+Milestone 3 changes shutdown. In `interrupt_for_shutdown`, an uncommitted Create is interrupted (`LifecycleControl::interrupt`, which stops its commands and makes `stopped_for_shutdown()` true) instead of cancelled. Every failure path of the create (the provisioning failure arms from Milestone 1, `rollback_failed_new_session`, and the lifecycle wrapper's `fail_unfinished_provisioning` call in `daemon/lifecycle.rs` around lines 465-500 and 582) checks `stopped_for_shutdown()` first and, when true, does nothing: no cleanup, no state write, intent kept. The next daemon owns it. A person's cancel and a close still take the CANCELLED path and roll back. Then take Create out of the non-deferrable "session lifecycle" handoff admission for the duration of provisioning: AGENTS.md says work that can take minutes but is safe to stop and starts again under the next daemon does not hold admission, and the handoff cancels it. Registration keeps holding "session admission" (bounded). If the commit-and-mark-running step needs admission, give it its own label and hold it only for that write. Update the handoff wait notices and blocker-naming tests accordingly.
+
+Milestone 4 adds recovery. At startup, beside `recover_restarts`, load all `session_create_intents` joined to their sessions. For an intent whose session is `Running`, `Error`, archived, or missing, delete the intent. For an intent whose session is `Provisioning`, `Disconnected` or `StartupCleanup`, re-admit a `LifecycleKind::Create` with request key `recovery:<operation id>` and add the session to `lifecycle_owned`. The recovered body first resets the session to its registered form: if a target is recorded, retire the environment with `retire_session_environment` and a fresh cleanup executor (process group first, files second, as retirement already does), clean up a partial managed worktree, restore `project_directory` from `managed_worktree.source_project_directory` and clear `managed_worktree`, settle any worker-restart intent for the session, and persist state `Provisioning` with `target = None`. It then runs the ordinary provisioning path with a normal cancellable executor and the stored `remember_launch_choices`, so a recovered create can itself be interrupted by another restart and recovered again, and a person can still cancel it. If reset or provisioning fails for a real reason, the normal rollback produces `Error` with that reason. Recovery must be admitted before the API serves clients, so a client's `WaitCreateSession` after reconnect finds the create. Where the startup code currently fails unowned `Provisioning` sessions, a session with an intent is now always owned; sessions without an intent (created by an older daemon) keep today's behavior. Capacity: run the same `admit_container_launch` the original create ran so the warning is reported again if the host is full. On the client side, make `follow_daemon_creation` treat a lost connection as "reconnect and send `WaitCreateSession` again" (read-only, safe to repeat), using the client's existing reconnect helpers; a `no create operation exists` answer after reconnect is resolved by reading the session record, not reported as a failure while the record is still provisioning. Never replay `StartCreateSession`.
+
+Milestone 5 tests and validates; see Validation.
+
+
+## Concrete Steps
+
+Work in the main checkout at `/home/jonathan/Projects/mjolnir/.mj/clones/ee7492167ca6a80c9167d91e518cc9a9` on branch `master`. Build and test outside the restricted sandbox, on the dev profile:
+
+    cargo test -p mj-controller <filter>
+    cargo test -p mj-cli <filter>
+    cargo clippy --all-targets -- -D warnings
+
+During the milestones run only the tests for what changed (`cargo test -p <crate> <filter>`); run the full suites of each touched crate and workspace clippy once at the end. Any manual or end-to-end run uses an isolated instance, for example `--instance create-resume`, never the default instance.
+
+
+## Validation and Acceptance
+
+Update the tests that encode the old rule: `create_cancellation_and_commit_have_one_winner` (`mj-controller/src/daemon/tests.rs` around line 2811, assertions around 2879-2901) now expects an uncommitted Create to be interrupted, not cancelled; the unowned-lifecycle tests around daemon/tests.rs 520-555 and `pollers/tests.rs` 217 now distinguish provisioning sessions with and without an intent; the create-holds-handoff tests around daemon/tests.rs 1195-1300 now expect a provisioning Create not to block handoff.
+
+Add only tests of the kinds AGENTS.md allows. A tricky-condition test that a failure cleanup started by a shutdown-interrupted create does not run, and that a genuinely failed top-level create's cleanup still completes after the create's executor is cancelled (Milestone 1; extend the existing provisioning tests rather than adding a family). A migration integration test in the existing migration test style: an older-revision store upgrades, a create intent round-trips, and the leftover-intent startup rule discards an intent whose session is already `Running` or `Error`. An end-to-end test in `tests/e2e/` modelled on `tests/e2e/session_restart_chaos.sh`: real `mj` binary, isolated instance, local target, start a session, run `mj daemon restart` while it is provisioning (make the window reliable, for example by restarting as soon as the session record appears; if the window is too short on a local target, describe the method you used), and assert the session reaches `running` under the new daemon, `mj sessions --session <id>` shows no error, there is one container or worker for it, and a TUI-style waiter receives the outcome. Mark nothing "Hard-won": these tests ship with the feature.
+
+Acceptance: the end-to-end scenario passes; restarting the daemon during provisioning returns as fast as before (shutdown no longer waits on the create); a person's cancel of a provisioning session still rolls it back; workspace clippy and the touched crates' full suites pass.
+
+
+## Idempotence and Recovery
+
+Recovery is designed to be re-entered: a recovered create that is interrupted again leaves its intent, and the next daemon resets and provisions again. Reset is safe to repeat because retirement of an already-retired environment and cleanup of an absent worktree are no-ops; verify this while implementing and record any exception in Surprises. The migration is additive and compatible; no data is rewritten.
+
+
+## Artifacts and Notes
+
+Incident evidence (daemon log `~/.local/share/mjolnir/logs/mj-daemon-20261116T113234.856Z-2582446.log`):
+
+    14:39:16.165 INFO daemon shutdown began
+    14:39:16.224 WARN session launch failed session_id="f5652d8c..." error=cleanup FAILED: stop environment worker ...: operation cancelled while stop exact Podman session container without removing storage; reserved resources remain recorded for Destroy: operation cancelled while start remote Podman container with isolated workspace storage
+    14:39:16.263 WARN lifecycle operation failed ... kind=Create ... cancel_cause=Some("server shutdown")
+    14:39:26.172 ERROR daemon shutdown did not finish in time; exiting seconds=10
+
+
+## Interfaces and Dependencies
+
+New table `session_create_intents` and data-access functions in `mj-controller/src/database/` (insert inside the `save_new_session` transaction, delete inside the commit-to-`Running` and terminal-`Error` transactions, load for startup). A startup function beside `recover_restarts` returning the session ids it owns. `LifecycleControl::interrupt` and `stopped_for_shutdown` already exist and are reused. No wire protocol change is expected; if one becomes necessary, follow the protocol versioning rules and record it here.
