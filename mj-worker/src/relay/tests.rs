@@ -6273,6 +6273,45 @@ fn clearable_relay(root: &Path) -> DurableRelay {
     relay
 }
 
+// The admission gate and the published capability must agree per harness:
+// Kimi clears like Codex and Claude; every other harness still refuses.
+#[test]
+fn clear_admission_matches_the_published_capability_per_harness() {
+    for (harness, supported) in [
+        (HarnessKind::Codex, true),
+        (HarnessKind::Claude, true),
+        (HarnessKind::Kimi, true),
+        (HarnessKind::Grok, false),
+        (HarnessKind::Muse, false),
+        (HarnessKind::OpenCode, false),
+        (HarnessKind::Dsh, false),
+        (HarnessKind::Antigravity, false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        relay.set_turn_verdict_harness(harness);
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "original".into(),
+                resumed: false,
+                native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
+            })
+            .unwrap();
+        relay.mark_native_session_used().unwrap();
+        assert_eq!(
+            relay.operational_state().clear_context,
+            supported,
+            "{harness:?}"
+        );
+        let admitted = relay
+            .submit_command("clear-request", RelayCommand::ClearContext)
+            .unwrap()
+            .is_ok();
+        assert_eq!(admitted, supported, "{harness:?}");
+    }
+}
+
 // The conversation that held an open request is discarded by /clear, so the
 // request must not reappear as a question in the fresh conversation.
 #[test]

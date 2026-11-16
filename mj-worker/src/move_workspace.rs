@@ -283,6 +283,33 @@ pub fn capture(
             .filter_map(|line| line.split_whitespace().nth(1))
             .collect();
         bundle_args.extend(stash_hashes);
+        // A force push/reset can leave the immutable launch base unreachable
+        // from every ref, but the next checkpoint still needs that object.
+        let managed_base = match &repository.base_commit {
+            Some(base) => Some(base.clone()),
+            None => mj_checkpoint::archive::remote_workspace_base(
+                &mj_checkpoint::archive::SystemGit,
+                &root,
+            )?,
+        };
+        let managed_base = match managed_base {
+            Some(base)
+                if mj_checkpoint::archive::managed_base_is_available(
+                    &mj_checkpoint::archive::SystemGit,
+                    &root,
+                    &base,
+                )? =>
+            {
+                Some(base)
+            }
+            Some(base) => {
+                tracing::warn!(repository = %repository.id, base_commit = %base,
+                    "legacy managed base object is absent; Move captures available history without an explicit base");
+                None
+            }
+            None => None,
+        };
+        bundle_args.extend(managed_base.as_deref());
         git_file(&root, &bundle_args, &stage.join("git-output"))?;
         fs::remove_file(stage.join("git-output"))?;
         git_file(
@@ -470,21 +497,27 @@ pub fn restore(source: &Path, repositories: &[WorkspaceRepository]) -> Result<()
             ],
         )?;
         git(root, &["checkout", "--detach", "--force", &repository.head])?;
-        // A manifest written before baseline pins were dropped may carry some.
+        // Transfer keeps base objects, but only managed finalization owns the
+        // base pin. Raw destinations must not acquire it. Legacy manifests
+        // may also carry obsolete review baseline pins.
         let wanted_refs: Vec<_> = repository
             .refs
             .iter()
-            .filter(|(name, _)| !mj_core::archive::is_review_baseline_pin(name))
+            .filter(|(name, _)| {
+                !mj_core::archive::is_review_baseline_pin(name)
+                    && name != mj_core::targets::HistoryCutoff::BASE_REF
+            })
             .collect();
         let saved_refs: std::collections::BTreeSet<_> =
             wanted_refs.iter().map(|(name, _)| name.as_str()).collect();
         let mut deletions = Vec::new();
         for line in git_text(root, &["for-each-ref", "--format=%(refname)"])?.lines() {
-            // A managed linked worktree shares the user's refs. Old review
-            // pins and legacy `refs/hel` refs there are the user's to remove
-            // (`mj doctor` lists them), so a Move leaves them alone.
-            let residue =
-                mj_core::archive::is_review_baseline_pin(line) || line.starts_with("refs/hel/");
+            // Existing pins belong to the destination, potentially shared
+            // with other linked worktrees. Move neither installs its base pin
+            // nor removes a pin it did not create; doctor reports raw residue.
+            let residue = mj_core::archive::is_review_baseline_pin(line)
+                || line.starts_with("refs/hel/")
+                || line == mj_core::targets::HistoryCutoff::BASE_REF;
             if !saved_refs.contains(line) && !residue {
                 write!(deletions, "delete {line}\0\0")?;
             }
@@ -509,6 +542,9 @@ pub fn restore(source: &Path, repositories: &[WorkspaceRepository]) -> Result<()
             )?;
         }
         for (name, target) in &repository.symbolic_refs {
+            if name == mj_core::targets::HistoryCutoff::BASE_REF {
+                continue;
+            }
             ensure!(
                 name.starts_with("refs/") && target.starts_with("refs/"),
                 "invalid symbolic Move ref"
@@ -672,6 +708,7 @@ mod tests {
         let stage = directory.path().join("move-stage");
         let manifest = capture(
             &[WorkspaceRepository {
+                base_commit: None,
                 id: "repo".into(),
                 root: source.clone(),
             }],
@@ -686,6 +723,7 @@ mod tests {
         restore(
             &stage,
             &[WorkspaceRepository {
+                base_commit: None,
                 id: "repo".into(),
                 root: target.clone(),
             }],
@@ -708,6 +746,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         init(directory.path());
         let repositories = [WorkspaceRepository {
+            base_commit: None,
             id: "repo".into(),
             root: directory.path().into(),
         }];
@@ -741,6 +780,7 @@ mod tests {
 
     // Hard-won: b63fedbf31: Move silently omitted untracked files based on their names.
     // Hard-won: 0cffddc616: restoring refs fetched the same bundle once for every ref.
+    // Hard-won: #1542: filtering transferred base pins also deleted a destination-owned GC root.
     #[test]
     fn disk_backed_move_preserves_git_state_and_selected_large_files() {
         if std::env::var_os("MJ_MOVE_RESTORE_TRACE_CHILD").is_none() {
@@ -872,6 +912,7 @@ mod tests {
         fs::write(source.join(".env"), "private").unwrap();
         fs::write(source.join("config.json"), "{\"flow\":4}").unwrap();
         let repos = vec![WorkspaceRepository {
+            base_commit: None,
             id: "repo".into(),
             root: source.clone(),
         }];
@@ -924,6 +965,7 @@ fi
         let existing = [
             "refs/mj/worktrees/other/review-baseline",
             "refs/hel/review-baseline",
+            mj_core::targets::HistoryCutoff::BASE_REF,
         ];
         for pin in existing {
             git(&target, &["update-ref", pin, &blob]).unwrap();
@@ -931,6 +973,7 @@ fi
         restore(
             &stage,
             &[WorkspaceRepository {
+                base_commit: None,
                 id: "repo".into(),
                 root: target.clone(),
             }],
@@ -968,7 +1011,8 @@ fi
                 "{args:?}"
             );
         }
-        // Every ref moves except the old review baseline pins, which nothing reads.
+        // Transferred refs agree except obsolete review pins and the managed
+        // base pin, whose ownership stays with each checkout.
         let refs_without_pins = |root: &Path| {
             git_text(
                 root,
@@ -979,7 +1023,11 @@ fi
             )
             .unwrap()
             .lines()
-            .filter(|line| !line.contains("review-baseline"))
+            .filter(|line| {
+                !line.contains("review-baseline")
+                    && line.split_whitespace().next()
+                        != Some(mj_core::targets::HistoryCutoff::BASE_REF)
+            })
             .collect::<Vec<_>>()
             .join("\n")
         };

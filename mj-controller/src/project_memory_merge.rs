@@ -157,12 +157,18 @@ pub(crate) async fn merge_and_swap_canonical<R: ConflictResolver>(
     resolver: &R,
     cancel: CancellationToken,
 ) -> Result<CanonicalSyncOutcome> {
-    let _cancel_on_drop = CancelOnDrop(cancel.clone());
+    // Resolver deadlines may cancel model work without cancelling the sync.
+    let resolver_cancel = cancel.child_token();
+    let _cancel_on_drop = CancelOnDrop(resolver_cancel.clone());
     let deadline = Instant::now() + CONFLICT_RESOLUTION_TIMEOUT;
     let mut cached_resolutions = Vec::<CachedResolution>::new();
 
     for attempt in 1..=MAX_CANONICAL_SYNC_ATTEMPTS {
-        let canonical = read_canonical_blocking(canonical_root.to_path_buf()).await?;
+        let canonical = tokio::select! {
+            biased;
+            () = cancel.cancelled() => bail!("project-memory synchronization for checkpoint was cancelled"),
+            result = read_canonical_blocking(canonical_root.to_path_buf()) => result?,
+        };
         let mut merged = mj_core::project_memory::merge_trees(baseline, &canonical, replica);
         let mut resolutions = Vec::with_capacity(merged.conflicts.len());
 
@@ -175,7 +181,12 @@ pub(crate) async fn merge_and_swap_canonical<R: ConflictResolver>(
                 cached
             } else {
                 let model_content = if Instant::now() < deadline {
-                    match timeout_at(deadline, resolver.resolve(conflict, cancel.clone())).await {
+                    let resolved = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => bail!("project-memory synchronization for checkpoint was cancelled"),
+                        result = timeout_at(deadline, resolver.resolve(conflict, resolver_cancel.clone())) => result,
+                    };
+                    match resolved {
                         Ok(Ok(content)) => match validate_model_output(&content) {
                             Ok(()) => Some(content),
                             Err(error) => {
@@ -196,7 +207,7 @@ pub(crate) async fn merge_and_swap_canonical<R: ConflictResolver>(
                             None
                         }
                         Err(_) => {
-                            cancel.cancel();
+                            resolver_cancel.cancel();
                             tracing::warn!(
                                 path = %conflict.path,
                                 "project-memory conflict resolution reached its 60 second deadline; using replica text"
@@ -205,7 +216,7 @@ pub(crate) async fn merge_and_swap_canonical<R: ConflictResolver>(
                         }
                     }
                 } else {
-                    cancel.cancel();
+                    resolver_cancel.cancel();
                     None
                 };
                 let resolution = match model_content {
@@ -232,8 +243,13 @@ pub(crate) async fn merge_and_swap_canonical<R: ConflictResolver>(
         }
 
         let expected = canonical.version();
-        match swap_canonical_blocking(canonical_root.to_path_buf(), expected, merged.tree.clone())
-            .await?
+        match swap_canonical_blocking(
+            canonical_root.to_path_buf(),
+            expected,
+            merged.tree.clone(),
+            &cancel,
+        )
+        .await?
         {
             SwapOutcome::Swapped => {
                 return Ok(CanonicalSyncOutcome::Swapped(CanonicalSync {
@@ -287,12 +303,26 @@ async fn swap_canonical_blocking(
     root: PathBuf,
     expected: TreeVersion,
     tree: ProjectMemorySnapshot,
+    cancel: &CancellationToken,
 ) -> Result<SwapOutcome> {
-    tokio::task::spawn_blocking(move || {
+    run_canonical_swap(cancel, move || {
         mj_core::project_memory::swap_canonical(&root, &expected, &tree)
     })
     .await
-    .context("project-memory canonical swap task failed")?
+}
+
+async fn run_canonical_swap<F>(cancel: &CancellationToken, swap: F) -> Result<SwapOutcome>
+where
+    F: FnOnce() -> Result<SwapOutcome> + Send + 'static,
+{
+    // No await separates this decision from starting the swap. Once it
+    // starts, keep ownership through completion, including its error.
+    if cancel.is_cancelled() {
+        bail!("project-memory synchronization for checkpoint was cancelled");
+    }
+    tokio::task::spawn_blocking(swap)
+        .await
+        .context("project-memory canonical swap task failed")?
 }
 
 /// Worker-side installation operations are a seam for the protocol fallback
@@ -438,6 +468,66 @@ mod tests {
             snapshot(&[("/MEMORY.md", "canonical\n")]),
             snapshot(&[("/MEMORY.md", "replica\n")]),
         )
+    }
+
+    // Hard-won: 656a36132 review: checkpoint cancellation detached a started canonical swap and lost its result.
+    #[tokio::test]
+    async fn cancellation_awaits_a_started_canonical_swap_and_reports_its_result() {
+        for fails in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().to_path_buf();
+            let tree = snapshot(&[("/MEMORY.md", "committed before checkpoint returns\n")]);
+            let swapped = tree.clone();
+            let cancel = CancellationToken::new();
+            let signal = cancel.clone();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let swap = run_canonical_swap(&cancel, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                if fails {
+                    bail!("controlled swap failure");
+                }
+                mj_core::project_memory::swap_canonical(
+                    &path,
+                    &ProjectMemorySnapshot::default().version(),
+                    &swapped,
+                )
+            });
+            tokio::pin!(swap);
+            tokio::select! {
+                result = &mut swap => panic!("swap finished before release: {result:?}"),
+                started = started_rx => started.unwrap(),
+            }
+            signal.cancel();
+            std::future::poll_fn(|cx| {
+                assert!(swap.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            release_tx.send(()).unwrap();
+            let result = swap.await;
+            if fails {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("controlled swap failure")
+                );
+            } else {
+                assert_eq!(result.unwrap(), SwapOutcome::Swapped);
+                assert_eq!(
+                    mj_core::project_memory::read_canonical(root.path()).unwrap(),
+                    tree
+                );
+            }
+            // A later swap must not start once cancellation is observed.
+            assert!(
+                run_canonical_swap(&cancel, || panic!("cancelled swap started"))
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

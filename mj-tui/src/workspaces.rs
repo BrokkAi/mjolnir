@@ -284,7 +284,14 @@ impl WorkspaceManager {
                 if selected.is_some_and(|entry| !entry.drafts.is_empty()) {
                     actions.push((Drafts, "Drafts", ready));
                 }
-                actions.push((Open, "Open", ready && selected.is_some()));
+                // Opening a workspace needs no details: it stays available
+                // while the details load runs or failed, but not while a
+                // mutation is in flight.
+                let openable = selected.is_some()
+                    && self
+                        .busy
+                        .is_none_or(|mutation| mutation == WorkspaceMutation::Load);
+                actions.push((Open, "Open", openable));
                 actions
             }
             WorkspaceManagerView::Create => vec![
@@ -396,6 +403,18 @@ fn workspace_manager_in_mode(mode: &mut Mode) -> Option<&mut WorkspaceManager> {
         Mode::WorkspaceManager(manager) => Some(manager),
         _ => None,
     }
+}
+
+/// The manager lists workspaces by name, whatever order the daemon keeps.
+fn sort_workspace_entries(entries: &mut [WorkspaceManagementEntry]) {
+    entries.sort_by(|a, b| {
+        a.workspace
+            .name
+            .to_lowercase()
+            .cmp(&b.workspace.name.to_lowercase())
+            .then_with(|| a.workspace.name.cmp(&b.workspace.name))
+            .then_with(|| a.workspace.id.cmp(&b.workspace.id))
+    });
 }
 
 impl DashboardState {
@@ -610,11 +629,17 @@ impl DashboardState {
     }
 
     /// Installs a manager snapshot, ignoring replies from an older modal or
-    /// mutation. An error remains visible in the responsive modal.
+    /// mutation. An error remains visible in the responsive modal. A
+    /// `details_pending` answer carries the workspace list ahead of the
+    /// details query: the list shows at once, while `loading` stays on so
+    /// mutations (and the shortcut's pending command) wait for the complete
+    /// answer — closing from a list that has not seen its drafts could
+    /// otherwise skip the confirmation that names them.
     pub fn finish_workspace_management(
         &mut self,
         generation: u64,
         result: Result<Vec<WorkspaceManagementEntry>, String>,
+        details_pending: bool,
     ) -> WorkspaceManagementOutcome {
         if !self.workspace_management_is_current(generation) {
             return WorkspaceManagementOutcome::ignored();
@@ -626,7 +651,35 @@ impl DashboardState {
         };
         let mut close_without_confirmation = false;
         match result {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                sort_workspace_entries(&mut entries);
+                if details_pending {
+                    let previous_selected_id = manager
+                        .selected_entry()
+                        .map(|entry| entry.workspace.id.clone());
+                    manager.entries = entries;
+                    manager.selected = previous_selected_id
+                        .as_deref()
+                        // The first answer has no previous selection: offer
+                        // the active workspace, as the complete answer does.
+                        .or(active_workspace_id.as_deref())
+                        .and_then(|id| {
+                            manager
+                                .entries
+                                .iter()
+                                .position(|entry| entry.workspace.id == id)
+                        })
+                        .unwrap_or_else(|| {
+                            manager
+                                .selected
+                                .min(manager.entries.len().saturating_sub(1))
+                        });
+                    manager.sync_form();
+                    return WorkspaceManagementOutcome {
+                        foreground,
+                        action: DashboardAction::None,
+                    };
+                }
                 let previous_busy = manager.busy;
                 // A rename or close started from its shortcut ends where the
                 // shortcut was pressed, as leaving it with Esc does (B-11).
@@ -729,7 +782,15 @@ impl DashboardState {
                 return WorkspaceManagementOutcome { foreground, action };
             }
             Err(error) => {
+                // A details answer that failed after the list arrived keeps
+                // the list read-only: its drafts are unknown, so no mutation
+                // may run on it. Reopening the manager retries the load.
+                let details_unknown =
+                    manager.busy == Some(WorkspaceMutation::Load) && !manager.entries.is_empty();
                 manager.set_error(error);
+                if details_unknown {
+                    manager.busy = Some(WorkspaceMutation::Load);
+                }
             }
         }
         WorkspaceManagementOutcome {
@@ -777,7 +838,11 @@ impl DashboardState {
                 let previous = manager.selected;
                 manager.select(index);
                 if manager.selected != previous {
-                    manager.error = None;
+                    // An error from the details load belongs to the list, not
+                    // the selection; it stays until a reload retries it.
+                    if manager.busy != Some(WorkspaceMutation::Load) {
+                        manager.error = None;
+                    }
                     manager.success = None;
                 }
             }
@@ -788,7 +853,11 @@ impl DashboardState {
             }
             Some(Interaction::Activate(control)) => match control {
                 WorkspaceControl::List | WorkspaceControl::Open => {
-                    if manager.busy.is_none()
+                    // Opening needs no details: it is allowed while the
+                    // details load runs or failed, not during a mutation.
+                    if manager
+                        .busy
+                        .is_none_or(|mutation| mutation == WorkspaceMutation::Load)
                         && let Some(workspace_id) = manager
                             .selected_entry()
                             .map(|entry| entry.workspace.id.clone())
@@ -1353,7 +1422,11 @@ pub(crate) fn render_workspace_manager(
         ])
         .split(inner);
     let message = if dialog.loading {
-        format!("Loading workspaces{}", theme::glyphs().ellipsis)
+        if dialog.entries.is_empty() {
+            format!("Loading workspaces{}", theme::glyphs().ellipsis)
+        } else {
+            format!("Loading details{}", theme::glyphs().ellipsis)
+        }
     } else if let Some(error) = &dialog.error {
         error.clone()
     } else if let Some(success) = &dialog.success {

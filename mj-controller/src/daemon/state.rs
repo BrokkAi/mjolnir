@@ -663,8 +663,8 @@ impl RuntimeState {
     /// The sentence is written for the person, not copied from the error
     /// chain: `last_error` is published, and a close failure's chain names
     /// project paths and SSH hosts. A failure that said what the caller can do
-    /// about it supplies that sentence; every other one points at the daemon
-    /// log entry that carries the whole reason.
+    /// about it supplies that sentence; other failures use the trusted
+    /// lifecycle boundary's cause and next action, followed by a log reference.
     pub(super) async fn record_failed_close(
         self: &Arc<Self>,
         session_id: &str,
@@ -687,12 +687,7 @@ impl RuntimeState {
         failure: &LifecycleFailure,
         prefix: &str,
     ) {
-        let cause = match &failure.refusal {
-            Some(refusal) => format!("{prefix}: {refusal}"),
-            None => {
-                format!("{prefix}; the daemon log records the reason under reference {reference}")
-            }
-        };
+        let cause = failure.public_message(prefix, reference);
         let applied = blocking({
             let session_id = session_id.to_owned();
             let cause = cause.clone();

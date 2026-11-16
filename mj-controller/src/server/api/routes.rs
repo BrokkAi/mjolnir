@@ -109,6 +109,15 @@ pub(super) async fn require_api_auth(
     request: HttpRequest<axum::body::Body>,
     next: Next,
 ) -> Result<Response, ApiFailure> {
+    // Shutdown is authoritative even for the unauthenticated API probe. A
+    // reconnect must never identify this daemon as healthy after its transfer
+    // streams have been cancelled.
+    if state.shutdown.is_cancelled() {
+        return Err(
+            ApiFailure::unavailable("the daemon is shutting down; reconnect")
+                .with_code(Some(DAEMON_HANDOFF_CODE)),
+        );
+    }
     let bearer = request
         .headers()
         .get(AUTHORIZATION)

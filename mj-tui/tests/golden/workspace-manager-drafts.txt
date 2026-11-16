@@ -78,9 +78,9 @@ action: LoadWorkspaceManagement { generation: 1 }
 ╭ Sessions ──                                                                                                │
 │ Create   Op  ╭ × Workspaces ───────────────────────────────────────────────────────────────╮               │
 │No sessions   │Enter opens the selected workspace · Tab moves between controls              │               │
-│Create new w  │Default  0 sessions                                           New workspace  │               │
-│              │Alpha  1 session                                              Rename         │               │
-│              │Beta  Current  2 sessions  2 drafts                           Delete…        │               │
+│Create new w  │Alpha  1 session                                              New workspace  │               │
+│              │Beta  Current  2 sessions  2 drafts                           Rename         │               │
+│              │Default  0 sessions                                           Delete…        │               │
 │              │                                                              Drafts         │               │
 │              │                                                              Open           │               │
 │              │                                                                             │               │

@@ -1218,14 +1218,11 @@ pub(super) fn raw_checkout_snapshot(
     git: &dyn mj_checkpoint::archive::GitCommandRunner,
     managed_clone: bool,
 ) -> Result<mj_checkpoint::archive::RepositorySnapshot> {
-    // Bundling "everything not on origin" only works when origin refs exist:
-    // every bundle prerequisite then sits on the remote the container clones.
-    mj_checkpoint::checkpoint::repair_origin_refs(git, checkout, repository_id)?;
+    let base = raw_checkout_base(git, checkout, repository_id)?;
     reject_dirty_submodules_for_move(git, checkout)?;
-    let boundary = origin_boundary_commit(git, checkout)?;
     let history = if managed_clone {
         mj_checkpoint::archive::GitHistoryMode::CloneFrom(
-            boundary
+            base.origin_boundary
                 .clone()
                 .context("managed clone has no origin boundary commit")?,
         )
@@ -1253,9 +1250,38 @@ pub(super) fn raw_checkout_snapshot(
         .map(|url| mj_checkpoint::archive::redact_origin_credentials(url))
         .collect::<Result<Vec<_>>>()?;
     snapshot.metadata.remote_workspace = true;
-    snapshot.metadata.base_commit =
-        boundary.unwrap_or_else(|| snapshot.metadata.head_commit.clone());
+    snapshot.metadata.base_commit = base.commit;
     Ok(snapshot)
+}
+
+pub(super) struct RawCheckoutBase {
+    origin_boundary: Option<String>,
+    pub(super) commit: String,
+}
+
+/// The existing host-to-workspace conversion boundary, shared by full
+/// repository snapshots and Move's metadata-only handoff.
+pub(super) fn raw_checkout_base(
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
+    checkout: &Path,
+    repository_id: &str,
+) -> Result<RawCheckoutBase> {
+    // A bundle's prerequisites must already be durable at the cloned origin.
+    mj_checkpoint::checkpoint::repair_origin_refs(git, checkout, repository_id)?;
+    let origin_boundary = origin_boundary_commit(git, checkout)?;
+    let commit = match &origin_boundary {
+        Some(boundary) => boundary.clone(),
+        None => git_runner_stdout(
+            git,
+            checkout,
+            ["rev-parse", "HEAD"],
+            "read durable checkout HEAD",
+        )?,
+    };
+    Ok(RawCheckoutBase {
+        origin_boundary,
+        commit,
+    })
 }
 
 /// The newest commit the checkout shares with `origin`, which is where a
@@ -1332,7 +1358,7 @@ pub(super) fn raw_conversion_preview_with_checkout(
     let checkout = conversion.checkout.as_path();
     // A dirty submodule cannot be captured, so say so now rather than failing
     // after the session has been stopped.
-    reject_dirty_submodules_for_move(&ExecutorGit(executor), checkout)?;
+    reject_dirty_submodules_for_move(&ExecutorGit::local(executor), checkout)?;
     let default_branch = mj_core::remote_git::default_branch(&conversion.source, executor)?;
     let position = read_checkout_position(executor, &ManagedWorktreeTarget::Local, checkout)?;
     let unpushed_commits = unpushed_commit_count(executor, checkout)?;
@@ -1388,10 +1414,40 @@ fn reject_dirty_submodules_for_move(
     Ok(())
 }
 
-/// Runs the checkpoint library's submodule inspection in a local checkout
-/// through a controller executor, so it keeps the caller's cancellation and
-/// deadline.
-struct ExecutorGit<'a, E>(&'a E);
+/// Runs checkpoint Git policy through the owning command executor, retaining
+/// cancellation and the source target's filesystem namespace.
+pub(super) struct ExecutorGit<'a, E> {
+    executor: &'a E,
+    location: ExecutorGitLocation<'a>,
+}
+
+enum ExecutorGitLocation<'a> {
+    Local,
+    Session {
+        backend: &'a crate::targets::TargetLocator,
+        id: &'a str,
+    },
+}
+
+impl<'a, E> ExecutorGit<'a, E> {
+    fn local(executor: &'a E) -> Self {
+        Self {
+            executor,
+            location: ExecutorGitLocation::Local,
+        }
+    }
+
+    pub(super) fn for_session(
+        executor: &'a E,
+        backend: &'a crate::targets::TargetLocator,
+        id: &'a str,
+    ) -> Self {
+        Self {
+            executor,
+            location: ExecutorGitLocation::Session { backend, id },
+        }
+    }
+}
 
 impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for ExecutorGit<'_, E> {
     fn run(
@@ -1403,15 +1459,66 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
             command.stdin.is_empty() && command.env.is_empty(),
             "an executor Git command takes no standard input or extra environment"
         );
-        let output = self.0.execute(&managed_git_command(
-            &ManagedWorktreeTarget::Local,
-            repository,
+        let mut environment: Vec<_> = mj_checkpoint::archive::NON_INTERACTIVE_GIT_ENV
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        environment.push((
+            "GIT_SSH_COMMAND".into(),
+            std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| {
+                mj_checkpoint::archive::NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()
+            }),
+        ));
+        let mut args = vec![
+            "git".into(),
+            "-C".into(),
+            repository.to_string_lossy().into_owned(),
+        ];
+        args.extend(
             command
                 .arguments
                 .iter()
                 .map(|argument| argument.to_string_lossy().into_owned()),
-            "inspect submodules",
-        ))?;
+        );
+        let command = match self.location {
+            ExecutorGitLocation::Local => {
+                let mut command =
+                    CommandSpec::new("git", args.into_iter().skip(1)).purpose("inspect submodules");
+                command.env.extend(environment);
+                command
+            }
+            ExecutorGitLocation::Session {
+                backend: backend @ crate::targets::TargetLocator::LocalBare { .. },
+                id,
+            } => {
+                let mut command = crate::targets::command_on_locator(
+                    backend,
+                    id,
+                    args,
+                    "inspect source checkout base",
+                )?;
+                command.env.extend(environment);
+                command
+            }
+            ExecutorGitLocation::Session { backend, id } => {
+                // Environment belongs to Git on the target, not to the local
+                // SSH/container transport process.
+                let mut remote = vec!["env".into()];
+                remote.extend(
+                    environment
+                        .into_iter()
+                        .map(|(name, value)| format!("{name}={value}")),
+                );
+                remote.extend(args);
+                crate::targets::command_on_locator(
+                    backend,
+                    id,
+                    remote,
+                    "inspect source checkout base",
+                )?
+            }
+        };
+        let output = self.executor.execute(&command)?;
         Ok(mj_checkpoint::archive::GitOutput {
             status: output.status,
             stdout: output.stdout,

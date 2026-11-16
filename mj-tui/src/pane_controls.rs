@@ -32,6 +32,10 @@ enum PaneOperation {
     PreferProfile(String),
     /// Empty `[quota] prefer`.
     ClearLoadBalancing,
+    /// Probe this profile's quota now.
+    RefreshProfile(String),
+    /// Open Usage by session filtered to this profile.
+    ProfileUsage(String),
     /// Runs a session command for the session whose row was right-clicked,
     /// through the same entry point its menu row uses.
     SessionCommand(String, CommandId),
@@ -214,9 +218,18 @@ impl DashboardState {
         }
     }
 
-    /// The right-click menu on a Quota profile row: load-balancing preference.
+    /// The right-click menu on a Quota profile row: refresh and usage for
+    /// that profile, then the load-balancing preference.
     pub(crate) fn begin_quota_row_menu(&mut self, profile_id: &str, at: (u16, u16)) {
         let entries = vec![
+            (
+                "Refresh".to_owned(),
+                PaneOperation::RefreshProfile(profile_id.to_owned()),
+            ),
+            (
+                "Usage…".to_owned(),
+                PaneOperation::ProfileUsage(profile_id.to_owned()),
+            ),
             (
                 format!("Prefer {profile_id} in load balancing"),
                 PaneOperation::PreferProfile(profile_id.to_owned()),
@@ -226,7 +239,7 @@ impl DashboardState {
                 PaneOperation::ClearLoadBalancing,
             ),
         ];
-        self.show_pane_menu("Load balancing", entries, false);
+        self.show_pane_menu(profile_id, entries, false);
         if let Some(menu) = self.pane_menu.as_mut() {
             menu.anchor = Some(Rect::new(at.0, at.1, 1, 1));
         }
@@ -546,6 +559,13 @@ impl DashboardState {
                 } else {
                     DashboardAction::ClearLoadBalancingPreferences
                 }
+            }
+            PaneOperation::RefreshProfile(profile_id) => {
+                DashboardAction::ProbeQuotaProfile { profile_id }
+            }
+            PaneOperation::ProfileUsage(profile_id) => {
+                self.begin_session_usage_report(Some(profile_id));
+                DashboardAction::None
             }
             PaneOperation::SessionCommand(session_id, id) => {
                 self.run_session_command(session_id, id)
@@ -962,8 +982,8 @@ mod tests {
         assert_eq!(d.pin_id("session-1"), Some(0));
     }
 
-    /// Right-clicking a Quota profile row offers Prefer and Clear; Clear is
-    /// disabled while no preference is set.
+    /// Right-clicking a Quota profile row offers Refresh, Usage…, Prefer and
+    /// Clear; Clear is disabled while no preference is set.
     #[test]
     fn quota_row_right_click_offers_load_balancing_preference_and_clear() {
         let mut d = dashboard_with_session(running_session());
@@ -991,11 +1011,38 @@ mod tests {
             assert_eq!(
                 labels,
                 [
+                    "Refresh",
+                    "Usage…",
                     "Prefer codex-1 in load balancing",
                     "Clear load balancing preferences"
                 ]
             );
         }
+        // Refresh probes just this profile.
+        assert_eq!(
+            d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
+            DashboardAction::ProbeQuotaProfile {
+                profile_id: "codex-1".into()
+            }
+        );
+        // Usage… opens the usage dialog with this profile preselected.
+        d.begin_quota_row_menu(&profile, at);
+        d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
+        assert_eq!(
+            d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
+            DashboardAction::None
+        );
+        match &d.mode {
+            crate::Mode::SessionUsageReport(dialog) => {
+                assert_eq!(dialog.query.profile.as_deref(), Some("codex-1"));
+            }
+            other => panic!("Usage… did not open the usage dialog: {other:?}"),
+        }
+        d.cancel_modal();
+        // Prefer runs from the row's menu.
+        d.begin_quota_row_menu(&profile, at);
+        d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
+        d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
         assert_eq!(
             d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
             DashboardAction::PreferLoadBalancingProfile {
@@ -1035,7 +1082,9 @@ mod tests {
         // With a preference set, Clear empties it.
         d.config.quota.prefer = vec!["codex-1".into()];
         d.begin_quota_row_menu(&profile, at);
-        d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
+        for _ in 0..3 {
+            d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
+        }
         assert_eq!(
             d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
             DashboardAction::ClearLoadBalancingPreferences

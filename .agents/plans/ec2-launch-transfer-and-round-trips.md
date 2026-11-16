@@ -19,7 +19,7 @@ After this change, the controller sends each distinct profile file to a host onc
 - [x] (2026-11-15 06:10Z) Diagnosed the incident from the daemon log and mapped both areas with read-only child investigations. Findings: `.mj/agents/98f62e22782823df6b3d6d3e298d2000/findings.md` (profile archive) and `.mj/agents/5eb1525f3de8aadc518093a8507a917f/findings.md` (round trips). These are local, uncommitted report directories; this plan repeats every fact it relies on.
 - [x] (2026-11-15) Milestone 1: host profile content store implemented and validated; real-shell regressions, full controller suite (2,651 passed, 27 ignored), workspace clippy and formatting pass.
 - [x] (2026-11-15 07:19Z) Milestone 2: shared step-script helper and all six groups implemented and committed in the batching worktree. Focused checks pass; final full suites pass (controller 2,650; core 651), and workspace clippy passes with warnings denied. Parent owns review of the integrated milestones.
-- [ ] Milestone 3: live check on a small EC2 host from an isolated instance; record timings here.
+- [x] (2026-11-16) Milestone 3: live burst check on an m7i.xlarge in us-east-1a from the isolated instance `launch-perf-1541`, old build `2fa098787` against new build `511c007f6` on the same host. Results are in Outcomes & Retrospective. Host terminated afterwards.
 
 
 ## Surprises & Discoveries
@@ -84,6 +84,9 @@ After this change, the controller sends each distinct profile file to a host onc
   Rationale: code review of 09769fc85 found that a copy failure such as a full disk could otherwise depend on whether `find -exec … +` reports the failed invocation. Checking the result directly does not depend on how a given `find` implementation behaves.
   Date/Author: 2026-11-15, parent session.
 
+- Decision: remove the per-file process starts that caused the empty-store regression. Digests are verified with one `sha256sum` or `shasum` pass over all uploaded content files, compared by `awk`, with a count check that catches files a partial pass skipped. New content is published with batched `cp`, `chmod` and `mv` calls through `find -exec … +`, and `rmdir` of the upload directory proves every file moved. Placeholders are now relative symlinks (one `..` per path component) into `.mj-store`, a link the script creates in a private work directory beside the extracted tree. The archive also carries `.mj-keys`, the list of shared keys, so the missing-content check uses shell builtins only. One `cp -RL` then copies the whole tree into the destination with links dereferenced, under umask 077. This supersedes the per-link copy loop.
+  Rationale: on the m7i.xlarge test host, per-file process starts cost 1.3 s for digests and 2.2 s for copies over 725 files. They made the first launch on an empty store slower than the old single archive, and were most of the transfer time in every later launch. Checked on Linux by the three profile archive tests, and on macOS by running the script against a hand-built archive: first upload, repeat upload, missing content.
+  Date/Author: 2026-11-16, parent session.
 
 ## Outcomes & Retrospective
 
@@ -94,6 +97,26 @@ The batching worktree did not run live EC2, Docker's ignored live cases, or nati
 
 Milestone 2 implementation estimate for the incident sequence is 69 commands to about 36 when the existing mbx resolution is available: profile install saves 6, worker replacement saves 6 including deletion of the useless SSH `true`, worker publication saves 2, inherited Git settings save 2, workspace Git configuration saves 6, and mbx inspection reuse plus shim/config batching save 11. This is a code-path estimate, not a timing measurement; the profile-store digest query from Milestone 1 can add a command back. SCP remains separate when a replacement has no remote source. No output-dependent local decision moved into shell. Milestone 3 still measures the combined implementation on a real isolated host.
 
+
+Milestone 3 (2026-11-16). Method: one isolated instance with a Claude profile holding a copy of the real `plugins/` and `skills/` and no credentials, the public `octocat/Hello-World` bundle, and an m7i.xlarge EC2 host created with `mj ec2 create`. For each build: one warm-up session, then four sessions started at once, with no prompt. Times are the `provision session` launch phase from the instance's daemon log. Each build was run once.
+
+    Old build 2fa098787            New build 511c007f6
+    warm-up   104.4 s, 75 cmds     warm-up   111.4 s, 54 cmds
+              upload 12.5 s                  query 0.3 s + send 20.4 s (11,523,317 B, 725 stored files)
+    burst     56.6-67.6 s each     burst     24.9-36.9 s each
+              62 cmds each                   43 cmds each
+              upload 10.2-32.0 s             query 0.7-0.8 s + send 2.9-3.7 s (about 73 KB, 0 stored files)
+
+The burst sessions sent no shared content and started in roughly half the time. Remote commands per launch fell from 62 to 43. The warm-up count includes one-time host work.
+
+One regression: the first launch on a host with an empty store took about 8 s longer (20.4 s against 12.5 s for the transfer). On the host, per-file process starts measured 1.3 s for the per-file digest check over 725 files, against 0.02 s for one `sha256sum` call over all of them, and 2.2 s for the per-file copy loop. That accounts for about 3.5 s; the rest is unexplained with one sample of each, and network variation is possible. The same copy loop is most of the roughly 3 s `send profile content` time in burst sessions. A follow-up could verify digests in one call and reduce per-file process starts in materialization.
+
+Regression fix measured (2026-11-16) on a second m7i.xlarge in us-east-1, build `3e2ad1314`, with the same method:
+
+    warm-up   94.9 s, 54 cmds, query 0.3 s + send 14.4 s (11,573,528 B, 725 stored files)
+    burst     16.8-23.0 s each, 43 cmds each, query 0.2-0.3 s + send 0.4-0.5 s (about 110 KB, 0 stored files)
+
+Burst sessions now spend under a second on the profile transfer, against 3.6-4.5 s before the fix and 10-32 s with the old build. The first launch on an empty store spent 14.7 s on the transfer, against 20.7 s before the fix and 12.5 s with the old build. The remaining 2 s gap is within what one run per build on different hosts can show. Burst archives grew from about 73 KB to about 110 KB, because each placeholder link now carries a relative path.
 
 ## Context and Orientation
 
@@ -219,3 +242,9 @@ Plan update (2026-11-15, Milestone 1 worker): implemented the host content store
 No new crates. Use the existing `tar` and `flate2` dependencies for the stream and `sha2` (already used by the worker store) for digests. Run commands through the existing executor (`execute_with_stdin` for the streamed upload); do not hand-roll pipes. The step-script helper lives in `mj-core/src/targets.rs` beside `CommandPlan` and returns errors through the same `anyhow` context style as `execute_checked`. `CommandStep::new(purpose, argv)` declares an operation; `accepted_statuses` declares accepted exit codes, `cleanup` runs it in the exit trap, and `best_effort_cleanup` reports failure without replacing the primary result. `step_script` returns the argv for the existing transport factories. `step_script_error` and `step_script_warnings` decode indexed status/purpose markers; purposes use JSON escaping and argv words use `posix_quote`. The core and controller error checkers decode failures, and worker publication logs all cleanup warnings before checking the result. No database migration and no relay protocol change are expected; if one becomes necessary, stop and record why in the Decision Log.
 
 Plan update (2026-11-15, Milestone 2): recorded batching implementation, preserved failure policies, the original-settings resolution lookup and corrected Cargo package selectors. Validation completed: the focused checks, both full crate suites and workspace clippy pass. The source revision stayed fixed during final validation; the final commit touches only this plan.
+
+Plan update (2026-11-16, parent): recorded the Milestone 3 live measurement and the cold-store regression.
+
+Plan update (2026-11-16, parent): replaced per-file process starts in the install script after the measured empty-store regression.
+
+Plan update (2026-11-16, parent): recorded the measurement of the regression fix; work complete.

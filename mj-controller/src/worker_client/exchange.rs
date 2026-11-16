@@ -5,13 +5,30 @@ const CANCELLED: &str = "the credential sync was cancelled by a lifecycle operat
 
 impl RelayClient {
     pub(super) async fn call(&mut self, request: RelayRequest) -> Result<RelayResponsePayload> {
-        self.call_with_timeout(request, self.request_timeout).await
+        // Memory RPCs include filesystem work and worker-side queueing. Neither
+        // has a measured deadline; lifecycle cancellation still interrupts them.
+        let timeout = match &request {
+            RelayRequest::ProjectMemoryTransfer { .. }
+            | RelayRequest::ProjectMemorySnapshot
+            | RelayRequest::InstallProjectMemorySnapshot { .. }
+            | RelayRequest::ReplaceProjectMemoryTree { .. } => None,
+            _ => Some(self.request_timeout),
+        };
+        self.call_with_deadline(request, timeout).await
     }
 
     pub(super) async fn call_with_timeout(
         &mut self,
         request: RelayRequest,
         timeout: Duration,
+    ) -> Result<RelayResponsePayload> {
+        self.call_with_deadline(request, Some(timeout)).await
+    }
+
+    async fn call_with_deadline(
+        &mut self,
+        request: RelayRequest,
+        timeout: Option<Duration>,
     ) -> Result<RelayResponsePayload> {
         let operation = request.method_name();
         if !request.supported_at(self.protocol_version) {
@@ -70,7 +87,7 @@ impl RelayClient {
         // Not logged here: a proxy the SSH server turned away also fails
         // hello, and only the connect that classifies it knows which it was.
         let line = self
-            .exchange(&envelope, operation, timeout, ExchangeKind::Handshake)
+            .exchange(&envelope, operation, Some(timeout), ExchangeKind::Handshake)
             .await?;
         decode_relay_hello_response(&line, &request_id)
     }
@@ -88,7 +105,7 @@ impl RelayClient {
         &mut self,
         envelope: &RelayRequestEnvelope,
         operation: &str,
-        timeout: Duration,
+        timeout: Option<Duration>,
         kind: ExchangeKind,
     ) -> Result<String> {
         if let Some(reason) = &self.abandoned {
@@ -106,7 +123,7 @@ impl RelayClient {
         frame.push(b'\n');
         let session_id = self.session_id.clone();
         let started = Instant::now();
-        let exchange = tokio::time::timeout(timeout, async {
+        let exchange = async {
             self.input
                 .as_mut()
                 .expect("connected relay owns proxy stdin")
@@ -130,7 +147,7 @@ impl RelayClient {
                         %session_id,
                         %operation,
                         warning_after_seconds = RELAY_SLOW_OPERATION_WARNING.as_secs_f64(),
-                        timeout_seconds = timeout.as_secs_f64(),
+                        timeout_seconds = timeout.map(|duration| duration.as_secs_f64()),
                         "relay operation is still waiting for its response"
                     );
                     response.await
@@ -144,7 +161,13 @@ impl RelayClient {
                         kind,
                     ))
                 })
-        });
+        };
+        let exchange = async {
+            match timeout {
+                Some(timeout) => tokio::time::timeout(timeout, exchange).await,
+                None => Ok(exchange.await),
+            }
+        };
         let cancellation = self.cancellation.clone();
         let exchanged = tokio::select! {
             biased;
@@ -173,7 +196,9 @@ impl RelayClient {
         match exchanged {
             Ok(line) => line,
             Err(_elapsed) => {
-                let seconds = timeout.as_secs_f64();
+                let seconds = timeout
+                    .expect("only a bounded exchange can time out")
+                    .as_secs_f64();
                 tracing::warn!(
                     %session_id,
                     %operation,
@@ -197,7 +222,7 @@ impl RelayClient {
         self.cancellation = cancellation;
     }
 
-    fn cancelled(&self) -> bool {
+    pub(super) fn cancelled(&self) -> bool {
         self.cancellation
             .as_ref()
             .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))

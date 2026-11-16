@@ -22,9 +22,10 @@ use crate::dashboard::io::{
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
     spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
     spawn_dashboard_create_session, spawn_dashboard_notifications_ignored, spawn_dashboard_rename,
-    spawn_lifecycle_operation, spawn_quota_preferences_save, spawn_remove_bundle,
-    spawn_workspace_close, spawn_workspace_close_cancel, spawn_workspace_create,
-    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
+    spawn_lifecycle_operation, spawn_quota_preferences_save, spawn_quota_probe_request,
+    spawn_remove_bundle, spawn_workspace_close, spawn_workspace_close_cancel,
+    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
+    spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -1029,6 +1030,12 @@ pub(crate) async fn apply_dashboard_action(
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
+        }
+        DashboardAction::ProbeQuotaProfile { profile_id } => {
+            context
+                .dashboard
+                .set_notice(format!("Refreshing {profile_id}'s quota…"));
+            spawn_quota_probe_request(profile_id, context.dashboard_io_tx.clone());
         }
         DashboardAction::ChangeWorkspace {
             session_id,
