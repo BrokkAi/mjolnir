@@ -318,7 +318,8 @@ impl Controller {
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
         ensure!(
-            crate::database::is_creating(session.state),
+            // The states an unfinished create's record can be in.
+            crate::database::holds_create_intent(session.state),
             "session {session_id} is {}, not an unfinished create",
             session.state.as_str()
         );

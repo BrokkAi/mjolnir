@@ -18,14 +18,31 @@ pub(crate) struct SessionCreateIntent {
     pub remember_launch_choices: bool,
 }
 
-/// States in which a session's creation is still unfinished. The one
-/// definition: registration, settlement, recovery and the create wait all ask
-/// it.
-pub(crate) fn is_creating(state: SessionState) -> bool {
+/// The states a session's create intent can exist in: the storage rule that
+/// registration and every session write keep. It says nothing about whether a
+/// given session's creation is unfinished; the intent row is the owner of that.
+pub(crate) fn holds_create_intent(state: SessionState) -> bool {
     matches!(
         state,
         SessionState::Provisioning | SessionState::Disconnected
     )
+}
+
+/// Whether a create intent outlived its creation: its session was archived, or
+/// finished or failed by something that did not settle the intent (an older
+/// daemon).
+pub(crate) fn create_intent_is_stale(session: &SessionRecord) -> bool {
+    session.archived || !holds_create_intent(session.state)
+}
+
+/// Whether this session's creation is unfinished, as its intent row says.
+pub(crate) fn session_has_create_intent(session_id: &str) -> Result<bool> {
+    let connection = open_reader(&database_path())?;
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_create_intents WHERE session_id = ?1)",
+        [session_id],
+        |row| row.get(0),
+    )?)
 }
 
 pub(super) fn insert_create_intent(
@@ -34,7 +51,7 @@ pub(super) fn insert_create_intent(
     remember_launch_choices: bool,
 ) -> Result<()> {
     // Sessions registered already past creation (fixtures, imports) own none.
-    if !is_creating(session.state) {
+    if !holds_create_intent(session.state) {
         return Ok(());
     }
     let operation_id = crate::session_manager::new_command_id("create")?;
@@ -62,7 +79,7 @@ pub(super) fn settle_create_intent_for_state(
     session_id: &str,
     state: SessionState,
 ) -> Result<()> {
-    if !is_creating(state) {
+    if !holds_create_intent(state) {
         tx.execute(
             "DELETE FROM session_create_intents WHERE session_id = ?1",
             [session_id],

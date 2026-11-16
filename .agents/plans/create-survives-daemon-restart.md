@@ -48,6 +48,8 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 
 - Decision: `database::is_creating` is the one definition of "creation unfinished"; recovery, the create wait and the reset all call it. The sub-agent checks for `Provisioning` alone ask a different question (a child stays Provisioning until its worker connects) and keep it. The dashboard follow loop treats a failed connection as a lost connection and retries it with the fixed quarter-second backoff, cancellable throughout. Date: 2026-11-16.
 
+- Decision: the dashboard follow loop retries only a connection that dropped after the wait was sent (`DaemonTransportLost`, attached by `DaemonClient::request_once` to socket failures). This replaces the round-4 rule that also retried a failed connect: `connect_or_start` waits on the startup lock through a handoff, so a connect error is a real failure and ends the follow, as do refusals and protocol mismatches. The create intent row, not session state, owns "creation unfinished": `wait_create_outcome` asks `session_has_create_intent`; `holds_create_intent(state)` is only the storage rule for writes and for the reset precondition, and `create_intent_is_stale` names the recovery question. Date: 2026-11-16.
+
 
 ## Outcomes & Retrospective
 

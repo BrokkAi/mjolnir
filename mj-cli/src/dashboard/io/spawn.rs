@@ -1527,11 +1527,13 @@ async fn await_daemon_creation(
             },
             () = cancellation() => bail!("operation cancelled"),
         };
-        // A refusal is the daemon's answer, including the real failure of a
-        // create that has ended; only a lost connection means "ask again".
+        // Only a connection that dropped after the wait was sent means "ask
+        // again". A refusal, a failure to connect or start a daemon (which
+        // waits out a handoff before it fails) and a protocol mismatch are
+        // real answers and end the follow with their own error.
         if error
-            .downcast_ref::<mj_client::daemon::DaemonRefusal>()
-            .is_some()
+            .downcast_ref::<mj_client::daemon::DaemonTransportLost>()
+            .is_none()
         {
             return Err(error);
         }

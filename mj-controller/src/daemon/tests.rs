@@ -6361,12 +6361,16 @@ async fn waiting_for_a_create_with_no_lifecycle_is_answered_from_the_record() {
     for (id, state, reason) in [
         ("wait-failed", SessionState::Error, Some("clone refused")),
         ("wait-running", SessionState::Running, None),
-        ("wait-creating", SessionState::Provisioning, None),
+        // A finished session whose worker dropped holds no create intent.
+        ("wait-dropped", SessionState::Disconnected, None),
     ] {
         let mut record = runtime_test_session(id, &workspace.id, state);
         record.last_error = reason.map(str::to_owned);
         crate::database::save_session(&record).unwrap();
     }
+    // A registered create holds its intent, and no lifecycle runs it.
+    let creating = runtime_test_session("wait-creating", &workspace.id, SessionState::Provisioning);
+    crate::database::save_new_session(&creating, None, false, false).unwrap();
     let state = test_runtime_state_loading_the_store();
     let failed = state.wait_create_session("wait-failed").await.unwrap_err();
     assert!(
@@ -6374,6 +6378,7 @@ async fn waiting_for_a_create_with_no_lifecycle_is_answered_from_the_record() {
         "{failed:#}"
     );
     state.wait_create_session("wait-running").await.unwrap();
+    state.wait_create_session("wait-dropped").await.unwrap();
     let creating = state
         .wait_create_session("wait-creating")
         .await

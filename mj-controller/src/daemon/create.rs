@@ -780,9 +780,7 @@ impl RuntimeState {
                 .state
                 .sessions
                 .get(&intent.session_id)
-                .is_some_and(|record| {
-                    !record.archived && crate::database::is_creating(record.state)
-                });
+                .is_some_and(|record| !crate::database::create_intent_is_stale(record));
             if !creating {
                 crate::database::discard_session_create_intent(
                     &intent.session_id,
@@ -853,8 +851,11 @@ impl RuntimeState {
                         .unwrap_or_else(|| "session creation failed".to_owned())
                 ));
             }
+            // The intent row owns whether creation is unfinished; a session
+            // whose worker later dropped (Disconnected) has no intent.
+            let id = session_id.to_owned();
             ensure!(
-                !crate::database::is_creating(record.state),
+                !blocking(move || crate::database::session_has_create_intent(&id)).await?,
                 "no create operation exists for session {session_id}"
             );
             return Ok(CreateWait::Finished);
