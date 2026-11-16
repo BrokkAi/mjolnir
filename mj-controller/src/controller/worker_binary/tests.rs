@@ -168,8 +168,7 @@ fn probing_and_stopping_a_root_with_an_old_worker_installs_the_current_one_first
     let install_old = || {
         let _ = std::fs::remove_file(root.join("hel"));
         std::fs::write(root.join("hel"), old).unwrap();
-        std::fs::set_permissions(root.join("hel"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(root.join("hel"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let shared = directory.path().join("other-root-hel");
         let _ = std::fs::remove_file(&shared);
         std::fs::hard_link(root.join("hel"), &shared).unwrap();
@@ -178,8 +177,7 @@ fn probing_and_stopping_a_root_with_an_old_worker_installs_the_current_one_first
     let root_text = root.to_string_lossy().into_owned();
 
     let shared = install_old();
-    let liveness =
-        probe_worker_liveness(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
+    let liveness = probe_worker_liveness(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
     assert_eq!(liveness.status, 0);
     assert_eq!(String::from_utf8_lossy(&liveness.stdout).trim(), "dead");
     assert_ne!(std::fs::read_to_string(root.join("hel")).unwrap(), old);

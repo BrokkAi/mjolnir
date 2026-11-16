@@ -1228,7 +1228,8 @@ pub(super) fn classify_resume_environment(
             TargetAvailability::Reachable => {}
         }
         start_retained_apple_for_resume(&backend, executor)?;
-        let output = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &root)?;
+        let output =
+            super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &root)?;
         ensure!(
             output.status == 0,
             "worker liveness probe failed: {}",

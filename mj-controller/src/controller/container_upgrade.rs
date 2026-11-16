@@ -39,9 +39,9 @@ impl Controller {
         commit: impl Fn() -> Result<bool> + Send + Sync,
     ) -> Result<()> {
         use super::worker_binary::{
-            WorkerInstall, install_staged_worker_binary, replace_installed_worker_launch_config,
-            stage_worker_binary_for_upgrade, start_worker_durably,
-            probe_worker_liveness, stop_worker_after_target_recovery,
+            WorkerInstall, install_staged_worker_binary, probe_worker_liveness,
+            replace_installed_worker_launch_config, stage_worker_binary_for_upgrade,
+            start_worker_durably, stop_worker_after_target_recovery,
         };
         let record = self
             .state

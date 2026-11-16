@@ -202,12 +202,14 @@ pub(crate) fn recover_worker_controlled(
         }
         let output = match plan.binary_refresh.as_ref() {
             // The root's own `hel` answers the probe, so it must be a current one.
-            Some(WorkerBinaryRefresh::Deferred(refresh)) => crate::controller::execute_worker_control(
-                executor,
-                &refresh.locator,
-                &refresh.session_id,
-                &plan.liveness_probe,
-            ),
+            Some(WorkerBinaryRefresh::Deferred(refresh)) => {
+                crate::controller::execute_worker_control(
+                    executor,
+                    &refresh.locator,
+                    &refresh.session_id,
+                    &plan.liveness_probe,
+                )
+            }
             _ => executor.execute(&plan.liveness_probe),
         }
         .context("probe relay worker liveness")?;

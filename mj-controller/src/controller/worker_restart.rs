@@ -422,8 +422,12 @@ impl Controller {
                 if let Some(target) = target {
                     owner.verify_target(target)?;
                     if crate::database::load_worker_restart(session_id)?.is_some() {
-                        let output =
-                            super::worker_binary::probe_worker_liveness(executor, restart.backend, session_id, restart.worker_root)?;
+                        let output = super::worker_binary::probe_worker_liveness(
+                            executor,
+                            restart.backend,
+                            session_id,
+                            restart.worker_root,
+                        )?;
                         anyhow::ensure!(
                             output.status == 0
                                 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
@@ -494,7 +498,12 @@ impl Controller {
                         || crate::database::worker_restart_phase(session_id)?
                             == Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
                     {
-                        let output = super::worker_binary::probe_worker_liveness(executor, backend, session_id, worker_root)?;
+                        let output = super::worker_binary::probe_worker_liveness(
+                            executor,
+                            backend,
+                            session_id,
+                            worker_root,
+                        )?;
                         anyhow::ensure!(
                             output.status == 0
                                 && String::from_utf8_lossy(&output.stdout).trim() == "dead",

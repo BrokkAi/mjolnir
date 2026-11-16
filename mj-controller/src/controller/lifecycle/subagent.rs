@@ -67,7 +67,12 @@ impl Controller {
                     Ok(relay) => Some(relay),
                     Err(error) if crate::session_manager::worker_connect_needs_restart(&error) => {
                         let (backend, worker_root) = self.worker_placement(session_id)?;
-                        let liveness = super::super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &worker_root)?;
+                        let liveness = super::super::worker_binary::probe_worker_liveness(
+                            executor,
+                            &backend,
+                            session_id,
+                            &worker_root,
+                        )?;
                         ensure!(
                             liveness.status == 0
                                 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead",

@@ -5324,7 +5324,7 @@ fn worker_liveness_does_not_report_death_when_the_probe_fails() {
     let hel = root.path().join("hel");
     std::fs::write(
         &hel,
-        "#!/bin/sh\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
+        "#!/bin/sh\ncase \"$*\" in *--help*) exit 0 ;; esac\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
     )
     .unwrap();
     std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o700)).unwrap();
