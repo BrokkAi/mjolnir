@@ -23,6 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub const TERM_GRACE: Duration = Duration::from_secs(2);
 /// How long a stop waits for the tree to disappear after KILL. The former stop
 /// script waited three one-second rounds.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const KILL_WAIT: Duration = Duration::from_secs(3);
 /// How long the holder of the lock may take to write the startup record that
 /// names it. The worker writes it as its first act after taking the lock.
