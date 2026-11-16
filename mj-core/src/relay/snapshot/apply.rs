@@ -337,6 +337,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if *native_continuity_lost {
                 snapshot.continuation.quota_recovery = None;
                 snapshot.continuation.quota_suppressed = true;
+                snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
             }
             snapshot.native_session_id = Some(native_session_id.clone());
             snapshot.native_session_opened_ordinal = Some(event.ordinal);
@@ -448,10 +449,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     ) =>
                 {
                     snapshot.person_input_through = event.ordinal;
+                    let context = crate::acp::context_command(prompt).is_some();
                     snapshot.continuation = crate::continuation::ContinuationState {
                         user_command_id: Some(command_id.clone()),
-                        suppressed: crate::acp::context_command(prompt).is_some(),
-                        quota_suppressed: crate::acp::context_command(prompt).is_some(),
+                        suppressed: context,
+                        quota_suppressed: context,
+                        withdrawn_ordinal: if context {
+                            Some(event.ordinal)
+                        } else {
+                            snapshot.continuation.withdrawn_ordinal
+                        },
                         ..Default::default()
                     };
                 }
@@ -537,6 +544,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 | RelayCommand::SetSessionMode { .. } => {
                     snapshot.continuation.suppressed = true;
                     snapshot.continuation.quota_suppressed = true;
+                    snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
                 }
                 _ => {}
             }
@@ -556,6 +564,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.continuation.quota_recovery = None;
                 if !matches!(command, RelayCommand::Prompt { .. }) {
                     snapshot.continuation.quota_suppressed = true;
+                    snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
                 }
             }
             if cancels_capacity_retry(command)

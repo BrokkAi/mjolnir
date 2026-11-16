@@ -664,7 +664,10 @@ pub struct CredentialSyncSignal {
     /// Hash of the access token the failed turn used (the turn diagnostic's
     /// `login_fingerprint`). `None` when the failure carries none: a warning,
     /// a worker that predates the field, or a harness without a token hash.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Never serialized: an older client's copy of this struct denies unknown
+    // fields and would fail to decode the session view. The daemon passes it
+    // in-process only.
+    #[serde(skip)]
     pub login_fingerprint: Option<String>,
 }
 

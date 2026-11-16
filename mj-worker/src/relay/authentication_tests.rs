@@ -31,11 +31,30 @@ fn auth_failure(relay: &mut DurableRelay, id: &str, login: &str) {
 }
 
 // Hard-won: #1515: a refreshed login left an auth-failed turn idle forever.
+// Hard-won: #1547: a spawned sub-agent's model configure set quota_suppressed, so #1515 never retried its auth-failed turn.
 #[test]
 fn authentication_recovery_survives_restart_and_never_retries_the_same_login() {
     for original in ["user-request", "subagent-spawn-auth-regression"] {
         let root = tempfile::tempdir().unwrap();
         let mut relay = open(root.path());
+        if original.starts_with("subagent-spawn") {
+            // A spawn configures the model before its generated prompt.
+            submit_relay(
+                &mut relay,
+                "subagent-spawn-auth-regression-model",
+                RelayCommand::SetConfig {
+                    key: "model".into(),
+                    value: "sonnet".into(),
+                },
+            );
+            relay.claim_pending_commands(true).unwrap();
+            relay
+                .record_command_completed(
+                    "subagent-spawn-auth-regression-model",
+                    RelayCommandOutcome::Configured,
+                )
+                .unwrap();
+        }
         submit_relay(&mut relay, original, prompt("finish this task"));
         relay.claim_pending_commands(true).unwrap();
         let authorization = relay.snapshot.continuation.user_command_id.clone();

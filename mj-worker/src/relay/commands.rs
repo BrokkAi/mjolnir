@@ -1631,7 +1631,6 @@ impl DurableRelay {
     pub(crate) fn authentication_retry_identity(&self) -> Option<(u64, &str)> {
         let facts = self.activity_facts();
         if self.verdict_harness != Some(mj_core::config::HarnessKind::Claude)
-            || self.snapshot.continuation.quota_suppressed
             || !self.snapshot.assessment_questions.is_empty()
             || self.snapshot.goal.budget_limited()
             || self
@@ -1650,10 +1649,18 @@ impl DurableRelay {
         let completed = &self.snapshot.turn_completion.as_ref()?.command_id;
         let receipt = self.snapshot.handled_commands.get(completed)?;
         let ordinal = receipt.terminal_ordinal?;
+        // Continuation withdrawn at or after the failed prompt's acceptance (a
+        // cancellation, a control command, a context command) ends recovery.
+        // One before it, such as a spawn's model configure, does not.
         if self
             .snapshot
-            .latest_prompt_accepted_ordinal
-            .is_some_and(|input| input > receipt.accepted_ordinal)
+            .continuation
+            .withdrawn_ordinal
+            .is_some_and(|withdrawn| withdrawn >= receipt.accepted_ordinal)
+            || self
+                .snapshot
+                .latest_prompt_accepted_ordinal
+                .is_some_and(|input| input > receipt.accepted_ordinal)
             || self
                 .snapshot
                 .last_harness_turn_started_ordinal
