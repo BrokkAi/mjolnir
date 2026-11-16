@@ -28,6 +28,13 @@ SCRIPTS = pathlib.Path(__file__).resolve().parent
 # Experiment data (instance, corpus, runs) lives outside the repository.
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 MJX = SCRIPTS / "mjx"
+# The mj instance mjx reaches (see mjx): the default instance, or the private one of the
+# earlier stages. Each keeps its workspace record in its own directory under ROOT.
+if os.environ.get("REVIEW_ARMS_INSTANCE", "default") == "private":
+    INSTANCE, STORE = ROOT / "instance", ROOT / "instance/data/mj.sqlite3"
+else:
+    INSTANCE = ROOT / "default-instance"
+    STORE = pathlib.Path.home() / ".local/share/mjolnir/mj.sqlite3"
 # The mjolnir checkout that supplies commit messages; defaults to the one holding these scripts.
 REPO = os.environ.get("REVIEW_ARMS_REPO") or subprocess.check_output(
     ["git", "-C", str(SCRIPTS), "rev-parse", "--show-toplevel"]).decode().strip()
@@ -54,7 +61,7 @@ ARMS = {
     "L": ["muse-ember-1.0:xhigh", "gemini-4-hydrogen:high", "kimi-code/k3.1-pro:high"],
     "M": ["glm-5.3:high", "glm-5.3-flash:high"],  # GLM, one session each
 }
-WORKSPACE = json.loads((ROOT / "instance/workspace.json").read_text())["workspace"]["id"]
+WORKSPACE = json.loads((INSTANCE / "workspace.json").read_text())["workspace"]["id"]
 # Hard-won candidates and the sampled ordinary diffs share one id space.
 CORPUS = {c["id"]: c for name in ("candidates-all.jsonl", "diffs.jsonl")
           if (SCRIPTS / "corpus" / name).exists()
@@ -70,7 +77,9 @@ ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
              # Dilution (brief/PLAN-dilution.md): arm D's brief plus every sibling fact.
              "WT": ["gpt-6.1-terra:high"] * 3, "WS": ["gpt-6.1-sol:high"] * 3,
              # Wizard-of-Oz query arms (brief/PLAN-oz.md): no brief, a site_context tool.
-             "QT": ["gpt-6.1-terra:high"] * 3, "QS": ["gpt-6.1-sol:high"] * 3})
+             "QT": ["gpt-6.1-terra:high"] * 3, "QS": ["gpt-6.1-sol:high"] * 3,
+             # Writer model (brief/PLAN-writer-terra.md): stage B's blind brief written by Terra/high.
+             "TT": ["gpt-6.1-terra:high"] * 3})
 
 
 def save(path, value):
@@ -110,7 +119,9 @@ def container(sid):
                                    "--format", "{{.ID}}"]).decode().split()
     assert len(ids) == 1, ids
     mounts = json.loads(subprocess.check_output(["podman", "inspect", ids[0], "--format", "{{json .Mounts}}"]))
-    return {"container": ids[0], "cwd": f"/workspace/{sid}/mjolnir",
+    # The default instance's Podman target follows agent-dev:latest, so record the image per job.
+    image = subprocess.check_output(["podman", "inspect", ids[0], "--format", "{{.Image}}"]).decode().strip()
+    return {"container": ids[0], "image": image, "cwd": f"/workspace/{sid}/mjolnir",
             "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
                        for m in mounts]}
 
@@ -172,7 +183,7 @@ def stored_reviewer(child):
     turn selection (session_turn_selections) stay in the store; usage comes from `mj usage`.
     The store is opened read-only; WAL mode lets that coexist with the running daemon.
     """
-    db = sqlite3.connect(f"file:{ROOT / 'instance/data/mj.sqlite3'}?mode=ro", uri=True, timeout=30)
+    db = sqlite3.connect(f"file:{STORE}?mode=ro", uri=True, timeout=30)
     try:
         report = db.execute("SELECT handback_message, handback_command_id FROM subagent_handbacks "
                             "WHERE child_session_id = ?", (child,)).fetchone()
@@ -210,7 +221,7 @@ def commit_message(bug):
 # Arms whose reviewers also get a relation brief (brief/PLAN.md), by brief kind.
 BRIEF_ARMS = {"OT": "oracle", "OS": "oracle", "BT": "blind", "BS": "blind", "FT": "bifrost", "FS": "bifrost",
               "DT": "bifrost-plus", "DS": "bifrost-plus", "XT": "blind-minus", "XS": "blind-minus",
-              "WT": "bifrost-diluted", "WS": "bifrost-diluted"}
+              "WT": "bifrost-diluted", "WS": "bifrost-diluted", "TT": "blind-terra"}
 BRIEF_NOTE = ("These are relations computed from the repository at this commit, not findings. "
               "They may be incomplete.")
 

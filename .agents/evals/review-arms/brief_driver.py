@@ -10,7 +10,9 @@ agents. It gets brief/WRITER.md with the base commit and the commit message
 (trailers removed), writes brief.md in its checkout, and the driver fetches
 it, checks the rules a script can check (lint), and asks the same writer to
 fix a brief that breaks them, at most FIX_ROUNDS times. Output goes to
-$REVIEW_ARMS_DIR/briefs/blind/<diff>/; the transcript is stored under
+$REVIEW_ARMS_DIR/briefs/<kind>/<diff>/ (--kind, default blind: the Sol/high
+writer of stage B; blind-terra: the same writer run on Terra/high,
+brief/PLAN-writer-terra.md); the transcript is stored under
 reviewers/ so that audit.py can scan it. Every step writes a file; a writer
 with a session is resumed, never started twice.
 """
@@ -28,7 +30,10 @@ import traceback
 import driver
 from driver import ROOT, SCRIPTS, MJX, mj, save, session
 
-WRITER_MODEL, WRITER_EFFORT = "gpt-6.1-sol", "high"
+# Brief kind -> writer model and effort. Everything else (prompt, tools, blinding, lint) is shared.
+KINDS = {"blind": ("gpt-6.1-sol", "high"), "blind-terra": ("gpt-6.1-terra", "high")}
+KIND = "blind"
+WRITER_MODEL, WRITER_EFFORT = KINDS[KIND]
 FIX_ROUNDS = 2
 MAX_ITEMS = 25
 # "About 1,500 tokens" (brief/PLAN.md); at about 4 characters a token, with slack.
@@ -117,10 +122,11 @@ def send(d, sid, name, command, text):
 
 def run(bug_id, gate):
     bug = driver.CORPUS[bug_id]
-    d = ROOT / "briefs" / "blind" / bug_id
+    d = ROOT / "briefs" / KIND / bug_id
     if (d / "done.json").exists():
         return "done"
-    tag = hashlib.sha256(("brief" + bug_id).encode()).hexdigest()
+    # Stage B's tag is kept for its kind, so its command ids and titles stay the same.
+    tag = hashlib.sha256(("brief" + ("" if KIND == "blind" else KIND) + bug_id).encode()).hexdigest()
     if (d / "launch.json").exists():
         sid = json.loads((d / "launch.json").read_text())["session_id"]
     elif (d / "launch-intent.json").exists():
@@ -203,10 +209,14 @@ def main():
     p.add_argument("bugs", nargs="+")
     p.add_argument("--concurrency", type=int, default=1)
     p.add_argument("--lint", action="store_true")
+    p.add_argument("--kind", choices=sorted(KINDS), default="blind")
     a = p.parse_args()
+    global KIND, WRITER_MODEL, WRITER_EFFORT
+    KIND = a.kind
+    WRITER_MODEL, WRITER_EFFORT = KINDS[KIND]
     if a.lint:
         for b in a.bugs:
-            d = ROOT / "briefs" / "blind" / b
+            d = ROOT / "briefs" / KIND / b
             text = (d / "brief.md" if (d / "brief.md").exists() else d / "brief-candidate.md").read_text()
             print(json.dumps({"bug": b, "problems": lint(text, driver.CORPUS[b])}))
         return 0
@@ -216,7 +226,7 @@ def main():
         try:
             return b, run(b, gate), None
         except Exception as e:  # report every failure with its diff
-            save(ROOT / "briefs" / "blind" / b / "error.json",
+            save(ROOT / "briefs" / KIND / b / "error.json",
                  {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
             return b, "failed", str(e)
 
