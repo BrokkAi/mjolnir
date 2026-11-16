@@ -819,9 +819,10 @@ impl Controller {
                         if let Some(command) =
                             targets::clear_relay_state_plan(&backend, session_id)?
                         {
-                            super::worker_binary::execute_worker_control_checked(
-                                syncing, &backend, session_id, command,
+                            super::worker_binary::ensure_control_worker(
+                                syncing, &backend, session_id,
                             )?;
+                            execute_checked(syncing, command)?;
                         }
                         // Both lanes below write into the worker root, so it
                         // exists first.
@@ -851,9 +852,8 @@ impl Controller {
                                 previous_profile_root,
                             )?
                         };
-                        super::worker_binary::execute_worker_control_checked(
-                            syncing, &backend, session_id, reset,
-                        )?;
+                        super::worker_binary::ensure_control_worker(syncing, &backend, session_id)?;
+                        execute_checked(syncing, reset)?;
                     }
                 }
             }

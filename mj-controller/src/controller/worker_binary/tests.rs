@@ -131,8 +131,8 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
 // Hard-won: 816ca1d77: the controller ran an old root binary that lacks the worker control subcommands
 #[cfg(unix)]
 #[test]
-fn probing_and_stopping_a_root_with_an_old_worker_installs_the_current_one_first() {
-    use std::os::unix::fs::PermissionsExt;
+fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current_one() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     const CHILD: &str = "MJ_OLD_ROOT_WORKER_CHILD";
     const SESSION: &str = "17171717171717171717171717171717";
     if std::env::var_os(CHILD).is_none() {
@@ -140,13 +140,17 @@ fn probing_and_stopping_a_root_with_an_old_worker_installs_the_current_one_first
         // The current worker: answers the control subcommands, then carries
         // this build's stamp after its `exit`.
         let current = directory.path().join("current-worker");
-        let mut body = b"#!/bin/sh\ncase \"$2\" in liveness) echo dead ;; esac\nexit 0\n".to_vec();
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; liveness) echo dead ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
         body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
         std::fs::write(&current, body).unwrap();
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
         IsolatedTest::new(test_name(
             module_path!(),
-            "probing_and_stopping_a_root_with_an_old_worker_installs_the_current_one_first",
+            "probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current_one",
         ))
         .isolated_store(directory.path())
         .env("MJ_INSTANCE", "issue-816ca1d77-old-root")
@@ -156,40 +160,42 @@ fn probing_and_stopping_a_root_with_an_old_worker_installs_the_current_one_first
         return;
     }
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join(SESSION);
+    let root = directory.path().join("workers").join(SESSION);
     std::fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_string_lossy().into_owned();
     let locator = targets::TargetLocator::LocalBare {
-        worker_root: root.to_string_lossy().into_owned(),
+        worker_root: root_text.clone(),
     };
     // A build from before `worker stop|liveness|holder`: clap's own rejection.
-    // Another root hard-links the same inode, so an in-place write would
-    // change it too.
     let old = "#!/bin/sh\necho \"error: unrecognized subcommand '$2'\" >&2\nexit 2\n";
-    let install_old = || {
-        let _ = std::fs::remove_file(root.join("hel"));
-        std::fs::write(root.join("hel"), old).unwrap();
-        std::fs::set_permissions(root.join("hel"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let shared = directory.path().join("other-root-hel");
-        let _ = std::fs::remove_file(&shared);
-        std::fs::hard_link(root.join("hel"), &shared).unwrap();
-        shared
+    let hel = root.join("hel");
+    std::fs::write(&hel, old).unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let inode = std::fs::metadata(&hel).unwrap().ino();
+    let unchanged = || {
+        assert_eq!(std::fs::read_to_string(&hel).unwrap(), old);
+        assert_eq!(std::fs::metadata(&hel).unwrap().ino(), inode);
     };
-    let root_text = root.to_string_lossy().into_owned();
 
-    let shared = install_old();
     let liveness = probe_worker_liveness(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
     assert_eq!(liveness.status, 0);
     assert_eq!(String::from_utf8_lossy(&liveness.stdout).trim(), "dead");
-    assert_ne!(std::fs::read_to_string(root.join("hel")).unwrap(), old);
-    assert_eq!(std::fs::read_to_string(&shared).unwrap(), old);
+    assert!(std::path::Path::new(&targets::control_worker_path(&root_text)).exists());
+    unchanged();
 
-    let shared = install_old();
     let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(SESSION, "test stop")
         .unwrap()
         .unwrap();
     stop_worker(&owner, &ProcessExecutor, &locator, &root_text).unwrap();
-    assert_ne!(std::fs::read_to_string(root.join("hel")).unwrap(), old);
-    assert_eq!(std::fs::read_to_string(&shared).unwrap(), old);
+    unchanged();
+
+    // The close plan stops the worker (embedding the same staged binary) and
+    // then removes the root.
+    targets::close_plan(&locator, SESSION)
+        .unwrap()
+        .execute(&ProcessExecutor)
+        .unwrap();
+    assert!(!root.exists());
 }
 
 #[test]
@@ -209,6 +215,7 @@ fn stale_pins_are_re_resolved() {
             .env("MJ_INSTANCE", "issue-1138-pins")
             .env(CHILD, "1")
             .env("MJ_WORKER_DIR", workers)
+            .env_remove("MJ_WORKER_BINARY")
             .run();
         return;
     }
@@ -260,6 +267,7 @@ fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
         .env("MJ_INSTANCE", "handoff-warm-pins")
         .env(CHILD, "1")
         .env("MJ_WORKER_DIR", &workers)
+        .env_remove("MJ_WORKER_BINARY")
         .run();
         return;
     }
@@ -1388,16 +1396,18 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     .unwrap();
 
     let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].purpose, "stop Mjolnir worker daemon");
+    // The staged control worker is checked first, then the stop runs it.
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].purpose, "check the staged control worker");
+    assert_eq!(commands[1].purpose, "stop Mjolnir worker daemon");
     assert!(
-        commands[0]
+        commands[1]
             .args
             .last()
             .is_some_and(|remote| unwrapped_remote_line(remote).starts_with("'sh' '-c' ")),
         "raw SSH worker management must not source login profiles: {commands:?}"
     );
-    let script = commands[0]
+    let script = commands[1]
         .args
         .iter()
         .find(|argument| argument.contains("worker stop --root"))
@@ -1456,6 +1466,11 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
                 stdout: Vec::new(),
                 stderr: Vec::new(),
             },
+            CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
         ]),
     };
     let locator = targets::TargetLocator::LocalPodman {
@@ -1489,6 +1504,7 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
             "inspect Mjolnir session container",
             "start stopped Mjolnir session container",
             "inspect Mjolnir session container",
+            "check the staged control worker",
             "stop Mjolnir worker daemon",
         ]
     );

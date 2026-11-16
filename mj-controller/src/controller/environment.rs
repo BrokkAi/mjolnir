@@ -798,8 +798,8 @@ mod tests {
         );
         assert_eq!(
             executor.operations.lock().unwrap().len(),
-            2,
-            "no deletion after a stop failure"
+            4,
+            "no deletion after a stop failure (each stop follows its control-worker check)"
         );
         executor.operations.lock().unwrap().clear();
         executor
@@ -811,7 +811,9 @@ mod tests {
         assert_eq!(
             executor.operations.lock().unwrap().as_slice(),
             [
+                "check the staged control worker",
                 "kill retired Mjolnir worker daemon",
+                "check the staged control worker",
                 "kill retired Mjolnir worker daemon"
             ]
         );

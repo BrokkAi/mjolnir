@@ -4143,6 +4143,7 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
                     "Config": {"Image":"agent-dev:2.51.0", "Labels": {"dev.mj.managed":"true", "dev.mj.session":LATCH_RELAY_SESSION}},
                     "HostConfig": {}, "Mounts": [], "State": {"Running":true}
                 }]))?,
+                "check the staged control worker" => b"present\n".to_vec(),
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
                 _ => anyhow::bail!(
                     "a pending upgrade tried to mutate its busy environment: {}",

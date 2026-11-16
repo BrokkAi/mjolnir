@@ -1,37 +1,64 @@
 use super::*;
 
-/// Exit status of a worker control script whose root holds a `hel` that does
-/// not understand `worker stop|liveness|holder`. Nothing ran, so the command
-/// can be run again once the current worker is installed. The link script in
-/// the worker store uses 75 to 77.
-pub const WORKER_CONTROL_STALE_STATUS: i32 = 79;
+/// Where the current worker build is staged for control commands on a target:
+/// `control/hel` in the target's worker store, beside the session roots like
+/// every store entry (`controller::worker_binary::store_root`). The store is on
+/// the target's own filesystem, inside the container for container targets.
+pub fn control_worker_path(worker_root: &str) -> String {
+    let parent = worker_root
+        .trim_end_matches('/')
+        .rsplit_once('/')
+        .map_or(".", |(parent, _)| parent);
+    format!("{parent}/worker-binaries/control/hel")
+}
 
-/// Shell that runs `hel worker <subcommand> --root <root>` from the worker
-/// root's own installed binary. The worker holds an exclusive lock on
-/// `<root>/worker.lock` for its whole life, which no shell can test portably,
-/// so the target's `hel` does. A root without that binary never had a worker
-/// started from it, so `when_no_binary` answers for it.
-///
-/// The root's binary is whatever build last started a worker there, which can
-/// predate these subcommands. The script then exits with
-/// [`WORKER_CONTROL_STALE_STATUS`] before doing anything, and the controller
-/// installs the current worker and runs it again
-/// (`controller::worker_binary::execute_worker_control`).
+/// Exit status of a control script whose staged worker is missing. Nothing ran.
+/// Callers stage it first (`controller::worker_binary::ensure_control_worker`),
+/// so this reports a staging that was skipped or removed.
+pub const WORKER_CONTROL_UNSTAGED_STATUS: i32 = 78;
+
+/// Shell that runs `hel worker <subcommand> --root <root>` from the target's
+/// staged current worker ([`control_worker_path`]), never from the root's own
+/// `hel`. A root keeps the build that last started a worker there, which can
+/// predate these subcommands; the lock they inspect (`<root>/worker.lock`, which
+/// no shell can test portably) and the startup record are older than they are,
+/// so the current build judges and stops an older worker correctly. A root
+/// without a `hel` never had a worker started from it, so `when_no_binary`
+/// answers for it.
 fn installed_worker_script(worker_root: &str, subcommand: &str, when_no_binary: &str) -> String {
     format!(
         r#"hel_root={root}
+hel_control={control}
 if [ -e "$hel_root/hel" ]; then
-    if ! "$hel_root/hel" worker stop --help >/dev/null 2>&1; then
-        echo "worker binary in $hel_root predates the worker control commands" >&2
-        exit {stale}
+    if [ ! -x "$hel_control" ]; then
+        echo "the current Mjolnir worker is not staged at $hel_control" >&2
+        exit {unstaged}
     fi
-    "$hel_root/hel" worker {subcommand} --root "$hel_root" || exit $?
+    "$hel_control" worker {subcommand} --root "$hel_root" || exit $?
 else
     {when_no_binary}
 fi
 "#,
         root = posix_quote(worker_root),
-        stale = WORKER_CONTROL_STALE_STATUS,
+        control = posix_quote(&control_worker_path(worker_root)),
+        unstaged = WORKER_CONTROL_UNSTAGED_STATUS,
+    )
+}
+
+/// Print `absent` when the root never ran a worker (no `hel`), `present` when
+/// the staged control worker is this build, and `missing` otherwise.
+pub fn control_worker_state_script(worker_root: &str) -> String {
+    format!(
+        r#"hel_root={root}
+hel_control={control}
+if [ ! -e "$hel_root/hel" ]; then printf 'absent\n'
+elif [ -x "$hel_control" ] && [ "$("$hel_control" worker build-id 2>/dev/null)" = {build} ]; then printf 'present\n'
+else printf 'missing\n'
+fi
+"#,
+        root = posix_quote(worker_root),
+        control = posix_quote(&control_worker_path(worker_root)),
+        build = posix_quote(mj_core::worker_build::WORKER_BUILD_ID),
     )
 }
 

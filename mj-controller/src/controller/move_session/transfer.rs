@@ -1076,10 +1076,9 @@ impl Controller {
             == WorkspaceTransferPhase::Downloaded
         {
             let root = targets::worker_root(&layout.backend, id)?;
-            super::super::worker_binary::execute_worker_control_checked(
+            super::super::worker_binary::ensure_control_worker(executor, &layout.backend, id)?;
+            super::super::execute_checked(
                 executor,
-                &layout.backend,
-                id,
                 targets::command_on_locator(
                     &layout.backend,
                     id,

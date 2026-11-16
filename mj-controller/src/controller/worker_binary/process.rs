@@ -40,74 +40,73 @@ fn run_owned_worker_stop(
         targets::worker_root(locator, owner.session_id())? == worker_root,
         "worker owner does not cover the selected root"
     );
-    execute_worker_control_checked(
-        executor,
-        locator,
-        owner.session_id(),
-        command(locator, worker_root),
-    )?;
+    ensure_control_worker(executor, locator, owner.session_id())?;
+    execute_checked(executor, command(locator, worker_root))?;
     Ok(())
 }
 
-/// Run a worker control command (`hel worker liveness|holder|stop`, alone or
-/// inside a longer script) for the session's root.
+/// Stage the current worker build where control commands run it
+/// ([`targets::control_worker_path`]), when it is not there yet.
 ///
-/// Roots keep the build that last started a worker there, so a parked
-/// sub-agent or a worker not yet upgraded can hold a `hel` that predates those
-/// subcommands. Only a current `hel` can judge or stop such a worker (the lock
-/// it checks is older than the subcommands). The script then exits with
-/// [`targets::WORKER_CONTROL_STALE_STATUS`] without having run anything, so this
-/// installs the current worker through the usual install path and runs the
-/// command once more. The install replaces `hel` by rename, never in place:
-/// roots share inodes and some run them. When the current worker cannot be
-/// installed for the target this fails and names the root; there is no second
-/// way to stop a worker.
-pub(crate) fn execute_worker_control(
+/// Control commands (`hel worker liveness|holder|stop`) never use a root's own
+/// `hel`: a parked sub-agent or a worker not yet upgraded keeps a build that
+/// predates them. The current build judges and stops an older worker correctly,
+/// because the lock and startup record it reads are older than the commands.
+/// Staging touches only the target's worker store, never a root, so it needs no
+/// worker admission and probes leave roots unchanged. Callers run it before the
+/// control command, outside any timeout that names the command. When the
+/// current build cannot be staged for the target this fails and names it; there
+/// is no second way to stop a worker.
+pub(crate) fn ensure_control_worker(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
-    command: &CommandSpec,
-) -> Result<mj_core::targets::CommandOutput> {
-    let output = executor.execute(command)?;
-    if output.status != targets::WORKER_CONTROL_STALE_STATUS {
-        return Ok(output);
-    }
+) -> Result<()> {
     let root = targets::worker_root(locator, session_id)?;
+    let state = execute_checked(
+        executor,
+        targets::locator_command(
+            locator,
+            vec![
+                "sh".into(),
+                "-c".into(),
+                targets::control_worker_state_script(&root),
+            ],
+        )
+        .purpose("check the staged control worker"),
+    )?;
+    // Anything but `missing` (`present`, or `absent` for a root that never ran a
+    // worker) needs no staging.
+    if String::from_utf8_lossy(&state.stdout).trim() != "missing" {
+        return Ok(());
+    }
+    let control = targets::control_worker_path(&root);
     let worker = WorkerInstall::for_target(locator, executor).with_context(|| {
         format!(
-            "worker root {root} holds a worker too old to stop or probe, \
-             and the current worker cannot be installed there"
+            "the current worker cannot be staged for {root}, so its worker cannot be stopped or probed"
         )
     })?;
-    install_worker_binary(executor, locator, session_id, &worker, "hel")
-        .with_context(|| format!("replace the old worker binary in {root}"))?;
-    executor.execute(command)
+    let directory = control
+        .rsplit_once('/')
+        .map_or(".", |(directory, _)| directory);
+    execute_checked(
+        executor,
+        targets::locator_command(locator, vec!["mkdir".into(), "-p".into(), directory.into()])
+            .purpose("create the control worker directory"),
+    )?;
+    install_worker_binary_at(executor, locator, session_id, &worker, &control, None)
+        .with_context(|| format!("stage the current worker for {root}"))
 }
 
-/// [`execute_worker_control`], failing on a nonzero exit.
-pub(crate) fn execute_worker_control_checked(
-    executor: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    command: CommandSpec,
-) -> Result<mj_core::targets::CommandOutput> {
-    let output = execute_worker_control(executor, locator, session_id, &command)?;
-    crate::controller::check_output(&command, output)
-}
-
-/// Probe worker liveness; see [`execute_worker_control`].
+/// Probe worker liveness through the staged current worker.
 pub(in crate::controller) fn probe_worker_liveness(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
     worker_root: &str,
 ) -> Result<mj_core::targets::CommandOutput> {
-    execute_worker_control(
-        executor,
-        locator,
-        session_id,
-        &worker_liveness_command(locator, worker_root),
-    )
+    ensure_control_worker(executor, locator, session_id)?;
+    executor.execute(&worker_liveness_command(locator, worker_root))
 }
 
 /// Restore a stopped Podman target before signaling its worker. Checkpoint

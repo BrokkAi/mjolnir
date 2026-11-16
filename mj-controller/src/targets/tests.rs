@@ -5320,22 +5320,34 @@ pub(crate) fn unwrapped_remote_line(remote: &str) -> &str {
 #[test]
 fn worker_liveness_does_not_report_death_when_the_probe_fails() {
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
-    let hel = root.path().join("hel");
+    let workers = tempfile::tempdir().unwrap();
+    let root = workers.path().join("0123456789abcdef");
+    std::fs::create_dir(&root).unwrap();
+    // The root has a `hel`, so a worker could have run there.
+    std::fs::write(root.join("hel"), "").unwrap();
+    // The staged control worker is what answers, and its probe fails.
+    let control = workers.path().join("worker-binaries/control/hel");
+    std::fs::create_dir_all(control.parent().unwrap()).unwrap();
     std::fs::write(
-        &hel,
-        "#!/bin/sh\ncase \"$*\" in *--help*) exit 0 ;; esac\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
+        &control,
+        "#!/bin/sh\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
     )
     .unwrap();
-    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o700)).unwrap();
     let output = std::process::Command::new("sh")
-        .args([
-            "-c",
-            &worker_daemon_liveness_script(root.path().to_str().unwrap()),
-        ])
+        .args(["-c", &worker_daemon_liveness_script(root.to_str().unwrap())])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(71));
+    assert!(output.stdout.is_empty(), "{output:?}");
+
+    // A control worker that was never staged is reported, never read as death.
+    std::fs::remove_file(&control).unwrap();
+    let output = std::process::Command::new("sh")
+        .args(["-c", &worker_daemon_liveness_script(root.to_str().unwrap())])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(WORKER_CONTROL_UNSTAGED_STATUS));
     assert!(output.stdout.is_empty(), "{output:?}");
 }
 

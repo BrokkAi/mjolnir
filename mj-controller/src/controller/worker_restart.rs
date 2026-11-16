@@ -866,7 +866,7 @@ mod tests {
         );
     }
 
-    /// Fails every command after the first, so a restart gets past its stop and
+    /// Fails every command after the first two (the control-worker check and the stop), so a restart gets past its stop and
     /// then loses the worker it was replacing.
     #[cfg(unix)]
     struct StopSucceedsThenFails {
@@ -878,7 +878,8 @@ mod tests {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let mut executed = self.executed.lock().expect("executed commands");
             executed.push(command.program.clone());
-            if executed.len() == 1 {
+            // The first two commands are the control-worker check and the stop.
+            if executed.len() <= 2 {
                 return Ok(CommandOutput {
                     status: 0,
                     stdout: Vec::new(),

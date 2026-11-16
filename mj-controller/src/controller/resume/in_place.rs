@@ -625,23 +625,30 @@ impl Controller {
                 let backend =
                     backend_locator(current.target.as_ref().unwrap(), current, &self.config)?;
                 let root = crate::targets::worker_root(&backend, session_id)?;
-                let cleanup = super::super::worker_binary::execute_worker_control_checked(
-                    &crate::targets::CancellableProcessExecutor::with_timeout(
-                        std::time::Duration::from_secs(15),
-                    ),
+                // Staging the current worker can take longer than the stop's
+                // own timeout, so it runs first and outside it.
+                let cleanup = super::super::worker_binary::ensure_control_worker(
+                    &crate::targets::ProcessExecutor,
                     &backend,
                     session_id,
-                    crate::targets::command_on_locator(
-                        &backend,
-                        session_id,
-                        vec![
-                            "sh".into(),
-                            "-c".into(),
-                            crate::targets::stop_worker_daemon_script(&root),
-                        ],
-                        "stop failed in-place worker while retaining its environment",
-                    )?,
-                );
+                )
+                .and_then(|()| {
+                    super::super::execute_checked(
+                        &crate::targets::CancellableProcessExecutor::with_timeout(
+                            std::time::Duration::from_secs(15),
+                        ),
+                        crate::targets::command_on_locator(
+                            &backend,
+                            session_id,
+                            vec![
+                                "sh".into(),
+                                "-c".into(),
+                                crate::targets::stop_worker_daemon_script(&root),
+                            ],
+                            "stop failed in-place worker while retaining its environment",
+                        )?,
+                    )
+                });
                 let mut retained = previous.clone();
                 let latest = crate::database::load_session_record(session_id)?
                     .context("retained session disappeared")?;
