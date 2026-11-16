@@ -1102,9 +1102,10 @@ pub(super) async fn handle_action(
             // failure: the same non-acceptance a draining daemon gives makes
             // the client reconnect and ask the next daemon, which finishes it.
             // The wait is read-only, so repeating it is safe.
-            match state.wait_create_outcome(&session_id).await? {
+            match state.wait_create_outcome(&session_id).await {
                 crate::daemon::create::CreateWait::Finished => Ok(DaemonReply::Done),
-                crate::daemon::create::CreateWait::StoppedForShutdown => {
+                crate::daemon::create::CreateWait::Failed(error) => Err(error),
+                crate::daemon::create::CreateWait::OwedToNextDaemon => {
                     Ok(DaemonReply::UpgradePending)
                 }
             }

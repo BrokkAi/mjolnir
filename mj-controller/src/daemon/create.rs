@@ -808,22 +808,18 @@ impl RuntimeState {
         Ok(owned)
     }
 
-    /// Wait for a create and fail with its error, including the stop of a
-    /// daemon that is exiting. Clients of the wire protocol use
-    /// [`Self::wait_create_outcome`], which tells that stop apart.
-    pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
-        match self.wait_create_outcome(session_id).await? {
-            CreateWait::Finished => Ok(()),
-            CreateWait::StoppedForShutdown => {
-                bail!("the daemon stopped during session creation")
-            }
-        }
+    /// How a wait for a session's creation ended: the one place that turns the
+    /// end of a create into an answer. Every caller maps this outcome and none
+    /// rebuilds it. A create stopped by daemon shutdown has not failed (the
+    /// next daemon finishes it), and the one predicate for that,
+    /// `stopped_for_shutdown`, decides it, never the error text.
+    pub(crate) async fn wait_create_outcome(&self, session_id: &str) -> CreateWait {
+        self.decide_create_wait(session_id)
+            .await
+            .unwrap_or_else(CreateWait::Failed)
     }
 
-    /// How a create wait ended. A create stopped by daemon shutdown has not
-    /// failed: the next daemon finishes it, so the one predicate for that,
-    /// `stopped_for_shutdown`, decides it, never the error text.
-    pub(crate) async fn wait_create_outcome(&self, session_id: &str) -> Result<CreateWait> {
+    async fn decide_create_wait(&self, session_id: &str) -> Result<CreateWait> {
         let entry = {
             let lifecycle_owner = self.owner();
             match lifecycle_owner.lifecycle.get(session_id) {
@@ -845,11 +841,11 @@ impl RuntimeState {
             let record = blocking(move || crate::database::load_session_record(&id)).await?;
             let record = record.with_context(|| format!("unknown session {session_id}"))?;
             if record.state == mj_core::state::SessionState::Error {
-                return Err(anyhow::anyhow!(
+                return Ok(CreateWait::Failed(anyhow::anyhow!(
                     record
                         .last_error
                         .unwrap_or_else(|| "session creation failed".to_owned())
-                ));
+                )));
             }
             // The intent row owns whether creation is unfinished; a session
             // whose worker later dropped (Disconnected) has no intent.
@@ -864,7 +860,7 @@ impl RuntimeState {
         let outcome = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&channel);
         if outcome.is_err() && control.stopped_for_shutdown() {
-            return Ok(CreateWait::StoppedForShutdown);
+            return Ok(CreateWait::OwedToNextDaemon);
         }
         match outcome? {
             DaemonLifecycleResult::Done => Ok(CreateWait::Finished),
@@ -879,10 +875,12 @@ impl RuntimeState {
 }
 
 /// How a wait for a session's creation ended.
+#[derive(Debug)]
 pub(crate) enum CreateWait {
     Finished,
+    Failed(anyhow::Error),
     /// The daemon is stopping; the next daemon finishes the create.
-    StoppedForShutdown,
+    OwedToNextDaemon,
 }
 
 fn validate_minimum_container_allocation(
@@ -1061,12 +1059,10 @@ mod delegation_replay_tests {
             }
             control.request_cancel("create test cancelled");
             drop(publish);
-            assert!(
-                runtime
-                    .wait_create_session(&registered.session.id)
-                    .await
-                    .is_err()
-            );
+            assert!(matches!(
+                runtime.wait_create_outcome(&registered.session.id).await,
+                super::CreateWait::Failed(_)
+            ));
         }
     }
 

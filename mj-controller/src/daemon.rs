@@ -857,7 +857,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
 
 mod close;
 mod close_workspace;
-mod create;
+pub(crate) mod create;
 mod lifecycle;
 mod resume;
 mod snapshot;

@@ -50,6 +50,8 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 
 - Decision: the dashboard follow loop retries only a connection that dropped after the wait was sent (`DaemonTransportLost`, attached by `DaemonClient::request_once` to socket failures). This replaces the round-4 rule that also retried a failed connect: `connect_or_start` waits on the startup lock through a handoff, so a connect error is a real failure and ends the follow, as do refusals and protocol mismatches. The create intent row, not session state, owns "creation unfinished": `wait_create_outcome` asks `session_has_create_intent`; `holds_create_intent(state)` is only the storage rule for writes and for the reset precondition, and `create_intent_is_stale` names the recovery question. Date: 2026-11-16.
 
+- Decision: one function, `RuntimeState::wait_create_outcome`, turns the end of a create into `Finished | Failed(reason) | OwedToNextDaemon`; the dashboard wait (`daemon/actions.rs`) and the phone New action (`server_runtime/actions.rs`, `phone_create_result`) only map it, and `wait_create_session` is gone. The phone reports no failure for `OwedToNextDaemon` (it ends Ok, and the next daemon updates the record the phone shows), so no phone protocol change. `remove_completed_lifecycle` keeps a shutdown-stopped Create's entry until exit, so every waiter reads the same answer from the same entry; an intent with no entry therefore stays a visible anomaly. Date: 2026-11-16.
+
 
 ## Outcomes & Retrospective
 

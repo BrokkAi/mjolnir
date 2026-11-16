@@ -6269,6 +6269,20 @@ async fn a_create_stopped_for_shutdown_answers_its_waiter_with_the_retryable_rep
             .expect("the wait ends with the create");
         if stopped {
             assert!(matches!(reply.unwrap(), DaemonReply::UpgradePending));
+            // A second waiter reads the same answer from the same place.
+            let again = handle_action(
+                DaemonAction::WaitCreateSession {
+                    session_id: session.into(),
+                },
+                &metadata,
+                &state,
+                &shutdown,
+            )
+            .await;
+            assert!(matches!(again.unwrap(), DaemonReply::UpgradePending));
+            // The phone's New action does not report that as a failure.
+            let outcome = state.wait_create_outcome(session).await;
+            assert!(crate::server_runtime::phone_create_result(outcome).is_ok());
         } else {
             assert!(reply.is_err(), "a cancelled create is a failure");
         }
@@ -6372,17 +6386,23 @@ async fn waiting_for_a_create_with_no_lifecycle_is_answered_from_the_record() {
     let creating = runtime_test_session("wait-creating", &workspace.id, SessionState::Provisioning);
     crate::database::save_new_session(&creating, None, false, false).unwrap();
     let state = test_runtime_state_loading_the_store();
-    let failed = state.wait_create_session("wait-failed").await.unwrap_err();
+    use create::CreateWait;
+    let CreateWait::Failed(failed) = state.wait_create_outcome("wait-failed").await else {
+        panic!("a failed create answers with its reason");
+    };
     assert!(
         format!("{failed:#}").contains("clone refused"),
         "{failed:#}"
     );
-    state.wait_create_session("wait-running").await.unwrap();
-    state.wait_create_session("wait-dropped").await.unwrap();
-    let creating = state
-        .wait_create_session("wait-creating")
-        .await
-        .unwrap_err();
+    for finished in ["wait-running", "wait-dropped"] {
+        assert!(matches!(
+            state.wait_create_outcome(finished).await,
+            CreateWait::Finished
+        ));
+    }
+    let CreateWait::Failed(creating) = state.wait_create_outcome("wait-creating").await else {
+        panic!("an unowned create is a visible error");
+    };
     assert!(
         format!("{creating:#}").contains("no create operation exists"),
         "{creating:#}"
