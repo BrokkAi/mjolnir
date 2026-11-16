@@ -2218,6 +2218,82 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
     );
 }
 
+// Hard-won: #1547: a sub-agent whose turn failed on a renewed login was reported failed and parked before the pushed login could reach it.
+#[tokio::test]
+async fn a_child_failed_on_a_renewed_login_is_not_finished_but_one_failed_on_the_current_login_is()
+{
+    let home = tempfile::tempdir().unwrap();
+    let login = |token: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "claudeAiOauth": {"accessToken": token, "expiresAt": 1}
+        }))
+        .unwrap()
+    };
+    std::fs::write(home.path().join(".credentials.json"), login("renewed")).unwrap();
+    let catalog = ProfileCatalog::with_probe(counting_probe(Default::default()));
+    let mut config = test_config(&[("claude6", HarnessKind::Claude)]);
+    config
+        .profiles
+        .get_mut("claude6")
+        .unwrap()
+        .home
+        .clone_from(&home.path().to_path_buf());
+    catalog.sync_now(&config).await;
+    let backend = Arc::new(
+        ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "child".into(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view: None,
+            })),
+            running_states(),
+            Arc::new(ParentExports(parent_record("child", "claude6"))),
+        )
+        .with_profile_catalog(catalog),
+    );
+    let failed_on = |token: &str| {
+        let mut turn = finished_turn("task");
+        turn.outcome = mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: "error".into(),
+        };
+        turn.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+            code: Some(agent_client_protocol::ErrorCode::AUTH_REQUIRED.to_string()),
+            login_fingerprint: mj_core::credentials::claude_access_token_fingerprint(&login(token)),
+            ..mj_core::diagnostic::TurnDiagnostic::from_provider(
+                &serde_json::json!({"message": "Authentication required"}),
+            )
+            .unwrap()
+        });
+        let mut progress = ChildProgress::settled(ReportState::Fallback);
+        progress.login_failure = Some("claude6".into());
+        progress.failed_turn = Some(("failed", "Authentication required".into()));
+        progress.answer = Some(turn);
+        vec![("child".to_owned(), None, progress)]
+    };
+
+    let mut renewed = failed_on("revoked");
+    backend
+        .settle_renewed_login_failures(&mut renewed)
+        .await
+        .unwrap();
+    let progress = &renewed[0].2;
+    assert!(progress.login_failure.is_none() && progress.failed_turn.is_none());
+    assert!(
+        progress.turn_pending,
+        "the child waits for its pushed login"
+    );
+
+    let mut refused = failed_on("renewed");
+    backend
+        .settle_renewed_login_failures(&mut refused)
+        .await
+        .unwrap();
+    let progress = &refused[0].2;
+    assert_eq!(progress.login_failure.as_deref(), Some("claude6"));
+    assert!(progress.failed_turn.is_some() && !progress.turn_pending);
+}
+
 /// Once the credential sync has found a profile's login refused, a spawn on it
 /// is refused at once instead of starting a child that cannot sign in. An
 /// unpinned spawn goes to another profile that offers the model.
@@ -2240,6 +2316,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
             trigger: Some(mj_core::credentials::CredentialSyncCause {
                 session_id: "child-1".into(),
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint: None,
             }),
             failure: None,
             outcomes: vec![mj_core::credentials::CredentialSyncOutcome {
@@ -2251,6 +2328,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
                     .unwrap()
                     .0,
                 ),
+                current_access_token: None,
                 session_id: "child-1".into(),
                 outcome: Ok(Vec::new()),
                 step_failures: Vec::new(),

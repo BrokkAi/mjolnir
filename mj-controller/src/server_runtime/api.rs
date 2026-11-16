@@ -1579,6 +1579,7 @@ impl ApiBackend {
             let mut summaries = summaries;
             self.observe_child_resolution(&mut summaries).await?;
             self.describe_child_profile_failures(&mut summaries).await?;
+            self.settle_renewed_login_failures(&mut summaries).await?;
             return Ok((summaries, starts));
         }
         // An offline backend has no writer publication to observe.
@@ -1600,6 +1601,7 @@ impl ApiBackend {
         }
         self.observe_child_resolution(&mut summaries).await?;
         self.describe_child_profile_failures(&mut summaries).await?;
+        self.settle_renewed_login_failures(&mut summaries).await?;
         Ok((summaries, starts))
     }
 
@@ -1645,6 +1647,65 @@ impl ApiBackend {
                             || crate::server::api::WaitObservation::worker_turn_pending(snapshot)
                     })
             });
+        }
+        Ok(())
+    }
+
+    /// A child whose turn failed on a login that has since been renewed did
+    /// not fail for anything its parent can fix: the daemon pushes the current
+    /// login the moment the failure is reported, and the worker resubmits the
+    /// turn. Until then the child is not finished, so it is neither reported
+    /// nor parked. A failure on the profile's current token stays a failure.
+    /// This is the one classification of a finished child turn's login
+    /// failure; it decides with [`mj_core::credentials::classify_authentication_failure`],
+    /// like the credential sync does.
+    async fn settle_renewed_login_failures(
+        &self,
+        children: &mut [(
+            String,
+            Option<mj_core::state::MaterializedSessionSummary>,
+            ChildProgress,
+        )],
+    ) -> Result<()> {
+        for (id, _, progress) in children {
+            let Some(profile_id) = progress.login_failure.clone() else {
+                continue;
+            };
+            let Some(failed) = progress
+                .answer
+                .as_ref()
+                .and_then(|turn| turn.diagnostic.as_ref())
+                .and_then(|diagnostic| diagnostic.login_fingerprint.clone())
+            else {
+                continue;
+            };
+            // Only a child with a connected worker receives the push.
+            if self
+                .exports
+                .session_record(id)
+                .is_none_or(|record| record.state != SessionState::Running)
+            {
+                continue;
+            }
+            let config = self.profile_catalog.live()?;
+            let Some(profile) = config.profiles.get(&profile_id) else {
+                continue;
+            };
+            let current = crate::worker_client::current_claude_access_token(profile).await;
+            if mj_core::credentials::classify_authentication_failure(
+                Some(&failed),
+                current.as_deref(),
+            ) == mj_core::credentials::AuthenticationVerdict::LoginRenewed
+            {
+                tracing::info!(
+                    session_id = %id,
+                    %profile_id,
+                    "a child's turn failed on a login that was renewed since; waiting for the pushed login instead of reporting a failure"
+                );
+                progress.login_failure = None;
+                progress.failed_turn = None;
+                progress.turn_pending = true;
+            }
         }
         Ok(())
     }

@@ -106,6 +106,23 @@ impl Controller {
             let mut relay = if let Some(relay) = attached {
                 relay
             } else {
+                // A worker that is not running starts from the profile files
+                // its environment kept, whose login is the one it held when it
+                // stopped; a renewal since then revoked it. Stage the profile
+                // again so the worker starts with the current login, as every
+                // other start path does. An installed worker had its files
+                // staged just before, and a reserved swap replaces a worker
+                // that was receiving pushes.
+                if swap_admission.is_none() && !matches!(&worker_state, RetainedWorker::Installed) {
+                    self.prepare_worker_files_for(
+                        session_id,
+                        &backend,
+                        &root,
+                        executor,
+                        super::super::worker_binary::WorkerFilePreparation::RefreshProfileOnly,
+                        super::super::worker_binary::LaunchHistory::Stored,
+                    )?;
+                }
                 let launch = self.current_worker_launch_config(session_id, &backend)?;
                 if !matches!(&worker_state, RetainedWorker::Installed) {
                     let worker = WorkerInstall::for_target(&backend, executor)?;
