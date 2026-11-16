@@ -685,6 +685,7 @@ mod tests {
             harness,
             choices: catalog_profile(&["sonnet"]),
             quota,
+            may_consume_credits: false,
             unhealthy: BTreeMap::new(),
         };
         let candidates = SubagentCandidates {

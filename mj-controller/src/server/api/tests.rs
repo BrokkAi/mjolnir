@@ -1311,6 +1311,7 @@ impl SubagentBackend for FakeBackend {
                     harness: mj_core::config::HarnessKind::Codex,
                     choices,
                     quota: crate::server::api::CandidateQuota::Unknown,
+                    may_consume_credits: false,
                     unhealthy: Default::default(),
                 }],
                 unavailable: Vec::new(),
@@ -2479,6 +2480,7 @@ fn model_candidate_with_efforts(
     SubagentCandidate {
         profile_id: profile_id.into(),
         harness: mj_core::config::HarnessKind::Codex,
+        may_consume_credits: false,
         choices: mj_core::worker_launch::ProfileConfig {
             model: Some(model.into()),
             models: vec![mj_core::acp::SessionConfigChoice {
