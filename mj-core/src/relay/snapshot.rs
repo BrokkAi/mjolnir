@@ -76,6 +76,19 @@ pub enum RelayCommand {
     HandbackReminder {
         completed_command_id: String,
         completed_ordinal: u64,
+        /// Rendered lines for work processes the child left running. Empty
+        /// gives the fixed text. Only sent to workers at protocol 67 or later:
+        /// older workers reject unknown fields.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        running: Vec<String>,
+    },
+    /// Prompt a child Mjolnir is holding for its own background work, only
+    /// while this completed turn (the reminder turn) is still current.
+    HoldFollowUp {
+        completed_command_id: String,
+        completed_ordinal: u64,
+        kind: crate::subagent::HoldFollowUpKind,
+        running: Vec<String>,
     },
     /// Add one event to the durable mailbox. Pending keys and recently
     /// delivered keys are deduplicated by the relay.
@@ -180,13 +193,58 @@ pub enum RelayCommand {
     },
 }
 
+fn process_lines(running: &[String]) -> String {
+    running
+        .iter()
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The hold's length for prompt text: "30 minutes", "1 minute".
+fn hold_minutes() -> String {
+    let minutes = crate::subagent::HOLD_GIVE_UP_MS / 60_000;
+    format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+}
+
+/// The reminder prompt: fixed when nothing is running, otherwise it names the
+/// processes and tells the child it may end its turn to wait for them.
+pub fn handback_reminder_text(running: &[String]) -> String {
+    if running.is_empty() {
+        return crate::subagent::HANDBACK_REMINDER_TEXT.to_owned();
+    }
+    format!(
+        "[handback reminder] Your turn ended without delivering a report, and commands you started are still running:\n{}\nIf your assigned task is finished, call the mj-agents handback tool now with your full report, then stop. If you are waiting for these commands to finish, you may end your turn: Mjolnir will prompt you when they have all exited, or after {}. Otherwise continue working, and hand back when the task is done.",
+        process_lines(running),
+        hold_minutes()
+    )
+}
+
+/// The prompt Mjolnir sends a held child when its processes exit or the wait
+/// reaches [`crate::subagent::HOLD_GIVE_UP_MS`].
+pub fn hold_follow_up_text(kind: crate::subagent::HoldFollowUpKind, running: &[String]) -> String {
+    match kind {
+        crate::subagent::HoldFollowUpKind::ProcessesExited => "[background work finished] The commands you were waiting for have exited. Check their results, continue your assigned task, and call the mj-agents handback tool when it is done.".to_owned(),
+        crate::subagent::HoldFollowUpKind::GiveUp => format!(
+            "[background wait ended] You have waited {} and these commands are still running:\n{}\nCall the mj-agents handback tool now with what you have: what finished, what is still running, and what your parent needs to decide. Your parent can tell you to keep waiting; Mjolnir leaves these commands running until your parent's next turn ends.",
+            hold_minutes(),
+            process_lines(running)
+        ),
+    }
+}
+
 impl RelayCommand {
     pub fn prompt_blocks(&self) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
         match self {
             Self::Prompt { prompt } => Some(std::borrow::Cow::Borrowed(prompt)),
-            Self::HandbackReminder { .. } => {
+            Self::HandbackReminder { running, .. } => {
                 Some(std::borrow::Cow::Owned(vec![ContentBlock::from(
-                    crate::subagent::HANDBACK_REMINDER_TEXT.to_owned(),
+                    handback_reminder_text(running),
+                )]))
+            }
+            Self::HoldFollowUp { kind, running, .. } => {
+                Some(std::borrow::Cow::Owned(vec![ContentBlock::from(
+                    hold_follow_up_text(*kind, running),
                 )]))
             }
             Self::MailboxWake { events } => {
@@ -213,6 +271,10 @@ impl RelayCommand {
                 .max()
                 .unwrap_or(super::RELAY_LEGACY_MAILBOX_PROTOCOL),
             Self::RestoreExecutionMode => 28,
+            Self::HoldFollowUp { .. } => super::RELAY_WORK_LIVENESS_PROTOCOL,
+            Self::HandbackReminder { running, .. } if !running.is_empty() => {
+                super::RELAY_WORK_LIVENESS_PROTOCOL
+            }
             Self::HandbackReminder { .. } | Self::InstallPromptContext { .. } => 26,
             Self::SeedAssessmentContext { .. } => crate::assessment::PROTOCOL,
             Self::SetQuotaRecovery { .. } | Self::ResumeAfterQuota { .. } => 20,
@@ -241,6 +303,7 @@ impl RelayCommand {
             self,
             Self::Prompt { .. }
                 | Self::HandbackReminder { .. }
+                | Self::HoldFollowUp { .. }
                 | Self::MailboxWake { .. }
                 | Self::ContinueAuthorizedWork { .. }
                 | Self::ResumeAfterQuota { .. }
@@ -273,6 +336,7 @@ impl RelayCommand {
             Self::ClearContext
                 | Self::Prompt { .. }
                 | Self::HandbackReminder { .. }
+                | Self::HoldFollowUp { .. }
                 | Self::MailboxWake { .. }
                 | Self::ContinueAuthorizedWork { .. }
                 | Self::ResumeAfterQuota { .. }
@@ -301,6 +365,7 @@ impl RelayCommand {
             Self::ClearContext => RelayCommandKind::ClearContext,
             Self::Prompt { .. }
             | Self::HandbackReminder { .. }
+            | Self::HoldFollowUp { .. }
             | Self::MailboxWake { .. }
             | Self::ContinueAuthorizedWork { .. }
             | Self::ResumeAfterQuota { .. } => RelayCommandKind::Prompt,
@@ -639,6 +704,14 @@ pub struct RelayOperationalState {
     /// Retained for checkpoint export; attention reads `open_request`.
     #[serde(default)]
     pub person_input_through: u64,
+    /// Whether the latest finished turn's work processes are still alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_liveness: Option<crate::work_facts::WorkLiveness>,
+    /// Keys of mailbox events the worker accepted but has not yet handed to the
+    /// agent: pending ones and those leased to a hook. The full delivered-key
+    /// map stays in the snapshot; this list is short.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undelivered_mailbox_event_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
@@ -1133,6 +1206,11 @@ pub enum RelayObservation {
     ManagedSubagentConfigured {
         managed: bool,
     },
+    /// The worker's recount of how many of a finished turn's work processes
+    /// are alive. Dropped when it names a turn other than the current one.
+    WorkLivenessChanged {
+        liveness: crate::work_facts::WorkLiveness,
+    },
     HandbackCheckStarted {
         assignment_id: String,
     },
@@ -1528,6 +1606,15 @@ pub struct RelaySnapshot {
     pub completed_reply_message: Option<String>,
     #[serde(default)]
     pub managed_subagent: bool,
+    /// Whether the work processes the latest finished turn left running are
+    /// still alive. Owned by the worker (see [`crate::work_facts::WorkLiveness`]).
+    /// Set when a turn completes with live process identities, cleared when
+    /// the next prompt is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_liveness: Option<crate::work_facts::WorkLiveness>,
+    /// Facts of the latest autonomous harness turn of a managed child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_turn_work: Option<HarnessTurnWork>,
     #[serde(default)]
     pub handback_checks: HandbackChecks,
     /// Survives queue removal and receipt GC, fencing reminders for older turns.
@@ -1684,6 +1771,22 @@ pub struct RelaySnapshot {
 pub struct SettledHarnessTurn {
     pub start_ordinal: u64,
     pub stop_reason: String,
+    /// What a managed child's worker observed when this turn ended, as for a
+    /// prompt's outcome. Absent for other sessions and in older journals,
+    /// which keeps their digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_facts: Option<Box<crate::work_facts::WorkFacts>>,
+}
+
+/// The facts a managed child's worker observed when its latest autonomous
+/// harness turn ended. A prompted turn's facts live in its handled command;
+/// this is the same record for a turn no prompt of ours started, so the
+/// worker's liveness watcher can recount its processes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessTurnWork {
+    /// The settle event's ordinal: the `completed_ordinal` of the turn.
+    pub completed_ordinal: u64,
+    pub facts: crate::work_facts::WorkFacts,
 }
 
 impl RelaySnapshot {
@@ -1707,6 +1810,8 @@ impl RelaySnapshot {
             assessment_questions: Default::default(),
             completed_reply_message: None,
             managed_subagent: false,
+            work_liveness: None,
+            harness_turn_work: None,
             assessment: None,
             request: None,
             person_input_through: 0,
@@ -1805,6 +1910,17 @@ impl RelaySnapshot {
             assessment: self.assessment.clone(),
             open_request: self.open_request().cloned(),
             person_input_through: self.person_input_through,
+            work_liveness: self.work_liveness.clone(),
+            undelivered_mailbox_event_keys: self
+                .pending_mailbox_events
+                .iter()
+                .chain(
+                    self.mailbox_hook_lease
+                        .iter()
+                        .flat_map(|lease| &lease.events),
+                )
+                .map(|event| event.key.clone())
+                .collect(),
             assessment_context: self.assessment_context.clone(),
             turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),

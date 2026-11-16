@@ -734,10 +734,7 @@ impl RuntimeState {
             .as_ref()
             .context("the daemon's quota service is not running")?;
         refresh
-            .send(super::QuotaRefreshIntent::ProbeProfiles {
-                requests,
-                forced,
-            })
+            .send(super::QuotaRefreshIntent::ProbeProfiles { requests, forced })
             .context("the daemon's quota service is not running")?;
         Ok(())
     }

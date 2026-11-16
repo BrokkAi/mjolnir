@@ -47,7 +47,11 @@ fn child_progress_uses_the_published_turn_and_report_together() {
             ..Default::default()
         },
     );
-    let progress = child_progress(&committed, "child");
+    let progress = child_progress(
+        &committed,
+        "child",
+        &mj_core::subagent::Liveness::Known(None),
+    );
     assert_eq!(progress.finished_span, Some((8, 12)));
     assert!(progress.answer.as_ref().unwrap().answers(7));
     assert!(
@@ -67,11 +71,33 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     committed
         .turns
         .insert_shared("child".into(), harness.clone());
-    assert!(child_progress(&committed, "child").awaiting_prompt(None));
+    assert!(
+        child_progress(
+            &committed,
+            "child",
+            &mj_core::subagent::Liveness::Known(None)
+        )
+        .awaiting_prompt(None)
+    );
     harness.state.2.as_mut().unwrap().answered_through = Some(14);
     committed.turns.insert_shared("child".into(), harness);
-    assert!(child_progress(&committed, "child").awaiting_prompt(None));
-    assert_eq!(child_progress(&committed, "other").failed_turn, None);
+    assert!(
+        child_progress(
+            &committed,
+            "child",
+            &mj_core::subagent::Liveness::Known(None)
+        )
+        .awaiting_prompt(None)
+    );
+    assert_eq!(
+        child_progress(
+            &committed,
+            "other",
+            &mj_core::subagent::Liveness::Known(None)
+        )
+        .failed_turn,
+        None
+    );
 }
 
 fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
@@ -847,6 +873,8 @@ fn ready_view_waiting(model: &str, waiting: Option<String>) -> ManagedSessionVie
         assessment: None,
         open_request: None,
         person_input_through: 0,
+        work_liveness: None,
+        undelivered_mailbox_event_keys: Vec::new(),
         assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),
@@ -1719,17 +1747,31 @@ async fn a_child_without_the_tool_or_with_queued_work_is_not_reminded() {
         Arc::new(NoExports),
     );
     let turn = finished_turn("task");
-    assert!(
-        !backend
-            .remind_subagent_to_hand_back("child-1", false, &turn, &[])
+    assert_eq!(
+        backend
+            .remind_subagent_to_hand_back(
+                "child-1",
+                false,
+                &turn,
+                &mj_core::subagent::Liveness::Known(None),
+                &[]
+            )
             .await
-            .unwrap()
+            .unwrap(),
+        ReportNudge::NotOwed
     );
-    assert!(
-        !backend
-            .remind_subagent_to_hand_back("child-1", true, &turn, &["api-next".into()])
+    assert_eq!(
+        backend
+            .remind_subagent_to_hand_back(
+                "child-1",
+                true,
+                &turn,
+                &mj_core::subagent::Liveness::Known(None),
+                &["api-next".into()]
+            )
             .await
-            .unwrap()
+            .unwrap(),
+        ReportNudge::NotOwed
     );
     assert!(
         submitted.try_recv().is_err(),
@@ -1771,11 +1813,18 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
     );
     let turn = finished_turn("task");
 
-    assert!(
+    assert_eq!(
         backend
-            .remind_subagent_to_hand_back("child-1", true, &turn, &[])
+            .remind_subagent_to_hand_back(
+                "child-1",
+                true,
+                &turn,
+                &mj_core::subagent::Liveness::Known(None),
+                &[]
+            )
             .await
-            .unwrap()
+            .unwrap(),
+        ReportNudge::Pending
     );
     let (command_id, command) = submitted.recv().await.unwrap();
     assert!(
@@ -1787,6 +1836,7 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
         RelayCommand::HandbackReminder {
             completed_command_id: "task".into(),
             completed_ordinal: turn.completed_ordinal,
+            running: Vec::new(),
         }
     );
     let recorded = crate::database::load_subagent_report("child-1").unwrap();
@@ -1798,11 +1848,18 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
         Some((command_id.as_str(), "task"))
     );
 
-    assert!(
+    assert_eq!(
         backend
-            .remind_subagent_to_hand_back("child-1", true, &turn, &[])
+            .remind_subagent_to_hand_back(
+                "child-1",
+                true,
+                &turn,
+                &mj_core::subagent::Liveness::Known(None),
+                &[]
+            )
             .await
             .unwrap(),
+        ReportNudge::Pending,
         "the already admitted reminder still owns the pending report"
     );
     assert!(submitted.try_recv().is_err());
@@ -4654,7 +4711,8 @@ async fn harness_handback_uses_worker_turn_identity() {
     outcome.completed_ordinal = 9;
     session.last_turn_outcome = Some(outcome);
     crate::database::save_materialized_session(&session).unwrap();
-    let progress = load_child_progress("child-1").unwrap();
+    let progress =
+        load_child_progress("child-1", &mj_core::subagent::Liveness::Known(None)).unwrap();
     assert!(matches!(progress.report, ReportState::Delivered(_)));
     assert_eq!(progress.finished_span, Some((7, 9)));
 }
@@ -5215,6 +5273,55 @@ async fn a_failed_turn_says_the_child_is_still_usable_but_an_errored_child_does_
     let child = list().await;
     assert_eq!(child["state"], "error", "{child}");
     assert!(child.get("promptable").is_none(), "{child}");
+}
+
+/// A turn the harness started on its own ends a child like a prompted turn
+/// does: its reminder names the processes the worker found at that turn's end.
+#[tokio::test]
+async fn a_reminder_after_an_autonomous_turn_names_the_running_processes() {
+    if std::env::var_os(HANDBACK_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_reminder_after_an_autonomous_turn_names_the_running_processes",
+            ),
+        )
+        .env(HANDBACK_TEST_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 1,
+            submitted: submitted_tx,
+            view: Some(ready_view("model")),
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    );
+    let mut turn = finished_turn(&mj_core::continuation::harness_turn_id(3));
+    turn.work_facts = Some(observed_work());
+    backend
+        .remind_subagent_to_hand_back(
+            "child-1",
+            true,
+            &turn,
+            &mj_core::subagent::Liveness::Known(None),
+            &[],
+        )
+        .await
+        .unwrap();
+    let (_, command) = submitted.recv().await.unwrap();
+    let RelayCommand::HandbackReminder { running, .. } = command else {
+        panic!("expected a handback reminder: {command:?}");
+    };
+    assert_eq!(running.len(), 1, "{running:?}");
+    assert!(running[0].contains("sleep 600"), "{running:?}");
 }
 
 fn observed_work() -> mj_core::work_facts::WorkFacts {

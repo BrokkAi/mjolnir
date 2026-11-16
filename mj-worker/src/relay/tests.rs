@@ -5005,6 +5005,35 @@ fn a_requested_stop_acknowledgement_does_not_open_a_harness_turn() {
     assert!(state.harness_turn.is_some());
 }
 
+// Hard-won: review round 3: the adapter wraps the acknowledgement in a blockquote paragraph,
+// so a stop requested on an idle session opened a harness turn that never settled.
+#[test]
+fn an_idle_stop_acknowledgement_in_the_adapters_blockquote_shape_opens_no_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay_with_stoppable_task(temp.path());
+    relay
+        .background_task_stop_target("air:4:root:sleeper")
+        .unwrap();
+    // As recorded from claude-agent-acp: noticeTranscriptText through transcriptBlock.
+    let recorded =
+        "\n\n> **Task stopped by user:** python3 -c \"import time; time.sleep(100020)\".\n\n";
+    relay
+        .record_session_update(agent_text_chunk(recorded))
+        .unwrap();
+    let state = relay.operational_state();
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert!(
+        state.harness_turn.is_none(),
+        "no model cycle follows a requested stop, so no result would settle a turn"
+    );
+    // Without a pending stop the same text is ordinary agent output.
+    let mut other = claude_relay(temp.path().join("other").as_path());
+    other
+        .record_session_update(agent_text_chunk(recorded))
+        .unwrap();
+    assert!(other.operational_state().harness_turn.is_some());
+}
+
 // Hard-won: 460153f3: Claude renamed tasks between the stop request and its stop acknowledgement.
 #[test]
 fn a_stop_acknowledgement_matches_whatever_name_the_adapter_now_uses() {
@@ -7165,6 +7194,7 @@ fn a_turn_verdict_keeps_the_completion_identity_a_handback_reminder_names() {
         let reminder = RelayCommand::HandbackReminder {
             completed_command_id: "first-command".into(),
             completed_ordinal: completed,
+            running: Vec::new(),
         };
         assert!(
             relay
@@ -8378,6 +8408,7 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
             RelayCommand::HandbackReminder {
                 completed_command_id: "harness-turn-0".into(),
                 completed_ordinal: completion.completed_ordinal,
+                running: Vec::new(),
             },
         )
         .unwrap();
@@ -8388,8 +8419,42 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
         RelayCommand::HandbackReminder {
             completed_command_id: id,
             completed_ordinal: completion.completed_ordinal,
+            running: Vec::new(),
         },
     );
+}
+
+// A follow-up for a completion the child has moved past is refused for good,
+// so the daemon can tell it from a worker that merely cannot take a prompt yet.
+#[test]
+fn a_hold_follow_up_for_a_completion_that_is_no_longer_current_is_refused_for_good() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    relay.open_harness_turn_if_allowed().unwrap();
+    let id = relay.originating_command_id().unwrap();
+    relay.settle_harness_turn(None, "end_turn").unwrap();
+    let completion = relay.operational_state().turn_completion.unwrap();
+    let follow_up = |completed_command_id: String| RelayCommand::HoldFollowUp {
+        completed_command_id,
+        completed_ordinal: completion.completed_ordinal,
+        kind: mj_core::subagent::HoldFollowUpKind::ProcessesExited,
+        running: Vec::new(),
+    };
+    let refused = relay
+        .submit_command("stale-hold", follow_up("harness-turn-0".into()))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code, RelayErrorCode::InvalidState);
+    assert!(
+        !refused.retryable,
+        "a stale completion never succeeds later"
+    );
+    submit_relay(&mut relay, "current-hold", follow_up(id));
 }
 
 #[test]
@@ -8616,4 +8681,54 @@ fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_o
         recovered.snapshot.config.get("model").map(String::as_str),
         Some("kept-model")
     );
+}
+
+// A turn Claude starts on its own ends a managed child's turn like a prompt
+// does: its facts set `work_liveness` with the settlement's ordinal, the
+// watcher can recount its processes, and the next prompt clears them.
+#[test]
+fn an_autonomous_harness_turn_settling_records_work_facts_and_liveness() {
+    use mj_core::work_facts::{Observed, ProcessFacts, ProcessIdentity, WorkFacts};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay.record_session_update(tool_call_update()).unwrap();
+    let result = mj_core::acp::RuntimeEvent::ClaudeTurnResult(cycle_result("task-notification"));
+    assert!(relay.event_settles_autonomous_turn(&result));
+    let identity = ProcessIdentity {
+        pid: 4242,
+        start: "boot-1".into(),
+    };
+    let facts = WorkFacts {
+        observed_at_ms: 77,
+        processes: Observed::Known(ProcessFacts {
+            running: 1,
+            shown: Vec::new(),
+            omitted: 1,
+            identities: vec![identity.clone()],
+            unattributed: 0,
+        }),
+        worktree: Observed::unavailable("not read"),
+    };
+    relay.offer_settle_facts(Some(facts.clone()));
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    let settled = observations(&relay)
+        .into_iter()
+        .find_map(|observation| match observation {
+            RelayObservation::HarnessTurnSettled {
+                autonomous: Some(turn),
+                ..
+            } => Some(turn),
+            _ => None,
+        })
+        .expect("an autonomous settlement");
+    assert_eq!(settled.work_facts.as_deref(), Some(&facts));
+    let completion = relay.operational_state().turn_completion.unwrap();
+    let liveness = relay.operational_state().work_liveness.unwrap();
+    assert_eq!(liveness.completed_ordinal, completion.completed_ordinal);
+    assert_eq!((liveness.alive, liveness.checked_at_ms), (1, 77));
+    let (watched, identities) = relay.watched_work().unwrap();
+    assert_eq!(watched, liveness);
+    assert_eq!(identities, vec![identity]);
 }

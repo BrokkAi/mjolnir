@@ -1062,6 +1062,22 @@ pub async fn run_daemon_owned(
     // Client tasks are detached, so a durable failure they cannot recover
     // from has to travel back here to stop the daemon.
     let (fatal_tx, mut fatal_rx) = mpsc::channel(1);
+    // A managed child's worker keeps `work_liveness` true while the processes
+    // its last turn left running exist. The watcher resumes from the snapshot
+    // after a restart and only ends on a durable relay failure.
+    if let Some(observer) = capture.clone() {
+        let relay = relay.clone();
+        let fatal = fatal_tx.clone();
+        tokio::spawn(async move {
+            let error = crate::work_facts::watch_liveness(
+                relay,
+                observer,
+                crate::work_facts::LIVENESS_INTERVAL,
+            )
+            .await;
+            let _ = fatal.send(error).await;
+        });
+    }
     let (cpu_tx, cpu_rx) = tokio::sync::watch::channel(Ok(None));
     let cpu_task = tokio::spawn(crate::cpu_usage::sample_cpu(
         cpu_tx,

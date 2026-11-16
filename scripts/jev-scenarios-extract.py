@@ -263,6 +263,8 @@ GENERATED_PROMPT_PREFIXES = (
     "subagent-",
     "mailbox-wake-",
     "handback-reminder-",
+    "hold-wake-",
+    "hold-give-up-",
     "session-message-turn-",
     "server-retry-",
     "capacity-retry-",

@@ -1427,6 +1427,17 @@ pub(super) fn submit_failure(error: &anyhow::Error) -> mj_client::session::Submi
     }
 }
 
+/// The worker read the command and refused it because of its present state,
+/// saying the same command may succeed later.
+fn is_not_now_rejection(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RelayRejected>()
+        .is_some_and(|rejected| {
+            rejected.is_retryable()
+                && rejected.0.code == mj_core::relay::RelayErrorCode::InvalidState
+        })
+}
+
 pub(super) fn is_final_rejection(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RelayRejected>()
@@ -1502,6 +1513,12 @@ pub(super) async fn submit_actor_command(
             // connection owns, which is how a controller probing for a command
             // an older worker does not understand would lose it.
             Err(error) if is_final_rejection(&error) => return Err(error),
+            // "Not now" is also a completed round trip: the worker read the
+            // command and said its state does not allow it yet (a checkpoint
+            // barrier held, a close pending). Reconnecting changes nothing
+            // about that, and would drop a barrier this connection owns. The
+            // caller retries the same command id.
+            Err(error) if is_not_now_rejection(&error) => return Err(error),
             Err(error) => {
                 tracing::warn!(
                     session_id = %target.session_id,

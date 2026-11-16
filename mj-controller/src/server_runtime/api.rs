@@ -1242,6 +1242,19 @@ impl ApiBackend {
                         inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
                         mark_promptable(&mut entry, &state, progress, record.as_ref());
+                        if let ReportState::Held {
+                            since_ms,
+                            give_up_at_ms,
+                            waiting_on,
+                            ..
+                        } = &progress.report
+                        {
+                            entry["waiting_on"] = serde_json::json!({
+                                "processes": waiting_on,
+                                "since_ms": since_ms,
+                                "give_up_at_ms": give_up_at_ms,
+                            });
+                        }
                         if let Some(facts) = progress
                             .answer
                             .as_ref()
@@ -1550,6 +1563,12 @@ impl ApiBackend {
         )>,
         std::collections::BTreeMap<String, StartStatus>,
     )> {
+        // The worker owns whether the processes a finished turn left are still
+        // alive, so each child's liveness is read before its report is judged.
+        let mut live = BTreeMap::new();
+        for id in &ids {
+            live.insert(id.clone(), self.live_work(id).await?);
+        }
         if let Some(committed) = crate::database::committed_state()? {
             let mut starts = BTreeMap::new();
             let summaries = ids
@@ -1572,7 +1591,7 @@ impl ApiBackend {
                             interruption_event_ordinals: Vec::new(),
                         }
                     });
-                    let progress = child_progress(&committed, &id);
+                    let progress = child_progress(&committed, &id, &live[&id]);
                     Ok((id, summary, progress))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -1587,7 +1606,7 @@ impl ApiBackend {
             ids.into_iter()
                 .map(|id| {
                     let summary = crate::database::load_materialized_session_summary(&id)?;
-                    let progress = load_child_progress(&id)?;
+                    let progress = load_child_progress(&id, &live[&id])?;
                     Ok((id, summary, progress))
                 })
                 .collect::<Result<Vec<_>>>()
@@ -1605,6 +1624,28 @@ impl ApiBackend {
         Ok((summaries, starts))
     }
 
+    /// What the child's worker says about the processes its last turn left.
+    /// A session that cannot be running has no such processes to wait for; one
+    /// that may be running but has no connected worker view is unknown, which
+    /// is not the same as none.
+    pub(crate) async fn live_work(
+        &self,
+        child_session_id: &str,
+    ) -> Result<mj_core::subagent::Liveness> {
+        if self
+            .exports
+            .session_record(child_session_id)
+            .is_none_or(|record| !record_may_be_running(record.state))
+        {
+            return Ok(mj_core::subagent::Liveness::Known(None));
+        }
+        let view = self
+            .session_handle(child_session_id.to_owned())
+            .await?
+            .map(|handle| handle.view());
+        Ok(liveness_of(view.as_ref()))
+    }
+
     async fn observe_child_resolution(
         &self,
         children: &mut [(
@@ -1614,15 +1655,11 @@ impl ApiBackend {
         )],
     ) -> Result<()> {
         for (id, _, progress) in children {
-            if self.exports.session_record(id).is_none_or(|record| {
-                !matches!(
-                    record.state,
-                    SessionState::Provisioning
-                        | SessionState::Running
-                        | SessionState::Disconnected
-                        | SessionState::Checkpointing
-                )
-            }) {
+            if self
+                .exports
+                .session_record(id)
+                .is_none_or(|record| !record_may_be_running(record.state))
+            {
                 continue;
             }
             let view = self
@@ -2077,24 +2114,36 @@ impl ApiBackend {
         .await
     }
 
-    /// Remind a child that ended its turn without handing back a report,
-    /// once, and say whether its reminder is pending. The parent's completion
-    /// report waits for that reminder turn, including after daemon recovery.
+    /// Decide what a child that ended its turn owes before its report can go
+    /// to the parent, and send the one prompt that decision calls for: a
+    /// handback reminder, or, for a child held while processes it started
+    /// run, the follow-up that is due. The parent's completion report waits
+    /// for that prompt's turn, including after daemon recovery.
     ///
-    /// The caller passes the turn and what is queued or running from the live
-    /// snapshot it just saw: the store's copy can lag it, and deciding from an
-    /// older turn could skip a reminder the parent needs.
+    /// The caller passes the turn, the worker's liveness and what is queued
+    /// or running from the live snapshot it just saw: the store's copy can
+    /// lag it, and deciding from an older turn could skip a prompt the parent
+    /// needs.
     pub async fn remind_subagent_to_hand_back(
         &self,
         child_session_id: &str,
         handback_tool: bool,
         last_turn: &mj_core::state::MaterializedTurnOutcome,
+        liveness: &mj_core::subagent::Liveness,
         in_flight: &[String],
-    ) -> Result<bool> {
+    ) -> Result<ReportNudge> {
         // A prompt already queued or running is the child's next task; its
-        // report supersedes this turn's.
+        // report supersedes this turn's. A queued hold follow-up stays judged:
+        // if the queue drops it, the next observation sends it again.
+        if handback_tool
+            && in_flight
+                .iter()
+                .any(|id| mj_core::subagent::hold_follow_up_of(id).is_some())
+        {
+            return Ok(ReportNudge::FollowUpSent);
+        }
         if !handback_tool || !in_flight.is_empty() {
-            return Ok(false);
+            return Ok(ReportNudge::NotOwed);
         }
         let report = blocking("load sub-agent report", {
             let child_id = child_session_id.to_owned();
@@ -2105,34 +2154,60 @@ impl ApiBackend {
             handback_tool,
             &report,
             Some(last_turn),
+            liveness,
             &[],
             mj_core::clock::epoch_millis(),
         );
-        if state != (ReportState::Pending { remind: true }) {
-            return Ok(state == (ReportState::Pending { remind: false }));
-        }
-        let command_id =
-            mj_core::subagent::handback_reminder_command_id(last_turn.completed_ordinal);
+        let (command_id, command) = match state {
+            ReportState::Pending { remind: true } => (
+                mj_core::subagent::handback_reminder_command_id(last_turn.completed_ordinal),
+                RelayCommand::HandbackReminder {
+                    completed_command_id: last_turn.command_id.clone(),
+                    completed_ordinal: last_turn.completed_ordinal,
+                    // Only a worker that knows the field may be sent it.
+                    running: self
+                        .reminder_running_lines(child_session_id, last_turn)
+                        .await,
+                },
+            ),
+            ReportState::Pending { remind: false } => return Ok(ReportNudge::Pending),
+            ReportState::Held {
+                give_up_at_ms,
+                follow_up: None,
+                ..
+            } => return Ok(ReportNudge::Holding { give_up_at_ms }),
+            ReportState::Held {
+                waiting_on,
+                follow_up: Some(kind),
+                ..
+            } => (
+                mj_core::subagent::hold_follow_up_command_id(kind, last_turn.completed_ordinal),
+                RelayCommand::HoldFollowUp {
+                    completed_command_id: last_turn.command_id.clone(),
+                    completed_ordinal: last_turn.completed_ordinal,
+                    kind,
+                    running: match kind {
+                        mj_core::subagent::HoldFollowUpKind::ProcessesExited => Vec::new(),
+                        mj_core::subagent::HoldFollowUpKind::GiveUp => waiting_on,
+                    },
+                },
+            ),
+            ReportState::Delivered(_) | ReportState::Fallback => return Ok(ReportNudge::NotOwed),
+        };
+        let is_follow_up = matches!(command, RelayCommand::HoldFollowUp { .. });
         let submitted = async {
             let handle = self
                 .sessions
                 .session(child_session_id.to_owned())
                 .await
                 .with_context(|| format!("session {child_session_id} is not running"))?;
-            handle
-                .submit(
-                    command_id.clone(),
-                    RelayCommand::HandbackReminder {
-                        completed_command_id: last_turn.command_id.clone(),
-                        completed_ordinal: last_turn.completed_ordinal,
-                    },
-                )
-                .await
+            handle.submit(command_id.clone(), command).await
         }
         .await;
         let child_id = child_session_id.to_owned();
         let for_command_id = last_turn.command_id.clone();
         match submitted {
+            Ok(_) if is_follow_up => Ok(ReportNudge::FollowUpSent),
             Ok(_) => {
                 let reminder = mj_core::subagent::HandbackReminder {
                     command_id: command_id.clone(),
@@ -2143,7 +2218,7 @@ impl ApiBackend {
                     crate::database::record_handback_reminder(&child_id, &reminder)
                 })
                 .await?;
-                Ok(true)
+                Ok(ReportNudge::Pending)
             }
             Err(error) => {
                 if error
@@ -2151,22 +2226,119 @@ impl ApiBackend {
                     .is_some()
                 {
                     // Retry the same guarded command and retained receipt. A lost
-                    // acknowledgement does not prove the reminder was refused.
+                    // acknowledgement does not prove the prompt was refused.
                     return Err(error);
+                }
+                if is_follow_up {
+                    // Only the worker's own refusal says the completion is no
+                    // longer current. Anything else (a worker that cannot take
+                    // a prompt right now, a session that is not running, a
+                    // transport error) did not decide anything: the child stays
+                    // held and the loop retries with backoff.
+                    if error
+                        .downcast_ref::<mj_client::session::Refused>()
+                        .is_none()
+                    {
+                        return Err(error.context("could not prompt a held sub-agent"));
+                    }
+                    tracing::info!(
+                        child_session_id,
+                        error = format!("{error:#}"),
+                        "a held sub-agent moved on before its follow-up; its last turn is reported"
+                    );
+                    blocking("record refused hold follow-up", move || {
+                        crate::database::record_handback_reminder_failed(&child_id, &for_command_id)
+                    })
+                    .await?;
+                    return Ok(ReportNudge::NotOwed);
                 }
                 tracing::warn!(
                     child_session_id,
                     error = format!("{error:#}"),
-                    "could not remind a sub-agent to hand back its report"
+                    "could not prompt a sub-agent to hand back its report"
                 );
                 // Its last message stands as its report when the reminder fails.
                 blocking("record failed handback reminder", move || {
                     crate::database::record_handback_reminder_failed(&child_id, &for_command_id)
                 })
                 .await?;
-                Ok(false)
+                Ok(ReportNudge::NotOwed)
             }
         }
+    }
+
+    /// The processes a handback reminder names, for a child whose worker can
+    /// carry them (relay protocol 67 or later).
+    async fn reminder_running_lines(
+        &self,
+        child_session_id: &str,
+        last_turn: &mj_core::state::MaterializedTurnOutcome,
+    ) -> Vec<String> {
+        let Some(facts) = last_turn.work_facts.as_ref() else {
+            return Vec::new();
+        };
+        let supported = match self.session_handle(child_session_id.to_owned()).await {
+            Ok(Some(handle)) => handle
+                .view()
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.operational.relay_protocol_version)
+                .is_some_and(|version| version >= mj_core::relay::RELAY_WORK_LIVENESS_PROTOCOL),
+            _ => false,
+        };
+        if supported {
+            mj_core::subagent::running_process_lines(facts)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Whether the park of a child that was just reported waits for its
+    /// parent's turn. It does while the processes the child's last turn left
+    /// are alive and the parent is still running the turn that received (or
+    /// will receive) the child's report: the parent may tell the child to
+    /// continue, and a park stops those processes.
+    ///
+    /// The parent's worker owns the delivery facts, read from its live
+    /// snapshot each time; the outbox row says whether it accepted the report.
+    /// A parent that is not running, or a child whose processes are gone,
+    /// opens the gate.
+    pub async fn park_waits_for_parent_turn(
+        &self,
+        parent_session_id: &str,
+        child_session_id: &str,
+        completed_ordinal: u64,
+        liveness: Option<&mj_core::work_facts::WorkLiveness>,
+    ) -> Result<bool> {
+        if !liveness.is_some_and(|liveness| {
+            liveness.completed_ordinal == completed_ordinal && liveness.alive > 0
+        }) {
+            return Ok(false);
+        }
+        if self
+            .exports
+            .session_record(parent_session_id)
+            .is_none_or(|record| record.state != SessionState::Running)
+        {
+            return Ok(false);
+        }
+        let (parent, child) = (parent_session_id.to_owned(), child_session_id.to_owned());
+        let Some(mail) = blocking("load child report mail", move || {
+            crate::database::load_report_mail(&parent, &child)
+        })
+        .await?
+        else {
+            return Ok(false);
+        };
+        let view = self
+            .session_handle(parent_session_id.to_owned())
+            .await?
+            .map(|handle| handle.view());
+        Ok(!report_turn_ended(
+            &mail.key,
+            mail.accepted_ordinal,
+            view.as_ref().and_then(|view| view.snapshot.as_ref()),
+        ))
     }
 
     /// Return the worker's atomic idle reservation outcome. The coordinator
@@ -2216,6 +2388,77 @@ impl ApiBackend {
         }
         Ok(())
     }
+}
+
+/// Whether a session in this state may have a worker running its turn.
+pub(crate) fn record_may_be_running(state: SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::Provisioning
+            | SessionState::Running
+            | SessionState::Disconnected
+            | SessionState::Checkpointing
+    )
+}
+
+/// The liveness a connected worker view publishes; without one it is unknown.
+pub(crate) fn liveness_of(
+    view: Option<&mj_client::session::ManagedSessionView>,
+) -> mj_core::subagent::Liveness {
+    match view
+        .filter(|view| view.connected)
+        .and_then(|view| view.snapshot.as_ref())
+    {
+        Some(snapshot) => {
+            mj_core::subagent::Liveness::Known(snapshot.operational.work_liveness.clone())
+        }
+        None => mj_core::subagent::Liveness::Unknown,
+    }
+}
+
+/// Whether the parent turn that received a child's report has ended: the
+/// parent's worker accepted the event, the snapshot shows that acceptance, the
+/// event is no longer waiting for the agent, and the parent is idle. A parent
+/// that is idle with the event delivered ended the turn it was delivered in;
+/// one with the event still waiting is about to run it.
+fn report_turn_ended(
+    key: &str,
+    accepted_ordinal: Option<u64>,
+    parent: Option<&mj_core::state::ManagedSessionSnapshot>,
+) -> bool {
+    let (Some(accepted), Some(snapshot)) = (accepted_ordinal, parent) else {
+        return false;
+    };
+    snapshot.operational.latest_ordinal >= accepted
+        && !snapshot
+            .operational
+            .undelivered_mailbox_event_keys
+            .iter()
+            .any(|undelivered| undelivered == key)
+        && matches!(
+            snapshot.materialized.execution,
+            MaterializedExecutionState::Idle
+        )
+        && snapshot.materialized.active_turn.is_none()
+        && snapshot.materialized.queued_prompts.is_empty()
+}
+
+/// What a child owes before its report can go to the parent, after the prompt
+/// that was due has been sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportNudge {
+    /// Nothing is owed: report the turn as it stands.
+    NotOwed,
+    /// A reminder is on its way or already ran; the child's next turn is what
+    /// will be judged.
+    Pending,
+    /// A hold follow-up is queued or was just sent. Unlike a reminder it is
+    /// not marked done: a queue that drops it is seen on the next observation
+    /// and it is sent again under the same id.
+    FollowUpSent,
+    /// The child waits on processes it started. Nothing is reported or
+    /// stopped before this time, unless the worker's liveness changes first.
+    Holding { give_up_at_ms: i64 },
 }
 
 /// What makes a child's report new for its parent: its finish, or a message
@@ -2381,7 +2624,10 @@ fn subagent_status(
                             Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
                             _ => None,
                         })
-                        || matches!(progress.report, ReportState::Pending { .. })) =>
+                        || matches!(
+                            progress.report,
+                            ReportState::Pending { .. } | ReportState::Held { .. }
+                        )) =>
             {
                 ("running".into(), summary.last_agent_message.clone(), false)
             }
@@ -2536,7 +2782,11 @@ impl ChildProgress {
 }
 
 /// Derive one child's progress from the writer's coherent committed records.
-fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -> ChildProgress {
+fn child_progress(
+    committed: &crate::database::CommittedState,
+    child_id: &str,
+    liveness: &mj_core::subagent::Liveness,
+) -> ChildProgress {
     let subagent = committed.state.subagents.get(child_id);
     let empty = mj_core::subagent::SubagentReport::default();
     let recorded = committed.subagent_reports.get(child_id).unwrap_or(&empty);
@@ -2547,6 +2797,7 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
         .into_iter()
         .map(|turn| turn.command_id.as_str())
         .collect::<Vec<_>>();
+    let handback_tool = subagent.is_some_and(|record| record.handback_tool);
     let failure = project_child_failure(
         child_failure_source(committed.state.sessions.get(child_id), last),
         subagent.map(|record| record.profile_id.as_str()),
@@ -2560,9 +2811,10 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
         }),
         last_completed_ordinal: last.map(|turn| turn.completed_ordinal),
         report: mj_core::subagent::report_state(
-            subagent.is_some_and(|record| record.handback_tool),
+            handback_tool,
             recorded,
             last,
+            liveness,
             &in_flight,
             mj_core::clock::epoch_millis(),
         ),
@@ -2638,9 +2890,12 @@ fn provider_failure(
 /// Read a child's progress from the store. Report notifications and
 /// `list_agents` apply this one rule; the session wait and the reminder apply
 /// the same report rule to the turn they saw.
-pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
+pub(crate) fn load_child_progress(
+    child_id: &str,
+    liveness: &mj_core::subagent::Liveness,
+) -> Result<ChildProgress> {
     if let Some(committed) = crate::database::committed_state()? {
-        return Ok(child_progress(&committed, child_id));
+        return Ok(child_progress(&committed, child_id, liveness));
     }
     let subagent = crate::database::load_subagent(child_id)?;
     let handback_tool = subagent.as_ref().is_some_and(|record| record.handback_tool);
@@ -2656,6 +2911,7 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         handback_tool,
         &recorded,
         last.as_ref(),
+        liveness,
         &in_flight,
         mj_core::clock::epoch_millis(),
     );
@@ -3300,6 +3556,18 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn subagent_work_liveness(
+        &self,
+        child_session_id: String,
+    ) -> BoxFuture<'_, mj_core::subagent::Liveness> {
+        Box::pin(async move {
+            // A lookup that fails says nothing about the child's processes.
+            self.live_work(&child_session_id)
+                .await
+                .unwrap_or(mj_core::subagent::Liveness::Unknown)
+        })
+    }
+
     fn profile_login_errors(&self) -> Result<BTreeMap<String, String>> {
         Ok(self
             .quota_reports

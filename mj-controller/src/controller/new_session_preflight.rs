@@ -66,8 +66,12 @@ impl Controller {
                 self.managed_worktree_options(target_id, &directory, executor)?;
             // The rule registration applies. Neither wizard offers a
             // per-session review choice, so `[review]` decides.
-            let review_turns_off = plain_directory
-                && mj_core::review::settings::plain_directory_turns_review_off(&self.config, None);
+            let review_turns_off = mj_core::review::settings::automatic_review_off(
+                &self.config.review,
+                None,
+                plain_directory,
+            )
+            .is_some();
             return Ok(NewSessionPreflight {
                 managed_worktree,
                 project_directory: Some(directory),

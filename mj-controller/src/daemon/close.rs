@@ -199,6 +199,17 @@ impl RuntimeState {
         self: &Arc<Self>,
         parent_session_id: &str,
     ) -> Result<()> {
+        // Whether a child is still waiting on processes it started is the
+        // worker's to say, so it is read from the live sessions first.
+        let children = self
+            .owner()
+            .controller()
+            .state
+            .active_child_session_ids(parent_session_id);
+        let mut liveness = std::collections::BTreeMap::new();
+        for child_id in &children {
+            liveness.insert(child_id.clone(), self.work_liveness(child_id).await);
+        }
         let stopped = blocking({
             let parent_session_id = parent_session_id.to_owned();
             move || {
@@ -208,7 +219,11 @@ impl RuntimeState {
                     .active_child_session_ids(&parent_session_id)
                     .iter()
                     .map(|child_id| {
-                        crate::controller::stopped_subagent(&controller.state, child_id)
+                        crate::controller::stopped_subagent(
+                            &controller.state,
+                            child_id,
+                            &liveness[child_id],
+                        )
                     })
                     .collect::<Result<Vec<_>>>()?;
                 // The primary hears that its oracle was stopped, but never its

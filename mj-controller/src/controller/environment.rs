@@ -619,7 +619,10 @@ mod tests {
                 }
             } else if command.purpose.contains("remove exact") {
                 assert!(
-                    !command.args.iter().any(|arg| arg.contains("hel_stop")),
+                    !command
+                        .args
+                        .iter()
+                        .any(|arg| arg.contains("worker stop --root")),
                     "reclamation must not repeat worker stopping"
                 );
             }

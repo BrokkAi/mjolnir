@@ -808,9 +808,8 @@ impl Controller {
                 tracing::warn!(session_id, missing = %missing,
                     "review choice cannot be resolved through the parent chain; launching without review tools");
             }
-            self.config
-                .review
-                .for_session(self.state.effective_review_or_off(session_id))
+            self.state
+                .effective_review_config(&self.config.review, session_id)
                 .trigger()
         } else {
             Default::default()

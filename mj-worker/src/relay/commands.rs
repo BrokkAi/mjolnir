@@ -791,6 +791,12 @@ impl DurableRelay {
         if let RelayCommand::HandbackReminder {
             completed_command_id,
             completed_ordinal,
+            ..
+        }
+        | RelayCommand::HoldFollowUp {
+            completed_command_id,
+            completed_ordinal,
+            ..
         } = &command
         {
             let current = self.snapshot.turn_completion.as_ref().is_some_and(|turn| {
@@ -812,13 +818,24 @@ impl DurableRelay {
                     .is_some_and(|ordinal| ordinal > *completed_ordinal)
                 || self.snapshot.active_prompt.is_some()
                 || !self.snapshot.queued_prompts.is_empty()
-                || !mj_core::activity::can_submit(&self.activity_facts())
+            {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "handback reminder or hold follow-up completion is stale or the worker has accepted newer input",
+                    false,
+                    None,
+                )));
+            }
+            // The completion is still current; the worker cannot take a prompt
+            // right now. Resending the same command can succeed later, so this
+            // is retryable and, unlike a stale completion, does not end the hold.
+            if !mj_core::activity::can_submit(&self.activity_facts())
                 || self.pending_close_barrier_id().is_some()
             {
                 return Ok(Err(relay_protocol_error(
                     RelayErrorCode::InvalidState,
-                    "handback reminder completion is stale or the worker has accepted newer input",
-                    false,
+                    "the worker cannot take a prompt right now",
+                    true,
                     None,
                 )));
             }

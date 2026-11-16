@@ -1,5 +1,7 @@
 //! Worker-owned observation of what a session's agent left running and of its
-//! working tree, answered on the relay connection (`RelayRequest::WorkFacts`).
+//! working tree, captured when a managed child's turn ends and journaled with
+//! the turn's outcome. [`watch_liveness`] then republishes how many of those
+//! processes are still alive.
 //!
 //! The processes of a session are those that descend from this worker (the
 //! harness and everything its tools start) plus any process anywhere that
@@ -566,6 +568,88 @@ async fn capture_from(
     }
 }
 
+/// How often the watcher recounts live work processes. This is the latency
+/// with which the daemon learns that the last process exited, not a limit on
+/// anything: a recount reads the process table once.
+pub const LIVENESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How many of `identities` are still alive: the ones a fresh scan finds with
+/// the same pid and start identity, so a reused pid does not count.
+fn count_alive(observer: &WorkObserver, identities: &[ProcessIdentity]) -> Observed<u32> {
+    match scan_processes(observer) {
+        Observed::Known(now) => {
+            let alive = identities
+                .iter()
+                .filter(|wanted| now.identities.contains(wanted))
+                .count();
+            Observed::Known(u32::try_from(alive).unwrap_or(u32::MAX))
+        }
+        Observed::Unavailable { reason } => Observed::Unavailable { reason },
+    }
+}
+
+/// Keeps `work_liveness` in the relay snapshot true while the last finished
+/// turn's work processes run. It follows the snapshot, so it resumes after a
+/// worker restart and stops by itself when the count reaches zero or the next
+/// prompt replaces the turn. A scan that fails leaves the published count as
+/// it was, and the failure is logged once until a scan succeeds. Returns only
+/// on a durable relay failure, which it reports.
+pub async fn watch_liveness(
+    relay: Arc<crate::relay::RelayCell>,
+    observer: WorkObserver,
+    interval: std::time::Duration,
+) -> anyhow::Error {
+    let mut releases = relay.releases();
+    let mut failing = false;
+    loop {
+        let watched = match relay.observe() {
+            Ok(guard) => guard.watched_work(),
+            Err(_) => return anyhow::anyhow!("relay state lock poisoned"),
+        };
+        let Some((liveness, identities)) = watched else {
+            // Nothing to watch until a turn leaves processes running.
+            if releases.changed().await.is_err() {
+                return anyhow::anyhow!("relay released no more changes");
+            }
+            continue;
+        };
+        tokio::time::sleep(interval).await;
+        let counted = {
+            let observer = observer.clone();
+            tokio::task::spawn_blocking(move || count_alive(&observer, &identities)).await
+        };
+        let alive = match counted {
+            Ok(Observed::Known(alive)) => {
+                failing = false;
+                alive
+            }
+            Ok(Observed::Unavailable { reason }) => {
+                if !std::mem::replace(&mut failing, true) {
+                    tracing::warn!(session_id = %observer.session_id, %reason, "work liveness scan failed");
+                }
+                continue;
+            }
+            Err(error) => {
+                if !std::mem::replace(&mut failing, true) {
+                    tracing::warn!(session_id = %observer.session_id, %error, "work liveness scan task failed");
+                }
+                continue;
+            }
+        };
+        let recorded = match relay.lock() {
+            Ok(mut guard) => guard.record_work_liveness(mj_core::work_facts::WorkLiveness {
+                completed_ordinal: liveness.completed_ordinal,
+                alive,
+                checked_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0),
+            }),
+            Err(_) => return anyhow::anyhow!("relay state lock poisoned"),
+        };
+        if let Err(error) = recorded {
+            return error.context("recording work liveness");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,6 +907,120 @@ mod tests {
         assert_eq!(process.command, "sleep 61");
         assert_eq!(facts.identities[0].start, identity);
     }
+    // The watcher recounts real processes: a killed one stops counting, and an
+    // identity whose pid is alive but whose start differs (a reused pid) never
+    // counts.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_watcher_counts_real_processes_and_ignores_a_reused_pid() {
+        use crate::relay::{DurableRelay, RelayCell, test_support::*};
+        use mj_core::relay::RelayCommandOutcome;
+        let session = format!("liveness-test-{}", std::process::id());
+        for _ in 0..2 {
+            let launched = std::process::Command::new("sh")
+                .args(["-c", "setsid sleep 62 >/dev/null 2>&1 &"])
+                .env("MJ_SESSION_ID", &session)
+                .status()
+                .unwrap();
+            assert!(launched.success());
+        }
+        let observer = WorkObserver {
+            session_id: session,
+            worker_pid: std::process::id(),
+            directory: std::env::temp_dir(),
+            git: "git".into(),
+            harness_ready_ms: Arc::new(AtomicI64::new(0)),
+            children: ObserverChildren::default(),
+        };
+        let observed = {
+            let observer = observer.clone();
+            tokio::task::spawn_blocking(move || {
+                for _ in 0..100 {
+                    if let Observed::Known(facts) = scan_processes(&observer)
+                        && facts.running == 2
+                    {
+                        return Some(facts);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                None
+            })
+            .await
+            .unwrap()
+        };
+        let mut facts = observed.expect("both orphans were found");
+        let pids: Vec<u32> = facts.identities.iter().map(|i| i.pid).collect();
+        let kill = |pid: u32| unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        };
+        // The third identity names a live pid with a start it never had.
+        facts.identities.push(ProcessIdentity {
+            pid: pids[0],
+            start: "not-the-start-of-that-process".into(),
+        });
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        submit_relay(&mut relay, "subagent-spawn-task", prompt("work"));
+        relay.claim_pending_commands(true).unwrap();
+        relay
+            .record_command_completed(
+                "subagent-spawn-task",
+                RelayCommandOutcome::Prompt {
+                    work_facts: Some(Box::new(WorkFacts {
+                        observed_at_ms: 1,
+                        processes: Observed::Known(facts),
+                        worktree: Observed::unavailable("not read"),
+                    })),
+                    diagnostic: None,
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                },
+            )
+            .unwrap();
+        let completed = relay.operational_state().work_liveness.unwrap();
+        assert_eq!(completed.alive, 3);
+        let relay = Arc::new(RelayCell::new(relay));
+        let watcher = tokio::spawn(watch_liveness(
+            relay.clone(),
+            observer,
+            std::time::Duration::from_millis(50),
+        ));
+        let alive = |relay: &RelayCell| {
+            relay
+                .observe()
+                .unwrap()
+                .operational_state()
+                .work_liveness
+                .unwrap()
+        };
+        let wait_for = |want: u32| {
+            let relay = relay.clone();
+            async move {
+                for _ in 0..200 {
+                    if alive(&relay).alive == want {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                panic!("alive never reached {want}: {}", alive(&relay).alive);
+            }
+        };
+        let result = async {
+            wait_for(2).await;
+            kill(pids[0]);
+            wait_for(1).await;
+            kill(pids[1]);
+            wait_for(0).await;
+            assert_eq!(alive(&relay).completed_ordinal, completed.completed_ordinal);
+        }
+        .await;
+        watcher.abort();
+        for pid in pids {
+            kill(pid);
+        }
+        result
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_observers_own_git_is_not_reported_as_the_agents_work() {

@@ -1372,6 +1372,8 @@ pub(super) struct TestRemoteManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
     pub(super) publisher: RemoteSessionPublisher,
+    /// Background tasks the daemon asked a worker to stop, in order.
+    pub(super) stopped_tasks: Vec<String>,
     _shutdown: SessionManagerShutdown,
     _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
 }
@@ -1383,18 +1385,31 @@ impl TestRemoteManager {
 
     /// A manager whose one session is `session_id`.
     pub(super) async fn for_session(session_id: &str) -> Self {
+        Self::for_sessions(&[session_id]).await
+    }
+
+    /// A manager whose sessions are `session_ids`; the first is the one the
+    /// tests wait on.
+    pub(super) async fn for_sessions(session_ids: &[&str]) -> Self {
+        let session_id = session_ids[0];
         let channels =
             crate::session_manager::spawn_remote_session_manager().expect("remote manager");
-        channels.targets.send_replace(vec![RelaySessionTarget {
-            session_id: session_id.to_owned(),
-            spec: CommandSpec::new("true", Vec::<String>::new()),
-            worker_recovery: None,
-            project_memory: None,
-        }]);
+        channels.targets.send_replace(
+            session_ids
+                .iter()
+                .map(|id| RelaySessionTarget {
+                    session_id: (*id).to_owned(),
+                    spec: CommandSpec::new("true", Vec::<String>::new()),
+                    worker_recovery: None,
+                    project_memory: None,
+                })
+                .collect(),
+        );
         let manager = Self {
             control: channels.control,
             requests: channels.requests,
             publisher: channels.publisher,
+            stopped_tasks: Vec::new(),
             _shutdown: channels.shutdown,
             _targets: channels.targets,
         };
@@ -1408,7 +1423,89 @@ impl TestRemoteManager {
             .wait_for_session(session_id, Duration::from_secs(5))
             .await
             .expect("remote manager creates test session");
+        for other in &session_ids[1..] {
+            manager
+                .publisher
+                .publish((*other).to_owned(), ManagedSessionView::default())
+                .await
+                .expect("publish test session view");
+            manager
+                .control
+                .wait_for_session(other, Duration::from_secs(5))
+                .await
+                .expect("remote manager creates test session");
+        }
         manager
+    }
+
+    /// Accepts every command the daemon submits until none arrives for a
+    /// moment, and returns them with the session each went to. Run it beside
+    /// the call under test, which waits for each acceptance.
+    /// The session manager's control, for starting the delegation loop on it.
+    pub(super) fn control_for_test(&self) -> SessionManagerControl {
+        self.control.clone()
+    }
+
+    /// The next command the daemon submits, left unanswered so a test decides
+    /// when it is acknowledged: the session, the command id and the reply.
+    pub(super) async fn next_submit(
+        &mut self,
+    ) -> (
+        String,
+        String,
+        tokio::sync::oneshot::Sender<std::result::Result<u64, mj_client::session::SubmitFailure>>,
+    ) {
+        loop {
+            let request = tokio::time::timeout(Duration::from_secs(10), self.requests.recv())
+                .await
+                .expect("the daemon submits a command")
+                .expect("the manager is running");
+            if let crate::session_manager::RemoteSessionRequest::Submit {
+                session_id,
+                command_id,
+                reply,
+                ..
+            } = request
+            {
+                return (session_id, command_id, reply);
+            }
+        }
+    }
+
+    /// The first submissions fail with `failures`, in order, before the worker
+    /// accepts anything.
+    pub(super) async fn answer_submissions(
+        &mut self,
+        failures: Vec<mj_client::session::SubmitFailure>,
+    ) -> Vec<(String, String, mj_core::relay::RelayCommand)> {
+        let mut failures = failures.into_iter();
+        let mut accepted = Vec::new();
+        while let Ok(Some(request)) =
+            tokio::time::timeout(Duration::from_millis(300), self.requests.recv()).await
+        {
+            if let crate::session_manager::RemoteSessionRequest::Submit {
+                session_id,
+                command_id,
+                command,
+                reply,
+            } = request
+            {
+                let _ = reply.send(match failures.next() {
+                    Some(failure) => Err(failure),
+                    None => Ok(99),
+                });
+                accepted.push((session_id, command_id, command));
+            } else if let crate::session_manager::RemoteSessionRequest::StopBackgroundTask {
+                background_task_id,
+                reply,
+                ..
+            } = request
+            {
+                self.stopped_tasks.push(background_task_id);
+                let _ = reply.send(Ok(()));
+            }
+        }
+        accepted
     }
 }
 
@@ -3756,6 +3853,8 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         assessment: None,
         open_request: None,
         person_input_through: 0,
+        work_liveness: None,
+        undelivered_mailbox_event_keys: Vec::new(),
         assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),
@@ -8353,7 +8452,7 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     let hel = worker_root.join("hel");
     std::fs::write(
         &hel,
-        "#!/bin/sh\ncat >/dev/null\necho 'No space left on device' >&2\nexit 1\n",
+        "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\ncat >/dev/null\necho 'No space left on device' >&2\nexit 1\n",
     )
     .unwrap();
     std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -8580,6 +8679,7 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
         &hel,
         format!(
             "#!/bin/sh\n\
+             [ \"$2\" = stop ] && exit 0\n\
              [ \"$1 $2\" = 'worker export-checkpoint' ] || \
              {{ echo \"the stand-in worker only exports: $*\" >&2; exit 2; }}\n\
              {STAND_IN_EXPORT}=1 '{program}' --exact '{test}' --nocapture | grep '^{{'\n",
@@ -9498,7 +9598,7 @@ fn parked_child(root: &Path, child_id: &str, parent_id: &str, workspace_id: &str
     std::fs::write(
         &hel,
         format!(
-            "#!/bin/sh\necho started >> {}\n",
+            "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\necho started >> {}\n",
             root.join("started").display()
         ),
     )
@@ -9540,7 +9640,13 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     // No handback tool and no finished turn on record: only being parked
     // says this child's parent already has what it will get from it.
     parked_child(root.path(), child_id, parent_id, &workspace.id);
-    assert!(crate::controller::subagent_has_handed_back(child_id).unwrap());
+    assert!(
+        crate::controller::subagent_has_handed_back(
+            child_id,
+            &mj_core::subagent::Liveness::Known(None)
+        )
+        .unwrap()
+    );
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();
@@ -10156,7 +10262,7 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
     seed_live_session(root.path(), &child_root);
     use std::os::unix::fs::PermissionsExt;
     let proxy = child_root.join("hel");
-    std::fs::write(&proxy, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::write(&proxy, "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\nexit 1\n").unwrap();
     std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
     let last_event = "journal-only child output ".repeat(4096);
     let mut journal =

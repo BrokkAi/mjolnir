@@ -444,10 +444,35 @@ fn run_relay_coordinator(
                 }
                 _ = tokio::time::sleep_until(stop_at), if stop_timer.is_some() && !held => {
                     let (turn, _) = stop_timer.take().expect("guarded stop timer");
-                    relay
-                        .lock()
-                        .expect("relay state lock poisoned")
-                        .end_unanswered_harness_turn_stop(turn)?;
+                    // Ending the turn is a managed child's turn ending like any
+                    // other: observe its work first, then replay what arrived.
+                    let mut deferred = std::collections::VecDeque::new();
+                    let facts = match capture.as_ref() {
+                        Some(observer) => Some(capture_while_open(
+                            &mut Capture { observer, wakes: &mut dispatch_wakes },
+                            &relay,
+                            &mut events,
+                            &mut deferred,
+                        ).await),
+                        None => None,
+                    };
+                    {
+                        let mut state = relay.lock().expect("relay state lock poisoned");
+                        state.offer_settle_facts(facts);
+                        let ended = state.end_unanswered_harness_turn_stop(turn);
+                        state.offer_settle_facts(None);
+                        ended?;
+                    }
+                    let mut capturing = capture.as_ref().map(|observer| Capture {
+                        observer, wakes: &mut dispatch_wakes,
+                    });
+                    if record_events_in_order(
+                        &relay, &mut in_flight, deferred, &mut events, &mut session_configured,
+                        &mut user_shells, &mut kimi_tasks, capturing.as_mut(), startup.as_mut(),
+                    ).await? {
+                        verdict_tasks.shutdown().await;
+                        return Ok(());
+                    }
                     // A checkpoint barrier may have been waiting for this turn.
                     dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
                 }
@@ -647,21 +672,93 @@ async fn capture_while_open(
 async fn record_one_runtime_event(
     relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
-    mut event: RuntimeEvent,
+    event: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
     capture: Option<&mut Capture<'_>>,
+    startup: Option<&mut HarnessStartup>,
+) -> Result<bool> {
+    record_events_in_order(
+        relay,
+        in_flight,
+        std::collections::VecDeque::from([event]),
+        events,
+        session_configured,
+        user_shells,
+        kimi_tasks,
+        capture,
+        startup,
+    )
+    .await
+}
+
+/// Record `queue` in order. What arrives while one event is observed belongs
+/// after it, and is itself a later event of the same kind: it is judged by the
+/// same rule, so an autonomous turn that ends inside an observation is
+/// observed too.
+#[allow(clippy::too_many_arguments)]
+async fn record_events_in_order(
+    relay: &Arc<RelayCell>,
+    in_flight: &mut BTreeMap<String, RelayCommand>,
+    mut queue: std::collections::VecDeque<RuntimeEvent>,
+    events: &mut mpsc::Receiver<RuntimeEvent>,
+    session_configured: &mut bool,
+    user_shells: &mut crate::user_shell::UserShellRegistry,
+    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    mut capture: Option<&mut Capture<'_>>,
     mut startup: Option<&mut HarnessStartup>,
 ) -> Result<bool> {
-    let mut deferred = std::collections::VecDeque::new();
-    let finishing_prompt = matches!(event, RuntimeEvent::PromptFinished { .. });
+    while let Some(event) = queue.pop_front() {
+        let mut deferred = std::collections::VecDeque::new();
+        // Boxed: the observation's future is large, and tests run on small stacks.
+        let stopped = Box::pin(observe_and_record(
+            relay,
+            in_flight,
+            event,
+            events,
+            &mut deferred,
+            session_configured,
+            user_shells,
+            kimi_tasks,
+            capture.as_deref_mut(),
+            startup.as_deref_mut(),
+        ))
+        .await?;
+        if stopped {
+            return Ok(true);
+        }
+        queue.append(&mut deferred);
+    }
+    Ok(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn observe_and_record(
+    relay: &Arc<RelayCell>,
+    in_flight: &mut BTreeMap<String, RelayCommand>,
+    mut event: RuntimeEvent,
+    events: &mut mpsc::Receiver<RuntimeEvent>,
+    deferred: &mut std::collections::VecDeque<RuntimeEvent>,
+    session_configured: &mut bool,
+    user_shells: &mut crate::user_shell::UserShellRegistry,
+    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    capture: Option<&mut Capture<'_>>,
+    startup: Option<&mut HarnessStartup>,
+) -> Result<bool> {
+    // One rule for "a managed child's turn ended": a prompt of ours finishing,
+    // or the harness ending a turn it started on its own.
+    let finishing_prompt = matches!(event, RuntimeEvent::PromptFinished { .. })
+        || relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .event_settles_autonomous_turn(&event);
     let work_facts = match capture.filter(|_| finishing_prompt) {
         Some(capture) => {
             let (prepared, facts) = tokio::join!(
                 prepare_kimi_runtime_event(kimi_tasks, relay, &mut event),
-                capture_while_open(capture, relay, events, &mut deferred),
+                capture_while_open(capture, relay, events, deferred),
             );
             prepared?;
             Some(facts)
@@ -672,33 +769,14 @@ async fn record_one_runtime_event(
         }
     };
     track_user_shell_completion(user_shells, &event);
-    if record_runtime_event_with_startup(
+    record_runtime_event_with_startup(
         relay,
         in_flight,
         event,
         session_configured,
         work_facts,
-        startup.as_deref_mut(),
-    )? {
-        return Ok(true);
-    }
-    // What arrived during the observation, in the order it arrived, now that the
-    // outcome it followed is recorded.
-    while let Some(mut event) = deferred.pop_front() {
-        prepare_kimi_runtime_event(kimi_tasks, relay, &mut event).await?;
-        track_user_shell_completion(user_shells, &event);
-        if record_runtime_event_with_startup(
-            relay,
-            in_flight,
-            event,
-            session_configured,
-            None,
-            startup.as_deref_mut(),
-        )? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+        startup,
+    )
 }
 
 fn record_runtime_event_with_startup(
@@ -876,6 +954,16 @@ pub(crate) fn record_runtime_event_with_facts(
 ) -> Result<bool> {
     let stopped = matches!(event, RuntimeEvent::Stopped);
     let mut relay = relay.lock().expect("relay state lock poisoned");
+    // A prompt's facts ride in its own outcome below; for any other event they
+    // are what a settlement of an autonomous turn takes. Every event replaces
+    // them, so none outlives the event it was observed for.
+    let work_facts = if matches!(event, RuntimeEvent::PromptFinished { .. }) {
+        relay.offer_settle_facts(None);
+        work_facts
+    } else {
+        relay.offer_settle_facts(work_facts);
+        None
+    };
     // Whether this event can wait behind a ready checkpoint barrier is the
     // relay's decision, made where it journals (`append_relay_event`). An
     // event that journals nothing leaves the cut held.
@@ -1206,6 +1294,8 @@ pub(crate) fn record_runtime_event_with_facts(
             }
         }
     }
+    // An event that settled nothing leaves the observation unused.
+    relay.offer_settle_facts(None);
     Ok(stopped)
 }
 
@@ -1423,6 +1513,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         RelayCommand::ClearContext => Some(CommandRequest::ClearContext { request_id }),
         command @ (RelayCommand::Prompt { .. }
         | RelayCommand::HandbackReminder { .. }
+        | RelayCommand::HoldFollowUp { .. }
         | RelayCommand::MailboxWake { .. }
         | RelayCommand::ContinueAuthorizedWork { .. }
         | RelayCommand::ResumeAfterQuota { .. }) => {

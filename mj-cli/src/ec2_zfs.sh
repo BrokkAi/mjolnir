@@ -74,3 +74,8 @@ mountopt = "nodev"
 STORAGE
 chown ubuntu:ubuntu /home/ubuntu/.config/containers/storage.conf
 chmod 0600 /home/ubuntu/.config/containers/storage.conf
+# Point Mjolnir's `.local/share/containers` storage probe at the NVMe pool.
+install -d -o ubuntu -g ubuntu /home/ubuntu/.local
+install -d -m 0700 -o ubuntu -g ubuntu /home/ubuntu/.local/share
+ln -sfn /mnt/nvme/podman /home/ubuntu/.local/share/containers
+chown -h ubuntu:ubuntu /home/ubuntu/.local/share/containers

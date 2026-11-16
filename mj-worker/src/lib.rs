@@ -6,6 +6,7 @@ pub const DEFAULT_WORKER_LOG_FILTER: &str = "warn,mj_jev=info";
 
 pub mod user_shell;
 pub mod worker_runtime;
+pub mod worker_stop;
 
 pub mod relay;
 

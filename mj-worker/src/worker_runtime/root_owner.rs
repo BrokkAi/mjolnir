@@ -13,7 +13,34 @@ pub struct WorkerRootOwner {
     _file: FileLock,
 }
 
+const PROBE_HOLD_ALLOWANCE: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl WorkerRootOwner {
+    /// Whether a worker holds the lock of `root` right now. A missing lock file
+    /// means no worker has ever run there, which is the same answer. The probe
+    /// takes a shared lock and drops it at once, so concurrent probes agree and
+    /// only a starting worker could notice it (see `acquire`).
+    pub fn is_held(root: &Path) -> Result<bool> {
+        let path = root.join("worker.lock");
+        let file = match OpenOptions::new().read(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| format!("open {}", path.display()));
+            }
+        };
+        match file.try_lock_shared() {
+            Ok(()) => {
+                file.unlock().context("release the worker lock probe")?;
+                Ok(false)
+            }
+            Err(TryLockError::WouldBlock) => Ok(true),
+            Err(TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("probe {}", path.display()))
+            }
+        }
+    }
+
     pub fn acquire(root: &Path) -> Result<Self> {
         mj_core::config::create_owner_only_directory(root)
             .with_context(|| format!("create worker root {}", root.display()))?;
@@ -24,13 +51,25 @@ impl WorkerRootOwner {
             .read(true)
             .write(true)
             .open(root.join("worker.lock"))?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                bail!("a worker already owns {}", root.display());
-            }
-            Err(TryLockError::Error(error)) => {
-                return Err(error).context("lock worker root");
+        // A liveness probe (`is_held`) takes the lock for the length of two
+        // system calls. A worker that starts at that instant sees a held lock
+        // that is not a worker's, so it asks again before concluding that
+        // another worker owns the root. The window is far longer than a probe
+        // holds the lock and short enough that a real owner is still reported
+        // at once.
+        let deadline = std::time::Instant::now() + PROBE_HOLD_ALLOWANCE;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    bail!("a worker already owns {}", root.display());
+                }
+                Err(TryLockError::Error(error)) => {
+                    return Err(error).context("lock worker root");
+                }
             }
         }
         let file = FileLock::new(file);

@@ -634,9 +634,11 @@ pub(in crate::controller) fn probe_worker(
 
 /// The shell half of [`probe_worker`]. The records are JSON the worker wrote,
 /// so they are inserted as they are; everything else it prints is a number.
+/// The live pid is the holder of the worker lock, the same fact the liveness
+/// probe reports.
 fn worker_probe_script(worker_root: &str) -> String {
     format!(
-        r#"{identity}
+        r#"hel_root={root}
 hel_record() {{
     if [ -s "$1" ]; then cat "$1"; else printf null; fi
 }}
@@ -645,28 +647,11 @@ hel_record "$hel_root/{startup_file}"
 printf ',"exit":'
 hel_record "$hel_root/{exit_file}"
 printf ',"pids":['
-if hel_pid=$(hel_recorded_worker); then
-    printf '%s' "$hel_pid"
-else
-    hel_separator=
-    while read -r hel_pid hel_args; do
-        case "$hel_pid" in
-            '' | *[!0-9]*) continue ;;
-        esac
-        [ "$hel_pid" -eq $$ ] && continue
-        case "$hel_args" in
-            *"$hel_match"*|*"$hel_match_home"*)
-                printf '%s%s' "$hel_separator" "$hel_pid"
-                hel_separator=,
-                ;;
-        esac
-    done <<MJ_PS
-$(hel_ps -eo pid=,args=)
-MJ_PS
-fi
+{holder}
 printf ']}}\n'
 "#,
-        identity = targets::worker_daemon_identity_script(worker_root),
+        root = targets::posix_quote(worker_root),
+        holder = targets::worker_daemon_holder_script(worker_root),
         startup_file = mj_core::relay::WORKER_STARTUP_FILE,
         exit_file = mj_core::relay::WORKER_EXIT_FILE,
     )
