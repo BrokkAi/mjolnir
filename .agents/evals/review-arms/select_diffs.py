@@ -1,13 +1,16 @@
-"""Samples ordinary pre-cutoff mjolnir commits for the pooled-findings design.
+"""Samples ordinary pre-cutoff commits of a repository for the pooled-findings design.
 
-Usage: python3 select_diffs.py <repo> <count> > corpus/diffs.jsonl
+Usage: python3 select_diffs.py <repo> <count> [--branch master] [--cutoff 2026-11-01T00:00:00]
+           [--candidates corpus/candidates-all.jsonl] [--seed 20261114] > corpus/diffs.jsonl
 
-Eligible: non-merge commits on master before 2026-11-01 (no Terra or Sol
+Eligible: non-merge commits on the branch before the cutoff (no Terra or Sol
 review before then), 80 to 1,500 changed lines not counting goldens,
 fixtures, snapshots or lock files, at least 60% of those lines in code files,
-not only tests, and not one of the Hard-won candidate commits. Sampled with a
-fixed seed, spread evenly across the eligible history by date order.
+not only tests, and not the introducing commit of any known-bug candidate.
+Sampled with a fixed seed, spread evenly across the eligible history by date
+order. The defaults reproduce mjolnir's corpus/diffs.jsonl.
 """
+import argparse
 import json
 import pathlib
 import random
@@ -15,16 +18,24 @@ import re
 import subprocess
 import sys
 
-repo, count = sys.argv[1], int(sys.argv[2])
-CUTOFF = "2026-11-01T00:00:00"
+here = pathlib.Path(__file__).resolve().parent
+p = argparse.ArgumentParser()
+p.add_argument("repo")
+p.add_argument("count", type=int)
+p.add_argument("--branch", default="master")
+p.add_argument("--cutoff", default="2026-11-01T00:00:00")
+p.add_argument("--candidates", default=str(here / "corpus/candidates-all.jsonl"),
+               help="known-bug candidates (JSONL with intro_commit) whose commits are never sampled")
+p.add_argument("--seed", type=int, default=20261114)
+a = p.parse_args()
+repo, count = a.repo, a.count
 EXCLUDED_PATH = re.compile(r"golden|fixtures?/|snapshots?/|\.snap$|Cargo\.lock$|package-lock\.json$|\.svg$|\.png$|testdata/|expected/")
 CODE = re.compile(r"\.(rs|py|js|ts|tsx|sh|go|toml|sql)$")
 TEST = re.compile(r"(^|/)tests?/|_tests?\.rs$|(^|/)tests\.rs$|_test\.py$|test_[^/]*\.py$")
-here = pathlib.Path(__file__).resolve().parent
-hard_won = {json.loads(l)["intro_commit"] for l in (here / "corpus/candidates-all.jsonl").read_text().splitlines()}
+hard_won = {json.loads(l)["intro_commit"] for l in pathlib.Path(a.candidates).read_text().splitlines() if l.strip()}
 
 log = subprocess.check_output(
-    ["git", "-C", repo, "log", "master", "--no-merges", f"--before={CUTOFF}", "--reverse",
+    ["git", "-C", repo, "log", a.branch, "--no-merges", f"--before={a.cutoff}", "--reverse",
      "--format=@@%H %P|%cI|%s", "--numstat"], text=True)
 eligible = []
 for block in log.split("@@")[1:]:
@@ -47,7 +58,7 @@ for block in log.split("@@")[1:]:
         eligible.append({"intro_commit": sha, "base_commit": parents[0], "intro_date": date[:10],
                          "subject": subject, "changed_lines": lines})
 
-rng = random.Random(20261114)
+rng = random.Random(a.seed)
 # One pick from each of `count` equal slices of the date-ordered history.
 size = len(eligible) / count
 picks = [eligible[int(i * size) + rng.randrange(max(1, int(size)))] for i in range(count)]

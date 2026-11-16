@@ -1,19 +1,20 @@
 # Bug corpus specification
 
-Purpose: build a set of 30 known mjolnir bugs to test code reviewers on. For
+Purpose: build a set of 30 known bugs in one repository (mjolnir, or the
+repository your instructions name) to test code reviewers on. For
 each bug, a reviewer will see the repository at the commit that introduced
 the bug, with no later history, and will review the diff `base..intro`. We
 then check whether any review finding identifies the known defect.
 
 The reviewers being compared are gpt-6.1-terra and gpt-6.1-sol. Neither model
-reviewed mjolnir commits before about 2026-11-05, so the introducing commit
+reviewed the repository's commits before about 2026-11-05, so the introducing commit
 must be older than the cutoff below. Otherwise the bug was already filtered by
 one of the setups under test, and the corpus would be biased.
 
 ## Source
 
 `// Hard-won: <#issue or short SHA>: <defect>` markers (Python: `#`) in the
-repository at a mjolnir checkout with full history (the path is given in your instructions)
+repository at a checkout with full history (the path is given in your instructions)
 (branch `master`, full history). Each marker sits on a test that pins a defect
 found after the code was believed done.
 
