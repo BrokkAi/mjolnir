@@ -2,7 +2,8 @@
 
 Usage (REVIEW_ARMS_DIR holds the data):
   python3 brief_dilution.py jobs          # dilution-jobs.json: the plan's 10 diffs x arms WT,WS
-  python3 brief_dilution.py editor-items  # briefs/bifrost-diluted-work/<diff>/{item.json,INSTRUCTIONS.md}
+  python3 brief_dilution.py editor-items [--rerun DIFF ...]  # briefs/bifrost-diluted-work/<diff>/{item.json,INSTRUCTIONS.md};
+      --rerun moves that diff's previous editor output and driver records to stale/ so the editor runs again
   (run the editors: verify_driver.py briefs/bifrost-diluted-work --kind task --output siblings.jsonl ...)
   python3 brief_dilution.py form-check    # form.jsonl + form-summary.json in the work dir; ids <diff>:<n>
   python3 brief_dilution.py truth-items   # briefs/bifrost-diluted-check/truth/<diff>[--NN]/ blind verifier units
@@ -192,7 +193,21 @@ sentences"}. Hand back the counts per label.
 """
 
 
-def editor_items():
+def editor_items(rerun=()):
+    """Editor units per diff. A diff named in rerun (form-check failures go back to the editor once)
+    has its siblings.jsonl and verify_driver's records moved to stale/, so the next
+    `verify_driver.py --kind task` run starts a new editor instead of reporting the unit done."""
+    unknown = set(rerun) - set(diffs())
+    if unknown:
+        raise SystemExit(f"--rerun names diffs outside the plan: {sorted(unknown)}")
+    for bug in rerun:
+        stale = WORK / "stale" / f"{bug}-{time.strftime('%Y%m%dT%H%M%S')}"
+        for f in (WORK / bug / "siblings.jsonl", WORK / "out" / f"task-{bug}.json",
+                  WORK / "sessions" / f"batch-{bug}.json"):
+            if f.exists():
+                stale.mkdir(parents=True, exist_ok=True)
+                f.rename(stale / f.name)
+        print(f"{bug}: previous editor output moved to {stale}")
     for bug in diffs():
         intro, base = commits(bug)
         d = WORK / bug
@@ -648,8 +663,14 @@ if __name__ == "__main__":
     p.add_argument("--allow-false-share", action="append", default=[],
                    help="build: diff whose false share exceeds 20% and is accepted")
     p.add_argument("--round", help="readout: the judging round of the dilution arm (brief-judge-h)")
+    p.add_argument("--rerun", action="append", default=[],
+                   help="editor-items: diff whose editor runs again (its old output moves to stale/)")
     a = p.parse_args()
-    if a.step == "build":
+    if a.rerun and a.step != "editor-items":
+        p.error("--rerun applies to editor-items only")
+    if a.step == "editor-items":
+        editor_items(a.rerun)
+    elif a.step == "build":
         build(a.drop, set(a.allow_false_share))
     elif a.step == "readout":
         readout(a.round)
