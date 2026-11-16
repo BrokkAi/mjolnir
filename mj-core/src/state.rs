@@ -2696,19 +2696,18 @@ impl State {
             .unwrap_or(true)
     }
 
-    /// The review choice that governs `session_id`. An ordinary sub-agent
-    /// reviews under the choice of the session that spawned it, followed up
-    /// the chain to a top-level session, so the parent's record stays the only
-    /// copy and a later change to it applies to its children. Every other
-    /// session uses its own record. Both the launch that offers the review
-    /// tools and the review host that picks reviewers ask this one function.
+    /// The session whose record holds the review choice that governs
+    /// `session_id`. An ordinary sub-agent reviews under the choice of the
+    /// session that spawned it, followed up the chain to a top-level session,
+    /// so the parent's record stays the only copy and a later change to it
+    /// applies to its children. Every other session uses its own record.
     ///
     /// Fails with the id of a missing ancestor record, or with the session
     /// itself when the parent chain loops.
-    pub fn effective_review(
+    fn review_owner(
         &self,
         session_id: &str,
-    ) -> std::result::Result<Option<&crate::config::SessionReview>, String> {
+    ) -> std::result::Result<Option<&SessionRecord>, String> {
         let mut current = session_id;
         // A chain longer than the relation table repeats a session.
         for _ in 0..=self.subagents.len() {
@@ -2719,28 +2718,49 @@ impl State {
                     }
                     current = &child.parent_session_id;
                 }
-                _ => {
-                    return Ok(self
-                        .sessions
-                        .get(current)
-                        .and_then(|s| s.review.as_ref())
-                        .map(|v| &**v));
-                }
+                _ => return Ok(self.sessions.get(current)),
             }
         }
         Err(session_id.to_owned())
     }
 
-    /// `effective_review`, with a parent chain that cannot be followed
-    /// reviewing as Off. Launch (no review tools), the review host, the
-    /// delegation completion and the viewer all read the choice through this
-    /// one rule.
-    pub fn effective_review_or_off(
+    /// The stored review choice that governs `session_id`, through
+    /// `review_owner`. Reviewer selection asks this for a Legacy override;
+    /// everything that needs the resulting configuration asks
+    /// `effective_review_config`.
+    pub fn effective_review(
         &self,
         session_id: &str,
-    ) -> Option<&crate::config::SessionReview> {
-        const OFF: &crate::config::SessionReview = &crate::config::SessionReview::Off;
-        self.effective_review(session_id).unwrap_or(Some(OFF))
+    ) -> std::result::Result<Option<&crate::config::SessionReview>, String> {
+        Ok(self
+            .review_owner(session_id)?
+            .and_then(|s| s.review.as_ref())
+            .map(|v| &**v))
+    }
+
+    /// The review configuration that governs `session_id`: the given global
+    /// `[review]` under the stored choice, then Mjolnir's automatic rules
+    /// (see `review::settings::automatic_review_off`), which are evaluated
+    /// here on every call and never stored. A parent chain that cannot be
+    /// followed reviews as Off. Launch (which offers the review tools), the
+    /// review host, child review requests, delegation completion and the
+    /// viewer all read the effective review through this one rule.
+    pub fn effective_review_config(
+        &self,
+        review: &crate::config::ReviewConfig,
+        session_id: &str,
+    ) -> crate::config::ReviewConfig {
+        let Ok(owner) = self.review_owner(session_id) else {
+            return review.for_session(Some(&crate::config::SessionReview::Off));
+        };
+        let plain = owner
+            .and_then(|s| s.project.as_deref())
+            .is_some_and(|project| project.primary_is_plain_directory());
+        crate::review::settings::effective_review_config(
+            review,
+            owner.and_then(|s| s.review.as_deref()),
+            plain,
+        )
     }
 }
 

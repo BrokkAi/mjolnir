@@ -731,6 +731,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         goal: Default::default(),
         capacity_retry: None,
         retry_assessment_pending: false,
+        authentication_retry_waiting: None,
         activity_turn_started_at_ms: None,
         session_id: "session-1".into(),
         store_id: None,

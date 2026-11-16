@@ -637,6 +637,7 @@ fn a_queued_periodic_sync_is_not_queued_twice() {
             cause: Some(CredentialSyncCause {
                 session_id: "session".into(),
                 reason: CredentialSyncReason::EmptyPromptResponse,
+                login_fingerprint: None,
             }),
         },
     );
@@ -770,6 +771,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
             trigger: Some(CredentialSyncCause {
                 session_id: "child-1".into(),
                 reason,
+                login_fingerprint: None,
             }),
             failure: failure.map(str::to_owned),
             outcomes,
@@ -780,6 +782,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
     let reached = |outcome: Result<Vec<CredentialSyncAction>, String>| {
         vec![CredentialSyncOutcome {
             unchanged_login: Some(matched.clone()),
+            current_access_token: None,
             session_id: "child-1".into(),
             outcome,
             step_failures: Vec::new(),
@@ -828,6 +831,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
             CredentialSyncReason::AuthenticationFailure,
             vec![CredentialSyncOutcome {
                 unchanged_login: Some(matched.clone()),
+                current_access_token: None,
                 session_id: "child-1".into(),
                 outcome: Ok(vec![CredentialSyncAction::SkillsPushed]),
                 step_failures: vec![StepFailure {
@@ -893,6 +897,66 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
     assert_eq!(rejected.refusal("codex4"), None);
 }
 
+// Hard-won: #1547: a delayed auth signal marked a renewed Claude login refused.
+#[test]
+fn a_claude_refusal_is_recorded_for_the_failed_token_only_while_it_is_current() {
+    let home = tempfile::tempdir().unwrap();
+    let marker = harness_authentication_marker(HarnessKind::Claude, home.path());
+    let login = |token: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "claudeAiOauth": {"accessToken": token, "expiresAt": 1}
+        }))
+        .unwrap()
+    };
+    let fingerprint = |token: &str| claude_access_token_fingerprint(&login(token)).unwrap();
+    std::fs::write(&marker, login("renewed")).unwrap();
+    let profile = HarnessProfile::new(HarnessKind::Claude, home.path().to_owned());
+    // What a sync of the failed session saw: its copy already equals the
+    // profile's, so there is nothing to push.
+    let observed = |failed: Option<&str>| {
+        let (snapshot, bytes) = read_credential_file(HarnessKind::Claude, &marker).unwrap();
+        CredentialSyncResult {
+            profile_id: "claude6".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "child".into(),
+                reason: CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint: failed.map(fingerprint),
+            }),
+            failure: None,
+            partial: false,
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: "child".into(),
+                current_access_token: claude_access_token_fingerprint(&bytes),
+                unchanged_login: Some(snapshot),
+                outcome: Ok(Vec::new()),
+                step_failures: Vec::new(),
+            }],
+        }
+    };
+    let mut rejected = RejectedLogins::default();
+    // The turn failed on a token that was renewed before the sync ran.
+    let stale = observed(Some("revoked"));
+    assert_eq!(
+        stale.authentication_verdict(),
+        Some(AuthenticationVerdict::LoginRenewed)
+    );
+    rejected.observe(&stale, &profile);
+    assert_eq!(rejected.refusal("claude6"), None);
+    // A failure that names no token proves nothing about the current login.
+    rejected.observe(&observed(None), &profile);
+    assert_eq!(rejected.refusal("claude6"), None);
+
+    // The current token itself was refused.
+    rejected.observe(&observed(Some("renewed")), &profile);
+    assert!(rejected.refusal("claude6").is_some());
+    // A later renewal ends it without anything else being recorded.
+    std::fs::write(&marker, login("renewed again")).unwrap();
+    assert_eq!(rejected.refusal("claude6"), None);
+    // A late signal for the first refused token does not bring it back.
+    rejected.observe(&observed(Some("renewed")), &profile);
+    assert_eq!(rejected.refusal("claude6"), None);
+}
+
 // Hard-won: #1485: observing an old failed sync marked a refreshed host login refused.
 #[test]
 fn a_refused_login_observation_cannot_reject_a_later_host_refresh() {
@@ -906,11 +970,13 @@ fn a_refused_login_observation_cannot_reject_a_later_host_refresh() {
         trigger: Some(CredentialSyncCause {
             session_id: "failed-session".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
         failure: None,
         partial: false,
         outcomes: vec![CredentialSyncOutcome {
             session_id: "failed-session".into(),
+            current_access_token: None,
             unchanged_login: Some(observed),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
