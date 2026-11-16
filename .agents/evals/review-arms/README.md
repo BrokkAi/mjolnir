@@ -505,6 +505,76 @@ blind in `verify-brief`, 82 groups: 57 confirmed, 7 plausible, 18 rejected):
   medium problems and adds a few false findings, consistent with reviewers
   exploring less (fewer tool calls). The no-brief sessions ran a day earlier.
 
+## Relation briefs, stage C (Bifrost): does a brief from today's tool help?
+
+Plan `brief/PLAN-bifrost.md` (#13150). Results: `results/brief-stage-c/`.
+Decision: **site context needed**. The brief does not help as built.
+
+- Briefs: Bifrost's `relation_brief` (#13149) for the 30 Hard-won and 40
+  ordinary diffs, from bifrost-dev 2e76c40839: the head of PR #13409, whose
+  brief code merged unchanged as a80fdbe025. The first run, on 0.15.3, was
+  discarded before judging. #13398 dropped proved callers when it trimmed a
+  scan to 8 KiB, which left 23 briefs empty and 394 items in all. That run's
+  briefs and sessions are kept in `briefs/bifrost-0.15.3/` and
+  `runs-stageC-0.15.3/`. The rerun has 0 failed briefs, 7 empty and 1189 items,
+  and Bifrost marks every item incomplete. The 32 briefs that 479392b9
+  generated separately came out byte-identical. A known defect of this binary,
+  #13399 (symlinks reported unreadable), empties JS/TS scans on 3 diffs
+  (`bifrost-briefs-RUNS.md`). The 2 Hard-won diffs among them caught nothing
+  with the blind brief either, so it does not change the decision.
+- Runs: `FT` (3 Terra/high) and `FS` (3 Sol/high) on the 30 Hard-won diffs,
+  and `FT` on the 40 ordinary diffs: 300 sessions. Each one's context was
+  checked to hold the new brief.
+- Judging round F: no-brief, blind and Bifrost sessions together (551
+  outputs), two Opus/high judges in the blinded verifier checkout
+  (`verify_driver.py --kind judge`). The judges agree on 549 outputs. All 173
+  caught or partial verdicts and the 2 disagreements were checked by hand:
+  an independent pass over all 173, and a reading of every partial and both
+  disagreements. Both disagreements became missed (timeout-only findings).
+  Round F reproduces stage B's no-brief and blind numbers exactly.
+
+Hard-won catch rate per session (mean over diffs; 95% interval of the effect):
+
+| Set | Model | No brief | Bifrost brief | Blind brief |
+|---|---|---:|---:|---:|
+| Primary (18) | Terra/high | 20.4% | 20.4% (+0.0; −7.4 to +7.4) | 55.6% |
+| Primary (18) | Sol/high | 22.2% | 24.1% (+1.9; −5.6 to +9.3) | 40.7% |
+| Secondary (4) | Terra/high | 33.3% | 33.3% | 41.7% |
+| Secondary (4) | Sol/high | 25.0% | 25.0% | 25.0% |
+| Control (8) | Terra/high | 20.8% | 16.7% | 12.5% |
+| Control (8) | Sol/high | 37.5% | 37.5% | 33.3% |
+
+- The blind brief's lead over the Bifrost brief is 35.2 points for Terra
+  (16.7 to 53.7) and 16.7 for Sol (1.9 to 33.3). Outcome 2 of the rule holds:
+  E is below 15 points for both models and the top of its interval is below
+  30. Control 1 passes (control-set gain −4.2 Terra, 0 Sol).
+- Per diff (`per-diff-hardwon.jsonl`): the blind brief turned misses into
+  catches on terminal-id-reused, held-prompt-ignores-interrupt,
+  stale-model-launch-spec, symbol-change-keeps-cached-transcript,
+  catalog-cache-key-collision and web-feed-self-deadlock. The Bifrost brief,
+  with 5 to 25 callers and paths on each, added one catch per model on
+  stale-model-launch-spec and web-feed-self-deadlock and none on the other
+  four. It names where the change reaches, not what the decisive relation is.
+- Expected catches of 30 for one reviewer: Terra 6.7 without a brief, 6.3
+  with the Bifrost brief, 12.7 with the blind one; Sol 8.0, 8.3, 11.0.
+- Reviewer cost: Terra median tokens 260k → 231k, latency 44 s → 38 s, tool
+  calls 8 → 7; Sol 484k → 519k, 103 s → 126 s, 12 → 12.
+
+Control 2, ordinary diffs (`brief_control2.py --arm FT`; no-brief and
+Bifrost-brief Terra/high findings pooled and verified blind in
+`verify-bifrost`; 75 groups: 46 confirmed, 12 plausible, 17 rejected):
+
+- Confirmed problems per session: 0.842 without a brief, 0.675 with the
+  Bifrost brief (ratio 0.80; difference −0.17, 95% −0.29 to −0.05).
+  **Control 2 fails.** Under the plan this is the brief's cost, not a change
+  of decision; the blind brief's ratio was 0.88.
+- No rejected finding cites a brief anchor outside the changed lines. 3 cite
+  an anchor when changed-line anchors count too, and by hand none relies on
+  what the brief states (`control2-citing-handmarks.json`). The citing half
+  passes.
+- Not run: the plan's report-only label of whether each P and S brief
+  contains the decisive fact.
+
 ## Bifrost tool coverage: can a code graph produce the decisive fact?
 
 For the Bifrost session, at Jonathan's request (`toolcov/SPEC.md`,

@@ -1,0 +1,14 @@
+{
+ "f-88b2697d": {
+  "relies_on_brief": false,
+  "why": "claims the busy-prompt title branch hides the setup status; the brief item only says draw_input uses dictation_prompt_title; cites the diff's own lines"
+ },
+ "f-68073c21": {
+  "relies_on_brief": false,
+  "why": "the autocomplete popover covering the queued chip is not in the brief, which only says draw_inline_chat uses draw_queued_prompt_row; cites the diff's own lines"
+ },
+ "f-3c58f225": {
+  "relies_on_brief": false,
+  "why": "as f-68073c21"
+ }
+}
