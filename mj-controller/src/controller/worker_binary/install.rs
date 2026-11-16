@@ -1184,7 +1184,8 @@ rm -rf -- "$destination"
 mkdir -p -- "$store" "$(dirname -- "$destination")"
 chmod -- 700 "$store"
 work=$(mktemp -d "$destination.work-XXXXXXXXXX")
-trap 'rm -rf -- "$work"' EXIT
+upload=
+trap 'rm -rf -- "$work" ${upload:+"$upload"}' EXIT
 tar -xzf - --no-same-owner --no-same-permissions -C "$work"
 ln -s -- "$store" "$work/.mj-store"
 tree="$work/profile"
@@ -1192,17 +1193,18 @@ mkdir -p -- "$tree"
 content="$work/.mj-content"
 if [ -d "$content" ]; then
     case $(uname -s) in Darwin) sum='shasum -a 256';; *) sum=sha256sum;; esac
-    # One digest pass; the count check catches files a partial run skipped.
-    # Relative names (./<hex key>) keep the staging path out of the output,
-    # where sha256sum would escape a backslash or newline in it.
     expected=$(cd "$content" && find . -type f | wc -l)
-    (cd "$content" && find . -type f -exec $sum -- {} +) > "$work/sums"
+    upload=$(mktemp -d "$store/.upload-XXXXXXXXXX")
+    find "$content" -type f -exec sh -c 'cp -- "$@" "$0"' "$upload" {} +
+    # Verify the copies that will be published, in one digest pass: a
+    # truncated copy fails its digest and a missing one fails the count.
+    # Relative names (./<hex key>) keep the store path out of the output,
+    # where sha256sum would escape a backslash or newline in it.
+    (cd "$upload" && find . -type f -exec $sum -- {} +) > "$work/sums"
     verified=$(awk '{ key = $0; sub(/.*\//, "", key); digest = key; sub(/\.x$/, "", digest);
         if ($1 != digest) { print "profile content digest mismatch: " key > "/dev/stderr"; bad = 1 } n++ }
         END { if (bad) exit 1; print n + 0 }' "$work/sums")
     [ "$verified" -eq "$expected" ] || { echo "verified $verified of $expected profile content files" >&2; exit 1; }
-    upload=$(mktemp -d "$store/.upload-XXXXXXXXXX")
-    find "$content" -type f -exec sh -c 'cp -- "$@" "$0"' "$upload" {} +
     find "$upload" -type f ! -name '*.x' -exec chmod -- 600 {} +
     find "$upload" -type f -name '*.x' -exec chmod -- 700 {} +
     # Each rename publishes one verified file atomically; rmdir proves all moved.
