@@ -58,7 +58,8 @@ pub struct WorkerRecoveryPlan {
     pub source_target: mj_core::state::TargetLocator,
     pub target: Option<TargetRecoveryPlan>,
     pub workspace: Option<WorkerWorkspace>,
-    pub liveness_probe: CommandSpec,
+    /// Runs the staged control worker, so it stages it first.
+    pub liveness_probe: crate::targets::WorkerControlPlan,
     /// Prints the dead worker's own exit record, read before a restart
     /// replaces it, so a worker that died of a full disk is not restarted
     /// onto the same full disk.
@@ -70,7 +71,7 @@ pub struct WorkerRecoveryPlan {
     /// Keep the worker executable and its launch schema paired. Configuration
     /// bytes travel through redacted stdin only when their digest is stale.
     pub launch_refresh: Option<WorkerLaunchRefreshPlan>,
-    pub restart: CommandPlan,
+    pub restart: crate::targets::WorkerControlPlan,
 }
 
 /// How recovery refreshes a stale installed worker binary before restarting.

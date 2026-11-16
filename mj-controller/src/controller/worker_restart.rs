@@ -1013,13 +1013,14 @@ mod tests {
             target: None,
             workspace: None,
             exit_record: None,
-            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()).into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: targets::CommandPlan {
                 description: "restart".into(),
                 commands: vec![],
-            },
+            }
+            .into(),
         };
         assert_eq!(
             crate::session_manager::recover_worker_controlled(recovery, true, Some(id), &executor)

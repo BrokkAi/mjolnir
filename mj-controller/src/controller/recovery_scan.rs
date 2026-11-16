@@ -1857,7 +1857,7 @@ mod tests {
         let backend = recovery_backend_locator(&template, &candidate.locator, session).unwrap();
         let plan = targets::close_plan(&backend, session).unwrap();
         assert!(
-            plan.commands.iter().any(|command| {
+            plan.scripts().iter().any(|command| {
                 command.args.iter().any(|argument| argument == &volume)
                     && command
                         .args

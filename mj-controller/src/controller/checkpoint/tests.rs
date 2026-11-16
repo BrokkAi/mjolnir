@@ -1932,7 +1932,7 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["alive\n"]),
+        liveness_probe: CommandSpec::new("printf", ["alive\n"]).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: targets::CommandPlan {
@@ -1941,7 +1941,8 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
                 "touch",
                 [restarted.to_string_lossy().into_owned()],
             )],
-        },
+        }
+        .into(),
     });
     let channels = crate::session_manager::spawn_session_manager().unwrap();
     channels.targets.send(vec![target]).unwrap();

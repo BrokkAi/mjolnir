@@ -1,15 +1,32 @@
 use super::*;
 
-/// Where the current worker build is staged for control commands on a target:
-/// `control/hel` in the target's worker store, beside the session roots like
-/// every store entry (`controller::worker_binary::store_root`). The store is on
-/// the target's own filesystem, inside the container for container targets.
+/// Where this build's worker is staged for control commands on a target: a
+/// slot named for the build in the target's worker store (`store_directory`, the
+/// one place that interprets the store's location), so daemons of different
+/// builds sharing a store (an SSH user's home, an EC2 host) each stage and use
+/// only their own and never overwrite another's. The build is known statically,
+/// so plans can embed the path without any I/O.
+///
+/// Nothing collects stale slots: the store's collector retires only
+/// 64-hex-digit digest directories, so a slot for a retired build stays until
+/// someone removes it.
 pub fn control_worker_path(worker_root: &str) -> String {
-    let parent = worker_root
-        .trim_end_matches('/')
-        .rsplit_once('/')
-        .map_or(".", |(parent, _)| parent);
-    format!("{parent}/worker-binaries/control/hel")
+    control_worker_path_for_build(worker_root, mj_core::worker_build::WORKER_BUILD_ID)
+}
+
+/// [`control_worker_path`] for a named build.
+pub fn control_worker_path_for_build(worker_root: &str, build_id: &str) -> String {
+    use sha2::Digest as _;
+    let slot = format!(
+        "control-{}",
+        &mj_core::hex::lower_hex(sha2::Sha256::digest(build_id.as_bytes()))[..16]
+    );
+    let store = crate::controller::store_directory(std::path::Path::new(worker_root))
+        .expect("a worker root has a parent directory");
+    mj_core::target_path::text(&mj_core::target_path::join(
+        &mj_core::target_path::join(&store, std::path::Path::new(&slot)),
+        std::path::Path::new("hel"),
+    ))
 }
 
 /// Exit status of a control script whose staged worker is missing. Nothing ran.
@@ -50,10 +67,10 @@ fi
 /// caller has to remember to. [`Self::declare`] decides by looking for the
 /// control path in the commands, so a builder cannot embed it without the plan
 /// requiring staging.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerControlPlan {
-    pub description: String,
-    pub commands: Vec<CommandSpec>,
+    description: String,
+    commands: Vec<CommandSpec>,
     control: Option<(TargetLocator, String)>,
 }
 
@@ -73,31 +90,64 @@ impl WorkerControlPlan {
         })
     }
 
+    /// A plan whose commands never run the control worker.
+    #[cfg(test)]
+    pub fn without_control(description: &str, commands: Vec<CommandSpec>) -> Self {
+        Self {
+            description: description.to_owned(),
+            commands,
+            control: None,
+        }
+    }
+
     /// Whether running this plan stages the control worker first.
     pub fn stages_control_worker(&self) -> bool {
         self.control.is_some()
     }
 
-    /// Stage, then run every command with `executor`.
+    /// Stage the control worker (on its own executor, without `executor`'s
+    /// deadline), then run every command with `executor`.
     pub fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
-        self.execute_staging_with(executor, executor)
-    }
-
-    /// Stage with `staging`, then run the commands with `executor`: a caller
-    /// that bounds the commands with a timeout keeps staging outside it.
-    pub fn execute_staging_with(
-        &self,
-        staging: &impl CommandExecutor,
-        executor: &impl CommandExecutor,
-    ) -> Result<Vec<CommandOutput>> {
         if let Some((locator, session_id)) = &self.control {
-            crate::controller::ensure_control_worker(staging, locator, session_id)?;
+            crate::controller::ensure_control_worker(executor, locator, session_id)?;
         }
         CommandPlan {
             description: self.description.clone(),
             commands: self.commands.clone(),
         }
         .execute(executor)
+    }
+
+    /// The commands of a plan that does not run the control worker, for a
+    /// caller that composes them itself. A plan that does run it is refused:
+    /// running its scripts would skip staging.
+    pub fn commands_without_staging(&self) -> Result<&[CommandSpec]> {
+        ensure!(
+            self.control.is_none(),
+            "{} runs the staged control worker, so it must run through `execute`",
+            self.description
+        );
+        Ok(&self.commands)
+    }
+
+    /// The scripts of any plan, for a test that inspects them. They skip staging.
+    #[cfg(test)]
+    pub fn scripts(&self) -> &[CommandSpec] {
+        &self.commands
+    }
+}
+
+#[cfg(test)]
+impl From<CommandSpec> for WorkerControlPlan {
+    fn from(command: CommandSpec) -> Self {
+        Self::without_control(&command.purpose.clone(), vec![command])
+    }
+}
+
+#[cfg(test)]
+impl From<CommandPlan> for WorkerControlPlan {
+    fn from(plan: CommandPlan) -> Self {
+        Self::without_control(&plan.description, plan.commands)
     }
 }
 

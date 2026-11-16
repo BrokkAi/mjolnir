@@ -1529,7 +1529,7 @@ fn cleanup_failed_provision_named(
         }
     };
     let purpose = plan
-        .commands
+        .scripts()
         .iter()
         .map(|command| command.purpose.clone())
         .collect::<Vec<_>>()
@@ -1857,6 +1857,19 @@ impl<E: CommandExecutor> CommandExecutor for StagedExecutor<'_, E> {
         input: &mut (dyn std::io::Read + Send),
     ) -> Result<CommandOutput> {
         self.inner.execute_with_stdin(&self.staged(command), input)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.inner.execute_without_deadline(&self.staged(command))
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.inner
+            .execute_with_stdin_without_deadline(&self.staged(command), input)
     }
 }
 

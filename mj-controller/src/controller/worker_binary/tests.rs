@@ -235,14 +235,33 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     let root_text = root.to_string_lossy().into_owned();
     let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
     assert!(!control.exists(), "nothing is staged yet");
+    // Another build's slot beside this one: staging must never touch it.
+    let other = std::path::PathBuf::from(targets::control_worker_path_for_build(
+        &root_text,
+        "another-build",
+    ));
+    assert_ne!(other, control, "builds get separate slots");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, "another build's worker").unwrap();
     let locator = targets::TargetLocator::LocalBare {
         worker_root: root_text,
     };
     let plan = targets::close_plan(&locator, SESSION).unwrap();
     assert!(plan.stages_control_worker());
+    // A caller's deadline covers the commands it names, not the staging that
+    // precedes them: with a deadline already past, staging still completes and
+    // only the plan's own commands time out.
+    let expired = targets::CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
+    let error = plan.execute(&expired).unwrap_err();
+    assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    assert!(control.exists(), "staging ignored the caller's deadline");
+    assert!(root.exists(), "the timed-out close removed nothing");
     plan.execute(&ProcessExecutor).unwrap();
-    assert!(control.exists());
     assert!(!root.exists());
+    assert_eq!(
+        std::fs::read_to_string(&other).unwrap(),
+        "another build's worker"
+    );
 }
 
 #[test]
@@ -1953,13 +1972,14 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
             target: targets::target_recovery_plan(&locator, &session)?,
             workspace: None,
             exit_record: None,
-            liveness_probe: worker_liveness_command(&locator, &root),
+            liveness_probe: worker_liveness_command(&locator, &root).into(),
             binary_refresh: worker_binary_refresh_plan(&locator, &session)?,
             launch_refresh: Some(worker_launch_refresh_plan(&locator, &session, &launch)?),
             restart: CommandPlan {
                 description: "restart isolated Docker worker".into(),
                 commands: vec![start_worker_command(&locator, &root)],
-            },
+            }
+            .into(),
         };
         crate::session_manager::recover_worker_controlled(plan, false, None, &ProcessExecutor)?;
         let installed = execute_checked(
@@ -5264,7 +5284,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["dead\n"]),
+        liveness_probe: CommandSpec::new("printf", ["dead\n"]).into(),
         binary_refresh: worker_binary_refresh_plan(&locator, session_id).unwrap(),
         launch_refresh: Some(WorkerLaunchRefreshPlan {
             expected_sha256: lower_hex(Sha256::digest(b"new launch schema")),
@@ -5290,7 +5310,8 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
                 "touch",
                 [restarted.to_string_lossy().into_owned()],
             )],
-        },
+        }
+        .into(),
     };
     let mut record = crate::controller::test_support::checkpoint_test_session(session_id);
     record.target = Some(Box::new(plan.source_target.clone()));

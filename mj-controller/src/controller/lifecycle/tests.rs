@@ -322,13 +322,14 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: targets::CommandPlan {
             description: "restart worker".into(),
             commands: vec![CommandSpec::new("restart", std::iter::empty::<&str>())],
-        },
+        }
+        .into(),
     };
     struct PausedRecovery {
         entered: mpsc::Sender<()>,
@@ -1066,7 +1067,9 @@ async fn close_child_with_partial_root(
         std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     // Control commands run the staged current worker; this one answers them.
-    let control = directory.path().join("worker-binaries/control");
+    let control =
+        std::path::PathBuf::from(targets::control_worker_path(&worker_root.to_string_lossy()));
+    let control = control.parent().unwrap().to_owned();
     std::fs::create_dir_all(&control).unwrap();
     #[cfg(unix)]
     mj_core::test_hooks::install_fake_command(&control, "hel", "");

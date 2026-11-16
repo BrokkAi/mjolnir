@@ -2742,6 +2742,25 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecu
         }
         self.inner.execute_with_stdin(command, input)
     }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner.execute_without_deadline(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner
+            .execute_with_stdin_without_deadline(command, input)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

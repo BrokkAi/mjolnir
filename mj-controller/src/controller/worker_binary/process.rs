@@ -58,10 +58,13 @@ fn run_owned_worker_stop(
 /// current build cannot be staged for the target this fails and names it; there
 /// is no second way to stop a worker.
 pub(crate) fn ensure_control_worker(
-    executor: &impl CommandExecutor,
+    caller: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
 ) -> Result<()> {
+    // Never the caller's own deadline: a timeout names the stop or probe that
+    // follows, not the upload. The caller's cancellation still applies.
+    let executor = &targets::WithoutDeadline::new(caller);
     let root = targets::worker_root(locator, session_id)?;
     let state = execute_checked(
         executor,
@@ -86,13 +89,20 @@ pub(crate) fn ensure_control_worker(
             "the current worker cannot be staged for {root}, so its worker cannot be stopped or probed"
         )
     })?;
-    let directory = control
-        .rsplit_once('/')
-        .map_or(".", |(directory, _)| directory);
+    let directory = Path::new(&control)
+        .parent()
+        .context("the control worker has a directory")?;
     execute_checked(
         executor,
-        targets::locator_command(locator, vec!["mkdir".into(), "-p".into(), directory.into()])
-            .purpose("create the control worker directory"),
+        targets::locator_command(
+            locator,
+            vec![
+                "mkdir".into(),
+                "-p".into(),
+                mj_core::target_path::text(directory),
+            ],
+        )
+        .purpose("create the control worker directory"),
     )?;
     install_worker_binary_at(executor, locator, session_id, &worker, &control, None)
         .with_context(|| format!("stage the current worker for {root}"))

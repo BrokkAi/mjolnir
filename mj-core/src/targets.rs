@@ -897,6 +897,88 @@ pub trait CommandExecutor {
     ) -> Result<CommandOutput> {
         bail!("this command executor does not support streamed stdin")
     }
+
+    /// Run `command` with this executor's cancellation but without its
+    /// deadline, for work a timeout named for another step must not cover.
+    /// Executors without deadlines run it as usual.
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    /// [`Self::execute_without_deadline`] for a command that reads `input`.
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+}
+
+/// An executor whose commands run without the wrapped executor's deadline but
+/// still stop when its supervisor cancels. Staging work that precedes a
+/// timeout-bound command runs on this, so the timeout covers only the command
+/// it names.
+pub struct WithoutDeadline<'a, E: ?Sized>(&'a E);
+
+impl<'a, E: CommandExecutor + ?Sized> WithoutDeadline<'a, E> {
+    pub fn new(executor: &'a E) -> Self {
+        Self(executor)
+    }
+}
+
+impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.0.execute_without_deadline(command)
+    }
+
+    fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.0.execute_cleanup(command)
+    }
+
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<CommandOutput> {
+        self.0.execute_cleanup_with_timeout(command, timeout)
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.0.cancellation_requested()
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        self.0.stage_started(stage);
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        self.0.stage_finished(stage);
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.0.notify_notice(notice);
+    }
+
+    fn begin_resumable_work(&self) -> Result<()> {
+        self.0.begin_resumable_work()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.0.shutdown_interrupted()
+    }
+
+    fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+        self.0.end_resumable_work(label)
+    }
+
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.0.execute_with_stdin_without_deadline(command, input)
+    }
 }
 
 /// A scoped lifecycle-stage report for controller-side work or a sequence of
@@ -1789,6 +1871,26 @@ impl CommandExecutor for CancellableProcessExecutor {
 
     fn cancellation_requested(&self) -> bool {
         self.is_cancelled()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        Self {
+            deadline: None,
+            ..self.clone()
+        }
+        .execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        Self {
+            deadline: None,
+            ..self.clone()
+        }
+        .execute_with_stdin(command, input)
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {

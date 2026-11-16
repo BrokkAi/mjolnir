@@ -5,9 +5,15 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 /// Beside the session roots, in their target filesystem (inside containers).
 pub(super) fn store_root(locator: &targets::TargetLocator, session_id: &str) -> Result<PathBuf> {
-    let root = PathBuf::from(targets::worker_root(locator, session_id)?);
-    Ok(mj_core::target_path::join(
-        root.parent().context("worker root has no parent")?,
+    store_directory(Path::new(&targets::worker_root(locator, session_id)?))
+        .context("worker root has no parent")
+}
+
+/// The worker store beside a worker root. The only place that interprets where
+/// a store is; the staged control worker (`control_worker_path`) builds on it.
+pub(crate) fn store_directory(worker_root: &Path) -> Option<PathBuf> {
+    Some(mj_core::target_path::join(
+        worker_root.parent()?,
         Path::new("worker-binaries"),
     ))
 }

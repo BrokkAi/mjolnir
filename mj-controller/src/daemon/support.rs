@@ -167,6 +167,19 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         self.inner.cancellation_requested()
     }
 
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.inner.execute_without_deadline(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.inner
+            .execute_with_stdin_without_deadline(command, input)
+    }
+
     fn stage_started(&self, stage: ProvisionStage) {
         if let Some(id) = &self.operation_id {
             self.state

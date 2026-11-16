@@ -624,20 +624,17 @@ impl Controller {
                 );
                 let backend =
                     backend_locator(current.target.as_ref().unwrap(), current, &self.config)?;
-                // The plan stages the current worker first; that can take longer
-                // than the stop's own timeout, so it runs outside it.
+                // The plan stages the current worker first, outside the stop's
+                // timeout.
                 let cleanup = crate::targets::stop_worker_plan(
                     &backend,
                     session_id,
                     "stop failed in-place worker while retaining its environment",
                 )
                 .and_then(|plan| {
-                    plan.execute_staging_with(
-                        &crate::targets::ProcessExecutor,
-                        &crate::targets::CancellableProcessExecutor::with_timeout(
-                            std::time::Duration::from_secs(15),
-                        ),
-                    )
+                    plan.execute(&crate::targets::CancellableProcessExecutor::with_timeout(
+                        std::time::Duration::from_secs(15),
+                    ))
                 });
                 let mut retained = previous.clone();
                 let latest = crate::database::load_session_record(session_id)?

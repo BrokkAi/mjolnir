@@ -2675,7 +2675,7 @@ fn legacy_ec2_close_uses_recorded_id() {
     )
     .unwrap();
     assert_eq!(
-        close.commands[0].args.last().unwrap(),
+        close.scripts()[0].args.last().unwrap(),
         "i-0123456789abcdef0"
     );
 }
@@ -2941,7 +2941,7 @@ fn bare_project_plan_leaves_project_validation_to_dialog_and_launch() {
     };
     let close = close_plan(&locator, SESSION).unwrap();
     assert!(
-        !close.commands[0]
+        !close.scripts()[0]
             .args
             .last()
             .unwrap()
@@ -2973,13 +2973,13 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
     .unwrap();
 
     assert_eq!(
-        remote.commands[0].purpose,
+        remote.scripts()[0].purpose,
         "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state"
     );
 
     for script in [
-        local.commands[0].args[1].clone(),
-        remote.commands[0].args.last().unwrap().clone(),
+        local.scripts()[0].args[1].clone(),
+        remote.scripts()[0].args.last().unwrap().clone(),
     ] {
         let stop = script
             .find("worker stop --kill --root")
@@ -2990,7 +2990,7 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
         assert!(!script.contains("pkill"));
     }
     assert!(
-        remote.commands[0]
+        remote.scripts()[0]
             .args
             .last()
             .unwrap()
@@ -3011,7 +3011,7 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
     )
     .unwrap()
     .expect("raw localhost reuses its worker root")
-    .commands[0]
+    .scripts()[0]
         .clone();
     assert_eq!(
         local.purpose,
@@ -3034,7 +3034,7 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
     )
     .unwrap()
     .expect("an SSH host reuses its worker root")
-    .commands[0]
+    .scripts()[0]
         .clone();
     assert_eq!(
         remote.purpose,
@@ -3093,7 +3093,7 @@ fn resume_cleanup_unlinks_a_linked_staged_home_and_keeps_a_real_one() {
         )
         .unwrap()
         .unwrap()
-        .commands[0]
+        .scripts()[0]
             .clone();
         let output = ProcessExecutor.execute(&cleanup).unwrap();
 
@@ -3127,7 +3127,7 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         &format!("{local_root}/profile"),
     )
     .unwrap()
-    .commands[0]
+    .scripts()[0]
         .clone();
     assert_eq!(
         local.purpose,
@@ -3166,7 +3166,7 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         &format!(".local/share/hel/profiles/{SESSION}"),
     )
     .unwrap()
-    .commands[0]
+    .scripts()[0]
         .clone();
     assert_eq!(remote.program, "ssh");
     let remote_script = remote.args.last().unwrap();
@@ -3194,7 +3194,7 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         &format!("/var/lib/hel/profiles/{SESSION}"),
     )
     .unwrap()
-    .commands[0]
+    .scripts()[0]
         .clone();
     assert_eq!(container.program, "podman");
     assert_eq!(
@@ -3236,7 +3236,7 @@ fn in_place_reset_unlinks_a_linked_profile_home_without_following_it() {
         &format!("{worker_root}/profile"),
     )
     .unwrap()
-    .commands[0]
+    .scripts()[0]
         .clone();
     let output = ProcessExecutor.execute(&reset).unwrap();
 
@@ -3390,15 +3390,18 @@ fn podman_cleanup_ignores_an_already_absent_container() {
         SESSION,
     )
     .unwrap();
-    assert_eq!(local.commands[0].program, "sh");
-    let local_script = &local.commands[0].args[1];
+    assert_eq!(local.scripts()[0].program, "sh");
+    let local_script = &local.scripts()[0].args[1];
     assert!(local_script.contains("podman rm --force --ignore"));
-    assert_eq!(local.commands[0].args.last().unwrap(), SESSION);
+    assert_eq!(local.scripts()[0].args.last().unwrap(), SESSION);
     assert_eq!(
-        local.commands[2].purpose,
+        local.scripts()[2].purpose,
         "remove Podman session Git cache snapshot"
     );
-    assert_eq!(local.commands[2].stage, Some(ProvisionStage::CleaningCache));
+    assert_eq!(
+        local.scripts()[2].stage,
+        Some(ProvisionStage::CleaningCache)
+    );
 
     let remote = close_plan(
         &TargetLocator::SshPodman {
@@ -3411,17 +3414,17 @@ fn podman_cleanup_ignores_an_already_absent_container() {
     )
     .unwrap();
     assert!(
-        remote.commands[0]
+        remote.scripts()[0]
             .args
             .last()
             .unwrap()
             .contains("podman rm --force --ignore")
     );
     assert_eq!(
-        remote.commands[2].purpose,
+        remote.scripts()[2].purpose,
         "remove Podman session Git cache snapshot"
     );
-    assert!(remote.commands[2].args.last().unwrap().contains(SESSION));
+    assert!(remote.scripts()[2].args.last().unwrap().contains(SESSION));
 }
 
 #[test]
@@ -3440,22 +3443,22 @@ fn podman_cleanup_removes_container_before_workspace_storage() {
     )
     .unwrap();
 
-    assert_eq!(plan.commands.len(), 4);
+    assert_eq!(plan.scripts().len(), 4);
     assert_eq!(
-        plan.commands[0].stage,
+        plan.scripts()[0].stage,
         Some(ProvisionStage::RemovingContainer)
     );
     assert_eq!(
-        plan.commands[1].stage,
+        plan.scripts()[1].stage,
         Some(ProvisionStage::RemovingStorage)
     );
     assert_eq!(
-        plan.commands[2].stage,
+        plan.scripts()[2].stage,
         Some(ProvisionStage::RemovingStorage)
     );
-    assert_eq!(plan.commands[3].stage, Some(ProvisionStage::CleaningCache));
-    assert!(plan.commands[1].args.contains(&volume));
-    assert!(plan.commands[1].args[1].contains("dev.mj.session"));
+    assert_eq!(plan.scripts()[3].stage, Some(ProvisionStage::CleaningCache));
+    assert!(plan.scripts()[1].args.contains(&volume));
+    assert!(plan.scripts()[1].args[1].contains("dev.mj.session"));
 }
 
 #[test]
@@ -3578,7 +3581,7 @@ fn docker_cleanup_removes_container_then_volumes_then_overlay_backing_files() {
         SESSION,
     )
     .unwrap();
-    let command = &close.commands[0];
+    let command = &close.scripts()[0];
     assert_eq!(command.program, "sh");
     let script = &command.args[1];
     let remove_container = script.find("docker rm --force").unwrap();
@@ -3822,7 +3825,7 @@ fn native_temporary_storage_is_initialized_and_cleanup_is_repeatable() {
 
         let close = close_plan(&temporary_storage_locator(engine, &name), SESSION).unwrap();
         for _ in 0..2 {
-            for command in &close.commands {
+            for command in close.scripts() {
                 let output = execute_with_fake_docker(&environment, command, &env);
                 assert_eq!(
                     output.status,
@@ -3970,7 +3973,7 @@ fn temporary_storage_refuses_foreign_volumes_during_launch_and_cleanup() {
         );
         let close = close_plan(&temporary_storage_locator(engine, &name), SESSION).unwrap();
         let failure = close
-            .commands
+            .scripts()
             .iter()
             .map(|command| execute_with_fake_docker(&environment, command, &env))
             .find(|output| output.status != 0)
@@ -4032,7 +4035,7 @@ fn retiring_a_podman_generation_preserves_the_destination_temporary_volume() {
     std::fs::write(state.join("volumes"), volumes).unwrap();
     let close =
         retire_move_target_plan(&temporary_storage_locator("podman", &name), SESSION).unwrap();
-    for command in &close.commands {
+    for command in close.scripts() {
         let output = execute_with_fake_docker(&environment, command, &env);
         assert_eq!(
             output.status,
@@ -4101,8 +4104,8 @@ test -s /tmp/mj-perf.txt
         )?;
         Ok(())
     })();
-    for command in close_plan(&locator, &session).unwrap().commands {
-        execute_checked(&ProcessExecutor, &command).unwrap();
+    for command in close_plan(&locator, &session).unwrap().scripts() {
+        execute_checked(&ProcessExecutor, command).unwrap();
     }
     result.unwrap();
 }
@@ -4183,7 +4186,7 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
             Ok(())
         })();
         let cleanup = close_plan(&locator, &session).unwrap();
-        for command in &cleanup.commands {
+        for command in cleanup.scripts() {
             execute_checked(&ProcessExecutor, &with_runtime(command.clone())).unwrap();
         }
         result.unwrap();
@@ -4249,7 +4252,7 @@ fn podman_session_container_survives_signals_sent_to_pid_1() {
         Ok(())
     })();
     let cleanup = close_plan(&locator, &session).unwrap();
-    for command in &cleanup.commands {
+    for command in cleanup.scripts() {
         execute_checked(&ProcessExecutor, command).unwrap();
     }
     result.unwrap();
@@ -4298,7 +4301,7 @@ fn docker_cleanup_preserves_owned_state_when_container_removal_fails() {
 
     let output = execute_with_fake_docker(
         &environment,
-        &close.commands[0],
+        &close.scripts()[0],
         &[("FAKE_DOCKER_FAIL_RM", "1")],
     );
     assert_ne!(output.status, 0);
@@ -4908,7 +4911,7 @@ fn ssh_apple_container_closes_the_container_and_snapshot_over_ssh() {
         container_id: resource_name(SESSION).unwrap(),
     };
     let plan = close_plan(&locator, SESSION).unwrap();
-    let command = &plan.commands[0];
+    let command = &plan.scripts()[0];
     assert_eq!(command.program, "ssh");
     let remote = command.args.last().unwrap();
     assert!(remote.contains("container rm --force"), "{remote}");
@@ -5145,7 +5148,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
         &session,
     )
     .unwrap();
-    for command in &close.commands {
+    for command in close.scripts() {
         execute_checked(&ProcessExecutor, command).unwrap();
     }
     result.unwrap();
@@ -5200,7 +5203,7 @@ fn docker_cleanup_retains_backing_volume_when_overlay_removal_fails() {
     .unwrap();
     let output = execute_with_fake_docker(
         &environment,
-        &close.commands[0],
+        &close.scripts()[0],
         &[("FAKE_DOCKER_FAIL_VOLUME_RM", "1")],
     );
     assert_eq!(output.status, 43);
@@ -5256,8 +5259,8 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
     reconnect_plan(&locator, BORROWED_CHILD).expect("a child reconnects through its parent");
 
     let cleanup = borrowed_worker_cleanup_plan(&locator, BORROWED_CHILD).unwrap();
-    assert_eq!(cleanup.commands.len(), 1);
-    let script = cleanup.commands[0]
+    assert_eq!(cleanup.scripts().len(), 1);
+    let script = cleanup.scripts()[0]
         .args
         .iter()
         .find(|argument| argument.contains("rm -rf"))
@@ -5312,12 +5315,12 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
     let cleanup = retire_move_target_plan(&locator, SESSION).unwrap();
     assert!(
         cleanup
-            .commands
+            .scripts()
             .iter()
             .all(|command| command.stage != Some(ProvisionStage::CleaningCache))
     );
-    assert!(cleanup.commands[0].args.contains(&destination_name));
-    assert!(!cleanup.commands[0].args.contains(&source_name));
+    assert!(cleanup.scripts()[0].args.contains(&destination_name));
+    assert!(!cleanup.scripts()[0].args.contains(&source_name));
 }
 
 /// The command an SSH remote line runs, without the macOS system PATH prefix
@@ -5340,7 +5343,7 @@ fn worker_liveness_does_not_report_death_when_the_probe_fails() {
     // The root has a `hel`, so a worker could have run there.
     std::fs::write(root.join("hel"), "").unwrap();
     // The staged control worker is what answers, and its probe fails.
-    let control = workers.path().join("worker-binaries/control/hel");
+    let control = std::path::PathBuf::from(control_worker_path(root.to_str().unwrap()));
     std::fs::create_dir_all(control.parent().unwrap()).unwrap();
     std::fs::write(
         &control,

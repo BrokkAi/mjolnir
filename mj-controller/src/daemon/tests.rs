@@ -4645,14 +4645,16 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         liveness_probe: crate::targets::CommandSpec::new(
             "must-not-run",
             std::iter::empty::<String>(),
-        ),
+        )
+        .into(),
         exit_record: None,
         binary_refresh: None,
         launch_refresh: None,
         restart: crate::targets::CommandPlan {
             description: "background recovery must stay suppressed".into(),
             commands: Vec::new(),
-        },
+        }
+        .into(),
     };
     assert_eq!(
         crate::session_manager::recover_worker_controlled(

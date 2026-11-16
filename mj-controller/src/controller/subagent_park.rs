@@ -801,13 +801,15 @@ mod tests {
             workspace: None,
             exit_record: None,
             liveness_probe: CommandSpec::new("printf", ["alive\n"])
-                .purpose("probe Mjolnir worker daemon liveness"),
+                .purpose("probe Mjolnir worker daemon liveness")
+                .into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: targets::CommandPlan {
                 description: "a live wake must not be restarted".into(),
                 commands: vec![CommandSpec::new("false", std::iter::empty::<&str>())],
-            },
+            }
+            .into(),
         });
         executor.cancelled.store(false, Ordering::SeqCst);
         assert_eq!(
