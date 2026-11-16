@@ -702,6 +702,14 @@ pub struct RelayOperationalState {
     /// Retained for checkpoint export; attention reads `open_request`.
     #[serde(default)]
     pub person_input_through: u64,
+    /// Whether the latest finished turn's work processes are still alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_liveness: Option<crate::work_facts::WorkLiveness>,
+    /// Keys of mailbox events the worker accepted but has not yet handed to the
+    /// agent: pending ones and those leased to a hook. The full delivered-key
+    /// map stays in the snapshot; this list is short.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undelivered_mailbox_event_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
@@ -1874,6 +1882,17 @@ impl RelaySnapshot {
             assessment: self.assessment.clone(),
             open_request: self.open_request().cloned(),
             person_input_through: self.person_input_through,
+            work_liveness: self.work_liveness.clone(),
+            undelivered_mailbox_event_keys: self
+                .pending_mailbox_events
+                .iter()
+                .chain(
+                    self.mailbox_hook_lease
+                        .iter()
+                        .flat_map(|lease| &lease.events),
+                )
+                .map(|event| event.key.clone())
+                .collect(),
             assessment_context: self.assessment_context.clone(),
             turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),

@@ -252,6 +252,8 @@ mod tests {
             assessment: None,
             open_request: None,
             person_input_through: 0,
+            work_liveness: None,
+            undelivered_mailbox_event_keys: Vec::new(),
             assessment_context: None,
             turn_completion: None,
             continuation: Default::default(),
