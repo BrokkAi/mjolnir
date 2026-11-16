@@ -1795,11 +1795,9 @@ impl RelaySnapshot {
     /// stored as written so journal digests stay valid; every reader that
     /// hands it to Jev or the question locator goes through here.
     pub fn authorization_context(&self) -> Option<crate::assessment::ContextHistory> {
-        self.assessment_context.as_deref().map(|history| {
-            history
-                .without_generated_prompts()
-                .without_set_aside_replies()
-        })
+        self.assessment_context
+            .as_deref()
+            .map(crate::assessment::ContextHistory::reader_view)
     }
 
     /// The open turn that began without a prompt.

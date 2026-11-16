@@ -1566,12 +1566,46 @@ mod settled_task_tests {
     }
 
     fn reply(relay: &mut DurableRelay, text: &str) {
+        reply_with_id(relay, None, text);
+    }
+
+    fn reply_with_id(relay: &mut DurableRelay, id: Option<&str>, text: &str) {
         use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, SessionUpdate};
         relay
-            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::from(text),
-            )))
+            .record_session_update(SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::from(text))
+                    .message_id(id.map(agent_client_protocol::v1::schema::MessageId::new)),
+            ))
             .unwrap();
+    }
+
+    fn answer_elicitation(relay: &mut DurableRelay) {
+        relay
+            .record_observation(RelayObservation::ElicitationResolved {
+                elicitation_id: "form".into(),
+                action: "accept".into(),
+                reply: Some("Yes".into()),
+            })
+            .unwrap();
+    }
+
+    fn visible_replies(relay: &DurableRelay) -> Vec<String> {
+        relay
+            .snapshot
+            .authorization_context()
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.text.chars().take(24).collect())
+            .collect()
+    }
+
+    fn reopen(dir: &std::path::Path, relay: DurableRelay) -> DurableRelay {
+        drop(relay);
+        std::fs::remove_file(dir.join(RELAY_STATE_FILE)).unwrap();
+        let mut relay = claude_relay(dir);
+        relay.set_acp_ready(true);
+        relay
     }
 
     #[test]
@@ -1788,6 +1822,109 @@ mod settled_task_tests {
             .map(|m| m.text)
             .collect();
         assert_eq!(texts, ["Deploy it.", "Deployed."]);
+
+        // A turn that ends with no text after the answer still names its
+        // reply as the question message.
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        submit_relay(&mut relay, "silent-turn", prompt("Deploy it."));
+        relay.claim_pending_commands(true).unwrap();
+        reply_with_id(&mut relay, Some("m-ask"), "Should I deploy?");
+        answer_elicitation(&mut relay);
+        finish_prompt(&mut relay, "silent-turn");
+        assert_eq!(visible_replies(&relay), ["Deploy it."]);
+        assert_eq!(
+            relay.snapshot.completed_reply_message.as_deref(),
+            Some("agent:m-ask")
+        );
+
+        // A harness that reuses one message id before and after the answer:
+        // the later entry shares the id, and a dismissal sets both aside.
+        use crate::relay::test_support::glide_answer;
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        submit_relay(&mut relay, "reuse-turn", prompt("Deploy it."));
+        relay.claim_pending_commands(true).unwrap();
+        reply_with_id(&mut relay, Some("m1"), "Should I deploy?");
+        answer_elicitation(&mut relay);
+        reply_with_id(&mut relay, Some("m1"), "Deployed. Want me to also tag it?");
+        assert_eq!(
+            visible_replies(&relay),
+            ["Deploy it.", "Deployed. Want me to als"],
+            "the answer set aside only the question"
+        );
+        finish_prompt(&mut relay, "reuse-turn");
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+        relay
+            .apply_glide_assessment(revision, glide_answer("await_input", None))
+            .unwrap();
+        let question = relay
+            .snapshot
+            .assessment
+            .as_ref()
+            .unwrap()
+            .inferred_question()
+            .unwrap();
+        submit_relay(
+            &mut relay,
+            "dismiss-reuse",
+            RelayCommand::DismissQuestion { question },
+        );
+        assert_eq!(visible_replies(&relay), ["Deploy it."]);
+        reply_with_id(&mut relay, Some("m1"), "Later news.");
+        let relay = reopen(dir.path(), relay);
+        assert_eq!(visible_replies(&relay), ["Deploy it.", "Later news."]);
+        drop(relay);
+
+        // Eviction after the fence is set keeps it on the same entries.
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        submit_relay(&mut relay, "evict-turn", prompt("Deploy it."));
+        relay.claim_pending_commands(true).unwrap();
+        let block = |c: char| c.to_string().repeat(5000);
+        reply_with_id(&mut relay, Some("a"), &block('A'));
+        reply_with_id(&mut relay, Some("b"), &block('B'));
+        answer_elicitation(&mut relay);
+        reply_with_id(&mut relay, Some("c"), &block('C'));
+        reply_with_id(&mut relay, Some("d"), &block('D'));
+        // 20,000 bytes exceed the 16 KiB budget: A was evicted, B stays stored.
+        let stored = |relay: &DurableRelay| -> String {
+            relay
+                .snapshot
+                .assessment_context
+                .as_ref()
+                .unwrap()
+                .messages
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .filter_map(|m| m.text.chars().next())
+                .collect()
+        };
+        assert_eq!(stored(&relay), "BCD");
+        let letters = |relay: &DurableRelay| -> String {
+            visible_replies(relay)
+                .iter()
+                .filter(|t| !t.starts_with("Deploy"))
+                .filter_map(|t| t.chars().next())
+                .collect()
+        };
+        assert_eq!(letters(&relay), "CD");
+        reply_with_id(&mut relay, Some("e"), &block('E'));
+        // E's arrival evicts B, the last set-aside entry; the fence reaches 0.
+        assert_eq!(stored(&relay), "CDE");
+        assert_eq!(letters(&relay), "CDE");
+        let relay = reopen(dir.path(), relay);
+        assert_eq!(stored(&relay), "CDE");
+        assert_eq!(letters(&relay), "CDE");
     }
 
     fn task(id: &str) -> crate::relay::AirTaskFixture {
