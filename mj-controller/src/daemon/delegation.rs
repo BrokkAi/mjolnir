@@ -465,12 +465,22 @@ async fn complete_child(
         &backend,
         work,
         relation,
-        observation.in_flight,
-        observation.work_liveness,
+        ChildSeen {
+            in_flight: observation.in_flight,
+            liveness: observation.work_liveness,
+        },
         outcome,
         review_open,
     )
     .await
+}
+
+/// What the worker published beside a child's ended turn.
+struct ChildSeen {
+    /// Commands queued or running on the child.
+    in_flight: Vec<String>,
+    /// Whether the processes the turn left running are still alive.
+    liveness: Option<mj_core::work_facts::WorkLiveness>,
 }
 
 async fn settle_child(
@@ -478,11 +488,14 @@ async fn settle_child(
     backend: &ApiBackend,
     work: crate::upgrade::Work,
     relation: mj_core::subagent::SubagentRecord,
-    in_flight: Vec<String>,
-    liveness: Option<mj_core::work_facts::WorkLiveness>,
+    seen: ChildSeen,
     outcome: mj_core::state::MaterializedTurnOutcome,
     review_open: bool,
 ) -> Result<ChildCompletion> {
+    let ChildSeen {
+        in_flight,
+        liveness,
+    } = seen;
     let child_id = relation.child_session_id.clone();
     if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
         let id = child_id.clone();
@@ -1014,8 +1027,10 @@ mod tests {
                 &backend,
                 crate::upgrade::activity_unless_draining("test completion").unwrap(),
                 stored.clone(),
-                Vec::new(),
-                None,
+                ChildSeen {
+                    in_flight: Vec::new(),
+                    liveness: None,
+                },
                 outcome.clone(),
                 review_open,
             )
@@ -1429,8 +1444,10 @@ mod tests {
                     &self.backend,
                     crate::upgrade::activity_unless_draining("test completion").unwrap(),
                     stored,
-                    Vec::new(),
-                    liveness,
+                    ChildSeen {
+                        in_flight: Vec::new(),
+                        liveness,
+                    },
                     outcome.clone(),
                     false,
                 ),
