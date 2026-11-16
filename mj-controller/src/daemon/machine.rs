@@ -7,7 +7,11 @@ pub(super) async fn execute(
     cancelled: Arc<AtomicBool>,
 ) -> Result<DaemonReply> {
     let config = state.with_config(Clone::clone);
-    tokio::task::spawn_blocking(move || {
+    let install_machine = match &action {
+        DaemonAction::InstallMbx { machine } => Some(machine.clone()),
+        _ => None,
+    };
+    let reply = tokio::task::spawn_blocking(move || {
         let quit = cancelled.clone();
         let executor = CancellableProcessExecutor::new(cancelled);
         // Preserve the dashboard's existing command deadlines, including the
@@ -270,7 +274,11 @@ pub(super) async fn execute(
         }
     })
     .await
-    .context("machine request task panicked")?
+    .context("machine request task panicked")??;
+    if let Some(machine) = install_machine {
+        state.notify_mbx_installed(&machine);
+    }
+    Ok(reply)
 }
 
 fn machine_runtime_probe(

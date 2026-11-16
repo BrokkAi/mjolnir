@@ -22,6 +22,7 @@ impl DashboardState {
         }
         dialog.prepare();
         self.mode = Mode::Setup(dialog);
+        self.take_setup_subagent_choices();
     }
 
     /// Open Settings on the page of the first edit with every edit staged in
@@ -54,6 +55,7 @@ impl DashboardState {
         // the edits in it.
         if was_open || result.is_ok() {
             self.mode = Mode::Setup(dialog);
+            self.take_setup_subagent_choices();
         }
         result
     }
@@ -65,6 +67,7 @@ impl DashboardState {
             .login_statuses
             .extend(self.profile_login_statuses.clone());
         self.mode = Mode::Setup(dialog);
+        self.take_setup_subagent_choices();
     }
 
     fn dismiss_setup(&mut self, dialog: SetupDialog) -> DashboardAction {
@@ -227,6 +230,7 @@ impl DashboardState {
         if key == self.config.capability_demand_key()
             || self.profile_hydration_requests.contains_key(&key)
             || self.profile_hydration_sent.as_ref() == Some(&key)
+            || self.profile_capabilities.covers(&config)
         {
             return None;
         }
@@ -816,6 +820,15 @@ impl DashboardState {
         }
         if action == DashboardAction::None {
             action = dialog.preview_archive_space_action();
+        }
+        if let Ok(unreachable) = mj_client::settings::discovery::fill_subagent_options(
+            &mut dialog.draft,
+            &self.profile_capabilities,
+        ) && dialog.notice.is_none()
+            && unreachable.is_some()
+            && dialog.path.first().is_some_and(|p| p == "subagents")
+        {
+            dialog.notice = unreachable;
         }
         dialog.prepare();
         self.mode = Mode::Setup(dialog);
