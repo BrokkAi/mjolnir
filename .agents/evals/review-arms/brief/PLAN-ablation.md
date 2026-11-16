@@ -41,7 +41,14 @@ stage C: 10 × 2 arms × 6 = 120 sessions.
     `file:line` in backticks), the section and diff-order position where the
     relation belongs, and the same completeness tag as its neighbours. The
     item may state a relation Bifrost cannot compute today; that is the
-    point. No other item changes.
+    point. No other item changes. A value-flow fact goes among the items of
+    `## Paths` or `## Affected callers`, not under the Bifrost brief's
+    `## Value flow` note ("Not computed"), which stays unchanged (ruling of
+    2026-11-16, before any edited item existed). "Must not stand out"
+    means: no item longer than the brief's longest existing item; a compound
+    fact may be split into at most two consecutive items within that length
+    (clarified 2026-11-16 after the first edit came back 1.3 to 2.5 times
+    too long, before any brief was built or judged).
   - Checks, both bound to the hash of the brief text: a judge
     applies the stage A editor's rule (`bifrost-contains`) and must answer
     `yes`; `judge/SPEC.md` run on the brief as a review output must answer

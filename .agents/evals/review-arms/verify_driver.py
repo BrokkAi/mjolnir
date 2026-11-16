@@ -38,6 +38,13 @@ p.add_argument("--kind", choices=["verify", "judge"], default="verify")
 # Model and profiles of the sessions; rounds A to F used Opus on the Claude profiles.
 p.add_argument("--model", default="opus")
 p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
+# Any mj target: each session gets SPEC.md and its batch uploaded into its workspace (INPUT), so the
+# session reads nothing of this host's filesystem and cannot reach the eval's results.
+p.add_argument("--target", default="localhost")
+# Container targets take a bundle, not a local project directory. A bundle checks out current
+# master, which holds this eval's results; the prompt then has the session detach to
+# --repo-commit (master before the first eval commit) before it reads anything.
+p.add_argument("--bundle")
 # Verifiers need later history (fixes) but must not reach this eval's results,
 # which map sessions to models. 3c3fa4b13 is master just before the first eval commit.
 p.add_argument("--repo-commit", default="3c3fa4b13")
@@ -117,21 +124,35 @@ def pick_profile():
     raise RuntimeError(f"every profile reported QuotaLimit: {sorted(exhausted)}")
 
 
+INPUT = "review-input"  # workspace folder that receives SPEC.md and the batch
+
+
 def prompt_text(batch_path, judge):
+    spec, batch = f"{INPUT}/SPEC.md", f"{INPUT}/{batch_path.name}"
+    first = (f"Before you read anything, run `git checkout -q --detach {a.repo_commit}` in your working "
+             "directory, and do not open .agents/evals/ at any point.\n\n") if a.bundle else ""
     if judge is None:
-        return f"""Read {V}/SPEC.md and follow it exactly.
+        return first + f"""Read {spec} and follow it exactly.
 
-Your batch: {batch_path}
+Your batch: {batch}
 
-Read only SPEC.md, your batch file, and the repository in your working directory. Do not open anything else under {ROOT} or /home/jonathan; other files there reveal which model wrote which finding.
+Read only {spec}, your batch file, and the repository in your working directory. Do not open anything outside your working directory.
 """
-    return f"""Read {V}/SPEC.md and follow it exactly, with one change: write verdicts.jsonl in your current working directory, not in a report directory.
+    return first + f"""Read {spec} and follow it exactly, with one change: write verdicts.jsonl in your current working directory, not in a report directory.
 
-Your batch: {batch_path}
+Your batch: {batch}
 Judge every output in it.
 
-The mjolnir checkout with full history is your current working directory. Read only SPEC.md, your batch file, and that repository. Do not open anything else under {ROOT} or /home/jonathan: other files there reveal which model or setup wrote which output. Do not build, run tests, or edit any file other than verdicts.jsonl.
+The mjolnir checkout with full history is your current working directory. Read only {spec}, your batch file, and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than verdicts.jsonl.
 """
+
+
+def upload_inputs(sid, batch_path):
+    for src in (V / "SPEC.md", batch_path):
+        r = subprocess.run(["mj", "put-file", "--session", sid, "--path", f"{INPUT}/{src.name}", "--overwrite",
+                            str(src)], capture_output=True, timeout=300)
+        if r.returncode:
+            raise RuntimeError(f"put-file {src.name} into {sid}: {r.stderr.decode()[-400:]}")
 
 
 def fetch_output(sid):
@@ -157,8 +178,9 @@ def run(batch_path, judge=None):
         sid = rec["session_id"]
     else:
         profile = pick_profile()
-        sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", "localhost",
-                 "--project-directory", REPO, "--effort", "high", "--review", "off", "--no-project-memory",
+        source = ["--bundle", a.bundle] if a.bundle else ["--project-directory", REPO]
+        sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", a.target,
+                 *source, "--effort", "high", "--review", "off", "--no-project-memory",
                  "--no-github-events", "--subagents", "none", "--title", f"review-arms {V.name} {tag}",
                  timeout=900)["session_id"]
         rec = {"session_id": sid, "profile": profile, "time_ns": time.time_ns()}
@@ -182,6 +204,7 @@ def run(batch_path, judge=None):
                     time.sleep(10)
         cfg = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
         assert cfg.get("model") == a.model and cfg.get("effort") == "high", cfg
+        upload_inputs(sid, batch_path)
         # A stable command ID makes a resend after an interrupted run the same request,
         # which mj accepts once, instead of a second verifier turn.
         mj("message", "--session", sid, "--command-id", f"review-arms-{V.name}-batch-{tag}-{sid[:12]}",
