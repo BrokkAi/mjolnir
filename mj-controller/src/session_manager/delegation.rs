@@ -12,6 +12,13 @@ pub(crate) struct DelegationObservation {
     pub outcome: Option<MaterializedTurnOutcome>,
     pub in_flight: Vec<String>,
     pub credential_signal: Option<CredentialSyncSignal>,
+    /// Whether the processes the last turn left running are still alive, as
+    /// the worker published it. A change re-evaluates a held child.
+    pub work_liveness: Option<mj_core::work_facts::WorkLiveness>,
+    /// Mailbox events the worker accepted and has not handed to the agent. A
+    /// child's park waits for its report to leave this list, so its change is
+    /// an observation of the parent.
+    pub undelivered_mailbox_event_keys: Vec<String>,
 }
 
 impl DelegationObservation {
@@ -46,6 +53,11 @@ impl DelegationObservation {
                 )
                 .collect(),
             credential_signal: snapshot.latest_credential_sync_signal.clone(),
+            work_liveness: snapshot.operational.work_liveness.clone(),
+            undelivered_mailbox_event_keys: snapshot
+                .operational
+                .undelivered_mailbox_event_keys
+                .clone(),
         })
     }
 }

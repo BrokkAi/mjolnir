@@ -170,7 +170,13 @@ async fn wait_for_turn(
                     if let Some((handback_tool, report)) = &child_report {
                         let now = mj_core::clock::epoch_millis();
                         observation.apply_subagent_report(*handback_tool, report, now);
-                        report_deadline = reminder_grace_end(&observation, report, now);
+                        report_deadline = [
+                            reminder_grace_end(&observation, report, now),
+                            hold_give_up_end(&observation, now),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .min();
                     }
                     ApiSession::from(session)
                 };
@@ -268,6 +274,14 @@ fn reminder_grace_end(
     // the reminder turn runs, and that turn's end is the actor's own change.
     let remaining = u64::try_from(remaining).ok().filter(|&ms| ms > 0)?;
     // One millisecond past the end, so the next pass reads it as over.
+    Some(tokio::time::Instant::now() + Duration::from_millis(remaining + 1))
+}
+
+/// When a held child's wait on its own processes ends. Nothing is republished
+/// at that moment, so the wait wakes itself, one millisecond past it.
+fn hold_give_up_end(observation: &WaitObservation, now_ms: i64) -> Option<tokio::time::Instant> {
+    let remaining = observation.hold_give_up_at_ms?.saturating_sub(now_ms);
+    let remaining = u64::try_from(remaining).ok()?;
     Some(tokio::time::Instant::now() + Duration::from_millis(remaining + 1))
 }
 
@@ -381,6 +395,7 @@ pub(super) fn build_observation(
     {
         observation.background_work = Some(ApiBackgroundWork::from(&*snapshot.operational));
         observation.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
+        observation.work_liveness = snapshot.operational.work_liveness.clone();
     }
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
         // Use activity and turn facts from the same actor snapshot. The viewer

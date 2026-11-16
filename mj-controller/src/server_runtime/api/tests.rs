@@ -1712,17 +1712,19 @@ async fn a_child_without_the_tool_or_with_queued_work_is_not_reminded() {
         Arc::new(NoExports),
     );
     let turn = finished_turn("task");
-    assert!(
-        !backend
-            .remind_subagent_to_hand_back("child-1", false, &turn, &[])
+    assert_eq!(
+        backend
+            .remind_subagent_to_hand_back("child-1", false, &turn, None, &[])
             .await
-            .unwrap()
+            .unwrap(),
+        ReportNudge::NotOwed
     );
-    assert!(
-        !backend
-            .remind_subagent_to_hand_back("child-1", true, &turn, &["api-next".into()])
+    assert_eq!(
+        backend
+            .remind_subagent_to_hand_back("child-1", true, &turn, None, &["api-next".into()])
             .await
-            .unwrap()
+            .unwrap(),
+        ReportNudge::NotOwed
     );
     assert!(
         submitted.try_recv().is_err(),
@@ -1764,11 +1766,12 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
     );
     let turn = finished_turn("task");
 
-    assert!(
+    assert_eq!(
         backend
-            .remind_subagent_to_hand_back("child-1", true, &turn, &[])
+            .remind_subagent_to_hand_back("child-1", true, &turn, None, &[])
             .await
-            .unwrap()
+            .unwrap(),
+        ReportNudge::Pending
     );
     let (command_id, command) = submitted.recv().await.unwrap();
     assert!(
@@ -1792,11 +1795,12 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
         Some((command_id.as_str(), "task"))
     );
 
-    assert!(
+    assert_eq!(
         backend
-            .remind_subagent_to_hand_back("child-1", true, &turn, &[])
+            .remind_subagent_to_hand_back("child-1", true, &turn, None, &[])
             .await
             .unwrap(),
+        ReportNudge::Pending,
         "the already admitted reminder still owns the pending report"
     );
     assert!(submitted.try_recv().is_err());
@@ -2035,6 +2039,7 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
                 login_failure: None,
                 provider_failure: None,
                 report_dir: None,
+                report_inputs: None,
             }
         };
     let status = |start: Option<&StartStatus>, progress: &ChildProgress| {
@@ -2114,6 +2119,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         login_failure: Some("codex4".into()),
         provider_failure: None,
         report_dir: None,
+        report_inputs: None,
     };
     let expected = "profile codex4: the login is no longer valid; run `mj login --profile codex4` and spawn again";
 

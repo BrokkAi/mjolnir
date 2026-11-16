@@ -129,6 +129,19 @@ impl RuntimeState {
                             crate::controller::ParkOutcome::NotRunning,
                         ));
                     }
+                    // The parent may have answered the child while its turn was
+                    // ending; the message is in the outbox before the worker has
+                    // it, so the park decision, serialized here, sees it. A
+                    // failed start has no task to lose.
+                    if failure.is_none() && {
+                        let child = session_id.clone();
+                        blocking(move || crate::database::child_has_undelivered_mail(&child))
+                            .await?
+                    } {
+                        return Ok(DaemonLifecycleResult::Park(
+                            crate::controller::ParkOutcome::Busy,
+                        ));
+                    }
                     let controller = blocking(Controller::load).await?;
                     let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
                     let outcome = match &failure {

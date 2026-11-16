@@ -24,6 +24,14 @@ enum ChildCompletion {
     /// The daemon began handing off before the completion could be admitted;
     /// the next daemon settles the child.
     Draining,
+    /// The child ended its reminder turn waiting for processes it started: no
+    /// report, no park. Judged again at `give_up_at_ms`, or sooner when the
+    /// worker publishes that the processes exited.
+    Held { give_up_at_ms: i64 },
+    /// The parent was told, but the child's processes are still running, so
+    /// the park waits until the parent's turn that received the report ends.
+    /// Judged again when the parent's observation changes.
+    ParkAfterParentTurn { parent: String },
 }
 
 /// First wait after a child completion fails or finds the child busy.
@@ -38,7 +46,8 @@ const COMPLETION_BUSY_CAP: Duration = Duration::from_secs(30);
 /// going. Settling the child forgets it; a later outcome starts afresh.
 struct CompletionRetry {
     ordinal: u64,
-    at: Instant,
+    /// When to try again; `None` waits for an observation that clears it.
+    at: Option<Instant>,
     failures: u32,
     last_failure: Option<String>,
 }
@@ -70,12 +79,27 @@ impl CompletionRetry {
         (
             Self {
                 ordinal,
-                at: now + delay,
+                at: Some(now + delay),
                 failures,
                 last_failure,
             },
             report,
         )
+    }
+
+    /// A completion that is waiting on a fact, not failing: it runs again at
+    /// `at`, or when an observation clears this entry.
+    fn waiting(ordinal: u64, at: Option<Instant>) -> Self {
+        Self {
+            ordinal,
+            at,
+            failures: 0,
+            last_failure: None,
+        }
+    }
+
+    fn holds(&self, ordinal: u64, now: Instant) -> bool {
+        self.ordinal == ordinal && self.at.is_none_or(|at| at > now)
     }
 }
 
@@ -150,6 +174,9 @@ async fn run(
     let mut completion_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
     let mut noticed = BTreeMap::<String, u64>::new();
     let mut retry = BTreeMap::<String, CompletionRetry>::new();
+    // Children whose park waits for their parent's turn, by parent: the
+    // parent's next observation ends the wait.
+    let mut parked_behind = BTreeMap::<String, String>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut quota_open = true;
@@ -227,7 +254,7 @@ async fn run(
                 if noticed.get(child) == Some(&outcome.completed_ordinal)
                     || completion_ids.values().any(|(id, _)| id == child)
                     || retry.get(child).is_some_and(|retry| {
-                        retry.ordinal == outcome.completed_ordinal && retry.at > Instant::now()
+                        retry.holds(outcome.completed_ordinal, Instant::now())
                     })
                 {
                     continue;
@@ -246,6 +273,22 @@ async fn run(
             _ = cancellation.cancelled() => break,
             update = updates.recv() => {
                 let Some((id, observation)) = update else { anyhow::bail!("delegation observation feed stopped") };
+                // A change in the parent ends the wait of children whose park
+                // follows its turn; a change in a held child's liveness ends
+                // its wait for the give-up time.
+                let waiting_on_it = parked_behind
+                    .iter()
+                    .filter(|(_, parent)| **parent == id)
+                    .map(|(child, _)| child.clone())
+                    .collect::<Vec<_>>();
+                for child in waiting_on_it {
+                    retry.remove(&child);
+                }
+                if observation.as_ref().map(|o| &o.work_liveness)
+                    != observations.get(&id).map(|o| &o.work_liveness)
+                {
+                    retry.remove(&id);
+                }
                 if let Some(observation) = observation {
                     policy.observe(&id, &observation);
                     dispatch.observe(&id, &observation.requests);
@@ -316,10 +359,19 @@ async fn run(
                 };
                 if let Some((id, ordinal)) = completion_ids.remove(&task_id) {
                     match result {
-                        Ok(ChildCompletion::Settled) => { noticed.insert(id.clone(), ordinal); retry.remove(&id); }
+                        Ok(ChildCompletion::Settled) => { noticed.insert(id.clone(), ordinal); retry.remove(&id); parked_behind.remove(&id); }
                         Ok(ChildCompletion::RetryPark | ChildCompletion::AwaitingReview | ChildCompletion::Draining) => {
+                            parked_behind.remove(&id);
                             let (next, _) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), None);
                             retry.insert(id, next);
+                        }
+                        Ok(ChildCompletion::Held { give_up_at_ms }) => {
+                            let remaining = u64::try_from(give_up_at_ms.saturating_sub(mj_core::clock::epoch_millis())).unwrap_or(0);
+                            retry.insert(id, CompletionRetry::waiting(ordinal, Some(Instant::now() + Duration::from_millis(remaining))));
+                        }
+                        Ok(ChildCompletion::ParkAfterParentTurn { parent }) => {
+                            parked_behind.insert(id.clone(), parent);
+                            retry.insert(id, CompletionRetry::waiting(ordinal, None));
                         }
                         Err(error) => {
                             let failure = format!("{error:#}");
@@ -410,6 +462,7 @@ async fn complete_child(
         work,
         relation,
         observation.in_flight,
+        observation.work_liveness,
         outcome,
         review_open,
     )
@@ -422,6 +475,7 @@ async fn settle_child(
     work: crate::upgrade::Work,
     relation: mj_core::subagent::SubagentRecord,
     in_flight: Vec<String>,
+    liveness: Option<mj_core::work_facts::WorkLiveness>,
     outcome: mj_core::state::MaterializedTurnOutcome,
     review_open: bool,
 ) -> Result<ChildCompletion> {
@@ -456,16 +510,29 @@ async fn settle_child(
     if review_open {
         return Ok(ChildCompletion::AwaitingReview);
     }
-    if relation.noticed_turn != Some(outcome.completed_ordinal) {
-        let reminded = backend
-            .remind_subagent_to_hand_back(&child_id, relation.handback_tool, &outcome, &in_flight)
+    // A reminder turn is judged every time: whether its child is held depends
+    // on the worker's liveness, which changes without a new turn.
+    if relation.noticed_turn != Some(outcome.completed_ordinal)
+        || mj_core::subagent::is_handback_reminder(&outcome.command_id)
+    {
+        let nudge = backend
+            .remind_subagent_to_hand_back(
+                &child_id,
+                relation.handback_tool,
+                &outcome,
+                liveness.as_ref(),
+                &in_flight,
+            )
             .await?;
+        if let crate::server_runtime::api::ReportNudge::Holding { give_up_at_ms } = nudge {
+            return Ok(ChildCompletion::Held { give_up_at_ms });
+        }
         let id = child_id.clone();
         tokio::task::spawn_blocking(move || {
             crate::database::mark_subagent_turn_noticed(&id, outcome.completed_ordinal)
         })
         .await??;
-        if reminded {
+        if nudge == crate::server_runtime::api::ReportNudge::Pending {
             return Ok(ChildCompletion::Settled);
         }
     }
@@ -512,6 +579,22 @@ async fn settle_child(
         crate::server_runtime::api::ChildReport::Awaiting => {
             return Ok(ChildCompletion::RetryPark);
         }
+    }
+    // Stopping the child stops the processes it started. Its parent may answer
+    // "continue" to the report it just received, so the park waits for the end
+    // of the parent turn that received it.
+    if backend
+        .park_waits_for_parent_turn(
+            &relation.parent_session_id,
+            &child_id,
+            outcome.completed_ordinal,
+            liveness.as_ref(),
+        )
+        .await?
+    {
+        return Ok(ChildCompletion::ParkAfterParentTurn {
+            parent: relation.parent_session_id,
+        });
     }
     let Ok(_work) = crate::upgrade::activity_unless_draining("delegation child park") else {
         return Ok(ChildCompletion::Draining);
@@ -844,6 +927,8 @@ mod tests {
             completed: Vec::new(),
             in_flight: Vec::new(),
             credential_signal: None,
+            work_liveness: None,
+            undelivered_mailbox_event_keys: Vec::new(),
             outcome: Some(turn),
         };
         assert!(matches!(
@@ -926,6 +1011,7 @@ mod tests {
                 crate::upgrade::activity_unless_draining("test completion").unwrap(),
                 stored.clone(),
                 Vec::new(),
+                None,
                 outcome.clone(),
                 review_open,
             )
@@ -1035,6 +1121,8 @@ mod tests {
             completed: Vec::new(),
             in_flight: Vec::new(),
             credential_signal: None,
+            work_liveness: None,
+            undelivered_mailbox_event_keys: Vec::new(),
             outcome: Some(newer),
         };
         let complete = || {
@@ -1180,6 +1268,8 @@ mod tests {
                 completed: Vec::new(),
                 in_flight: Vec::new(),
                 credential_signal: None,
+                work_liveness: None,
+                undelivered_mailbox_event_keys: Vec::new(),
                 outcome: Some(mj_core::state::MaterializedTurnOutcome {
                     work_facts: None,
                     answered_through: None,
@@ -1205,5 +1295,447 @@ mod tests {
                 "{child} settles"
             );
         }
+    }
+
+    // Everything a held-child test needs: a running parent, a child that has
+    // the handback tool, and a park that counts its attempts.
+    struct HeldChild {
+        manager: crate::daemon::tests::TestRemoteManager,
+        state: Arc<RuntimeState>,
+        backend: Arc<ApiBackend>,
+        parks: Arc<ToggleParent>,
+    }
+
+    struct ToggleParent {
+        running: std::sync::atomic::AtomicBool,
+        parks: AtomicUsize,
+    }
+    impl ExportRuntime for ToggleParent {
+        fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
+            matches!(session_id, "parent" | "child").then(|| {
+                crate::daemon::tests::runtime_test_session(
+                    session_id,
+                    "workspace",
+                    if session_id == "parent" && !self.running.load(Ordering::SeqCst) {
+                        mj_core::state::SessionState::Stopped
+                    } else {
+                        mj_core::state::SessionState::Running
+                    },
+                )
+            })
+        }
+        fn checkpoint_now(
+            &self,
+            _: String,
+        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+            Box::pin(async { anyhow::bail!("a park does not checkpoint") })
+        }
+        fn park_subagent(self: Arc<Self>, _: String) -> BoxFuture<'static, Result<ParkOutcome>> {
+            Box::pin(async move {
+                self.parks.fetch_add(1, Ordering::SeqCst);
+                Ok(ParkOutcome::Parked)
+            })
+        }
+    }
+
+    impl HeldChild {
+        async fn new(name: &str) -> Self {
+            let workspace = crate::database::create_workspace(name).unwrap();
+            let parent = crate::daemon::tests::runtime_test_session(
+                "parent",
+                &workspace.id,
+                mj_core::state::SessionState::Running,
+            );
+            let child = crate::daemon::tests::runtime_test_session(
+                "child",
+                &workspace.id,
+                mj_core::state::SessionState::Running,
+            );
+            crate::database::save_session(&parent).unwrap();
+            let mut relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
+            relation.handback_tool = true;
+            crate::database::save_subagent_session(&child, &relation).unwrap();
+            let manager =
+                crate::daemon::tests::TestRemoteManager::for_sessions(&["child", "parent"]).await;
+            let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
+            let parks = Arc::new(ToggleParent {
+                running: true.into(),
+                parks: AtomicUsize::new(0),
+            });
+            let backend = Arc::new(ApiBackend::new(
+                state.session_manager.client(),
+                Arc::new(|_| None),
+                parks.clone(),
+            ));
+            state.install_report_backend(&backend);
+            Self {
+                manager,
+                state,
+                backend,
+                parks,
+            }
+        }
+
+        /// The child idle after `turn`, as its worker published it.
+        async fn child_ended(&self, turn: &mj_core::state::MaterializedTurnOutcome) {
+            publish_idle_child(&self.manager, turn).await;
+        }
+
+        /// What the delegation loop does with the child's ended turn, and the
+        /// commands it sent the child's worker meanwhile.
+        async fn settle(
+            &mut self,
+            liveness: Option<mj_core::work_facts::WorkLiveness>,
+            outcome: &mj_core::state::MaterializedTurnOutcome,
+        ) -> (
+            ChildCompletion,
+            Vec<(String, String, mj_core::relay::RelayCommand)>,
+        ) {
+            let stored = crate::database::load_subagent("child").unwrap().unwrap();
+            let (done, sent) = tokio::join!(
+                settle_child(
+                    &self.state,
+                    &self.backend,
+                    crate::upgrade::activity_unless_draining("test completion").unwrap(),
+                    stored,
+                    Vec::new(),
+                    liveness,
+                    outcome.clone(),
+                    false,
+                ),
+                self.manager.accept_submissions()
+            );
+            (done.unwrap(), sent)
+        }
+
+        /// The parent's view with the given facts, waited for until the
+        /// actor serves it.
+        async fn parent_view(
+            &self,
+            execution: mj_core::state::MaterializedExecutionState,
+            latest_ordinal: u64,
+            undelivered: Vec<String>,
+        ) {
+            let mut view = crate::daemon::tests::ready_startup_view();
+            let snapshot = view.snapshot.as_mut().unwrap();
+            snapshot.materialized.execution = execution;
+            let mut operational = (*snapshot.operational).clone();
+            operational.latest_ordinal = latest_ordinal;
+            operational.undelivered_mailbox_event_keys = undelivered;
+            snapshot.operational = operational.into();
+            self.manager
+                .publisher
+                .publish("parent".into(), view)
+                .await
+                .unwrap();
+            let handle = self.state.session_manager.client().session("parent".into()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while handle
+                    .view()
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|snapshot| snapshot.operational.latest_ordinal != latest_ordinal)
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the parent's view is served");
+        }
+
+        fn told(&self) -> usize {
+            crate::database::pending_mailbox_events(10).unwrap().len()
+        }
+    }
+
+    fn turn_at(
+        command_id: &str,
+        completed_ordinal: u64,
+        completed_at_ms: i64,
+        work_facts: Option<mj_core::work_facts::WorkFacts>,
+    ) -> mj_core::state::MaterializedTurnOutcome {
+        let mut turn = store_finished_turn("child", command_id, completed_ordinal);
+        turn.completed_at_ms = completed_at_ms;
+        turn.work_facts = work_facts;
+        // The readers' snapshot holds the same turn as the observation.
+        let mut conversation = mj_core::state::MaterializedSession::empty("child");
+        conversation.applied_event_ordinal = completed_ordinal;
+        conversation.applied_event_digest = format!("{completed_ordinal:064x}");
+        conversation.last_turn_outcome = Some(turn.clone());
+        crate::database::save_materialized_session(&conversation).unwrap();
+        turn
+    }
+
+    fn liveness(completed_ordinal: u64, alive: u32) -> Option<mj_core::work_facts::WorkLiveness> {
+        Some(mj_core::work_facts::WorkLiveness {
+            completed_ordinal,
+            alive,
+            checked_at_ms: 0,
+        })
+    }
+
+    fn one_running_process() -> mj_core::work_facts::WorkFacts {
+        use mj_core::work_facts::*;
+        WorkFacts {
+            observed_at_ms: 0,
+            processes: Observed::Known(ProcessFacts {
+                running: 1,
+                shown: vec![RunningProcess {
+                    pid: 41,
+                    elapsed_secs: 12,
+                    command: "cargo test".into(),
+                    detached: false,
+                }],
+                omitted: 0,
+                identities: vec![ProcessIdentity {
+                    pid: 41,
+                    start: "s".into(),
+                }],
+                unattributed: 0,
+            }),
+            worktree: Observed::unavailable("not under test"),
+        }
+    }
+
+    fn isolated(test: &str, instance: &str) -> bool {
+        const CHILD: &str = "MJ_TEST_DELEGATION_HOLD";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), test))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", instance)
+            .isolated_store(root.path())
+            .run();
+        false
+    }
+
+    // A child that ended its reminder turn waiting for its own processes is
+    // neither reported nor parked. When they exit it is woken once; after the
+    // give-up time it is asked once to hand back what it has, and only if that
+    // turn also ends without a handback is its last message reported.
+    #[tokio::test]
+    async fn a_held_child_is_woken_once_and_given_up_on_only_after_its_deadline() {
+        if !isolated(
+            "a_held_child_is_woken_once_and_given_up_on_only_after_its_deadline",
+            "delegation-held-child",
+        ) {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut held = HeldChild::new("held child").await;
+        let now = mj_core::clock::epoch_millis();
+        let reminder = mj_core::subagent::handback_reminder_command_id(10);
+        let turn = turn_at(&reminder, 20, now, Some(one_running_process()));
+        held.child_ended(&turn).await;
+
+        // Waiting: no report, no park, no prompt, and nothing marked. Judged
+        // again from the same state, as a restarted loop would.
+        for _ in 0..2 {
+            let (done, sent) = held.settle(liveness(20, 2), &turn).await;
+            assert!(
+                matches!(done, ChildCompletion::Held { give_up_at_ms } if give_up_at_ms == now + mj_core::subagent::HOLD_GIVE_UP_MS)
+            );
+            assert!(sent.is_empty(), "{sent:?}");
+        }
+        assert_eq!(held.parks.parks.load(Ordering::SeqCst), 0);
+        assert_eq!(held.told(), 0);
+        assert_eq!(
+            crate::database::load_subagent("child").unwrap().unwrap().noticed_turn,
+            None
+        );
+
+        // The processes exited: one wake prompt, still no report or park.
+        let (done, sent) = held.settle(liveness(20, 0), &turn).await;
+        assert!(matches!(done, ChildCompletion::Settled));
+        assert_eq!(
+            sent,
+            vec![(
+                "child".to_owned(),
+                "hold-wake-20".to_owned(),
+                mj_core::relay::RelayCommand::HoldFollowUp {
+                    completed_command_id: reminder.clone(),
+                    completed_ordinal: 20,
+                    kind: mj_core::subagent::HoldFollowUpKind::ProcessesExited,
+                    running: Vec::new(),
+                }
+            )]
+        );
+        assert_eq!(held.parks.parks.load(Ordering::SeqCst), 0);
+        assert_eq!(held.told(), 0);
+
+        // The woken child ended its turn without a handback: it is reminded
+        // under the reminder's own id, not woken again, and held afresh.
+        let woken = turn_at("hold-wake-20", 30, now, None);
+        held.child_ended(&woken).await;
+        let (done, sent) = held.settle(None, &woken).await;
+        assert!(matches!(done, ChildCompletion::Settled));
+        assert_eq!(
+            sent.iter().map(|(_, id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["handback-reminder-30"]
+        );
+
+        // Past the deadline with processes still running: one give-up prompt
+        // naming them.
+        let stale = now - mj_core::subagent::HOLD_GIVE_UP_MS - 1_000;
+        let reminder = mj_core::subagent::handback_reminder_command_id(30);
+        let turn = turn_at(&reminder, 40, stale, Some(one_running_process()));
+        held.child_ended(&turn).await;
+        let (done, sent) = held.settle(liveness(40, 1), &turn).await;
+        assert!(matches!(done, ChildCompletion::Settled));
+        let [(_, id, command)] = sent.as_slice() else {
+            panic!("exactly one give-up prompt: {sent:?}");
+        };
+        assert_eq!(id, "hold-give-up-40");
+        assert!(matches!(
+            command,
+            mj_core::relay::RelayCommand::HoldFollowUp {
+                kind: mj_core::subagent::HoldFollowUpKind::GiveUp,
+                running,
+                ..
+            } if running.len() == 1 && running[0].contains("cargo test")
+        ));
+        assert_eq!(held.parks.parks.load(Ordering::SeqCst), 0);
+
+        // The give-up turn ended without a handback: its last message is the
+        // report, and the child is parked.
+        let gave_up = turn_at("hold-give-up-40", 50, now, None);
+        held.child_ended(&gave_up).await;
+        let (done, sent) = held.settle(None, &gave_up).await;
+        assert!(matches!(done, ChildCompletion::Settled));
+        assert!(sent.is_empty(), "{sent:?}");
+        assert_eq!(held.told(), 1, "the parent hears of it once");
+        assert_eq!(held.parks.parks.load(Ordering::SeqCst), 1);
+    }
+
+    // A park stops the processes the child started, so a told child with live
+    // processes waits for the end of the parent turn that received its report,
+    // and the parent's answer to it ends the park for good.
+    #[tokio::test]
+    async fn a_told_child_with_live_processes_is_parked_after_its_parents_turn() {
+        if !isolated(
+            "a_told_child_with_live_processes_is_parked_after_its_parents_turn",
+            "delegation-park-after-parent-turn",
+        ) {
+            return;
+        }
+        use mj_core::state::MaterializedExecutionState::{Idle, Running};
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut held = HeldChild::new("park gate").await;
+        let turn = turn_at("turn", 10, 1, None);
+        held.child_ended(&turn).await;
+        assert!(
+            crate::database::record_subagent_handback(
+                "child",
+                &mj_core::subagent::SubagentHandback {
+                    command_id: "turn".into(),
+                    message: "done".into(),
+                    recorded_at_ms: 1,
+                },
+            )
+            .unwrap()
+        );
+        let parked = |held: &HeldChild| held.parks.parks.load(Ordering::SeqCst);
+
+        // The parent is still in the turn that will receive the report.
+        held.parent_view(Running { started_at_ms: 1 }, 1, Vec::new()).await;
+        let (done, _) = held.settle(liveness(10, 1), &turn).await;
+        assert!(matches!(
+            done,
+            ChildCompletion::ParkAfterParentTurn { ref parent } if parent == "parent"
+        ));
+        assert_eq!((held.told(), parked(&held)), (1, 0));
+
+        // The parent's worker accepted the report but has not handed it to
+        // the agent: the idle parent is about to run the turn that gets it.
+        let key = crate::database::load_report_mail("parent", "child")
+            .unwrap()
+            .expect("the report is in the outbox")
+            .key;
+        crate::database::mark_mailbox_event_accepted(&key, "mailbox-command", 12).unwrap();
+        held.parent_view(Idle, 12, vec![key.clone()]).await;
+        let (done, _) = held.settle(liveness(10, 1), &turn).await;
+        assert!(matches!(done, ChildCompletion::ParkAfterParentTurn { .. }));
+        assert_eq!(parked(&held), 0);
+
+        // Delivered, and the parent idle again: its turn has ended.
+        held.parent_view(Idle, 13, Vec::new()).await;
+        let (done, _) = held.settle(liveness(10, 1), &turn).await;
+        assert!(matches!(done, ChildCompletion::Settled));
+        assert_eq!(parked(&held), 1);
+    }
+
+    // Control: nothing alive, nothing to wait for; and a parent that is no
+    // longer running cannot answer, so it holds nothing back.
+    #[tokio::test]
+    async fn a_child_without_live_processes_or_with_a_stopped_parent_is_parked_at_once() {
+        if !isolated(
+            "a_child_without_live_processes_or_with_a_stopped_parent_is_parked_at_once",
+            "delegation-park-gate-open",
+        ) {
+            return;
+        }
+        use mj_core::state::MaterializedExecutionState::Running;
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut held = HeldChild::new("park gate open").await;
+        let turn = turn_at("turn", 10, 1, None);
+        held.child_ended(&turn).await;
+        assert!(
+            crate::database::record_subagent_handback(
+                "child",
+                &mj_core::subagent::SubagentHandback {
+                    command_id: "turn".into(),
+                    message: "done".into(),
+                    recorded_at_ms: 1,
+                },
+            )
+            .unwrap()
+        );
+        held.parent_view(Running { started_at_ms: 1 }, 1, Vec::new()).await;
+        let (done, _) = held.settle(liveness(10, 0), &turn).await;
+        assert!(matches!(done, ChildCompletion::Settled));
+        assert_eq!(held.parks.parks.load(Ordering::SeqCst), 1);
+
+        held.parks.running.store(false, Ordering::SeqCst);
+        let (done, _) = held.settle(liveness(10, 3), &turn).await;
+        assert!(matches!(done, ChildCompletion::Settled));
+        assert_eq!(held.parks.parks.load(Ordering::SeqCst), 2);
+    }
+
+    // The parent's answer to a report reaches the child's outbox before the
+    // parent's turn ends. The park decision, serialized with the lifecycle,
+    // sees it and leaves the worker running.
+    #[tokio::test]
+    async fn a_parent_message_in_the_outbox_prevents_the_park() {
+        if !isolated(
+            "a_parent_message_in_the_outbox_prevents_the_park",
+            "delegation-park-outbox-message",
+        ) {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let held = HeldChild::new("outbox message").await;
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "subagent-message-r1".into(),
+            source: "mjolnir".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                text: "continue".into(),
+            },
+        };
+        crate::database::enqueue_mailbox_event(
+            &event.key,
+            "child",
+            &serde_json::to_string(&event).unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            held.state.park_subagent("child".into()).await.unwrap(),
+            ParkOutcome::Busy
+        );
     }
 }

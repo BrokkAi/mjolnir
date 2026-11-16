@@ -1383,14 +1383,26 @@ impl TestRemoteManager {
 
     /// A manager whose one session is `session_id`.
     pub(super) async fn for_session(session_id: &str) -> Self {
+        Self::for_sessions(&[session_id]).await
+    }
+
+    /// A manager whose sessions are `session_ids`; the first is the one the
+    /// tests wait on.
+    pub(super) async fn for_sessions(session_ids: &[&str]) -> Self {
+        let session_id = session_ids[0];
         let channels =
             crate::session_manager::spawn_remote_session_manager().expect("remote manager");
-        channels.targets.send_replace(vec![RelaySessionTarget {
-            session_id: session_id.to_owned(),
-            spec: CommandSpec::new("true", Vec::<String>::new()),
-            worker_recovery: None,
-            project_memory: None,
-        }]);
+        channels.targets.send_replace(
+            session_ids
+                .iter()
+                .map(|id| RelaySessionTarget {
+                    session_id: (*id).to_owned(),
+                    spec: CommandSpec::new("true", Vec::<String>::new()),
+                    worker_recovery: None,
+                    project_memory: None,
+                })
+                .collect(),
+        );
         let manager = Self {
             control: channels.control,
             requests: channels.requests,
@@ -1408,7 +1420,43 @@ impl TestRemoteManager {
             .wait_for_session(session_id, Duration::from_secs(5))
             .await
             .expect("remote manager creates test session");
+        for other in &session_ids[1..] {
+            manager
+                .publisher
+                .publish((*other).to_owned(), ManagedSessionView::default())
+                .await
+                .expect("publish test session view");
+            manager
+                .control
+                .wait_for_session(other, Duration::from_secs(5))
+                .await
+                .expect("remote manager creates test session");
+        }
         manager
+    }
+
+    /// Accepts every command the daemon submits until none arrives for a
+    /// moment, and returns them with the session each went to. Run it beside
+    /// the call under test, which waits for each acceptance.
+    pub(super) async fn accept_submissions(
+        &mut self,
+    ) -> Vec<(String, String, mj_core::relay::RelayCommand)> {
+        let mut accepted = Vec::new();
+        while let Ok(Some(request)) =
+            tokio::time::timeout(Duration::from_millis(300), self.requests.recv()).await
+        {
+            if let crate::session_manager::RemoteSessionRequest::Submit {
+                session_id,
+                command_id,
+                command,
+                reply,
+            } = request
+            {
+                let _ = reply.send(Ok(99));
+                accepted.push((session_id, command_id, command));
+            }
+        }
+        accepted
     }
 }
 

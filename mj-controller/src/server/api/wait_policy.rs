@@ -72,6 +72,12 @@ pub struct WaitObservation {
     /// Mjolnir reminds the child to hand it back, so like an armed retry the
     /// turn is not an ending yet.
     pub report_pending_for: Option<String>,
+    /// Whether the processes the child's last turn left running are alive, as
+    /// its worker published it. Only the live snapshot carries it.
+    pub work_liveness: Option<mj_core::work_facts::WorkLiveness>,
+    /// When a held child, waiting for those processes, is asked to hand back
+    /// what it has. The wait wakes then.
+    pub hold_give_up_at_ms: Option<i64>,
     /// The report a child handed back, and the turn it answers.
     pub handback: Option<(String, String)>,
 }
@@ -241,10 +247,26 @@ impl WaitObservation {
             .iter()
             .map(|turn| turn.command_id.as_str())
             .collect::<Vec<_>>();
-        match mj_core::subagent::report_state(handback_tool, report, Some(turn), &in_flight, now_ms)
-        {
+        match mj_core::subagent::report_state(
+            handback_tool,
+            report,
+            Some(turn),
+            self.work_liveness.as_ref(),
+            &in_flight,
+            now_ms,
+        ) {
             mj_core::subagent::ReportState::Pending { .. } => {
                 self.report_pending_for = Some(turn.command_id.clone());
+            }
+            // A held child waits for its own processes: its turn is no ending
+            // yet, and the wait wakes when the hold gives up.
+            mj_core::subagent::ReportState::Held {
+                give_up_at_ms,
+                follow_up,
+                ..
+            } => {
+                self.report_pending_for = Some(turn.command_id.clone());
+                self.hold_give_up_at_ms = follow_up.is_none().then_some(give_up_at_ms);
             }
             mj_core::subagent::ReportState::Delivered(message) => {
                 self.handback = Some((turn.command_id.clone(), message));
