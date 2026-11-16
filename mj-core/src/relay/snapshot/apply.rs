@@ -767,22 +767,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 ..
             } = outcome
             {
-                snapshot.work_liveness =
-                    work_facts
-                        .as_deref()
-                        .and_then(|facts| match &facts.processes {
-                            crate::work_facts::Observed::Known(processes)
-                                if !processes.identities.is_empty() =>
-                            {
-                                Some(crate::work_facts::WorkLiveness {
-                                    completed_ordinal: event.ordinal,
-                                    alive: u32::try_from(processes.identities.len())
-                                        .unwrap_or(u32::MAX),
-                                    checked_at_ms: facts.observed_at_ms,
-                                })
-                            }
-                            _ => None,
-                        });
+                snapshot.work_liveness = crate::work_facts::WorkLiveness::from_turn_facts(
+                    event.ordinal,
+                    work_facts.as_deref(),
+                );
                 // Always `KeepCurrent`; see `TurnCompletion` for why the field
                 // is still written.
                 snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
@@ -1429,6 +1417,19 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             ..
         } => {
             if let Some(turn) = autonomous {
+                // The same rule as a prompted turn's outcome: whatever started
+                // the turn, its end decides what the worker watches.
+                snapshot.work_liveness = crate::work_facts::WorkLiveness::from_turn_facts(
+                    event.ordinal,
+                    turn.work_facts.as_deref(),
+                );
+                snapshot.harness_turn_work =
+                    turn.work_facts
+                        .as_deref()
+                        .map(|facts| crate::relay::HarnessTurnWork {
+                            completed_ordinal: event.ordinal,
+                            facts: facts.clone(),
+                        });
                 snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
                     command_id: crate::continuation::harness_turn_id(turn.start_ordinal),
                     completed_ordinal: event.ordinal,
