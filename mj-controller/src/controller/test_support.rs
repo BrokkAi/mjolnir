@@ -155,6 +155,7 @@ pub(super) fn write_network_checkpoint_archive(
             unstaged_patch: Vec::new(),
             untracked_tar: Vec::new(),
             operation_payloads: None,
+            linked_worktrees: Vec::new(),
         }],
         Vec::new(),
     )

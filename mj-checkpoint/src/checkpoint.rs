@@ -320,6 +320,22 @@ struct StagedRepository {
     conflicted_worktree_tar_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     operation_state_tar_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    linked_worktrees: Vec<StagedLinkedWorktree>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StagedLinkedWorktree {
+    metadata: mj_core::archive::LinkedWorktreeMetadata,
+    staged_patch_path: PathBuf,
+    unstaged_patch_path: PathBuf,
+    untracked_tar_path: PathBuf,
+    /// Present exactly when `metadata.git_operation` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conflicted_worktree_tar_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation_state_tar_path: Option<PathBuf>,
 }
 
 /// A session delta is measured against every origin ref, so a repository that

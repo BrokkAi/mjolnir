@@ -44,6 +44,11 @@ impl GitCommandRunner for CollectionGit {
                 )
             }
             Some("show-ref") => (1, Vec::new()),
+            // Only the checkout itself: no linked worktrees.
+            Some("worktree") => (
+                0,
+                format!("worktree {}\n", repository.display()).into_bytes(),
+            ),
             Some("rev-parse")
                 if arguments
                     .iter()
@@ -161,6 +166,7 @@ fn repository(id: &str) -> RepositorySnapshot {
         unstaged_patch: format!("unstaged-{id}").into_bytes(),
         untracked_tar: tar_with_file("scripts/tool.sh", b"#!/bin/sh\n", 0o755),
         operation_payloads: None,
+        linked_worktrees: Vec::new(),
     }
 }
 
@@ -1545,8 +1551,14 @@ fn untracked_tar_preserves_executable_mode_and_safe_symlink() {
     let paths = b"scripts/tool\0scripts/current\0".to_vec();
     #[cfg(not(unix))]
     let paths = b"scripts/tool\0".to_vec();
-    let tar =
-        build_untracked_tar(source.path(), &paths, UntrackedFiles::Include, &|_| Ok(())).unwrap();
+    let tar = build_untracked_tar(
+        source.path(),
+        &paths,
+        UntrackedFiles::Include,
+        &Default::default(),
+        &|_| Ok(()),
+    )
+    .unwrap();
     validate_untracked_tar(&tar).unwrap();
 
     let destination = tempfile::tempdir().unwrap();
@@ -1580,12 +1592,18 @@ fn untracked_tar_progress_can_cancel_before_opening_the_next_file() {
     let paths = b"first.txt\0missing.txt\0";
     let seen = std::sync::Mutex::new(Vec::new());
 
-    let error = build_untracked_tar(source.path(), paths, UntrackedFiles::Include, &|progress| {
-        let GitSnapshotProgress::UntrackedFile { current, total, .. } = progress;
-        seen.lock().unwrap().push((current, total));
-        ensure!(current < 2, "cancelled by test");
-        Ok(())
-    })
+    let error = build_untracked_tar(
+        source.path(),
+        paths,
+        UntrackedFiles::Include,
+        &Default::default(),
+        &|progress| {
+            let GitSnapshotProgress::UntrackedFile { current, total, .. } = progress;
+            seen.lock().unwrap().push((current, total));
+            ensure!(current < 2, "cancelled by test");
+            Ok(())
+        },
+    )
     .unwrap_err();
 
     assert!(error.to_string().contains("cancelled by test"));
@@ -2612,11 +2630,10 @@ fn nested_worktree_checkpoint_names_the_directory_and_explicit_scratch_exclusion
     initialize_repository(source.path());
     commit_file(source.path(), "tracked.txt", b"base\n", "base");
     let base = git_line(source.path(), &["rev-parse", "HEAD"]);
+    // An independent clone is a different repository: its work cannot travel
+    // in this one's snapshot. (A linked worktree of this repository can.)
     let nested = ".mj/csharp-parity/bin-src";
-    git(
-        source.path(),
-        &["worktree", "add", "--detach", nested, "HEAD"],
-    );
+    git(source.path(), &["clone", "--no-hardlinks", ".", nested]);
     fs::write(
         source.path().join(nested).join("valuable.txt"),
         b"nested work\n",

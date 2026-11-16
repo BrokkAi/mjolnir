@@ -713,7 +713,13 @@ fn ignore_nested_repositories_exports_outer_work_without_persisting_the_omission
     assert_eq!(fs::read(checkout.join("README.md")).unwrap(), b"unstaged\n");
     assert_eq!(git(&checkout, &["show", ":README.md"]), "staged");
     assert_eq!(fs::read(checkout.join("keep.txt")).unwrap(), b"untracked\n");
-    assert!(!checkout.join(".scratch").exists());
+    // The registered worktree is the repository's own work and comes back;
+    // only the independent clone, which the user chose to omit, does not.
+    assert_eq!(
+        fs::read(checkout.join(nested).join("valuable.txt")).unwrap(),
+        b"nested work\n"
+    );
+    assert!(!checkout.join(".scratch/independent").exists());
     assert_eq!(
         fs::read(repository.join(".git/info/exclude")).unwrap(),
         exclude
@@ -1157,6 +1163,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
         untracked_tar_path: "repositories/app/untracked.tar".into(),
         conflicted_worktree_tar_path: None,
         operation_state_tar_path: None,
+        linked_worktrees: Vec::new(),
     }];
     let path = restored_native_relative_path(
         HarnessKind::Grok,
@@ -1472,6 +1479,7 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
         untracked_tar_path: "repositories/app/untracked.tar".into(),
         conflicted_worktree_tar_path: None,
         operation_state_tar_path: None,
+        linked_worktrees: Vec::new(),
     }];
     let path = restored_native_relative_path(
         HarnessKind::Claude,
@@ -1520,6 +1528,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
         untracked_tar_path: "repositories/app/untracked.tar".into(),
         conflicted_worktree_tar_path: None,
         operation_state_tar_path: None,
+        linked_worktrees: Vec::new(),
     }];
     let path = restored_native_relative_path(
             HarnessKind::Kimi,
@@ -2140,6 +2149,7 @@ fn codex_root_archive_throughput() {
             unstaged_patch: Vec::new(),
             untracked_tar: Vec::new(),
             operation_payloads: None,
+            linked_worktrees: Vec::new(),
         })
         .collect::<Vec<_>>();
     let archive_started = std::time::Instant::now();
@@ -2786,6 +2796,287 @@ fn a_subdirectory_session_restores_work_across_its_whole_checkout() {
     );
     restore_single_repository_onto_branch(&archive_path, &other, "mj/other", &SystemGit).unwrap();
     assert_restored(&other);
+}
+
+/// Agents make linked worktrees inside their checkout (`git worktree add
+/// .mj/lanes/x`); a recovery copy must carry each one's HEAD, index, files and
+/// lock, and bring them back at the same place.
+#[test]
+fn linked_worktrees_inside_a_clone_survive_a_recovery_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, archive_path) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let base = git(&repository, &["rev-parse", "HEAD"]);
+    spec.repositories[0].capture = CheckpointRepositoryCapture::ManagedClone {
+        base_commit: base.clone(),
+    };
+    let configure = |directory: &Path| {
+        git(directory, &["config", "user.email", "hel@example.test"]);
+        git(directory, &["config", "user.name", "Hel Test"]);
+    };
+    // A lane on its own branch with a commit, a staged edit, an unstaged
+    // edit and an untracked file with a non-ASCII name.
+    git(
+        &repository,
+        &["worktree", "add", ".mj/lanes/a", "-b", "lane-a"],
+    );
+    let lane_a = repository.join(".mj/lanes/a");
+    configure(&lane_a);
+    fs::write(lane_a.join("a.txt"), b"committed in a\n").unwrap();
+    git(&lane_a, &["add", "a.txt"]);
+    git(&lane_a, &["commit", "-m", "lane a"]);
+    fs::write(lane_a.join("README.md"), b"staged in a\n").unwrap();
+    git(&lane_a, &["add", "README.md"]);
+    fs::write(lane_a.join("a.txt"), b"unstaged in a\n").unwrap();
+    fs::write(lane_a.join("ü-notes.txt"), b"untracked in a\n").unwrap();
+    // A lane nested inside the first one.
+    git(&lane_a, &["worktree", "add", ".mj/lanes/c", "-b", "lane-c"]);
+    fs::write(lane_a.join(".mj/lanes/c/c.txt"), b"untracked in c\n").unwrap();
+    // A detached lane whose HEAD is a commit no ref holds.
+    git(&repository, &["worktree", "add", "--detach", ".mj/lanes/d"]);
+    let lane_d = repository.join(".mj/lanes/d");
+    configure(&lane_d);
+    fs::write(lane_d.join("d.txt"), b"only d holds this\n").unwrap();
+    git(&lane_d, &["add", "d.txt"]);
+    git(&lane_d, &["commit", "-m", "detached lane"]);
+    // A locked lane, and a registered lane whose directory is gone.
+    git(
+        &repository,
+        &["worktree", "add", ".mj/lanes/l", "-b", "lane-l"],
+    );
+    git(
+        &repository,
+        &["worktree", "lock", "--reason", "busy", ".mj/lanes/l"],
+    );
+    git(
+        &repository,
+        &["worktree", "add", ".mj/lanes/x", "-b", "lane-x"],
+    );
+    fs::remove_dir_all(repository.join(".mj/lanes/x")).unwrap();
+    fs::write(
+        repository.join("keep.txt"),
+        b"untracked in the main checkout\n",
+    )
+    .unwrap();
+
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&archive_path).unwrap();
+    assert_eq!(
+        archive.manifest.schema_version,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+    );
+    let recorded = archive.manifest.repositories[0]
+        .linked_worktrees
+        .iter()
+        .map(|worktree| worktree.metadata.path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded,
+        [
+            ".mj/lanes/a",
+            ".mj/lanes/a/.mj/lanes/c",
+            ".mj/lanes/d",
+            ".mj/lanes/l"
+        ]
+        .map(PathBuf::from),
+        "the missing lane is left out and parents come before children"
+    );
+    let main_tar = archive
+        .payload_by_role(&PayloadRole::GitUntrackedTar {
+            repository_id: "app".into(),
+        })
+        .unwrap();
+    let main_files = tar::Archive::new(std::io::Cursor::new(main_tar))
+        .entries()
+        .unwrap()
+        .map(|entry| entry.unwrap().path().unwrap().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        main_files,
+        [PathBuf::from("keep.txt")],
+        "lane contents travel as the lanes' own entries"
+    );
+    assert_eq!(
+        git(&repository, &["for-each-ref", "refs/mj-checkpoint"]),
+        "",
+        "the capture removes its temporary refs"
+    );
+
+    let restored_root = temp.path().join("restored");
+    fs::create_dir(&restored_root).unwrap();
+    git(
+        &restored_root,
+        &["clone", repository.to_str().unwrap(), "app"],
+    );
+    restore_repositories(&archive_path, &restored_root, &SystemGit).unwrap();
+    let restored = restored_root.join("app");
+    for lane in [
+        ".mj/lanes/a",
+        ".mj/lanes/a/.mj/lanes/c",
+        ".mj/lanes/d",
+        ".mj/lanes/l",
+    ] {
+        let (source, copy) = (repository.join(lane), restored.join(lane));
+        assert_eq!(
+            git(&copy, &["rev-parse", "HEAD"]),
+            git(&source, &["rev-parse", "HEAD"]),
+            "{lane} HEAD"
+        );
+        let branch = |directory: &Path| {
+            let output = std::process::Command::new("git")
+                .args(["symbolic-ref", "--quiet", "HEAD"])
+                .current_dir(directory)
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        assert_eq!(branch(&copy), branch(&source), "{lane} branch");
+        assert_eq!(
+            git(&copy, &["status", "--porcelain"]),
+            git(&source, &["status", "--porcelain"]),
+            "{lane} status"
+        );
+        assert_eq!(
+            git(&copy, &["diff", "--cached"]),
+            git(&source, &["diff", "--cached"]),
+            "{lane} index"
+        );
+        assert_eq!(
+            git(&copy, &["diff"]),
+            git(&source, &["diff"]),
+            "{lane} worktree"
+        );
+    }
+    assert_eq!(
+        fs::read(restored.join(".mj/lanes/a/ü-notes.txt")).unwrap(),
+        b"untracked in a\n"
+    );
+    let lock = |checkout: &Path| {
+        let directory = git(
+            checkout,
+            &["rev-parse", "--path-format=absolute", "--git-dir"],
+        );
+        fs::read_to_string(Path::new(&directory).join("locked"))
+            .ok()
+            .map(|reason| reason.trim_end().to_owned())
+    };
+    assert_eq!(lock(&restored.join(".mj/lanes/l")).as_deref(), Some("busy"));
+    assert_eq!(lock(&restored.join(".mj/lanes/d")), None);
+    assert!(!restored.join(".mj/lanes/x").exists());
+    assert_eq!(git(&restored, &["for-each-ref", "refs/mj-checkpoint"]), "");
+
+    // A retried restore finds the worktrees it already made and leaves them.
+    let snapshot = crate::checkpoint::restore::archived_repository_snapshot(
+        &archive,
+        &archive.manifest.repositories[0],
+    )
+    .unwrap();
+    crate::archive::restore_linked_worktrees_for_test(
+        &SystemGit,
+        &restored,
+        &snapshot.linked_worktrees,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(restored.join(".mj/lanes/a/a.txt")).unwrap(),
+        b"unstaged in a\n"
+    );
+}
+
+/// A managed worktree's bundle is empty when its own HEAD has nothing beyond
+/// the base, yet a lane's commits, branch-held or detached, must still travel.
+#[test]
+fn linked_worktree_commits_travel_when_the_checkout_has_none_of_its_own() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, archive_path) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    for (lane, arguments) in [
+        ("branch", ["-b", "lane-branch"].as_slice()),
+        ("detached", ["--detach"].as_slice()),
+    ] {
+        let path = format!(".mj/lanes/{lane}");
+        let mut add = vec!["worktree", "add", path.as_str()];
+        add.extend(arguments);
+        git(&repository, &add);
+        let directory = repository.join(&path);
+        git(&directory, &["config", "user.email", "hel@example.test"]);
+        git(&directory, &["config", "user.name", "Hel Test"]);
+        fs::write(directory.join(format!("{lane}.txt")), lane.as_bytes()).unwrap();
+        git(&directory, &["add", "."]);
+        git(&directory, &["commit", "-m", lane]);
+    }
+    export_checkpoint(&spec).unwrap();
+
+    let restored_root = temp.path().join("restored");
+    fs::create_dir(&restored_root).unwrap();
+    git(
+        &restored_root,
+        &["clone", repository.to_str().unwrap(), "app"],
+    );
+    restore_repositories(&archive_path, &restored_root, &SystemGit).unwrap();
+    let restored = restored_root.join("app");
+    for lane in ["branch", "detached"] {
+        let (source, copy) = (
+            repository.join(format!(".mj/lanes/{lane}")),
+            restored.join(format!(".mj/lanes/{lane}")),
+        );
+        assert_eq!(
+            git(&copy, &["rev-parse", "HEAD"]),
+            git(&source, &["rev-parse", "HEAD"]),
+            "{lane} HEAD"
+        );
+    }
+    assert_eq!(
+        git(
+            &restored.join(".mj/lanes/branch"),
+            &["branch", "--show-current"]
+        ),
+        "lane-branch"
+    );
+    assert_eq!(
+        git(
+            &restored.join(".mj/lanes/detached"),
+            &["branch", "--show-current"]
+        ),
+        ""
+    );
+}
+
+/// A retry skips a worktree that already sits at its recorded commit, so a
+/// restore that failed after `worktree add` must not leave one behind.
+#[test]
+fn a_linked_worktree_that_fails_to_restore_leaves_nothing_for_a_retry_to_skip() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let head = git(&repository, &["rev-parse", "HEAD"]);
+    let mut snapshot = crate::archive::LinkedWorktreeSnapshot {
+        metadata: mj_core::archive::LinkedWorktreeMetadata {
+            path: PathBuf::from(".mj/lanes/a"),
+            head_commit: head,
+            branch: None,
+            lock_reason: None,
+            git_operation: None,
+        },
+        staged_patch: b"this is not a patch\n".to_vec(),
+        unstaged_patch: Vec::new(),
+        untracked_tar: Vec::new(),
+        operation_payloads: None,
+    };
+    let restore = |snapshot: &crate::archive::LinkedWorktreeSnapshot| {
+        crate::archive::restore_linked_worktrees_for_test(
+            &SystemGit,
+            &repository,
+            std::slice::from_ref(snapshot),
+        )
+    };
+    restore(&snapshot).unwrap_err();
+    assert!(!repository.join(".mj/lanes/a").exists());
+    assert!(!git(&repository, &["worktree", "list"]).contains("lanes/a"));
+
+    snapshot.staged_patch = Vec::new();
+    restore(&snapshot).unwrap();
+    assert!(repository.join(".mj/lanes/a/README.md").exists());
 }
 
 fn copy_archive_with_schema(source: &Path, destination: &Path, schema_version: u32) {
@@ -4009,7 +4300,11 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
     let readme = spec.workspace_root.join("app/README.md");
     let before = fs::read(&readme).unwrap();
 
-    for schema_version in [1, crate::archive::ARCHIVE_SCHEMA_VERSION + 1] {
+    for schema_version in [
+        1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION + 1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES + 1,
+    ] {
         let incompatible = temp
             .path()
             .join(format!("incompatible-{schema_version}.hel.zip"));

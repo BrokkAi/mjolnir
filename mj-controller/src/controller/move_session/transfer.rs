@@ -93,6 +93,7 @@ fn record_move_handoff_bases(
             unstaged_patch: Vec::new(),
             untracked_tar: Vec::new(),
             operation_payloads: None,
+            linked_worktrees: Vec::new(),
         },
         &output,
     )
