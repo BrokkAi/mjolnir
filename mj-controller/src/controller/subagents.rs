@@ -635,7 +635,10 @@ fn slot_refusal(live: &[LiveSubagent], maximum: usize) -> String {
 /// newest task, from what the store holds; see
 /// [`mj_core::subagent::has_handed_back`]. A session that is not a child, or
 /// that has never finished a turn, has not.
-pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
+pub fn subagent_has_handed_back(
+    child_session_id: &str,
+    liveness: Option<&mj_core::work_facts::WorkLiveness>,
+) -> Result<bool> {
     let Some(relation) = crate::database::load_subagent(child_session_id)? else {
         return Ok(false);
     };
@@ -657,6 +660,7 @@ pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
         &report,
         working,
         last_turn.as_ref(),
+        liveness,
         mj_core::clock::epoch_millis(),
     ))
 }
@@ -666,6 +670,7 @@ pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
 pub fn stopped_subagent(
     state: &mj_core::state::State,
     child_session_id: &str,
+    liveness: Option<&mj_core::work_facts::WorkLiveness>,
 ) -> Result<mj_core::subagent::StoppedSubagent> {
     let relation = state
         .subagents
@@ -682,7 +687,7 @@ pub fn stopped_subagent(
         child_session_id: child_session_id.to_owned(),
         title,
         task: mj_core::subagent::task_summary(&launch.initial_prompt, report_dir.as_deref()),
-        handed_back: subagent_has_handed_back(child_session_id)?,
+        handed_back: subagent_has_handed_back(child_session_id, liveness)?,
     })
 }
 

@@ -377,7 +377,7 @@ async fn run(
                             let failure = format!("{error:#}");
                             let (next, report) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), Some(failure.clone()));
                             if report {
-                                tracing::warn!(child_session_id = %id, error = %failure, retry_in_seconds = (next.at - Instant::now()).as_secs(), "delegation child completion failed; retrying with backoff");
+                                tracing::warn!(child_session_id = %id, error = %failure, retry_in_seconds = next.at.map_or(0, |at| (at - Instant::now()).as_secs()), "delegation child completion failed; retrying with backoff");
                             }
                             retry.insert(id, next);
                         }
@@ -1428,7 +1428,7 @@ mod tests {
                 .publish("parent".into(), view)
                 .await
                 .unwrap();
-            let handle = self.state.session_manager.client().session("parent".into()).await.unwrap();
+            let handle = self.state.session_manager.client().session("parent".to_owned()).await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while handle
                     .view()

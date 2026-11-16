@@ -9412,7 +9412,7 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     // No handback tool and no finished turn on record: only being parked
     // says this child's parent already has what it will get from it.
     parked_child(root.path(), child_id, parent_id, &workspace.id);
-    assert!(crate::controller::subagent_has_handed_back(child_id).unwrap());
+    assert!(crate::controller::subagent_has_handed_back(child_id, None).unwrap());
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();

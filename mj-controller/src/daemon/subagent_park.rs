@@ -35,6 +35,28 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Whether the processes a session's last finished turn left running are
+    /// still alive, as its live worker published it. `None` for a session
+    /// that is not live or whose worker publishes nothing.
+    pub(crate) async fn work_liveness(
+        &self,
+        session_id: &str,
+    ) -> Option<mj_core::work_facts::WorkLiveness> {
+        let handle = self
+            .session_manager
+            .client()
+            .session(session_id.to_owned())
+            .await
+            .ok()?;
+        handle
+            .view()
+            .snapshot
+            .as_ref()?
+            .operational
+            .work_liveness
+            .clone()
+    }
+
     /// Park a sub-agent whose turn ended and whose parent was told. A child
     /// that has work in flight or queued, or that is no longer running, is
     /// left as it is. Any failure leaves the child running; the caller logs it.

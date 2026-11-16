@@ -3447,6 +3447,22 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn subagent_work_liveness(
+        &self,
+        child_session_id: String,
+    ) -> BoxFuture<'_, Option<mj_core::work_facts::WorkLiveness>> {
+        Box::pin(async move {
+            let handle = self.session_handle(child_session_id).await.ok().flatten()?;
+            handle
+                .view()
+                .snapshot
+                .as_ref()?
+                .operational
+                .work_liveness
+                .clone()
+        })
+    }
+
     fn profile_login_errors(&self) -> Result<BTreeMap<String, String>> {
         Ok(self
             .quota_reports
