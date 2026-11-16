@@ -98,7 +98,6 @@ pub use mbx::install::{
 pub use mbx::preview_build_cache;
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
 pub(crate) use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
-use provisioning::apply_failed_new_session_rollback;
 pub use provisioning::{GitIdentity, controller_git_identity, set_controller_git_identity};
 pub(crate) use worker_binary::{
     image_worker_label, prepare_recovery_worker_binary, recorded_exit_reason,
@@ -838,34 +837,6 @@ impl Controller {
         .pop()?;
         let reason = targets::overlay_unsupported_filesystem(&filesystem)?;
         Some(format!("{filesystem} ({reason})"))
-    }
-
-    fn fail_new_session_with_cleanup(
-        &mut self,
-        session_id: &str,
-        error: anyhow::Error,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<anyhow::Error> {
-        let original = provisioning::note_new_session_launch_failure(session_id, &error);
-        let cleanup_error = self
-            .cleanup_new_session_worktree_after_failure(session_id, executor)
-            .err()
-            .map(|cleanup_error| format!("{cleanup_error:#}"));
-        if let Some(cleanup_error) = &cleanup_error {
-            tracing::warn!(
-                session_id,
-                error = %cleanup_error,
-                "new-session worktree rollback reported a cleanup failure"
-            );
-        }
-        let failure = apply_failed_new_session_rollback(
-            &mut self.state,
-            session_id,
-            &original,
-            cleanup_error,
-        );
-        self.persist_session_state(session_id)?;
-        Ok(failure)
     }
 
     pub fn register_session_with_resources(

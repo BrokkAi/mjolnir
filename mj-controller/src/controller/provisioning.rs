@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use mj_core::config::{Config, TargetTemplate, atomic_write, data_dir};
+use mj_core::config::{TargetTemplate, atomic_write, data_dir};
 use mj_core::state::{SessionState, State, TargetLocator};
 
 use crate::targets::{
@@ -660,7 +660,7 @@ impl Controller {
         let managed_checkout = match preparation {
             Ok(created) => created,
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
-                return Err(self.fail_new_session_with_cleanup(session_id, error, executor)?);
+                return Err(self.rollback_failed_new_session(session_id, error)?);
             }
             Err(error) => return Err(error),
         };
@@ -753,7 +753,6 @@ impl Controller {
                 template,&target,session_id,None,executor,&resource_name)?;
             self.state.sessions.get_mut(session_id).context("session disappeared before target reservation")?.target = Some(Box::new(reserved_target));
             self.persist_session_state(session_id)?;
-            let reserved_environment = crate::database::session_environment(session_id)?.context("target reservation has no environment")?;
 
             let tool_cache = super::tool_cache::prepare(
                 &self.config,
@@ -870,9 +869,6 @@ impl Controller {
                 },
             )
             .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));
-            let result = result.map_err(|error| {
-                error.context(failed_environment_creation_cleanup(&reserved_environment, &self.config, executor))
-            });
             tracing::debug!(
                 session_id,
                 elapsed_ms = started.elapsed().as_millis(),
@@ -881,33 +877,15 @@ impl Controller {
             result
         })();
         let result = match result {
-            Err(error)
-                if managed_checkout.is_some()
-                    && failure_disposition == ProvisioningFailureDisposition::Discard =>
-            {
-                return Err(self.fail_new_session_with_cleanup(session_id, error, executor)?);
-            }
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Preserve => {
                 Err(error)
             }
+            // Every failure from here, before or after the target was
+            // reserved, goes through the one rollback: failure on record
+            // with the target still named, retirement on an executor the
+            // create's cancellation cannot stop, and only then `Error`.
             Err(error) => {
-                // This arm (no managed worktree to unwind) is the one a
-                // provisioning failure such as a dropped target connection
-                // hits; record the diagnostic and the session-id log here too.
-                let detail = note_new_session_launch_failure(session_id, &error);
-                {
-                    let record = self.state.sessions.get_mut(session_id).unwrap();
-                    record.state = SessionState::Error;
-                    record.target = None;
-                    record.updated_at = super::now();
-                    record.last_error = Some(format!("session provisioning failed: {detail}"));
-                }
-                return match self.persist_session_state(session_id) {
-                    Ok(()) => Err(error),
-                    Err(persistence_error) => Err(error.context(format!(
-                        "persist removal of failed provisioning session {session_id}: {persistence_error:#}"
-                    ))),
-                };
+                return Err(self.rollback_failed_new_session(session_id, error)?);
             }
             Ok((locator, remainder, bundle, build_cache)) => {
                 let image = self
@@ -1365,25 +1343,6 @@ fn execute_repository_setup(
     }
     let _cloning = ProvisionStageGuard::new(executor, ProvisionStage::Cloning);
     plan.execute_concurrent(executor).map(|_| ())
-}
-
-fn failed_environment_creation_cleanup(
-    environment: &crate::database::EnvironmentRecord,
-    config: &Config,
-    executor: &(impl CommandExecutor + Sync),
-) -> String {
-    match super::environment::retire_owned_environment(
-        environment.clone(),
-        config,
-        executor,
-        super::BranchDisposition::Delete,
-        super::CheckoutDisposition::Remove,
-    ) {
-        Ok(_) => "cleanup succeeded: reserved session environment".into(),
-        Err(error) => {
-            format!("cleanup FAILED: {error:#}; reserved resources remain recorded for Destroy")
-        }
-    }
 }
 
 /// Run a provisioning plan and discover the locator it produced, tearing the
