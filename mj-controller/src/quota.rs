@@ -547,13 +547,16 @@ impl QuotaManager {
 /// keeps failing the same way is logged once, not on every refresh.
 fn log_quota_change(previous: Option<&ProfileQuota>, report: &ProfileQuota) {
     if let Some(until) = report.rate_limited_until_epoch_seconds {
-        // A hold is logged once, when it starts: the profile is not probed
-        // again until it ends.
+        // A hold is logged once, when it starts. The provider's hold and the
+        // next scheduled check differ when the hold is shorter than the
+        // regular interval.
         if previous.and_then(|previous| previous.rate_limited_until_epoch_seconds) != Some(until) {
+            let now = mj_core::clock::epoch_seconds();
             tracing::info!(
                 profile_id = %report.profile_id,
                 harness = report.harness.display_name(),
-                retry_in_seconds = until.saturating_sub(mj_core::clock::epoch_seconds()),
+                provider_hold_seconds = until.saturating_sub(now),
+                next_check_in_seconds = report.next_check_at().unwrap_or(until).saturating_sub(now),
                 "the provider rate limited the quota probe; holding this profile's probes"
             );
         }
