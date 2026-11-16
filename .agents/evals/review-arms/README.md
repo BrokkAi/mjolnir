@@ -572,8 +572,18 @@ Bifrost-brief Terra/high findings pooled and verified blind in
   an anchor when changed-line anchors count too, and by hand none relies on
   what the brief states (`control2-citing-handmarks.json`). The citing half
   passes.
-- Not run: the plan's report-only label of whether each P and S brief
-  contains the decisive fact.
+
+Does the brief contain the decisive fact (report-only; one Opus/high judge
+with the census record and the stage A editor's rule;
+`bifrost-contains.jsonl`)? Bifrost: 0 yes, 13 partial, 9 no of the 22 primary
+and secondary diffs; blind: 7, 10, 5. Every partial anchors the decisive
+location but misses a second relation: state shared between two parties (one
+cache key, one lock, a concurrent writer), a counterpart path (an interrupt,
+hit-test order, a cache's invalidation key, an error path), or a parameter or
+alias. The four diffs where the blind brief contained the fact and turned
+misses into catches (catalog-cache-key-collision, stale-model-launch-spec,
+symbol-change-keeps-cached-transcript, web-feed-self-deadlock) are partial or
+no for Bifrost.
 
 ## Bifrost tool coverage: can a code graph produce the decisive fact?
 
