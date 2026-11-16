@@ -60,7 +60,9 @@ pub async fn login(
                     "login cancelled"
                 );
                 if options.method.is_some() {
-                    bail!("ACP sign-in was requested but is unavailable: {reason}");
+                    bail!(
+                        "ACP sign-in was requested but is unavailable: {reason}. Run `mj login --profile {profile_id} --cli` instead."
+                    );
                 }
                 eprintln!(
                     "ACP sign-in is unavailable for {} ({reason}); using its command-line login.",
@@ -91,18 +93,34 @@ pub async fn login(
     let (configured_program, arguments) = mj_core::credentials::login_command(profile)
         .with_context(|| format!("profile {profile_id:?}"))?;
     #[cfg(unix)]
-    let arguments = if device_auth {
-        vec!["login".to_owned(), "--device-auth".to_owned()]
-    } else {
-        arguments
-    };
-    #[cfg(unix)]
     let environment = pinned_fallback
         .as_ref()
         .map(|pinned| pinned.environment.clone())
         .unwrap_or_else(|| configured_login_environment(profile));
     #[cfg(not(unix))]
     let environment = configured_login_environment(profile);
+    #[cfg(unix)]
+    let arguments = {
+        let mut arguments = if device_auth {
+            vec!["login".to_owned(), "--device-auth".to_owned()]
+        } else {
+            arguments
+        };
+        if profile.kind == mj_core::config::HarnessKind::Grok {
+            let mut full_env: BTreeMap<String, String> = std::env::vars_os()
+                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+                .collect();
+            full_env.extend(environment.clone());
+            if !acp_login::has_desktop_session(&full_env)
+                && !arguments
+                    .iter()
+                    .any(|arg| arg == "--device-auth" || arg == "--device-code")
+            {
+                arguments.push("--device-auth".to_owned());
+            }
+        }
+        arguments
+    };
     #[cfg(unix)]
     let program = pinned_fallback
         .as_ref()
@@ -125,6 +143,12 @@ pub async fn login(
         .args(&arguments)
         .envs(&environment)
         .kill_on_drop(true);
+    if !profile
+        .kind
+        .keeps_login_in_home(mj_core::config::HarnessHost::current())
+    {
+        command.env_remove(profile.kind.home_env());
+    }
     let mut child = command
         .spawn()
         .map_err(|error| login_spawn_error(error, &program, profile.kind, profile_id))

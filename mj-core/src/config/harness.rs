@@ -532,6 +532,37 @@ impl HarnessKind {
         }
     }
 
+    /// Extra CLI arguments required to point this harness's ACP or login
+    /// command at `home`, in addition to [`Self::configure_home_environment`].
+    pub fn home_cli_args(self, home: &Path) -> Vec<String> {
+        match self {
+            Self::Antigravity => vec!["--gemini-dir".into(), crate::target_path::text(home)],
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh => Vec::new(),
+        }
+    }
+
+    /// Extra CLI arguments for `self` derived from `environment`, failing if a
+    /// harness that requires a CLI home argument is missing its home variable.
+    pub fn home_cli_args_from_environment(
+        self,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>> {
+        let args = match environment.get(self.home_env()) {
+            Some(value) => self.home_cli_args(&self.home_from_environment(value)),
+            None => Vec::new(),
+        };
+        if self == Self::Antigravity && args.is_empty() {
+            bail!("Antigravity staged home is missing");
+        }
+        Ok(args)
+    }
+
     pub const ALL: [Self; 8] = [
         Self::Codex,
         Self::Claude,

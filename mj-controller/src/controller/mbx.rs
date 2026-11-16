@@ -122,6 +122,11 @@ static MBX_SYNC_LOCKS: std::sync::LazyLock<std::sync::Mutex<MbxSyncLocks>> =
 enum Freshness {
     /// Provisioning: an answer from the last `RESOLUTION_LIFETIME` will do.
     Memoized,
+    /// Configuration a session already depends on: a recent successful answer
+    /// will do, but a remembered failure is asked again. Another caller's
+    /// failure (such as the background policy service timing out on a busy
+    /// link) must not fail a launch that can still reach the host.
+    MemoizedSuccess,
     /// The settings screen, which is read precisely when somebody has just
     /// changed something on the host. A fresh answer also replaces the
     /// memoized one, so the next session sees the same thing the screen does.
@@ -138,9 +143,10 @@ fn inspect(
     executor: &impl CommandExecutor,
 ) -> Result<Inspection> {
     let key = format!("{}|{settings:?}", host.key());
-    if freshness == Freshness::Memoized
+    if freshness != Freshness::Fresh
         && let Some((recorded, inspection)) = RESOLUTIONS.lock().expect("mbx resolutions").get(&key)
         && recorded.elapsed() < RESOLUTION_LIFETIME
+        && (freshness == Freshness::Memoized || inspection.is_ok())
     {
         return inspection.clone().map_err(|error| anyhow::anyhow!(error));
     }
@@ -388,7 +394,7 @@ pub(super) fn prepare_session_configuration(
     // Reuse the launch's original resolution key first. Retained containers
     // can still mount an older directory, or a cache disabled since launch;
     // only those need a second resolution projected onto the recorded mount.
-    let inspected = inspect(&host, &settings, Freshness::Memoized, executor)?;
+    let inspected = inspect(&host, &settings, Freshness::MemoizedSuccess, executor)?;
     let needs_projection = inspected
         .cache
         .as_ref()
@@ -400,7 +406,7 @@ pub(super) fn prepare_session_configuration(
     let inspected = if needs_projection {
         settings.directory = Some(recorded.directory.clone());
         settings.enabled = Some(true);
-        inspect(&host, &settings, Freshness::Memoized, executor)?
+        inspect(&host, &settings, Freshness::MemoizedSuccess, executor)?
     } else {
         inspected
     };
