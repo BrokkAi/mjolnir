@@ -64,6 +64,7 @@ pub(super) fn save_new_session_to(
         "a session profile id cannot use the reserved legacy preference key"
     );
     insert_session(&tx, session)?;
+    super::session_create::insert_create_intent(&tx, session, remember_launch_choices)?;
     if let Some((host, size)) = container_size.filter(|_| remember_container_size) {
         write_host_container_size(&tx, &host, size)?;
     }
@@ -1518,8 +1519,9 @@ pub(super) fn mark_session_worker_connected_to(
     if updated_at.trim().is_empty() {
         bail!("worker connection timestamp is empty");
     }
-    let connection = open(path)?;
-    let changed = connection.execute(
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
         "UPDATE sessions
          SET state = 'running',
              native_session_id = coalesce(?2, native_session_id),
@@ -1531,6 +1533,9 @@ pub(super) fn mark_session_worker_connected_to(
     if changed != 1 {
         bail!("unknown session {session_id}");
     }
+    // The create commits in this write: nothing is left for a later daemon.
+    super::session_create::settle_create_intent_for_state(&tx, session_id, SessionState::Running)?;
+    tx.commit()?;
     Ok(())
 }
 
