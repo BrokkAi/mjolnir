@@ -1170,10 +1170,11 @@ if [ ! -f "$store/.collected" ] || [ -n "$(find "$store/.collected" -mmin +60 -p
     touch -- "$store/.collected"
 fi"#;
 
-// The archive holds private files, `.mj-content/<key>` for content the host
-// lacked, `.mj-keys` (every shared key, one per line), and a relative symlink
-// per shared path into `.mj-store`, which this script points at the store from
-// a private work directory. One dereferencing `cp -RL` then materializes the
+// The archive holds the profile under `profile/`, with private files and a
+// relative symlink per shared path into `.mj-store`; beside it, outside the
+// profile's names, `.mj-content/<key>` for content the host lacked and
+// `.mj-keys` (every shared key, one per line). This script extracts it into a
+// private work directory and points `.mj-store` there at the store. One dereferencing `cp -RL` then materializes the
 // whole profile, so the cost does not grow with one process per file.
 const INSTALL_PROFILE_CONTENT: &str = r#"set -eu
 umask 077
@@ -1184,11 +1185,11 @@ mkdir -p -- "$store" "$(dirname -- "$destination")"
 chmod -- 700 "$store"
 work=$(mktemp -d "$destination.work-XXXXXXXXXX")
 trap 'rm -rf -- "$work"' EXIT
-tree="$work/tree"
-mkdir -- "$tree"
+tar -xzf - --no-same-owner --no-same-permissions -C "$work"
 ln -s -- "$store" "$work/.mj-store"
-tar -xzf - --no-same-owner --no-same-permissions -C "$tree"
-content="$tree/.mj-content"
+tree="$work/profile"
+mkdir -p -- "$tree"
+content="$work/.mj-content"
 if [ -d "$content" ]; then
     case $(uname -s) in Darwin) sum='shasum -a 256';; *) sum=sha256sum;; esac
     # One digest pass; the count check catches files a partial run skipped.
@@ -1209,17 +1210,16 @@ if [ -d "$content" ]; then
     rmdir -- "$upload"
 fi
 missing=
-if [ -f "$tree/.mj-keys" ]; then
+if [ -f "$work/.mj-keys" ]; then
     while IFS= read -r key; do
         [ -f "$store/$key" ] || missing="$missing$key
 "
-    done < "$tree/.mj-keys"
+    done < "$work/.mj-keys"
 fi
 if [ -n "$missing" ]; then
     printf '%s' "$missing"
     exit 75
 fi
-rm -rf -- "$content" "$tree/.mj-keys"
 cp -RL -- "$tree" "$destination" || { echo "could not copy stored profile content into $destination" >&2; exit 1; }"#;
 
 struct ProfileArchiveEntry {
@@ -1303,11 +1303,10 @@ fn build_profile_archive(
     archive.follow_symlinks(true);
     let mut sent = HashSet::new();
     for entry in entries {
-        let path = if entry.path.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            &entry.path
-        };
+        // Profile names live under `profile/`, so no profile file can collide
+        // with `.mj-content` or `.mj-keys` at the archive root.
+        let path = Path::new("profile").join(&entry.path);
+        let path = path.as_path();
         let absolute = source.join(&entry.path);
         if entry.directory {
             archive.append_dir(path, absolute)?;
@@ -1775,6 +1774,10 @@ mod profile_archive_tests {
         fs::create_dir_all(source.join("skills/empty")).unwrap();
         fs::create_dir(source.join("empty")).unwrap();
         fs::write(source.join(".credentials.json"), b"synthetic credentials").unwrap();
+        // Hard-won: review of 7954fde2e: profile files named like the
+        // archive's own manifest and content directory must survive.
+        fs::write(source.join(".mj-keys"), b"a profile file").unwrap();
+        fs::write(source.join(".mj-content"), b"another profile file").unwrap();
         symlink("plugins/日本語/tool data", source.join("linked plugin")).unwrap();
         let executor = SystemTar::new(temp.path());
         let expected = snapshot(&source);
