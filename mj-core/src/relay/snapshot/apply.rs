@@ -509,6 +509,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         bail!("dismissed question no longer matches the open request");
                     }
                     snapshot.person_input_through = event.ordinal;
+                    if let Some(context) = &mut snapshot.assessment_context {
+                        Arc::make_mut(context).set_aside_replies();
+                    }
                 }
                 RelayCommand::SeedAssessmentContext { context, .. } => {
                     snapshot.assessment_context = Some(Arc::new((**context).clone()));
@@ -2030,6 +2033,9 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             snapshot.assessment_questions.remove(elicitation_id);
             if reply.is_some() {
                 snapshot.person_input_through = event.ordinal;
+                if let Some(context) = &mut snapshot.assessment_context {
+                    Arc::make_mut(context).set_aside_replies();
+                }
             }
         }
         RelayObservation::ElicitationsCleared => {

@@ -1565,6 +1565,15 @@ mod settled_task_tests {
         assert!(claude_relay(dir.path()).snapshot.open_request().is_none());
     }
 
+    fn reply(relay: &mut DurableRelay, text: &str) {
+        use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, SessionUpdate};
+        relay
+            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                ContentBlock::from(text),
+            )))
+            .unwrap();
+    }
+
     #[test]
     fn dismissed_questions_survive_journal_replay_and_reject_stale_requests() {
         use crate::relay::test_support::glide_answer;
@@ -1580,6 +1589,7 @@ mod settled_task_tests {
             .unwrap();
         submit_relay(&mut relay, "first-turn", prompt("Choose a target."));
         relay.claim_pending_commands(true).unwrap();
+        reply(&mut relay, "Which target: A or B?");
         finish_prompt(&mut relay, "first-turn");
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
@@ -1593,7 +1603,22 @@ mod settled_task_tests {
             .unwrap()
             .inferred_question()
             .unwrap();
-        let context = serde_json::to_value(&relay.snapshot.assessment_context).unwrap();
+        let messages = relay
+            .snapshot
+            .assessment_context
+            .as_ref()
+            .unwrap()
+            .messages
+            .clone();
+        assert_eq!(
+            relay
+                .snapshot
+                .authorization_context()
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
         let command = RelayCommand::DismissQuestion {
             question: question.clone(),
         };
@@ -1608,10 +1633,21 @@ mod settled_task_tests {
             "dismissal never reaches the harness"
         );
         assert_eq!(
-            serde_json::to_value(&relay.snapshot.assessment_context).unwrap(),
-            context,
-            "dismissal grants no new authorization"
+            relay.snapshot.assessment_context.as_ref().unwrap().messages,
+            messages,
+            "dismissal grants no new authorization and the stored history stays as written"
         );
+        let set_aside = |relay: &DurableRelay| -> Vec<String> {
+            relay
+                .snapshot
+                .authorization_context()
+                .unwrap()
+                .messages
+                .into_iter()
+                .map(|m| m.text)
+                .collect()
+        };
+        assert_eq!(set_aside(&relay), ["Choose a target."]);
         // Late classification can finish without reopening the answered request.
         relay
             .apply_glide_assessment(revision, glide_answer("await_input", None))
@@ -1630,6 +1666,19 @@ mod settled_task_tests {
         assert_eq!(
             submit_relay(&mut relay, "dismiss-first", command.clone()),
             accepted
+        );
+        // Replay rebuilt the fence.
+        assert_eq!(set_aside(&relay), ["Choose a target."]);
+
+        // A generated prompt (a mailbox wake) is not the person's message:
+        // it leaves the fence in force, and the reply it produces is new.
+        submit_relay(&mut relay, "mailbox-wake-1", prompt("[mailbox] wake"));
+        relay.claim_pending_commands(true).unwrap();
+        reply(&mut relay, "Background work finished.");
+        finish_prompt(&mut relay, "mailbox-wake-1");
+        assert_eq!(
+            set_aside(&relay),
+            ["Choose a target.", "Background work finished."]
         );
 
         submit_relay(
@@ -1652,6 +1701,16 @@ mod settled_task_tests {
             .inferred_question()
             .unwrap();
         assert_ne!(question, next);
+        assert_eq!(
+            set_aside(&relay),
+            [
+                "Choose a target.",
+                "Which target: A or B?",
+                "Background work finished.",
+                "What about the other target?"
+            ],
+            "a person message ends the fence's effect: older replies are history again"
+        );
         let response = relay.handle(relay_request(
             "stale-dismissal",
             RelayRequest::Submit {
@@ -1696,6 +1755,38 @@ mod settled_task_tests {
             "{response:?}"
         );
         assert!(relay.snapshot.assessment_questions.contains("permission"));
+    }
+
+    #[test]
+    fn an_answered_elicitation_sets_aside_earlier_replies_across_replay() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        submit_relay(&mut relay, "deploy-turn", prompt("Deploy it."));
+        relay.claim_pending_commands(true).unwrap();
+        reply(&mut relay, "Should I deploy?");
+        finish_prompt(&mut relay, "deploy-turn");
+        relay
+            .record_observation(RelayObservation::ElicitationResolved {
+                elicitation_id: "form".into(),
+                action: "accept".into(),
+                reply: Some("Yes".into()),
+            })
+            .unwrap();
+        reply(&mut relay, "Deployed.");
+        drop(relay);
+        std::fs::remove_file(dir.path().join(RELAY_STATE_FILE)).unwrap();
+        let relay = claude_relay(dir.path());
+        let texts: Vec<_> = relay
+            .snapshot
+            .authorization_context()
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(texts, ["Deploy it.", "Deployed."]);
     }
 
     fn task(id: &str) -> crate::relay::AirTaskFixture {

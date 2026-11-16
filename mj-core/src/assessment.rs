@@ -423,6 +423,15 @@ pub struct ContextHistory {
     pub open_assistant_id: Option<String>,
     #[serde(default)]
     pub final_reply_omitted: bool,
+    /// Id of the newest assistant message the person set aside without a
+    /// message of their own (a dismissed `?` or an answered elicitation).
+    /// Readers treat it like a person message after that reply; see
+    /// [`ContextHistory::without_set_aside_replies`]. It is never cleared at
+    /// write time: a genuine person message after it ends its effect, and
+    /// whether a delivered prompt is genuine is decided at read time by
+    /// today's rules, as for generated prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_aside_through: Option<String>,
 }
 
 impl Default for ContextHistory {
@@ -433,6 +442,7 @@ impl Default for ContextHistory {
             assistant_history_omitted: false,
             open_assistant_id: None,
             final_reply_omitted: false,
+            set_aside_through: None,
         }
     }
 }
@@ -584,6 +594,48 @@ impl ContextHistory {
             role: "user".into(),
             text,
         });
+    }
+
+    /// The person set aside every assistant message written so far, except
+    /// one still being streamed: its later text is a reply after the
+    /// dismissal or answer.
+    pub fn set_aside_replies(&mut self) {
+        if let Some(message) = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant" && Some(&m.id) != self.open_assistant_id.as_ref())
+        {
+            self.set_aside_through = Some(message.id.clone());
+        }
+    }
+
+    /// This history without the assistant replies the person set aside after
+    /// their latest message. Call it on a history already stripped of
+    /// generated prompts; a fence older than that message drops nothing. The stored history is unchanged (journal digests
+    /// cover it). If the fenced message has been evicted, every reply left is
+    /// newer than the fence, because eviction removes the oldest assistant
+    /// entries first, so nothing is dropped.
+    #[must_use]
+    pub fn without_set_aside_replies(mut self) -> Self {
+        let Some(fence) = self.set_aside_through.take() else {
+            return self;
+        };
+        let Some(through) = self.messages.iter().position(|m| m.id == fence) else {
+            return self;
+        };
+        let after_user = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == "user")
+            .map_or(0, |i| i + 1);
+        let mut index = 0;
+        self.messages.retain(|m| {
+            let keep = m.role != "assistant" || index < after_user || index > through;
+            index += 1;
+            keep
+        });
+        self
     }
 
     pub fn assistant(&mut self, id: Option<&str>, ordinal: u64, text: &str) {
