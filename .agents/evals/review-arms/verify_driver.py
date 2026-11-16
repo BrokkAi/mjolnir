@@ -166,7 +166,16 @@ def run(batch_path, judge=None):
         while not (session(sid).get("is_idle") and session(sid).get("lifecycle") == "live"):
             time.sleep(5)
         for k, v in [("model", "opus"), ("effort", "high")]:
-            mj("set-config", "--session", sid, "--key", k, "--value", v)
+            # An idle, live session can still be initializing; mj then refuses with 409 until
+            # initialization ends, so retry exactly that refusal.
+            while True:
+                try:
+                    mj("set-config", "--session", sid, "--key", k, "--value", v)
+                    break
+                except RuntimeError as e:
+                    if "initialization is still running" not in str(e):
+                        raise
+                    time.sleep(10)
         cfg = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
         assert cfg.get("model") == "opus" and cfg.get("effort") == "high", cfg
         # A stable command ID makes a resend after an interrupted run the same request,
