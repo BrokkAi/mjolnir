@@ -208,3 +208,35 @@ fn authentication_recovery_yields_to_new_input_cancellation_and_checkpoints() {
         }
     }
 }
+
+#[test]
+fn a_revision_24_snapshot_with_the_quota_flag_keeps_the_auth_retry_blocked() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "user-request", prompt("finish this task"));
+    relay.claim_pending_commands(true).unwrap();
+    auth_failure(&mut relay, "user-request", "old-access-hash");
+    assert!(relay.authentication_retry_identity().is_some());
+    let frontier = relay.snapshot.latest_ordinal;
+    // What an older worker wrote after the user cancelled: the flag alone.
+    let mut legacy = serde_json::to_value(&relay.snapshot).unwrap();
+    legacy["format_version"] = serde_json::json!(24);
+    legacy["continuation"]["quota_suppressed"] = serde_json::json!(true);
+    legacy["continuation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("withdrawn_ordinal");
+    drop(relay);
+    std::fs::write(
+        root.path().join(mj_core::relay::RELAY_STATE_FILE),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let upgraded = open(root.path());
+    assert_eq!(
+        upgraded.snapshot.continuation.withdrawn_ordinal,
+        Some(frontier)
+    );
+    assert!(upgraded.authentication_retry_identity().is_none());
+}

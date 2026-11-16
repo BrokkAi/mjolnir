@@ -454,6 +454,15 @@ impl DurableRelay {
                 turn.autonomous =
                     snapshot.continuation.autonomous_turn_started == Some(turn.first_ordinal);
             }
+            // An older worker recorded a withdrawn continuation only as the
+            // quota flag, so a retry stays blocked for a session already in
+            // that state at upgrade.
+            if snapshot.format_version < 25
+                && snapshot.continuation.quota_suppressed
+                && snapshot.continuation.withdrawn_ordinal.is_none()
+            {
+                snapshot.continuation.withdrawn_ordinal = Some(snapshot.latest_ordinal);
+            }
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
             // they did not retain its start through subsequent background work.
