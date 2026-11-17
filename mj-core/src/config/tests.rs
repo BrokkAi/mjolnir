@@ -2210,6 +2210,8 @@ fn saving_can_reenable_one_machine_during_global_cache_migration() {
 
 #[test]
 fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
     for legacy in [
         serde_json::json!({"max_size": "500GiB", "target_max_size": "250GiB"}),
         serde_json::json!({"max_size": [false], "target_max_size": {"invalid": true}}),
@@ -2229,7 +2231,8 @@ fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
             }}
         }))
         .unwrap();
-        let config: Config = toml::from_str(&source).unwrap();
+        fs::write(&path, &source).unwrap();
+        let config = Config::load_from(&path).unwrap();
         assert_eq!(config.machines["builder"].build_cache(), Some(&cache));
         let serialized = serde_json::to_value(&cache).unwrap();
         assert!(serialized.get("max_size").is_none());
@@ -2238,9 +2241,19 @@ fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
         let reset: TargetBuildCache = serde_json::from_value(settings).unwrap();
         assert_eq!(reset.max_total_size.as_deref(), Some("2TB"));
     }
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[machines.builder]\nkind = \"ssh\"\n\
+             host = \"builder.example.com\"\n[machines.builder.build_cache]\n\
+             max_totl_size = \"2TB\"\n"
+        ),
+    )
+    .unwrap();
+    let refusal = format!("{:#}", Config::load_from(&path).unwrap_err());
     assert!(
-        serde_json::from_value::<TargetBuildCache>(serde_json::json!({"max_totl_size": "2TB"}))
-            .is_err()
+        refusal.contains("`machines.builder.build_cache.max_totl_size`"),
+        "{refusal}"
     );
 }
 

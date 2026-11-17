@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// `image` and `mounts` apply only to a container runtime. A container
 /// otherwise has no host filesystem access; its data lives in a named volume.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct DaemonConfig {
     #[serde(skip_serializing_if = "DaemonRuntime::is_default")]
     pub runtime: DaemonRuntime,

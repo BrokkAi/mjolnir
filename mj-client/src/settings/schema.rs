@@ -21,7 +21,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
         // Only the section itself: its reviewer entries are SubagentChoice
-        // tables, which reject unknown keys.
+        // tables, which read no other keys.
         "review" if path.len() == 1 => json!({}),
         "github" if path.len() == 1 => json!({"watch":{}}),
         "github" if key == "watch" => {
@@ -1144,7 +1144,7 @@ pub fn path_kind(path: &[String]) -> Option<PathKind> {
 mod review_tests {
     use super::*;
 
-    /// Reviewer entries are SubagentChoice tables, which reject unknown
+    /// Reviewer entries are SubagentChoice tables, which read no other
     /// keys, so expanding a draft must leave them exactly as stored.
     #[test]
     fn expanding_a_draft_leaves_reviewer_entries_unchanged() {
