@@ -23,7 +23,9 @@ pub(crate) struct NotificationsPane {
     pub(crate) controls: Vec<NotificationGesture>,
     pub(crate) message_read: Option<NotificationMessageRead>,
     scroll: u16,
-    scroll_session: Option<String>,
+    /// The card whose message the scroll offset belongs to. A new question or
+    /// reply from the same session is a new card and opens at its beginning.
+    scroll_card: Option<crate::NotificationCard>,
 }
 
 impl Default for NotificationsPane {
@@ -37,7 +39,7 @@ impl Default for NotificationsPane {
             controls: Vec::new(),
             message_read: None,
             scroll: 0,
-            scroll_session: None,
+            scroll_card: None,
         }
     }
 }
@@ -381,14 +383,19 @@ pub(crate) fn render(
         return;
     }
     let Some(entry) = entries.first() else {
+        dashboard.notifications.scroll_card = None;
         frame.render_widget(
             Paragraph::new("Nothing needs you").style(theme::muted()),
             inner,
         );
         return;
     };
-    if dashboard.notifications.scroll_session.as_deref() != Some(&entry.session_id) {
-        dashboard.notifications.scroll_session = Some(entry.session_id.clone());
+    let card = crate::NotificationCard {
+        session_id: entry.session_id.clone(),
+        target: entry.target.clone(),
+    };
+    if dashboard.notifications.scroll_card.as_ref() != Some(&card) {
+        dashboard.notifications.scroll_card = Some(card);
         dashboard.notifications.scroll = 0;
     }
     let now = std::time::SystemTime::now()
@@ -538,6 +545,31 @@ pub(crate) mod tests {
         }
         dashboard.focus = Focus::Notifications;
         dashboard
+    }
+
+    // Hard-won: 6597a0761: a new card from the same session kept the old scroll offset.
+    #[test]
+    fn a_new_card_from_the_same_session_opens_at_its_beginning() {
+        let mut dashboard = dashboard();
+        let long = (0..80).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        for detail in dashboard.session_details.values_mut() {
+            detail.last_agent_message = Some(long.as_str().into());
+        }
+        drawn(&mut dashboard, 140, 50);
+        dashboard.scroll_notification(5);
+        drawn(&mut dashboard, 140, 50);
+        assert_eq!(dashboard.notifications.scroll, 5);
+        // The same session publishes a new question while staying the top card.
+        dashboard.notification_dismissals.insert(
+            "q1".into(),
+            NotificationDismissal::Question(mj_core::assessment::InferredQuestion {
+                turn_id: "turn-9".into(),
+                completed_ordinal: 9,
+            }),
+        );
+        drawn(&mut dashboard, 140, 50);
+        assert_eq!(dashboard.notification_entries()[0].session_id, "q1");
+        assert_eq!(dashboard.notifications.scroll, 0);
     }
 
     #[test]
