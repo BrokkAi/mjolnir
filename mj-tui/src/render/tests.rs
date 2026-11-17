@@ -3420,6 +3420,9 @@ fn golden_dashboard_layout_render() {
     for detail in notifications.session_details.values_mut() {
         detail.last_activity_at_ms = None;
     }
+    for character in "I'll investigate.".chars() {
+        notifications.handle_key(key(KeyCode::Char(character)));
+    }
     append_dashboard_golden(
         &mut output,
         "question notification card",
@@ -3427,6 +3430,21 @@ fn golden_dashboard_layout_render() {
         44,
         &mut notifications,
     );
+    let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut notifications))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let (x, y) = (0..buffer.area.height)
+        .find_map(|y| {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row.find("? Newest question ·")
+                .map(|byte| (row[..byte].chars().count() as u16, y))
+        })
+        .expect("notification header");
+    append_golden_value(&mut output, "notification header color", buffer[(x, y)].fg);
 
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_workspace_name("UNDERLYING DASHBOARD SENTINEL".into());

@@ -139,21 +139,26 @@ impl DashboardState {
         self.last_event_consumed.set(result.consumed);
         if mouse.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
         {
-            self.notifications.gesture =
-                [CommandId::NotificationClear, CommandId::NotificationLater]
-                    .into_iter()
-                    .find(|id| {
-                        self.surface_form
-                            .borrow()
-                            .is_armed(SurfaceControl::Notification(*id))
-                    })
-                    .and_then(|id| {
-                        self.notifications
-                            .controls
-                            .iter()
-                            .find(|gesture| gesture.command == id)
-                            .cloned()
-                    });
+            self.notifications.gesture = [
+                CommandId::NotificationOpen,
+                CommandId::NotificationSend,
+                CommandId::NotificationRestore,
+                CommandId::NotificationClear,
+                CommandId::NotificationSkip,
+            ]
+            .into_iter()
+            .find(|id| {
+                self.surface_form
+                    .borrow()
+                    .is_armed(SurfaceControl::Notification(*id))
+            })
+            .and_then(|id| {
+                self.notifications
+                    .controls
+                    .iter()
+                    .find(|gesture| gesture.command == id)
+                    .cloned()
+            });
         }
         if workspace_menu_hit
             && self

@@ -22,7 +22,6 @@ use crate::components::{EventResult, render_scrollbar, scrollbar_geometry};
 use crate::selection::{SurfaceFrame, SurfaceId};
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, TranscriptItem, config_command_text};
-use mj_core::storage::PromptHistoryEntry;
 
 use mj_client::session::{
     ManagedSessionView, SessionControl as SessionManagerControl,
@@ -32,6 +31,7 @@ use mj_core::relay::WorkerPhase;
 use mj_core::transcript::ChatEntry;
 
 use super::autocomplete::render_autocomplete;
+use super::composer::ComposerIoUpdate;
 use super::elicitation::render_elicitation_in;
 use super::history::{highlighted_input_lines, history_scope_name, history_search_footer};
 use super::input::{input_cursor_visual_position, set_input_cursor};
@@ -46,7 +46,6 @@ use super::rendering::{
     voice_button_glyph, voice_button_line, wrap_styled_line,
 };
 
-use super::composer::ComposerIoUpdate;
 #[cfg(test)]
 use super::composer::{AttachmentResult, MAX_ATTACHMENT_TASKS};
 use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
@@ -92,10 +91,6 @@ enum ChatIoUpdate {
             String,
         >,
     },
-    SessionHistoryListed {
-        generation: u64,
-        result: std::result::Result<Vec<PromptHistoryEntry>, String>,
-    },
     /// The history a large session did not convert when it opened, built off
     /// the event loop. `attempt` counts the tries so far, so a transcript that
     /// keeps changing under the conversion cannot retry for ever.
@@ -124,43 +119,6 @@ enum ChatIoUpdate {
 /// tail. Compaction rewriting the history under a pending conversion is rare,
 /// and one rebuild against the current snapshot normally lands.
 const MAX_PREFIX_CONVERSION_ATTEMPTS: u32 = 3;
-
-fn dispatch_session_history_request(
-    session: ManagedSessionHandle,
-    chat: &mut ChatState,
-    updates: &tokio::sync::mpsc::UnboundedSender<ChatIoUpdate>,
-) {
-    let Some(generation) = chat.take_session_history_request() else {
-        return;
-    };
-    let updates = updates.clone();
-    tokio::spawn(async move {
-        let result = session
-            .session_prompts()
-            .await
-            .map_err(|error| format!("{error:#}"));
-        if let Err(error) = updates.send(ChatIoUpdate::SessionHistoryListed { generation, result })
-        {
-            tracing::debug!(%error, "session history result dropped because the chat closed");
-        }
-    });
-}
-
-fn dispatch_history_search_request(session: ManagedSessionHandle, chat: &mut ChatState) {
-    let Some(request) = chat.take_history_search_request() else {
-        return;
-    };
-    let generation = request.generation;
-    let updates = chat.composer_runtime.tx.clone();
-    tokio::spawn(async move {
-        let result = ChatState::resolve_history_search_request(request, &session).await;
-        if let Err(error) =
-            updates.send(ComposerIoUpdate::HistorySearchResults { generation, result })
-        {
-            tracing::debug!(%error, "history search result dropped because the chat closed");
-        }
-    });
-}
 
 fn dispatch_diffstat_requests(
     chat: &mut ChatState,
@@ -288,17 +246,6 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
                 chat.set_notice(format!("Earlier messages failed to load: {error}"));
             }
         },
-        ChatIoUpdate::SessionHistoryListed {
-            generation,
-            result: Ok(entries),
-        } => chat.set_session_history(generation, entries),
-        ChatIoUpdate::SessionHistoryListed {
-            generation,
-            result: Err(error),
-        } => {
-            tracing::warn!(%error, "session chat history listing failed");
-            chat.set_session_history_unavailable(generation, error);
-        }
         ChatIoUpdate::ToolDiffstats {
             tool_call_id,
             revision,
@@ -673,7 +620,10 @@ impl ActiveChat {
         state.notices = notices;
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
         state.request_session_history();
-        dispatch_session_history_request(session.clone(), &mut state, &chat_io_tx);
+        state.dispatch_composer_requests(
+            || std::future::ready(Ok(session.clone())),
+            persistence.as_ref(),
+        );
         if let Some(pending) = pending_prefix {
             spawn_transcript_prefix(pending, 1, chat_io_tx.clone());
         }

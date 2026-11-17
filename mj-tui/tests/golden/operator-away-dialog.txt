@@ -1,67 +1,67 @@
 === AFK (100x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default ?2                         ≡ ││                                                          │
-╰──────────────────────────────────────╯│                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
 │hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
 │  ? Exp  │                                                                              │         │
 │  Quest  │                    ▟█████▙  ▄████▄  ██████  ██   ██     ╱╱                   │         │
-│  │ Cho  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │         │
-│  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
+│  │ Cho  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │  ───────╯
+│  │      │                       ║     ██████  █████   █████     ╱━━                    │  ───────╮
 │         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │         │
-│  ? Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │  ───────╯
-│  Quest  │                                                                              │  ───────╮
-│  │ I n  │   While you are away, an agent that asks a question or needs permission is   │         │
-│  │      │  told that you are away and asked to do other useful work first. If it asks  │  en.    │
+│  ? Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │  en.    │
+│  Quest  │                                                                              │  ───────╯
+│  │ I n  │   While you are away, an agent that asks a question or needs permission is   │   ▁   ▄ ╮
+│  │      │  told that you are away and asked to do other useful work first. If it asks  │         │
 │         │               the same thing again, the request waits for you.               │  ───────╯
 │  ○ Ord  │                                                                              │   ▁   ▄ ╮
-│  Idle   │                               Waiting for you:                               │         │
-│  │ I n  │                       Explicit question (default / hel)                      │  ───────╯
-│  │      │                      Classifier failure (default / hel)                      │   ▁   ▄ ╮
-│         │                       Classifier question (other / hel)                      │  ets    │
-│         │                                                                              │         │
-│         │                        Close this window to come back.                       │         │
-│         │                                                                              │         │
+│  Idle   │                               Waiting for you:                               │  ets    │
+│  │ I n  │                       Explicit question (default / hel)                      │         │
+│  │      │                      Classifier failure (default / hel)                      │         │
+│         │                       Classifier question (other / hel)                      │         │
 │         │                                                                              │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │                        Close this window to come back.                       │   ▄   □ ╮
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                  │
 │                                                                                                  │
-│                                      ││Clear unavailable: answer this request in the session.    │
-│                                      ││ Clear & Next   Later   Clear all ! (0)                   │
+│                                      ││Quick reply:                                         Send │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)    │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK classifier intervention only (100x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default ?1                         ≡ ││                                                          │
-╰──────────────────────────────────────╯│                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
 │hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
 │  ○ Exp  │                                                                              │         │
 │  Idle   │                    ▟█████▙  ▄████▄  ██████  ██   ██     ╱╱                   │         │
-│  │ I n  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │         │
-│  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
+│  │ I n  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │  ───────╯
+│  │      │                       ║     ██████  █████   █████     ╱━━                    │  ───────╮
 │         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │         │
-│  ? Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │  ───────╯
-│  Quest  │                                                                              │  ───────╮
-│  │ I n  │   While you are away, an agent that asks a question or needs permission is   │         │
-│  │      │  told that you are away and asked to do other useful work first. If it asks  │  en.    │
+│  ? Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │  en.    │
+│  Quest  │                                                                              │  ───────╯
+│  │ I n  │   While you are away, an agent that asks a question or needs permission is   │   ▁   ▄ ╮
+│  │      │  told that you are away and asked to do other useful work first. If it asks  │         │
 │         │               the same thing again, the request waits for you.               │  ───────╯
 │  ○ Ord  │                                                                              │   ▁   ▄ ╮
-│  Idle   │                               Waiting for you:                               │         │
-│  │ I n  │                      Classifier failure (default / hel)                      │  ───────╯
-│  │      │                       Classifier question (other / hel)                      │   ▁   ▄ ╮
-│         │                                                                              │  ets    │
-│         │                        Close this window to come back.                       │         │
+│  Idle   │                               Waiting for you:                               │  ets    │
+│  │ I n  │                      Classifier failure (default / hel)                      │         │
+│  │      │                       Classifier question (other / hel)                      │         │
+│         │                                                                              │         │
+│         │                        Close this window to come back.                       │  ───────╯
+│         │                                                                              │   ▄   □ ╮
 │         │                                                                              │         │
 │         │                                                                              │         │
-│         │                                                                              │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                  │
 │                                                                                                  │
-│                                      ││Clear unavailable: answer this request in the session.    │
-│                                      ││ Clear & Next   Later   Clear all ! (0)                   │
+│                                      ││Quick reply:                                         Send │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)    │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK waiting requests cleared (100x32) ===
@@ -100,34 +100,34 @@
 === AFK ASCII (100x32) ===
 + Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation -------------------------- +   .---+
 | default ?2                         = ||                                                          |
-+--------------------------------------+|                                                          |
++--------------------------------------+|                     *  M J O L N I R                     |
 + Sessio                                                                                           |
 | Create                                                                                           |
 |hel ---  + x  AFK  ---------------------------------------------------------------------+         |
 |  ? Exp  |                                                                              |         |
 |  Quest  |                    .=====.  /####\  ######  ##   ##     //                   |         |
-|  | Cho  |                    '==+=='  ##  ##  ##      ##  ##     //                    |         |
-|  |      |                       |     ######  #####   #####     /==                    |         |
+|  | Cho  |                    '==+=='  ##  ##  ##      ##  ##     //                    |  -------+
+|  |      |                       |     ######  #####   #####     /==                    |  -------+
 |         |                       |     ##  ##  ##      ##  ##     //                    |         |
-|  ? Cla  |                      [_]    ##  ##  ##      ##   ##   //                     |  -------+
+|  ? Cla  |                      [_]    ##  ##  ##      ##   ##   //                     |  en.    |
 |  Quest  |                                                                              |  -------+
-|  | I n  |   While you are away, an agent that asks a question or needs permission is   |         |
-|  |      |  told that you are away and asked to do other useful work first. If it asks  |  en.    |
+|  | I n  |   While you are away, an agent that asks a question or needs permission is   |   -   = +
+|  |      |  told that you are away and asked to do other useful work first. If it asks  |         |
 |         |               the same thing again, the request waits for you.               |  -------+
 |  - Ord  |                                                                              |   -   = +
-|  Idle   |                               Waiting for you:                               |         |
-|  | I n  |                       Explicit question (default / hel)                      |  -------+
-|  |      |                      Classifier failure (default / hel)                      |   -   = +
-|         |                       Classifier question (other / hel)                      |  sets   |
-|         |                                                                              |         |
-|         |                        Close this window to come back.                       |         |
-|         |                                                                              |         |
+|  Idle   |                               Waiting for you:                               |  sets   |
+|  | I n  |                       Explicit question (default / hel)                      |         |
+|  |      |                      Classifier failure (default / hel)                      |         |
+|         |                       Classifier question (other / hel)                      |         |
 |         |                                                                              |  -------+
-|         +------------------------------------------------------------------------------+   -   = +
+|         |                        Close this window to come back.                       |   =   + +
+|         |                                                                              |         |
+|         |                                                                              |         |
+|         +------------------------------------------------------------------------------+         |
 |                                                                                                  |
 |                                                                                                  |
-|                                      ||Clear unavailable: answer this request in the session.    |
-|                                      || Clear & Next   Later   Clear all ! (0)                   |
+|                                      ||Quick reply:                                         Send |
+|                                      || Go to Session   Clear & Next   Skip   Clear all ! (0)    |
 +--------------------------------------++----------------------------------------------------------+
 / search (filter a/b/w/i/d) - Tab pane | ctrl+b then c create - g sessions - a read - : / ? palette
 === AFK small (32x12) ===

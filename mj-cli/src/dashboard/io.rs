@@ -1098,11 +1098,13 @@ impl DashboardContext {
                 if self.startup_prompts.is_settled(&session_id, &prompt.command_id) {return;}
                 if let Err(error) = result {
                     if !self.startup_prompts.admission_failed(&session_id, &prompt.command_id, &error, definitely_unaccepted) {
+                        if self.dashboard.notification_reply_unconfirmed(&session_id, &prompt.command_id, &error) { return; }
                         self.dashboard.set_failure_notice(if definitely_unaccepted {
                             format!("The prompt was not queued: {error}; the recalled draft is kept.")
                         } else {format!("Could not confirm whether the prompt was queued: {error}; checking its status.")});
                         return;
                     }
+                    if super::startup_prompts::finish_notification_reply(&mut self.dashboard, &mut self.chats, &session_id, &prompt, Err(error.clone())) { return; }
                     let restored = if let Some(chat) = self.chats.get_mut(&session_id).filter(|_| !self.dashboard.has_standby_composer(&session_id)) {
                         chat.restore_startup_prompt(prompt)
                     } else { self.dashboard.restore_startup_prompt(&session_id, prompt) };

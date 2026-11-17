@@ -147,6 +147,12 @@ async function mount(page, sessions, holdDetail = null, initialHash = `#workspac
       const detail = viewerDetailResponse(state.snapshot, id);
       return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
+    const message = pathname.match(/^\/api\/sessions\/([^/]+)\/notification-message$/);
+    if (message) {
+      const id = decodeURIComponent(message[1]);
+      state.messageRequests = [...(state.messageRequests || []), id];
+      return json({ session_id: id, text: state.notificationMessages?.[id] ?? `The full message from ${id}.\n\nSecond paragraph.` });
+    }
     if (pathname === '/api/events') {
       return route.fulfill({
         status: 200,
@@ -199,7 +205,9 @@ async function mount(page, sessions, holdDetail = null, initialHash = `#workspac
   if (initialHash.startsWith('#conversation/')) {
     await expect(page.locator('#conversation')).toBeVisible();
   } else {
-    await expect(page.locator('#workspace-select')).toBeVisible();
+    await expect(page.locator('#shell-header')).toBeVisible();
+    if (initialHash === '') await expect(page).toHaveURL(/#(notifications|workspace\/.+)$/);
+    else await expect(page.locator('#workspace-select')).toBeVisible();
   }
   return state;
 }
@@ -353,10 +361,16 @@ test('golden_viewer_dashboard', async ({ context }) => {
   compactState.snapshot.launch_failures = [{ id: 'failed-launch', workspace_id: OTHER_WORKSPACE_ID }];
   await refresh(compactPage, compactState);
   await compactPage.goto('https://viewer.test/');
-  await expect(compactPage.locator('#launch-failures')).toContainText('A session could not be started.');
-  await expect(compactPage.locator('#workspace-select')).toHaveValue('notifications');
-  await expect(compactPage.locator('#sessions .session')).toHaveCount(4);
-  await captureGoldenState(output, compactPage, 'notifications selected by default');
+  await expect(compactPage).toHaveURL(/#notifications$/);
+  await expect(compactPage.locator('#inbox .inbox-message')).toContainText('Second paragraph.');
+  await captureGoldenState(output, compactPage, 'notifications screen on first visit');
+  // The launch failure is a card of its own, after the ? and ! cards.
+  await expect(compactPage.locator('#launch-failures')).toBeEmpty();
+  await expect(compactPage.locator('#notifications-badge')).toBeHidden();
+  await compactPage.getByRole('button', { name: 'Skip', exact: true }).click();
+  await compactPage.getByRole('button', { name: 'Skip', exact: true }).click();
+  await expect(compactPage.locator('.inbox-message')).toContainText('A session could not be started.');
+  await expect(compactPage.getByRole('button', { name: 'Clear & Next' })).toBeEnabled();
   await compactPage.close();
 
   const orderedPage = await context.newPage();
@@ -1069,61 +1083,89 @@ test('dismiss clears the input glyph once the daemon lowers attention; ignoring 
   await expect(askingCard.locator('.session-attention')).not.toContainText('?');
 
   // ...and an ignored session neither counts nor lists on Notifications.
-  // (Retention keeps entries handled during the visit; a reload resets it.)
   await expect(page.locator('#notifications-badge')).toBeHidden();
   await page.reload();
   await expect(page.locator('#notifications-badge')).toBeHidden();
-  await page.locator('#workspace-select').selectOption('notifications');
-  await expect(page.locator('#sessions .session')).toHaveCount(0);
-  await page.locator('#workspace-select').selectOption(WORKSPACE_ID);
+  await page.evaluate(() => { location.hash = '#notifications'; });
+  await expect(page.locator('#inbox')).toContainText('No notifications.');
+  await page.evaluate(id => { location.hash = `#workspace/${id}`; }, WORKSPACE_ID);
 
   row.notifications_ignored = false;
   await refresh(page, state);
   await expect(askingCard.locator('.session-attention')).toContainText('?');
-  await expect(page.locator('#notifications-badge')).toHaveText('1');
+  await expect(page.locator('#notifications-badge')).toHaveText('1 notification');
 });
 
-test('notifications Clear all dismisses every targeted row and leaves the rest flagged', async ({ page }) => {
-  const a = session('clear-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
-  const b = session('clear-b', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
-  const broken = session('clear-failed', 'c', 'C', { attention: 'failed', activity: SERVER_TIME_MS });
-  const state = await mount(page, [a, b, broken]);
-  a.notification_dismissal = { read_through: 4 };
-  b.notification_dismissal = { question: { turn_id: 't', completed_ordinal: 7 } };
+test('the notifications screen clears and skips one card at a time and Clear all ! leaves questions', async ({ page }) => {
+  const q = session('card-q', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
+  const i1 = session('card-i1', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
+  const i2 = session('card-i2', 'c', 'C', { attention: 'important', activity: SERVER_TIME_MS });
+  const broken = session('card-failed', 'd', 'D', { attention: 'failed', activity: SERVER_TIME_MS });
+  const state = await mount(page, [q, i1, i2, broken]);
+  q.notification_dismissal = { question: { turn_id: 't', completed_ordinal: 7 } };
+  i1.notification_dismissal = { read_through: 4 };
+  i2.notification_dismissal = { read_through: 5 };
   await refresh(page, state);
-  await page.locator('#workspace-select').selectOption('notifications');
-  const clearAll = page.locator('#notifications-clear-all');
-  await expect(clearAll).toBeVisible();
-  await clearAll.click();
-  await expect.poll(() => state.actions
-    .filter(action => action.action === 'dismiss-notification').length).toBe(2);
+  await page.locator('#notifications-badge').click();
+  await expect(page).toHaveURL(/#notifications$/);
+  const header = page.locator('.inbox-header-text');
+  await expect(header).toContainText('A');
+  await expect(page.locator('.inbox-message')).toContainText('The full message from card-q.');
+  await expect(page.getByRole('button', { name: 'Clear all ! (2)' })).toBeVisible();
+
+  // Skip sends the card to the back; the question comes round again.
+  await page.getByRole('button', { name: 'Skip', exact: true }).click();
+  await expect(page.locator('.inbox-message')).toContainText('card-i2');
+  await page.getByRole('button', { name: 'Skip', exact: true }).click();
+  await page.getByRole('button', { name: 'Skip', exact: true }).click();
+  await expect(page.locator('.inbox-message')).toContainText('card-q');
+
+  // A refusal stays on the card.
+  state.failAction = { action: 'dismiss-notification', error: 'notification target is stale' };
+  await page.getByRole('button', { name: 'Clear & Next' }).click();
+  await expect(page.locator('.inbox-card .error')).toHaveText('notification target is stale');
+  state.failAction = null;
+
+  await page.getByRole('button', { name: 'Clear all ! (2)' }).click();
+  await expect.poll(() => state.actions.filter(action => action.action === 'dismiss-notification' && action.session_id !== 'card-q').length).toBe(2);
   const dismissed = Object.fromEntries(state.actions
-    .filter(action => action.action === 'dismiss-notification')
+    .filter(action => action.action === 'dismiss-notification' && action.session_id !== 'card-q')
     .map(action => [action.session_id, action.target]));
-  expect(dismissed).toEqual({
-    'clear-a': { read_through: 4 },
-    'clear-b': { question: { turn_id: 't', completed_ordinal: 7 } },
-  });
+  expect(dismissed).toEqual({ 'card-i1': { read_through: 4 }, 'card-i2': { read_through: 5 } });
+  await expect(page.locator('#notifications-badge')).toHaveCount(1);
+  await expect(page.locator('.inbox-message')).toContainText('card-q');
 
-  // Cleared glyphs hide at once and the rows drop out of the count; the
-  // failure carries no dismissal target and stays flagged.
-  await expect(card(page, 'clear-a').locator('.session-attention')).not.toContainText('?');
-  await expect(card(page, 'clear-b').locator('.session-attention')).not.toContainText('!');
-  await expect(card(page, 'clear-failed').locator('.session-attention')).toContainText('×');
-  await expect(page.locator('#notifications-badge')).toHaveText('1');
-  await expect(clearAll).toBeHidden();
+  await page.getByRole('button', { name: 'Clear & Next' }).click();
+  await expect.poll(() => state.actions.filter(action => action.session_id === 'card-q' && action.action === 'dismiss-notification').length).toBe(2);
+  await expect(page.locator('#inbox')).toContainText('No notifications.');
+});
 
-  // Once the daemon lowers attention the handled rows stay for the visit,
-  // below the failure that still needs a person.
-  a.attention = 'idle';
-  a.notification_dismissal = null;
-  b.attention = 'idle';
-  b.notification_dismissal = null;
-  await refresh(page, state);
-  const ids = () => page.locator('#sessions .session').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId));
-  expect(await ids()).toEqual(['clear-failed', 'clear-b', 'clear-a']);
-  await expect(page.locator('#notifications-badge')).toHaveText('1');
-  await expect(clearAll).toBeHidden();
+test('Go to Session returns to the notifications screen on Back and the back control; quick reply keeps drafts per session', async ({ page }) => {
+  const a = session('go-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 1000, capabilities: { prompt: true } });
+  const b = session('go-b', 'b', 'B', { attention: 'important', activity: SERVER_TIME_MS - 2000, capabilities: { prompt: true } });
+  const state = await mount(page, [a, b]);
+  await page.locator('#notifications-badge').click();
+  const input = page.getByLabel('Quick reply');
+  await input.fill('answer for a');
+  await page.getByRole('button', { name: 'Skip', exact: true }).click();
+  await expect(input).toHaveValue('');
+  await page.getByRole('button', { name: 'Skip', exact: true }).click();
+  await expect(input).toHaveValue('answer for a');
+  await input.press('Enter');
+  await expect.poll(() => state.actions.find(action => action.action === 'prompt')).toMatchObject({ session_id: 'go-a', text: 'answer for a' });
+  await expect(input).toHaveValue('');
+
+  // Enter on an empty line is Go to Session.
+  await input.press('Enter');
+  await expect(page).toHaveURL(/#notifications\/go-a$/);
+  await expect(page.locator('#conversation')).toBeVisible();
+  await page.locator('#back').click();
+  await expect(page).toHaveURL(/#notifications$/);
+  await page.getByRole('button', { name: 'Go to Session' }).click();
+  await expect(page).toHaveURL(/#notifications\/go-a$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/#notifications$/);
+  await expect(page.locator('#inbox .inbox-card')).toBeVisible();
 });
 
 test('composer steering survives reconnect and Escape never confirms cancellation', async ({ page }) => {
@@ -1611,14 +1653,15 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
 
 
 // Hard-won: 6e217adde: rewriting the open workspace select on every snapshot stacked native pickers in Firefox for Android.
-test('notification counts change the badge beside the workspace select, never the select', async ({ page }) => {
+test('notification counts change the header button, never the workspace select', async ({ page }) => {
   const a = session('notice-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
   const b = session('quiet-b', 'b', 'B', { activity: SERVER_TIME_MS - 1000 });
   const state = await mount(page, [a, b]);
   const select = page.locator('#workspace-select');
   const badge = page.locator('#notifications-badge');
-  await expect(badge).toHaveText('1');
-  await expect(select.locator('option').first()).toHaveText('Notifications');
+  await expect(badge).toHaveText('1 notification');
+  await expect(select.locator('option').first()).not.toHaveText('Notifications');
+  await expect(page.locator('#shell-header #notifications-badge')).toHaveCount(1);
   await page.evaluate(() => {
     window.selectMutations = 0;
     new MutationObserver(records => { window.selectMutations += records.length; })
@@ -1628,75 +1671,24 @@ test('notification counts change the badge beside the workspace select, never th
   b.last_activity_at_ms = SERVER_TIME_MS + 5000;
   b.attention = 'important';
   await refresh(page, state);
-  await expect(badge).toHaveText('2');
+  await expect(badge).toHaveText('2 notifications');
   await expect(badge).toHaveAttribute('aria-label', '2 notifications; open Notifications');
   expect(await page.evaluate(() => window.selectMutations)).toBe(0);
 
   await badge.click();
-  await expect(select).toHaveValue('notifications');
-  await expect(page.locator('#sessions .session')).toHaveCount(2);
+  await expect(page).toHaveURL(/#notifications$/);
+  await expect(page.locator('#inbox .inbox-card')).toBeVisible();
   a.attention = 'idle';
   b.attention = 'idle';
   await refresh(page, state);
+  await expect(page.locator('#inbox')).toContainText('No notifications.');
   await expect(badge).toBeHidden();
 });
 
-test('notifications retain handled entries below the band until leaving or reloading', async ({ page }) => {
-  const a = session('notice-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
-  const b = session('notice-b', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
-  const unread = session('unread-notice', 'unread', 'Unread', { attention: 'unread', activity: SERVER_TIME_MS + 1000 });
-  const state = await mount(page, [a, b, unread]);
-  await page.locator('#workspace-select').selectOption('notifications');
-  const ids = () => page.locator('#sessions .session').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId));
-  expect(await ids()).toEqual(['notice-b', 'notice-a']);
-  await expect(page.locator('#sessions .session[data-session-id="unread-notice"]')).toHaveCount(0);
-  await page.evaluate(() => { window.notificationOption = document.querySelector('#workspace-select option'); });
-  const noticeCard = page.locator('#sessions .session[data-session-id="notice-b"]');
-  await noticeCard.dispatchEvent('pointerdown', { pointerId: 1, button: 0, isPrimary: true, clientX: 10, clientY: 10 });
-  await expect(noticeCard.locator('.session-menu')).toBeVisible();
-  await noticeCard.dispatchEvent('pointerup', { pointerId: 1 });
-  await page.keyboard.press('Escape');
-  b.attention = 'idle';
-  b.lifecycle = 'suspended';
-  b.capabilities = { open: false, resume: true };
-  await refresh(page, state);
-  expect(await ids()).toEqual(['notice-a', 'notice-b']);
-  expect(await page.evaluate(() => document.querySelector('#workspace-select option') === window.notificationOption)).toBe(true);
-  await expect(page.locator('#notifications-badge')).toHaveText('1');
-  await expect(noticeCard.locator('.session-attention-item')).toHaveCount(0);
-  await expect(noticeCard).not.toContainText('Cleared');
-  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toHaveCount(0);
-  await expect(noticeCard).not.toHaveAttribute('role', 'link');
-  await noticeCard.locator('button[aria-label^="Actions for"]').click();
-  await expect(noticeCard.getByRole('menuitem', { name: 'Resume', exact: true })).toBeVisible();
-  await expect(noticeCard.getByRole('menuitem', { name: 'Changed files…' })).toHaveCount(0);
-  await noticeCard.getByRole('menuitem', { name: 'Resume', exact: true }).click();
-  await expect.poll(() => state.actions.find(action => action.action === 'resume')).toMatchObject({ session_id: 'notice-b', workspace_id: OTHER_WORKSPACE_ID });
-  const c = session('notice-c', 'c', 'C', { attention: 'failed', activity: SERVER_TIME_MS });
-  state.snapshot.sessions.push(c);
-  await refresh(page, state);
-  expect(await ids()).toEqual(['notice-c', 'notice-a', 'notice-b']);
-  b.attention = 'important';
-  await refresh(page, state);
-  expect(await ids()).toEqual(['notice-c', 'notice-b', 'notice-a']);
-  await expect(noticeCard.locator('.session-attention-item')).toHaveCount(1);
-  b.attention = 'idle';
-  await refresh(page, state);
-  expect(await ids()).toEqual(['notice-c', 'notice-a', 'notice-b']);
-  await page.reload();
-  await expect.poll(ids).toEqual(['notice-c', 'notice-a']);
-  a.attention = 'idle';
-  await refresh(page, state);
-  await page.locator('#workspace-select').selectOption(WORKSPACE_ID);
-  await page.locator('#workspace-select').selectOption('notifications');
-  expect(await ids()).toEqual(['notice-c']);
-});
-
-test('initial workspace selection follows notifications without redirecting conversation links', async ({ page }) => {
+test('a first visit lands on notifications without redirecting links that name a place', async ({ page }) => {
   const openNotice = session('load-notice', 'a', 'Notice', { attention: 'needs_input' });
-  await mount(page, [openNotice]);
-  await expect(page).toHaveURL(/#workspace\/notifications$/);
-  await expect(page.locator('#workspace-select')).toHaveValue('notifications');
+  await mount(page, [openNotice], null, '');
+  await expect(page).toHaveURL(/#notifications$/);
 
   const noNotices = await page.context().newPage();
   await mount(noNotices, [session('load-plain', 'a', 'Plain')]);
@@ -1704,7 +1696,7 @@ test('initial workspace selection follows notifications without redirecting conv
 
   const other = await page.context().newPage();
   await mount(other, [openNotice], null, `#workspace/${OTHER_WORKSPACE_ID}`);
-  await expect(other).toHaveURL(/#workspace\/notifications$/);
+  await expect(other).toHaveURL(new RegExp(`#workspace/${OTHER_WORKSPACE_ID}$`));
 
   const conversation = await page.context().newPage();
   await mount(conversation, [session('load-conversation', 'a', 'Conversation', {

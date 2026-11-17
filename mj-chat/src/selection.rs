@@ -17,11 +17,65 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::Modifier;
 use unicode_width::UnicodeWidthStr;
 
+/// Plain text using the transcript's wrapping and smart-copy rules. The row
+/// cache is shared by rendering and extraction, including off-screen rows.
+#[derive(Debug)]
+pub struct SelectableText {
+    source: String,
+    width: u16,
+    rows: Vec<ratatui::text::Line<'static>>,
+    copies: Vec<crate::chat::rendering::RowCopy>,
+}
+impl SelectableText {
+    /// Build the same rows and soft-wrap boundaries as transcript text.
+    pub fn new(source: String, width: u16) -> Self {
+        let mut rows = Vec::new();
+        let mut copies = Vec::new();
+        for line in source.split('\n') {
+            let (wrapped, _, copied) = crate::chat::rendering::wrap_styled_line_for_copy(
+                ratatui::text::Line::raw(line.to_owned()),
+                width.max(1) as usize,
+                0,
+            );
+            rows.extend(wrapped);
+            copies.extend(copied);
+        }
+        Self {
+            source,
+            width,
+            rows,
+            copies,
+        }
+    }
+    /// Whether a cached row space still describes this text and width.
+    pub fn matches(&self, source: &str, width: u16) -> bool {
+        self.source == source && self.width == width
+    }
+    /// Wrapped rows for rendering and scroll extent.
+    pub fn rows(&self) -> &[ratatui::text::Line<'static>] {
+        &self.rows
+    }
+    /// Extract with the transcript's word/line boundary and Unicode rules.
+    pub fn selection_text(&self, range: &SelectionRange) -> String {
+        crate::chat::transcript::copied_rows_text(
+            self.rows
+                .iter()
+                .zip(&self.copies)
+                .enumerate()
+                .filter(|(row, _)| *row >= range.start.row && *row <= range.end.row)
+                .map(|(row, (line, copy))| (line, *copy, range.columns_on(row, self.width))),
+            self.width,
+        )
+    }
+}
+
 /// Identifies a surface that can own a selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SurfaceId {
     /// Chat transcript rows.
     Transcript,
+    /// Notification body; a new card or row layout gets a new identity.
+    NotificationText(u64),
     /// Scrollable message body of an elicitation dialog.
     ElicitationMessage,
     /// Prompt editor.
@@ -350,6 +404,22 @@ impl SelectionState {
         match self.phase {
             Phase::Idle => None,
             _ => self.surface,
+        }
+    }
+
+    /// A pressed/dragging selection captures the pointer until release.
+    pub fn owns_pointer(&self) -> bool {
+        matches!(self.phase, Phase::Pressed | Phase::Dragging)
+    }
+
+    /// A surface identity belongs to one content space. Removing that surface
+    /// invalidates its selection before highlighting, routing or copying.
+    pub fn reconcile_surfaces(&mut self, surfaces: &FrameSurfaces) {
+        if self
+            .surface
+            .is_some_and(|id| surfaces.surface(id).is_none())
+        {
+            self.clear();
         }
     }
 

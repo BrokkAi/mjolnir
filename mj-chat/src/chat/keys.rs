@@ -252,12 +252,15 @@ impl ChatState {
                         let stashed = std::mem::take(&mut self.input);
                         self.record_prompt_history(&stashed);
                         if let Some(bundle_id) = self.bundle_id.clone() {
-                            self.pending_abandoned_prompt =
-                                Some(ChatDaemonRequest::RecordAbandonedPrompt {
-                                    session_id: self.session_id.clone(),
-                                    bundle_id,
-                                    text: stashed,
-                                });
+                            self.composer_requests.push_back(
+                                super::history::ComposerRequest::Daemon(
+                                    ChatDaemonRequest::RecordAbandonedPrompt {
+                                        session_id: self.session_id.clone(),
+                                        bundle_id,
+                                        text: stashed,
+                                    },
+                                ),
+                            );
                         }
                         self.clear_input();
                     }

@@ -1,0 +1,69 @@
+{
+  "data_root": "/mnt/optane/review-arms-20261113",
+  "blinded_round": "brief-judge-k",
+  "files": [
+    {
+      "path": "brief-judge-k/batch-0.json",
+      "sha256": "2a573674040981c8947316b958b3048356d643255e9874e0d1cd7024df353133",
+      "bytes": 134482
+    },
+    {
+      "path": "brief-judge-k/batch-1.json",
+      "sha256": "c51e66cc3ea77aa37f5927f4c1c8cf919ff19a7133a718d823df09813291ca0c",
+      "bytes": 108894
+    },
+    {
+      "path": "brief-judge-k/batch-2.json",
+      "sha256": "f114f73a85c9211fc8726df312ff63bec8964f447151a9de75d9c77220680616",
+      "bytes": 86158
+    },
+    {
+      "path": "brief-judge-k/SPEC.md",
+      "sha256": "424d065e62c57a8d103262017fb2a4b9f401fdb3d02f4b27f6b1f334b2770a4c",
+      "bytes": 2064
+    },
+    {
+      "path": "brief-judge-k/workflow-out.json",
+      "sha256": "31fd046d6fb51666b971efebadf20cffa7b186ec66674d278819302b0b77cadc",
+      "bytes": 251578
+    },
+    {
+      "path": "brief-judge-k/merged.jsonl",
+      "sha256": "c0854f3f0603f2db0756e19550a47eee6c8a2c4b67eb89555c9979a55c2e8267",
+      "bytes": 32933
+    },
+    {
+      "path": "brief-judge-k/handcheck.jsonl",
+      "sha256": "95f4a64da1596a4d05677d452de5896dd558fa4c6a8c21d754e9f5b373ef6215",
+      "bytes": 209598
+    },
+    {
+      "path": "brief-judge-k/handcheck-decisions.json",
+      "sha256": "a0890b45884be346b702d8f14e0b34eee769945683de849de6845bed90f62b7b",
+      "bytes": 2788
+    },
+    {
+      "path": "brief-judge-k/parent-handcheck-review.json",
+      "sha256": "13e8d42dff8018a4a658f9d21b1a602791e719790057ed0a52af4126f904af3c",
+      "bytes": 410
+    },
+    {
+      "path": "brief-judge-k/handcheck-run/handcheck/HANDCHECK.md",
+      "sha256": "a0d863fbea486b7c00d680de9330a30a4d47a77c39c48097ab86dd2df9f3bb3b",
+      "bytes": 1822
+    },
+    {
+      "path": "brief-judge-k/handcheck-run/handcheck/handcheck-proposal.json",
+      "sha256": "6a762baf7849b520a1434ec7a8dead7964c8252a64ea54d320d3bceabef5683a",
+      "bytes": 23930
+    },
+    {
+      "path": "private/key-brief-judge-k.json",
+      "sha256": "76f9ef2e37aabb23a17291faf4c5eef93e857c7d84e4dd2b7ef9cd0864f6006c",
+      "bytes": 109684
+    }
+  ],
+  "outputs": 270,
+  "individual_verdicts": 540,
+  "handcheck_rows": 87
+}

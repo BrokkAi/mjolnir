@@ -1,0 +1,599 @@
+{
+  "scope": "Saved writer transcripts and pre/post checkout inventory",
+  "tool_items": 239,
+  "flagged_matches": 20,
+  "findings": "No access to outside sources evidenced in the retained transcripts. Self-owned tool-output spill reads were identified by the session names embedded in those paths.",
+  "writers": [
+    {
+      "bug": "archive-resume-hint-without-prompt",
+      "session_id": "b15db6ba29daeea56fcdf514d80ebfb3",
+      "image": "89128665711a486b13e857f6d86a61a5e66f89efbdee439b10b0abc9badb1838",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "8d668f1e6e8fc270e8f7203ccce51ce42f25250e6536c38a8b629ecdf403158a",
+      "audit": {
+        "tool_items": 12,
+        "hits": [
+          {
+            "seq": 69,
+            "kind": "memory-or-sessions",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          }
+        ]
+      }
+    },
+    {
+      "bug": "catalog-cache-key-collision",
+      "session_id": "d0b816d818769dc20bff8719792972b3",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "87535a3f2f7d659024e3f7e82d091c94c0d44172224538e053a82c1a80c633e0",
+      "audit": {
+        "tool_items": 16,
+        "hits": []
+      }
+    },
+    {
+      "bug": "child-model-wrong-efforts",
+      "session_id": "b83af26e352e1992802c95b565c65aec",
+      "image": "89128665711a486b13e857f6d86a61a5e66f89efbdee439b10b0abc9badb1838",
+      "fix_rounds": 2,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "65deeec866d2e474e384358964f34cd523917568cfdb2f4495906fb0bd6f4747",
+      "audit": {
+        "tool_items": 14,
+        "hits": []
+      }
+    },
+    {
+      "bug": "codex-effort-alias-lost",
+      "session_id": "7037c8a8308467c51f2a00a0cdd53a4e",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "96b8ac43a096155a37ca38c4ca9cde47cd22bf0c68506e6b6287c74c3ad1ace4",
+      "audit": {
+        "tool_items": 10,
+        "hits": []
+      }
+    },
+    {
+      "bug": "export-relative-read-root",
+      "session_id": "aefa3765ac325aaffd8f1abcfc49adce",
+      "image": "89128665711a486b13e857f6d86a61a5e66f89efbdee439b10b0abc9badb1838",
+      "fix_rounds": 2,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "6cbc39476f2b009ed3ecdb480f8d3fe19c769989281ec5a795bc445d1e9cc768",
+      "audit": {
+        "tool_items": 14,
+        "hits": [
+          {
+            "seq": 41,
+            "kind": "outside-workspace",
+            "where": "input",
+            "disposition": "Read of a tool-results spill path under the writer\u2019s own session. The retained transcript did not preserve the spilled output in full."
+          },
+          {
+            "seq": 77,
+            "kind": "git-history-escape",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          },
+          {
+            "seq": 77,
+            "kind": "memory-or-sessions",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          },
+          {
+            "seq": 97,
+            "kind": "git-history-escape",
+            "where": "input",
+            "disposition": "Search terms in repository source reads."
+          },
+          {
+            "seq": 97,
+            "kind": "memory-or-sessions",
+            "where": "input",
+            "disposition": "Search terms in repository source reads."
+          },
+          {
+            "seq": 109,
+            "kind": "git-history-escape",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          },
+          {
+            "seq": 109,
+            "kind": "memory-or-sessions",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          },
+          {
+            "seq": 146,
+            "kind": "git-history-escape",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          },
+          {
+            "seq": 146,
+            "kind": "memory-or-sessions",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          }
+        ]
+      }
+    },
+    {
+      "bug": "github-token-in-container-argv",
+      "session_id": "6a6607e4ff7d242f5648c9b4ce259850",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 2,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "6d3854f0fe1d58c39cc91762f42e5b7f4401e116e4c91f0c85c2b74e0c5439b6",
+      "audit": {
+        "tool_items": 12,
+        "hits": [
+          {
+            "seq": 63,
+            "kind": "git-history-escape",
+            "where": "input",
+            "disposition": "Search terms in repository source reads."
+          },
+          {
+            "seq": 69,
+            "kind": "github-or-web",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          },
+          {
+            "seq": 69,
+            "kind": "git-history-escape",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          }
+        ]
+      }
+    },
+    {
+      "bug": "held-prompt-ignores-interrupt",
+      "session_id": "e40050aeefb922f26c5bfff85ac10063",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "ae33dba8ed17cebf604ad9ff38c7f7616718a0d8481d28849a2cbb08206cf22a",
+      "audit": {
+        "tool_items": 9,
+        "hits": [
+          {
+            "seq": 66,
+            "kind": "memory-or-sessions",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          }
+        ]
+      }
+    },
+    {
+      "bug": "journal-valid-json-corruption",
+      "session_id": "8dcd6676da0f839e1a1a104dd375c732",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "fb35b77ce6cafe24281be4a8e44ee185096f7f05079c2856a17fcf108a3e33e6",
+      "audit": {
+        "tool_items": 9,
+        "hits": []
+      }
+    },
+    {
+      "bug": "path-completion-lost-on-step-redraw",
+      "session_id": "b7aae630f0a1c4dc89dbba44bdcc5468",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 0,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "33237d46195450c3e5eef6e9249c88a1c8c220f90ef0dde8e939df93b63c3167",
+      "audit": {
+        "tool_items": 10,
+        "hits": [
+          {
+            "seq": 57,
+            "kind": "git-history-escape",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          }
+        ]
+      }
+    },
+    {
+      "bug": "pending-assessment-hidden-when-idle",
+      "session_id": "7aef96e85e72901756a43aadda7b6756",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 0,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "a8b21774ec02c199c191ffaf339a9df4d4b1c8c75fae41d6487073c1301f445c",
+      "audit": {
+        "tool_items": 8,
+        "hits": []
+      }
+    },
+    {
+      "bug": "projection-mixed-sqlite-snapshots",
+      "session_id": "cfc14e0fd1c67c2940d0e565166c9b1f",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "f1bf56a173956ce3c4d7a964a68298022642eae32258118faf6cb9edf40e6977",
+      "audit": {
+        "tool_items": 9,
+        "hits": [
+          {
+            "seq": 28,
+            "kind": "output-outside-path",
+            "where": "output",
+            "disposition": "Own-session spill path printed by the harness when the repository diff output was truncated."
+          }
+        ]
+      }
+    },
+    {
+      "bug": "reserved-workspace-internal-error",
+      "session_id": "022282885dfdeacee81f63304d0c76cd",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "59caa43e422f32d5f42fcae7618d5fb2596a92231ca0c0ca968a8eea9b2fd546",
+      "audit": {
+        "tool_items": 9,
+        "hits": []
+      }
+    },
+    {
+      "bug": "restore-through-profile-symlink",
+      "session_id": "1e42b6f71cf59c248c4f13abdda578e6",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "9c958853373f84e9173e8339c5318f55d0682ae9dc30f2924be2753b79f04ebc",
+      "audit": {
+        "tool_items": 10,
+        "hits": []
+      }
+    },
+    {
+      "bug": "stale-model-launch-spec",
+      "session_id": "71593cba54a1ee9587488381c82bcbf1",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "04096e40527b2a482e2e1f69a3976e11d8fae0ab2fda4434a78dc8aad0ce7050",
+      "audit": {
+        "tool_items": 9,
+        "hits": []
+      }
+    },
+    {
+      "bug": "symbol-change-keeps-cached-transcript",
+      "session_id": "021e338b86279a809b6c2edc2735f7d1",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "578a35cd1adc323e81c975bc89dc57f4f241de141774d11e634bedf71aeb264c",
+      "audit": {
+        "tool_items": 10,
+        "hits": []
+      }
+    },
+    {
+      "bug": "terminal-id-reused",
+      "session_id": "4439fd36e564f5c34d5cfdbf413db21a",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "09215dc14131f48ef1e1b6629fd62ba95dcfbbed40985f8b90106eeff88915ba",
+      "audit": {
+        "tool_items": 13,
+        "hits": []
+      }
+    },
+    {
+      "bug": "unused-thread-above-archive-floor",
+      "session_id": "6a5e3ae1f153e7defeade00c0a579860",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "4c56781d7ef9beac45c16a9a90a22f737c289c4c93e4472617aa36f9d20577e7",
+      "audit": {
+        "tool_items": 12,
+        "hits": [
+          {
+            "seq": 50,
+            "kind": "outside-workspace",
+            "where": "input",
+            "disposition": "Read of a tool-results spill path under the writer\u2019s own session. The retained transcript did not preserve the spilled output in full."
+          }
+        ]
+      }
+    },
+    {
+      "bug": "web-feed-self-deadlock",
+      "session_id": "ce41418bcac87b4629d55f902ccfb024",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "c8c4c7b3236dd4b7c75b91df6bb06dff7d55aa7b0ec041a257b4b33c2ea9578f",
+      "audit": {
+        "tool_items": 9,
+        "hits": []
+      }
+    },
+    {
+      "bug": "activity-recorder-kills-api",
+      "session_id": "9291759c3e545c198ca614b5ce4fc172",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 1,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "67120d5040061f746d9465c8ccc662dbcada39d1b8c8dc97eecb14d040b70a16",
+      "audit": {
+        "tool_items": 12,
+        "hits": [
+          {
+            "seq": 60,
+            "kind": "outside-workspace",
+            "where": "input",
+            "disposition": "Read of a tool-results spill path under the writer\u2019s own session. The retained transcript did not preserve the spilled output in full."
+          },
+          {
+            "seq": 90,
+            "kind": "memory-or-sessions",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          }
+        ]
+      }
+    },
+    {
+      "bug": "dropdown-click-hits-covered-field",
+      "session_id": "57443f60a0d3ff48e9df10737b3b973c",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 0,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "2d7be0ad8ea2f8177eb3bbffbf4539c7c332117aafa6360d205d48b56086be2b",
+      "audit": {
+        "tool_items": 9,
+        "hits": []
+      }
+    },
+    {
+      "bug": "metadata-checkpoint-overwrites-checkout",
+      "session_id": "0cb62f5b57887385c58c8bac0ebaa62b",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 0,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "78e96615ca58b1fc69364027e0ec7205e8395bc5b6c34df1bfb5ff096ac636ff",
+      "audit": {
+        "tool_items": 7,
+        "hits": [
+          {
+            "seq": 69,
+            "kind": "git-history-escape",
+            "where": "input",
+            "disposition": "Prose and source references in the command that wrote brief.md."
+          }
+        ]
+      }
+    },
+    {
+      "bug": "shortcut-escape-opens-unvisited-manager",
+      "session_id": "65bca6545478561968f7b14951cda99c",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "fix_rounds": 2,
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "settings": {
+        "model": "sonnet",
+        "effort": "high",
+        "ultracode": "off"
+      },
+      "profile": "claude5",
+      "brief_sha256": "229244dabb5d417ebdbc66c3802bc737525c8d938eb66679100bfb38b0ebb6c6",
+      "audit": {
+        "tool_items": 16,
+        "hits": []
+      }
+    }
+  ]
+}

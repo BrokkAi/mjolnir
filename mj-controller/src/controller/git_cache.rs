@@ -274,6 +274,9 @@ ssh_command=$6
 shift 6
 umask 077
 mkdir -p "$cache_root/mirrors" "$cache_root/locks" "$(dirname "$snapshot")"
+# The session root's own time is its preparation stamp: until the container
+# exists, it is what keeps the cache GC from treating the root as an orphan.
+touch -- "$(dirname "$snapshot")"
 entry="$cache_root/mirrors/$key"
 mirror="$entry/repo.git"
 # An overlapping refresher satisfies this request too. The locked read below
@@ -448,7 +451,10 @@ for snapshot in "$root"/sessions/*; do
             break
         fi
     done
-    if [ "$live" -eq 0 ] && find "$snapshot" -mmin +1440 -print | grep -q .; then
+    # A session without a container may still be between preparation and
+    # container start, so only the root's own preparation stamp ages it. Its
+    # snapshots hardlink mirror objects and inherit their older times.
+    if [ "$live" -eq 0 ] && find "$snapshot" -maxdepth 0 -mmin +1440 -print | grep -q .; then
         rm -rf -- "$snapshot"
     fi
 done
@@ -1316,9 +1322,14 @@ exec "$CACHE_TEST_MKDIR" "$@"
         let cache_root = temporary.path().join("cache");
         let orphan = cache_root.join("sessions/orphan-session");
         let live = cache_root.join("sessions/live-session");
+        let starting = cache_root.join("sessions/starting-session");
         std::fs::create_dir_all(&orphan).unwrap();
         std::fs::create_dir_all(&live).unwrap();
-        for path in [&orphan, &live] {
+        // A just-prepared snapshot whose container does not exist yet.
+        let inherited = starting.join("repository.git/objects/pack/old.pack");
+        std::fs::create_dir_all(inherited.parent().unwrap()).unwrap();
+        std::fs::write(&inherited, []).unwrap();
+        for path in [&orphan, &live, &inherited] {
             let command = CommandSpec::new("touch", ["-t", "200001010000", path.to_str().unwrap()])
                 .purpose("age test clone-cache snapshot");
             checked(ProcessExecutor.execute(&command).unwrap(), &command).unwrap();
@@ -1335,6 +1346,9 @@ exec "$CACHE_TEST_MKDIR" "$@"
 
         assert!(!orphan.exists());
         assert!(live.exists());
+        // Hard-won: #1567: a just-prepared snapshot with no container yet was
+        // collected because its hardlinked mirror objects carry old times.
+        assert!(inherited.exists());
     }
 
     fn directory_kib(path: &Path) -> u64 {

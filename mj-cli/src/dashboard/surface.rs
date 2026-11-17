@@ -296,10 +296,13 @@ impl DashboardContext {
         let Some((surface, direction)) = self.autoscroll_request() else {
             return Ok(());
         };
-        let Some(chat) = self.focused_chat_mut() else {
+        if matches!(surface, SurfaceId::NotificationText(_)) {
+            self.dashboard.autoscroll_notification_selection(direction);
+        } else if let Some(chat) = self.focused_chat_mut() {
+            chat.autoscroll_selection(surface, direction);
+        } else {
             return Ok(());
-        };
-        chat.autoscroll_selection(surface, direction);
+        }
         self.draw()?;
         let Self {
             selection,
@@ -326,6 +329,11 @@ impl DashboardContext {
             ..
         } = self;
         if let Event::Mouse(mouse) = &event
+            && !(selection.owns_pointer()
+                && matches!(
+                    mouse.kind,
+                    MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                ))
             && (dashboard.component_handles_mouse(*mouse) || chat_owns_pointer)
         {
             selection.clear();
@@ -347,6 +355,9 @@ impl DashboardContext {
     ) -> Result<()> {
         self.draw()?;
         let extracted = match surface {
+            SurfaceId::NotificationText(generation) => self
+                .dashboard
+                .notification_selection_text(generation, &range),
             SurfaceId::Transcript => self
                 .focused_chat_mut()
                 .and_then(|chat| chat.transcript_selection_text(&range)),

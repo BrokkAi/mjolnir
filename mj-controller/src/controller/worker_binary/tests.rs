@@ -2233,7 +2233,11 @@ impl CommandExecutor for SshHostExecutor {
         let mut status = 0;
         let mut stdout = Vec::new();
         let remote = command.args.last().cloned().unwrap_or_default();
-        if command.purpose == "publish shared Mjolnir worker" {
+        if command.purpose == "check negotiated profile receiver support" {
+            // This models the legacy remote tar boundary; real negotiation is
+            // exercised against the bundled receiver in install::profile_transfer.
+            status = 127;
+        } else if command.purpose == "publish shared Mjolnir worker" {
             // Publication now shares one shell batch with verification and
             // discard. Its directory is an argument inside the quoted script.
             let unquoted = remote.replace(['\'', '\\', '"'], "");

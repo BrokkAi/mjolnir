@@ -1,0 +1,744 @@
+{
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "profile": "codex4",
+  "initial_labels": {
+    "missed": 18,
+    "partial": 1,
+    "caught": 3
+  },
+  "final_labels": {
+    "missed": 18,
+    "partial": 1,
+    "caught": 3
+  },
+  "rewrites": 4,
+  "records": [
+    {
+      "id": "archive-resume-hint-without-prompt",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "8d668f1e6e8fc270e8f7203ccce51ce42f25250e6536c38a8b629ecdf403158a",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output maps wiki lookup and restoration but never identifies unconditional resume advice for an archive lacking a user prompt. It does not connect the hint to the prompt requirement.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output maps archive lookup and restoration but never identifies unconditional resume advice for an archive with no user prompt or the resulting restoration failure.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "catalog-cache-key-collision",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "87535a3f2f7d659024e3f7e82d091c94c0d44172224538e053a82c1a80c633e0",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It lists the catalog cache key and discovery table usage without identifying default-model discovery using the same empty-model row or either writer overwriting the other. The shared-table inventory alone does not identify the collision.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It notes the shared cache table and empty catalog model key, but does not identify default-model discovery using the same row or either payload overwriting the other.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "child-model-wrong-efforts",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "65deeec866d2e474e384358964f34cd523917568cfdb2f4495906fb0bd6f4747",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes validation and inheritance against the chosen profile choices, but never identifies those as default-model choices rather than the selected child model\u2019s efforts. No unsupported child effort or startup failure is identified.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes validating and inheriting effort using the chosen profile choices, but never distinguishes those default-model choices from the selected child model or identifies unsupported effort reaching the child.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "codex-effort-alias-lost",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "96b8ac43a096155a37ca38c4ca9cde47cd22bf0c68506e6b6287c74c3ad1ace4",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The model/effort allowlist is described, but the output never mentions the reasoning_effort alias or the loss of Codex effort on resume. Enumerating copied keys does not identify the defect.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes the model/effort allowlist but never identifies the reasoning_effort alias or loss of the archived Codex effort on resume.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "export-relative-read-root",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "6cbc39476f2b009ed3ecdb480f8d3fe19c769989281ec5a795bc445d1e9cc768",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It maps read_file validation and primary_repository_path usage for git operations without identifying the wrong root passed to relative file reads. Neither missing files nor reads from the workspace parent are reported.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It maps file export and primary-repository paths without identifying that read_file passes the workspace parent as its root, producing incorrect relative file lookups.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "github-token-in-container-argv",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "partial",
+          "brief_sha256": "6d3854f0fe1d58c39cc91762f42e5b7f4401e116e4c91f0c85c2b74e0c5439b6",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output explicitly traces the literal token into process argv, but never identifies exposure through process inspection or command diagnostics. Choosing the lower label because it presents credential plumbing without the security symptom required by the match rule.",
+              "confidence": "medium"
+            },
+            {
+              "judge": "B",
+              "label": "partial",
+              "matching_finding": "then formatted into `GH_TOKEN={token}` inside `extra_run_args`",
+              "rationale": "It explicitly traces the literal token through extra_run_args into executed process argv. It does not identify exposure through process inspection or diagnostics, so the required security consequence is missing and the lower, partial label applies.",
+              "confidence": "medium"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "partial",
+          "brief_sha256": "e18b42cab3b80fdb9520df8d549d3820b34c8144c40d7e82eaca26e50d626f6f",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-1",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "partial",
+              "matching_finding": "container_run command argv containing `GH_TOKEN=...` \u2192 `preflight_target(...).and_then(provision.execute)` (`:784`) \u2192 `ProcessExecutor::execute` (`hel_targets.rs:249`), which spawns `Command::new(program).args(args)`.",
+              "rationale": "The output traces the literal token into container and SSH process arguments. It does not identify exposure through process inspection or command diagnostics, which the match rule requires; the lower, partial label reflects that missing security consequence.",
+              "confidence": "medium"
+            },
+            {
+              "judge": "B",
+              "label": "partial",
+              "matching_finding": "The `CommandSpec` args containing the token are the same value passed to `ProcessExecutor.execute`",
+              "rationale": "The output traces the literal secret into container and SSH process argv, including Command::args. It does not identify exposure through process inspection or command logs, which the match rule also requires; the lower label applies.",
+              "confidence": "medium"
+            }
+          ]
+        }
+      ],
+      "final_label": "partial"
+    },
+    {
+      "id": "held-prompt-ignores-interrupt",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "ae33dba8ed17cebf604ad9ff38c7f7616718a0d8481d28849a2cbb08206cf22a",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The readiness loop and immediate interrupt handler are listed separately. The output never identifies interrupt failing to withdraw a held prompt or unwanted submission after attachment.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes the readiness loop and mentions the interrupt handler, but never connects interrupt to inability to withdraw the held prompt or its subsequent unwanted submission.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "journal-valid-json-corruption",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "fb35b77ce6cafe24281be4a8e44ee185096f7f05079c2856a17fcf108a3e33e6",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes parse-failure recovery and strict visitors, but does not identify the missing digest validation for successfully parsed records in Recover mode. Valid-JSON corruption reaching the recovery visitor is not reported.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It discusses malformed JSON recovery and existing strict validation, but never identifies valid-JSON corruption passing Recover without digest validation.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "path-completion-lost-on-step-redraw",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "33237d46195450c3e5eef6e9249c88a1c8c220f90ef0dde8e939df93b63c3167",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes the activeElement guard and dropping late answers after blur, but does not connect catalog-triggered step redraw to replacing the input and losing a current response. The described focus check alone does not identify the defect.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It mentions the activeElement check dropping late replies after blur, but not step redraw replacing the input and invalidating a current completion response; ordinary focus loss is a different case.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "pending-assessment-hidden-when-idle",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "caught",
+          "brief_sha256": "a8b21774ec02c199c191ffaf339a9df4d4b1c8c75fae41d6487073c1301f445c",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "caught",
+              "matching_finding": "With `is_idle` true and `retry_assessment_pending` true, the label comes from `details.idle_since_ms` via `epochMs` and `idleSinceLabel`",
+              "rationale": "The output identifies the new idle guard, explains that activity state is independent of pending assessment, and explicitly shows an idle label replacing the checking label when both flags are true. Together these identify the suppression mechanism and visible result.",
+              "confidence": "medium"
+            },
+            {
+              "judge": "B",
+              "label": "caught",
+              "matching_finding": "With `is_idle` true and `retry_assessment_pending` true, the label comes from `details.idle_since_ms` via `epochMs` and `idleSinceLabel`",
+              "rationale": "It explicitly identifies the new idle gate, says activity state is independent of assessment pending, and explains that an idle session with assessment pending receives an idle label. Together these identify the suppression mechanism and the missing checking label.",
+              "confidence": "high"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "caught",
+          "brief_sha256": "3513aa96cedea71c5a3c97b1313edbb2f0bbfcdb1feb6b74e1d2bf09f1a7da72",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-1",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "caught",
+              "matching_finding": "With `is_idle` true and `retry_assessment_pending` true, the label comes from `details.idle_since_ms` via `epochMs` and `idleSinceLabel`",
+              "rationale": "The output identifies the added idle guard, explains that activity state is independent of the pending-assessment flag, and traces their simultaneous truth to an idle label instead of Checking response. These observations identify the suppression mechanism even though presented as a code-path analysis.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "caught",
+              "matching_finding": "The activity state used at snapshot.rs:733 is independent of `retry_assessment_pending`",
+              "rationale": "The output identifies the added !session.is_idle guard, explains that assessment state and worker idleness are independent, and traces the idle-plus-pending case to an Idle label instead of Checking response. This describes the faulty coupling and resulting suppression.",
+              "confidence": "medium"
+            }
+          ]
+        }
+      ],
+      "final_label": "caught"
+    },
+    {
+      "id": "projection-mixed-sqlite-snapshots",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "f1bf56a173956ce3c4d7a964a68298022642eae32258118faf6cb9edf40e6977",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It enumerates successive projection reads on one connection, but never identifies the absence of a read transaction or concurrent writes producing mixed generations. Frontier mismatch handling is described without identifying this cause.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It enumerates the successive reads and validation on one connection, but does not identify the missing read transaction or mixed generations caused by concurrent commits.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "reserved-workspace-internal-error",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "59caa43e422f32d5f42fcae7618d5fb2596a92231ca0c0ca968a8eea9b2fd546",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The reserved-name refusal and its callers are mapped, but the output never traces that error into HTTP 500 instead of a client error. Other workspace-selection errors do not identify the known defect.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes the reserved-name refusal and its callers, but never traces that refusal into an internal HTTP 500 or identifies the missing usable client-error response.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "restore-through-profile-symlink",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "9c958853373f84e9173e8339c5318f55d0682ae9dc30f2924be2753b79f04ebc",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes the profile symlink, launch-time unlinking, and in-place reset behavior. It does not identify restore cleanup retaining the link in a reused worker root or checkpoint writes following it into the user\u2019s profile.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It documents the migration symlink and unlinking during other reset/install paths, but never identifies checkpoint restoration through a surviving link into the original user profile.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "stale-model-launch-spec",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "04096e40527b2a482e2e1f69a3976e11d8fae0ab2fda4434a78dc8aad0ce7050",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It lists startup pinning, the persisted supervisor environment, and later accepted-config mutations, but never connects later selections to a stale bridge restart. The described relaunch path instead concerns reopening the relay at daemon startup.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes startup pinning, persisted supervisor environment, and later mutable accepted configuration separately, but never identifies bridge restarts using a stale model after selection changes.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "symbol-change-keeps-cached-transcript",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "578a35cd1adc323e81c975bc89dc57f4f241de141774d11e634bedf71aeb264c",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It traces mutable symbol selection and transcript glyph production without identifying the transcript row cache or its missing symbol-set invalidation. Stale rows after switching symbols are not reported.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It maps mutable glyph selection and transcript rendering without identifying the transcript row cache or its missing symbol-set invalidation dependency.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "terminal-id-reused",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "09215dc14131f48ef1e1b6629fd62ba95dcfbbed40985f8b90106eeff88915ba",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The terminal ID format and downstream output fields are described, but the output never identifies counter reset across connections or collisions with retained transcript IDs. No persisted-output misassociation is reported.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes the counter-based terminal ID and its downstream use, but never identifies counter reset across reconnects or collision with persisted transcript terminal IDs.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "unused-thread-above-archive-floor",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "4c56781d7ef9beac45c16a9a90a22f737c289c4c93e4472617aa36f9d20577e7",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes the nonzero recovery-floor predicate and the missing-thread error branch, but never identifies a fresh unused thread created above that floor. Without that distinction it does not identify the safe recreation being incorrectly blocked.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It lists the nonzero recovery-floor predicate and missing-thread refusal, but never distinguishes an unused native thread created after that floor or identifies its safe recreation being blocked.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "web-feed-self-deadlock",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "caught",
+          "brief_sha256": "c8c4c7b3236dd4b7c75b91df6bb06dff7d55aa7b0ec041a257b4b33c2ea9578f",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "caught",
+              "matching_finding": "`session_projection` itself calls `active_lifecycles` (daemon.rs:2095) while holding `self.controller` (daemon.rs:2091), and `active_lifecycles` now locks `self.controller` again (daemon.rs:1995).",
+              "rationale": "This directly identifies the same-thread acquisition of the same controller mutex along the web projection call path. Although it does not use the word deadlock, the exact self-locking mechanism is identified.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "caught",
+              "matching_finding": "`session_projection` itself calls `active_lifecycles` (daemon.rs:2095) while holding `self.controller` (daemon.rs:2091), and `active_lifecycles` now locks `self.controller` again (daemon.rs:1995).",
+              "rationale": "It explicitly identifies session_projection holding self.controller while calling active_lifecycles, which locks the same mutex again. That is the exact self-deadlock mechanism, even though the output does not use the word deadlock.",
+              "confidence": "high"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "caught",
+          "brief_sha256": "76c6fe6e7eebf97662cf0e2aa1ede1b4eb5694428514591b1e30907f820e8069",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-1",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "caught",
+              "matching_finding": "`session_projection` itself calls `active_lifecycles` (daemon.rs:2095) while holding `self.controller` (daemon.rs:2091), and `active_lifecycles` now locks `self.controller` again (daemon.rs:1995).",
+              "rationale": "The output explicitly identifies the caller retaining the controller mutex while its callee acquires that same mutex again. This is the exact self-deadlock mechanism, rather than a separate cross-thread lock-order concern.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "caught",
+              "matching_finding": "`session_projection` itself calls `active_lifecycles` (daemon.rs:2095) while holding `self.controller` (daemon.rs:2091), and `active_lifecycles` now locks `self.controller` again (daemon.rs:1995).",
+              "rationale": "The output explicitly identifies the same controller mutex being acquired again by active_lifecycles while session_projection holds it. That is the precise self-deadlock mechanism, even though it does not use the word deadlock.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "caught"
+    },
+    {
+      "id": "activity-recorder-kills-api",
+      "group": "S",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "caught",
+          "brief_sha256": "67120d5040061f746d9465c8ccc662dbcada39d1b8c8dc97eecb14d040b70a16",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "caught",
+              "matching_finding": "An `Err` from that task returns `Err` from the future, and the select then ends `run_server` with \"native API activity recorder stopped\".",
+              "rationale": "The output explicitly connects the fallible database recorder task through record_activity_stream to the select ending run_server. This identifies both the propagation mechanism and termination of serving.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "caught",
+              "matching_finding": "An `Err` from that task returns `Err` from the future, and the select then ends `run_server` with \"native API activity recorder stopped\".",
+              "rationale": "It explicitly traces a database recording task error out of the recorder future and through the select into termination of run_server. This matches the known API-server termination defect.",
+              "confidence": "high"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "caught",
+          "brief_sha256": "25d06df53a57a1750c614e25ddea8fdfc77c63430f243826dd7b4bc447fd5fea",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-1",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "caught",
+              "matching_finding": "An `Err` from that task returns `Err` from the future, and the select returns that error from `run_server` with \"native API activity recorder stopped\".",
+              "rationale": "The output connects the database recording task to error propagation out of record_activity_stream and the server select returning from run_server. It therefore identifies how an activity recording failure terminates API serving.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "caught",
+              "matching_finding": "An `Err` from that task returns `Err` from the future, and the select returns that error from `run_server` with \"native API activity recorder stopped\".",
+              "rationale": "The output connects a database recording error through the recorder future to the select that races it against serve and control. It explicitly states that the error exits run_server, identifying why an activity write failure stops the serving API.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "caught"
+    },
+    {
+      "id": "dropdown-click-hits-covered-field",
+      "group": "S",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "2d7be0ad8ea2f8177eb3bbffbf4539c7c332117aafa6360d205d48b56086be2b",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It describes popup hitboxes, reverse iteration, and re-rendering the expanded review selector last, but does not identify a later underlying control winning a click over the popup. Registration details alone do not report the wrong-control behavior.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It notes reverse registration hit testing and a popup registered last in review settings, but never identifies a later underlying field winning a popup click and receiving the wrong interaction.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "metadata-checkpoint-overwrites-checkout",
+      "group": "S",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "78e96615ca58b1fc69364027e0ec7205e8395bc5b6c34df1bfb5ff096ac636ff",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It notes that metadata-only status is derived from saved refs, but does not identify the empty-ref case taking the full checkout path and modifying shared files. Its restore description instead asserts that the metadata-only guard prevents checkout.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It records the refs-dependent metadata-only flag and the restore guard, but never identifies the no-refs case bypassing that guard and modifying a shared checkout; its raw-resume description instead presents the guard as effective.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    },
+    {
+      "id": "shortcut-escape-opens-unvisited-manager",
+      "group": "S",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "229244dabb5d417ebdbc66c3802bc737525c8d938eb66679100bfb38b0ebb6c6",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-sonnet-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The direct Close shortcut and operation cancellation are mapped, but Escape dismissal from direct Rename/Close is not analyzed. Returning to an unvisited manager list instead of the dashboard is not identified.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "It maps direct Close entry and cancellation of an active close operation, but never identifies Escape dismissal returning to an unvisited manager list instead of the dashboard.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ],
+      "final_label": "missed"
+    }
+  ]
+}

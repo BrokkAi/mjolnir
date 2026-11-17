@@ -1,0 +1,41 @@
+[
+  {
+    "kind": "blind",
+    "briefs": 22,
+    "median": {
+      "cost_usd": 0.1977842,
+      "total_tokens": 507276.0,
+      "wall_s": 197.05,
+      "turns": 1.0
+    },
+    "total_cost_usd": 4.37,
+    "known_cost_usd": 4.37,
+    "unknown_cost": 0
+  },
+  {
+    "kind": "blind-terra",
+    "briefs": 22,
+    "median": {
+      "cost_usd": 0.0514892,
+      "total_tokens": 233994.0,
+      "wall_s": 103.7,
+      "turns": 1.0
+    },
+    "total_cost_usd": 1.18,
+    "known_cost_usd": 1.18,
+    "unknown_cost": 0
+  },
+  {
+    "kind": "blind-sonnet",
+    "briefs": 22,
+    "median": {
+      "cost_usd": 0.20578285000000002,
+      "total_tokens": 536261.0,
+      "wall_s": 304.1,
+      "turns": 2.0
+    },
+    "total_cost_usd": 5.06,
+    "known_cost_usd": 5.06,
+    "unknown_cost": 0
+  }
+]

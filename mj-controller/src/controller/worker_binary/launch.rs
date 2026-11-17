@@ -374,14 +374,15 @@ impl Controller {
         if profile.kind == mj_core::config::HarnessKind::Claude {
             configure_claude_mailbox_hook(&profile_stage, worker_root)?;
         }
+        let mut shared_paths: Vec<&Path> = shared_profile_paths(profile.kind);
         // A session without project memory gets no replica, no baseline and
         // no history server: nothing of the workspace's memory reaches it.
         if let Some(project_memory) = &project_memory {
-            stage_memory_replica(
+            shared_paths.extend(stage_memory_replica(
                 project_memory,
                 Path::new(&target_profile_home),
                 &profile_stage,
-            )?;
+            )?);
             if project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile {
                 configure_kimi_history_mcp(
                     &profile_stage,
@@ -410,7 +411,7 @@ impl Controller {
                     ownership: &ownership_path,
                     profile: &profile_stage,
                     shared_login: shared_login.as_ref(),
-                    shared_paths: &shared_profile_paths(profile.kind),
+                    shared_paths: &shared_paths,
                 },
             )?;
             if upgrade_retained_worker {
@@ -432,7 +433,7 @@ impl Controller {
             &ownership_path,
             &profile_stage,
             shared_login.as_ref(),
-            &shared_profile_paths(profile.kind),
+            &shared_paths,
         )?;
         if session.build_cache.is_some() {
             self.install_build_cache_shim(session, backend, &launch, executor)

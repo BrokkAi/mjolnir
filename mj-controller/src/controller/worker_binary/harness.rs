@@ -228,11 +228,22 @@ pub(super) fn profile_configuration_paths(harness: HarnessKind) -> Vec<&'static 
         .collect()
 }
 
-/// Only harness-declared content trees may outlive a session in the host store.
-pub(super) fn shared_profile_paths(harness: HarnessKind) -> Vec<&'static str> {
+const MUSE_MODEL_CATALOG: &str = ".data/muse/model-catalog";
+
+/// The profile kinds that may outlive a session in the receiver's store.
+/// Harness configuration, instructions, credentials and new kinds are private
+/// unless explicitly declared here or as a staged project-memory root.
+pub(in crate::controller) fn shared_profile_paths(harness: HarnessKind) -> Vec<&'static Path> {
+    let asset = match harness {
+        HarnessKind::Codex => Some(STAGED_CATALOG_FILE),
+        HarnessKind::Muse => Some(MUSE_MODEL_CATALOG),
+        _ => None,
+    };
     profile_configuration_entries(harness)
         .into_iter()
         .filter_map(|(path, shared)| shared.then_some(path))
+        .chain(asset)
+        .map(Path::new)
         .collect()
 }
 
@@ -293,7 +304,7 @@ pub(super) fn stage_profile(
             .expect("Muse has an XDG home")
             .join("model-catalog");
         if catalog.exists() {
-            copy_profile_entry(&catalog, &destination.join(".data/muse/model-catalog"))?;
+            copy_profile_entry(&catalog, &destination.join(MUSE_MODEL_CATALOG))?;
         }
     }
     Ok(())

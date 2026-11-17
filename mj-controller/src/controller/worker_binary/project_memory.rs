@@ -90,11 +90,11 @@ pub(super) fn canonical_memory_root(project_key: &str) -> PathBuf {
     data_dir().join("projects").join(project_key).join("memory")
 }
 
-pub(super) fn stage_memory_replica(
-    memory: &ProjectMemoryLaunchConfig,
+pub(super) fn stage_memory_replica<'a>(
+    memory: &'a ProjectMemoryLaunchConfig,
     target_profile_home: &Path,
     profile_stage: &Path,
-) -> Result<()> {
+) -> Result<[&'a Path; 2]> {
     let canonical = mj_core::project_memory::resolve_canonical_root(&canonical_memory_root(
         &memory.project_key,
     ))?;
@@ -102,5 +102,6 @@ pub(super) fn stage_memory_replica(
     let replica = memory.root.strip_prefix(target_profile_home)?;
     let baseline = memory.baseline_root.strip_prefix(target_profile_home)?;
     copy_profile_entry(&canonical, &profile_stage.join(replica))?;
-    copy_profile_entry(&canonical, &profile_stage.join(baseline))
+    copy_profile_entry(&canonical, &profile_stage.join(baseline))?;
+    Ok([replica, baseline])
 }
