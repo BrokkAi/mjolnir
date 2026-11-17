@@ -89,22 +89,36 @@ def conditions(arms):
     return ["no-brief", *sorted({CONDITION[a] for a in arms})]
 
 
+def planned_cells(arms):
+    """Required sessions per diff: baseline minima and selected brief-arm counts."""
+    planned = collections.Counter({("no-brief", model): 3 for model in MODELS})
+    for arm in arms:
+        for spec in ARMS[arm]:
+            model, effort = spec.rsplit(":", 1)
+            if model in MODELS and effort == "high":
+                planned[(CONDITION[arm], model)] += 1
+    return planned
+
+
 def require_complete(rows, arms):
     """Refuses a partial sample: every frozen diff needs its planned sessions for every model.
 
     No-brief: the stored arms give each Hard-won diff at least 3 sessions per model.
     Each brief kind: exactly the sessions its arms launch (driver.ARMS), all with output.
     """
-    planned = collections.Counter((CONDITION[arm], m.split(":")[0]) for arm in arms for m in ARMS[arm])
+    planned = planned_cells(arms)
     have = collections.Counter((r["bug"], r["condition"], r["model"]) for r in rows)
     gaps = []
-    for bug in sum(scoped_sets().values(), []):
-        for model in MODELS:
-            if have[(bug, "no-brief", model)] < 3:
-                gaps.append(f"{bug} no-brief {model}: {have[(bug, 'no-brief', model)]} of at least 3")
-            for kind in conditions(arms)[1:]:
-                if have[(bug, kind, model)] != planned[(kind, model)]:
-                    gaps.append(f"{bug} {kind} {model}: {have[(bug, kind, model)]} of {planned[(kind, model)]}")
+    bugs = set(sum(scoped_sets().values(), []))
+    for (bug, kind, model), count in sorted(have.items()):
+        if bug in bugs and (kind, model) not in planned:
+            gaps.append(f"{bug} {kind} {model}: {count} in an unplanned cell (expected 0)")
+    for bug in sorted(bugs):
+        for (kind, model), count in planned.items():
+            n = have[(bug, kind, model)]
+            if (n < count if kind == "no-brief" else n != count):
+                qualifier = "at least " if kind == "no-brief" else ""
+                gaps.append(f"{bug} {kind} {model}: {n} of {qualifier}{count}")
     if gaps:
         raise SystemExit("incomplete sample; not scoring a subset:\n" + "\n".join(gaps))
 
@@ -279,17 +293,16 @@ def score():
             final[r["output_id"]] = "missed"
     sets = scoped_sets()
     conds = conditions(saved["arms"])
+    planned = planned_cells(saved["arms"])
     rate = collections.defaultdict(dict)  # (set, condition, model) -> bug -> catch share
     for group, bugs in sets.items():
-        for cond in conds:
-            for model in MODELS:
-                for bug in bugs:
-                    labels = [final[o] for o, k in key.items()
-                              if k["bug"] == bug and k["condition"] == cond and k["model"] == model]
-                    if labels:
-                        rate[(group, cond, model)][bug] = (sum(l == "caught" for l in labels) / len(labels),
-                                                           sum(l == "partial" for l in labels) / len(labels),
-                                                           len(labels))
+        for cond, model in planned:
+            for bug in bugs:
+                labels = [final[o] for o, k in key.items()
+                          if k["bug"] == bug and k["condition"] == cond and k["model"] == model]
+                rate[(group, cond, model)][bug] = (sum(l == "caught" for l in labels) / len(labels),
+                                                  sum(l == "partial" for l in labels) / len(labels),
+                                                  len(labels))
     report = {"sets": {k: len(v) for k, v in sets.items()}, "rates": [], "effects": [], "per_arm": []}
     for (group, cond, model), per in sorted(rate.items()):
         caught = [v[0] for v in per.values()]
@@ -297,28 +310,26 @@ def score():
                                 "sessions": sum(v[2] for v in per.values()),
                                 "catch_rate": round(statistics.fmean(caught), 3), "ci95": boot(caught),
                                 "partial_rate": round(statistics.fmean(v[1] for v in per.values()), 3)})
-    for kind in conds[1:]:
+    for kind, model in planned:
+        if kind == "no-brief":
+            continue
         for group in sets:
-            for model in MODELS:
-                a, b = rate[(group, kind, model)], rate[(group, "no-brief", model)]
-                common = sorted(set(a) & set(b))
-                assert len(common) == len(sets[group]), (kind, group, model)
-                diffs = [a[x][0] - b[x][0] for x in common]
-                report["effects"].append({"brief": kind, "set": group, "model": model, "diffs": len(common),
-                                          "effect_points": round(100 * statistics.fmean(diffs), 1),
-                                          "ci95_points": [round(100 * x, 1) for x in boot(diffs)]})
-    for model in MODELS:  # expected catches of 30 for one reviewer
-        for cond in conds:
-            report.setdefault("expected_catches_of_30", []).append({"model": model, "condition": cond, "value": round(
-                sum(v[0] for g in sets for v in rate.get((g, cond, model), {}).values()), 1)})
-    for cond in conds:
-        for model in MODELS:
-            ks = [k for k in key.values() if k["condition"] == cond and k["model"] == model]
-            lat = [k["latency_s"] for k in ks if k["latency_s"] is not None]
-            report["per_arm"].append({"condition": cond, "model": model, "sessions": len(ks),
-                                      "median_tokens": statistics.median(k["total_tokens"] for k in ks),
-                                      "median_latency_s": statistics.median(lat) if lat else None,
-                                      "median_tool_calls": (statistics.median(t) if (t := [k["tool_calls"] for k in ks if k["tool_calls"] is not None]) else None)})
+            a, b = rate[(group, kind, model)], rate[(group, "no-brief", model)]
+            common = sorted(set(a) & set(b))
+            assert len(common) == len(sets[group]), (kind, group, model)
+            diffs = [a[x][0] - b[x][0] for x in common]
+            report["effects"].append({"brief": kind, "set": group, "model": model, "diffs": len(common),
+                                      "effect_points": round(100 * statistics.fmean(diffs), 1),
+                                      "ci95_points": [round(100 * x, 1) for x in boot(diffs)]})
+    for cond, model in planned:  # expected catches of 30 for one reviewer
+        report.setdefault("expected_catches_of_30", []).append({"model": model, "condition": cond, "value": round(
+            sum(v[0] for g in sets for v in rate[(g, cond, model)].values()), 1)})
+        ks = [k for k in key.values() if k["condition"] == cond and k["model"] == model]
+        lat = [k["latency_s"] for k in ks if k["latency_s"] is not None]
+        report["per_arm"].append({"condition": cond, "model": model, "sessions": len(ks),
+                                  "median_tokens": statistics.median(k["total_tokens"] for k in ks),
+                                  "median_latency_s": statistics.median(lat) if lat else None,
+                                  "median_tool_calls": (statistics.median(t) if (t := [k["tool_calls"] for k in ks if k["tool_calls"] is not None]) else None)})
     if "oracle" in conds:
         report["stage_a"] = decide(rate)
     if "bifrost" in conds and "blind" in conds:

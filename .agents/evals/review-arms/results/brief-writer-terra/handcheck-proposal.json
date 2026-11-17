@@ -1,0 +1,442 @@
+{
+  "024dd0b4a6b43456": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies archived selectors stored under harness-specific option IDs being omitted by the canonical model/effort lookup, losing the selected effort on native resume."
+  },
+  "0496f2b47166d271": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Connects a prompt held for worker readiness with interrupt finding no active turn, failing to withdraw the prompt, and the cancelled prompt being submitted when the worker attaches."
+  },
+  "07558cab1ecd965f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the metadata-only marker being false when saved review refs are empty, so content restore can check out the archived HEAD into the shared working checkout."
+  },
+  "086de10074e6c124": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly identifies ordinary project-relative file paths resolving against workspace_root, the project parent, rather than the agent working directory. The additional sibling-file access concern does not replace this matching finding."
+  },
+  "0b7d9b432a9d72c8": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "0ef0b1dcbccf71fc": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies separate frontier/state and transcript/window queries observing different concurrent commits without a shared read transaction. Its different downstream example does not change the identified snapshot-consistency defect."
+  },
+  "0fce58fe678dee4e": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies archived selectors stored under harness-specific option IDs being omitted by the canonical model/effort lookup, losing the selected effort on native resume."
+  },
+  "171482fd54e4ff35": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies archived selectors stored under harness-specific option IDs being omitted by the canonical model/effort lookup, losing the selected effort on native resume."
+  },
+  "1b97a5d40ccea847": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "1d5fd9a039f126ff": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Connects a prompt held for worker readiness with interrupt finding no active turn, failing to withdraw the prompt, and the cancelled prompt being submitted when the worker attaches."
+  },
+  "21b0da5086600c3c": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "242bde740a4d342b": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol selection missing from transcript row-cache invalidation, causing existing rows to retain Unicode glyphs after switching to ASCII."
+  },
+  "2804add3efa9ae7f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog bodies and default-model discovery results sharing the same (profile, empty-model) database primary key and replacing each other, destroying outage fallback."
+  },
+  "2b2926166881844d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly identifies ordinary project-relative file paths resolving against workspace_root, the project parent, rather than the agent working directory. The additional sibling-file access concern does not replace this matching finding."
+  },
+  "2bed828e89d74630": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the supervisor environment being persisted once and reused after accepted model changes, causing subsequent bridge launches within the worker to use the old or default model."
+  },
+  "2c6009974a3df27d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog bodies and default-model discovery results sharing the same (profile, empty-model) database primary key and replacing each other, destroying outage fallback."
+  },
+  "2d6d75c5d44b9f49": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "2e37bc65dd86106d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection already holding the controller mutex when active_lifecycles acquires the same non-reentrant mutex, deadlocking web publication and other controller users."
+  },
+  "34f60df0c23edf46": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the per-connection counter restarting at term-1 while historical transcript tool calls retain those IDs, so output after reconnect attaches to earlier calls."
+  },
+  "3c5875ff0c91a696": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "46c459da3981544f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "4929fd50126f47f0": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the metadata-only marker being false when saved review refs are empty, so content restore can check out the archived HEAD into the shared working checkout."
+  },
+  "4f8f21343b8ea453": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "4fb00775fa2e9cbd": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies archived selectors stored under harness-specific option IDs being omitted by the canonical model/effort lookup, losing the selected effort on native resume."
+  },
+  "50fe19cb95715b13": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog bodies and default-model discovery results sharing the same (profile, empty-model) database primary key and replacing each other, destroying outage fallback."
+  },
+  "581593a60d7c53c2": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol selection missing from transcript row-cache invalidation, causing existing rows to retain Unicode glyphs after switching to ASCII."
+  },
+  "590466dc4243042d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "5b57cd754dfe9ac5": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the per-connection counter restarting at term-1 while historical transcript tool calls retain those IDs, so output after reconnect attaches to earlier calls."
+  },
+  "5c7183ecf47d7d27": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "5d6934ab7af66944": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "5de2b42930a7ab95": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "5e21d4f61aade697": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "5f20beb126d240d2": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol selection missing from transcript row-cache invalidation, causing existing rows to retain Unicode glyphs after switching to ASCII."
+  },
+  "6055464be96a340e": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies archived selectors stored under harness-specific option IDs being omitted by the canonical model/effort lookup, losing the selected effort on native resume."
+  },
+  "63bac7350151d439": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly identifies ordinary project-relative file paths resolving against workspace_root, the project parent, rather than the agent working directory. The additional sibling-file access concern does not replace this matching finding."
+  },
+  "6663d8eea70de3df": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the per-connection counter restarting at term-1 while historical transcript tool calls retain those IDs, so output after reconnect attaches to earlier calls."
+  },
+  "66fd4eae79948be6": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol selection missing from transcript row-cache invalidation, causing existing rows to retain Unicode glyphs after switching to ASCII."
+  },
+  "69be4c2381f4ace1": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "69db8e24967039c8": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "6b97e42eaea49cce": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection already holding the controller mutex when active_lifecycles acquires the same non-reentrant mutex, deadlocking web publication and other controller users."
+  },
+  "765064c722cb468f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "76fafd520f804fcf": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "7bbd59bd3a924575": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog bodies and default-model discovery results sharing the same (profile, empty-model) database primary key and replacing each other, destroying outage fallback."
+  },
+  "7c0c02729e4ddc40": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "7d50dc548fd571b1": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "7dac335fa8789e88": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection already holding the controller mutex when active_lifecycles acquires the same non-reentrant mutex, deadlocking web publication and other controller users."
+  },
+  "86b9362298e9bee9": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the supervisor environment being persisted once and reused after accepted model changes, causing subsequent bridge launches within the worker to use the old or default model."
+  },
+  "87e400512dc86124": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "88f7f1c163f2ae01": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "8b8310d9543c8155": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the metadata-only marker being false when saved review refs are empty, so content restore can check out the archived HEAD into the shared working checkout."
+  },
+  "8de3b7161111c1b0": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol selection missing from transcript row-cache invalidation, causing existing rows to retain Unicode glyphs after switching to ASCII."
+  },
+  "94108308d5a9ffed": {
+    "label": "partial",
+    "agrees_with_judges": true,
+    "why": "Points at the restore selector lookup and notes advertised option IDs being missed, but its concrete alias and loss concern model_id and accepted model defaults. It never identifies an effort alias such as reasoning_effort or the lost accepted effort required by the match rule; the generic selector discussion is insufficient for caught."
+  },
+  "9430036150522018": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly identifies ordinary project-relative file paths resolving against workspace_root, the project parent, rather than the agent working directory. The additional sibling-file access concern does not replace this matching finding."
+  },
+  "958dc1d8ec145855": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection already holding the controller mutex when active_lifecycles acquires the same non-reentrant mutex, deadlocking web publication and other controller users."
+  },
+  "96a1387e65319026": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog bodies and default-model discovery results sharing the same (profile, empty-model) database primary key and replacing each other, destroying outage fallback."
+  },
+  "984077e7e6ddf4d4": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the supervisor environment being persisted once and reused after accepted model changes, causing subsequent bridge launches within the worker to use the old or default model."
+  },
+  "9b7967d8fa926355": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol selection missing from transcript row-cache invalidation, causing existing rows to retain Unicode glyphs after switching to ASCII."
+  },
+  "9bc2e164fbe1ab61": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog bodies and default-model discovery results sharing the same (profile, empty-model) database primary key and replacing each other, destroying outage fallback."
+  },
+  "9f2ffa1d5ea26b32": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "a4f2b09a2bf4fad3": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol selection missing from transcript row-cache invalidation, causing existing rows to retain Unicode glyphs after switching to ASCII."
+  },
+  "a521224b4c1df217": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "a54fbadddf0c114b": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection already holding the controller mutex when active_lifecycles acquires the same non-reentrant mutex, deadlocking web publication and other controller users."
+  },
+  "ab85356e1c02cee1": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "ac18705d2583f0fb": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the per-connection counter restarting at term-1 while historical transcript tool calls retain those IDs, so output after reconnect attaches to earlier calls."
+  },
+  "be594200a190678c": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "c5b0c0f268b5cc4e": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection already holding the controller mutex when active_lifecycles acquires the same non-reentrant mutex, deadlocking web publication and other controller users."
+  },
+  "c5c852476a1c10ed": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "cc139707a14e2d87": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the per-connection counter restarting at term-1 while historical transcript tool calls retain those IDs, so output after reconnect attaches to earlier calls."
+  },
+  "cc80d5e7e2dd6087": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies archived selectors stored under harness-specific option IDs being omitted by the canonical model/effort lookup, losing the selected effort on native resume."
+  },
+  "d07f66396f217e94": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection already holding the controller mutex when active_lifecycles acquires the same non-reentrant mutex, deadlocking web publication and other controller users."
+  },
+  "d2772b6ea756ea53": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "d67bef0c73ea51f7": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "d8ddfccd02c4c295": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the per-connection counter restarting at term-1 while historical transcript tool calls retain those IDs, so output after reconnect attaches to earlier calls."
+  },
+  "da3b6709aadb186d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies archived selectors stored under harness-specific option IDs being omitted by the canonical model/effort lookup, losing the selected effort on native resume."
+  },
+  "dbbe6f304784e237": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "dce358ab55e351f7": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "dd1b9ff6619c7e01": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly identifies ordinary project-relative file paths resolving against workspace_root, the project parent, rather than the agent working directory. The additional sibling-file access concern does not replace this matching finding."
+  },
+  "de3fb256c85a8a85": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection already holding the controller mutex when active_lifecycles acquires the same non-reentrant mutex, deadlocking web publication and other controller users."
+  },
+  "df5319d9c780d30b": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the metadata-only marker being false when saved review refs are empty, so content restore can check out the archived HEAD into the shared working checkout."
+  },
+  "e2a55b6d1ffd4ce3": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Connects a prompt held for worker readiness with interrupt finding no active turn, failing to withdraw the prompt, and the cancelled prompt being submitted when the worker attaches."
+  },
+  "e47b78e041a00baf": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container-runtime or SSH command arguments and exposed through process argument inspection."
+  },
+  "e9d1c42f1ea8f1ed": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "ee9c9f0c3885fd17": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies effort validation or inheritance using discovery for the profile default rather than the selected child model, accepting unsupported efforts or rejecting supported ones. This is the same incorrect capability source."
+  },
+  "efd7590930cbde6f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol selection missing from transcript row-cache invalidation, causing existing rows to retain Unicode glyphs after switching to ASCII."
+  },
+  "f2112bac72d98175": {
+    "label": "missed",
+    "agrees_with_judges": false,
+    "why": "Describes a different archive-version compatibility defect: older readers accepting archives while ignoring the new metadata-only marker. It does not identify capture deriving that marker from nonempty saved refs or a current reader taking the checkout path when the ref map is empty. Shared-checkout damage is a common consequence, but correcting the proposed schema-version issue would leave the known bug intact; this is a different problem, not partial identification."
+  },
+  "f4d5014b7d55344a": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the metadata-only marker being false when saved review refs are empty, so content restore can check out the archived HEAD into the shared working checkout."
+  },
+  "f8ad5c239dcb0a78": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing choosing a later underlying field or button before the visually covering popup, sending option clicks to the wrong control."
+  },
+  "fec27962eefe33c4": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies archived selectors stored under harness-specific option IDs being omitted by the canonical model/effort lookup, losing the selected effort on native resume."
+  }
+}

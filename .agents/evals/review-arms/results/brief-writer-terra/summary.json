@@ -1,0 +1,157 @@
+{
+  "round": "brief-judge-j",
+  "reviewer_model": "gpt-6.1-terra",
+  "reviewer_effort": "high",
+  "writer_models": {
+    "TT": "gpt-6.1-terra",
+    "BT": "gpt-6.1-sol"
+  },
+  "writer_effort": "high",
+  "metric": "mean per-diff caught share; partial is separate and never counts as caught",
+  "bootstrap": {
+    "resamples": 10000,
+    "seed": 20261116,
+    "unit": "diff",
+    "paired": true,
+    "confidence": 0.95,
+    "interval": "percentile order statistics at floor(0.025*n), floor(0.975*n)"
+  },
+  "decision_rule": "Primary P only: TT >= BT - 0.10 AND lower95(TT-no-brief) > 0; else Sol",
+  "margin_criterion": "point estimate only; no significance claim for TT-BT",
+  "decision_checks": {
+    "TT_at_least_BT_minus_10_points": false,
+    "TT_minus_no_brief_lower95_above_zero": false
+  },
+  "default_writer": "Sol/high",
+  "sets": {
+    "P": {
+      "diffs": 18,
+      "arms": {
+        "no-brief": {
+          "condition": "no-brief",
+          "sessions": 60,
+          "catch_rate": 0.2037037037037037,
+          "partial_rate": 0.018518518518518517
+        },
+        "BT": {
+          "condition": "blind",
+          "sessions": 54,
+          "catch_rate": 0.5555555555555556,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "condition": "blind-terra",
+          "sessions": 54,
+          "catch_rate": 0.2962962962962963,
+          "partial_rate": 0.0
+        }
+      },
+      "contrasts": {
+        "TT-BT": {
+          "difference": -0.25925925925925924,
+          "ci95": [
+            -0.4444444444444444,
+            -0.09259259259259259
+          ]
+        },
+        "TT-no-brief": {
+          "difference": 0.09259259259259259,
+          "ci95": [
+            -0.05555555555555555,
+            0.2777777777777778
+          ]
+        }
+      }
+    },
+    "S": {
+      "diffs": 4,
+      "arms": {
+        "no-brief": {
+          "condition": "no-brief",
+          "sessions": 12,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "condition": "blind",
+          "sessions": 12,
+          "catch_rate": 0.4166666666666667,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "condition": "blind-terra",
+          "sessions": 12,
+          "catch_rate": 0.4166666666666667,
+          "partial_rate": 0.0
+        }
+      },
+      "contrasts": {
+        "TT-BT": {
+          "difference": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "TT-no-brief": {
+          "difference": 0.08333333333333333,
+          "ci95": [
+            0.0,
+            0.25
+          ]
+        }
+      }
+    }
+  },
+  "judge_consistency": {
+    "reference_round": "brief-judge-g",
+    "reviewer_model": "gpt-6.1-terra",
+    "judges": {
+      "brief-judge-j": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "profile": "codex4"
+      },
+      "brief-judge-g": {
+        "model": "gemini-4-carbon",
+        "effort": "high"
+      }
+    },
+    "scope": "10 ablation diffs, identical session IDs; mean per-diff caught share",
+    "affects_writer_decision": false,
+    "diffs": 10,
+    "arms": {
+      "BT": {
+        "sessions": 30,
+        "rates": {
+          "brief-judge-j": {
+            "catch_rate": 0.9,
+            "partial_rate": 0.0
+          },
+          "brief-judge-g": {
+            "catch_rate": 0.9,
+            "partial_rate": 0.0
+          }
+        },
+        "difference_points": 0.0,
+        "differs_over_10_points": false
+      },
+      "no-brief": {
+        "sessions": 34,
+        "rates": {
+          "brief-judge-j": {
+            "catch_rate": 0.2333333333333333,
+            "partial_rate": 0.03333333333333333
+          },
+          "brief-judge-g": {
+            "catch_rate": 0.2,
+            "partial_rate": 0.03333333333333333
+          }
+        },
+        "difference_points": 3.3333333333333335,
+        "differs_over_10_points": false
+      }
+    },
+    "caveats": []
+  }
+}
