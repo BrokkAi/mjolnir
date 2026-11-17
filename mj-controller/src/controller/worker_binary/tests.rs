@@ -4,6 +4,37 @@ use mj_core::targets::SshTrafficClass;
 
 use crate::targets::tests::unwrapped_remote_line;
 
+/// The worker writes each harness's GitHub CLI approval into a file inside the
+/// session's staged profile, so the profile staging allowlist must carry that
+/// file from the profile home. A harness that names a new file in
+/// `HarnessKind::gh_approval` without adding it there starts its sessions
+/// without the approval.
+#[test]
+fn every_staged_gh_approval_file_is_copied_by_profile_staging() {
+    for harness in mj_core::config::HarnessKind::ALL {
+        let path = match harness.gh_approval() {
+            mj_core::config::GhApproval::StagedFile(path) => path,
+            mj_core::config::GhApproval::SessionConfigDocument(_)
+            | mj_core::config::GhApproval::SessionOptions
+            | mj_core::config::GhApproval::AdapterEnvironment(_)
+            | mj_core::config::GhApproval::LaunchFile(_)
+            | mj_core::config::GhApproval::AcpRequest => continue,
+        };
+        let entries = harness::profile_configuration_paths(harness);
+        assert!(
+            entries.iter().any(|entry| {
+                path == *entry
+                    || path
+                        .strip_prefix(entry)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            }),
+            "{} gh approval {} is not staged: {entries:?}",
+            harness.display_name(),
+            path
+        );
+    }
+}
+
 #[test]
 fn observe_enforcement_requires_configured_approvals_even_on_isolated_targets() {
     for current in [

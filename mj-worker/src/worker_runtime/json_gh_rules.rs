@@ -1,68 +1,24 @@
-//! Session-owned native permissions for the JSON-configured harnesses: GitHub CLI
-//! approvals and, for OpenCode, the tools Mjolnir turns off.
+//! Session-owned native permissions for OpenCode: the GitHub CLI approval it
+//! reads last among its configuration documents, and the tools Mjolnir turns
+//! off.
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use jsonc_parser::{
     ParseOptions,
     cst::{CstInputValue, CstNode, CstObject, CstRootNode},
 };
-use mj_core::config::{ExecutionPolicy, HarnessKind};
+use mj_core::config::ExecutionPolicy;
 
 const OPENCODE_CONTENT: &str = "OPENCODE_CONFIG_CONTENT";
 const GH_COMMANDS: [&str; 2] = ["gh", "gh *"];
-
-/// Whether this harness gets session-owned rules in every execution policy,
-/// not only under configured approvals.
-pub(super) fn configures_native_rules_always(harness: HarnessKind) -> bool {
-    harness == HarnessKind::OpenCode
-}
 
 /// What OpenCode must not offer the model, whatever the approval mode.
 #[derive(Clone, Copy)]
 pub(super) struct OpenCodeDenials {
     /// Its own `subagent` tool, when Mjolnir (or nobody) delegates.
     pub(super) native_subagent: bool,
-}
-
-pub(super) fn configure_json_gh_rules(
-    harness: HarnessKind,
-    policy: ExecutionPolicy,
-    denials: OpenCodeDenials,
-    environment: &mut BTreeMap<String, String>,
-) -> Result<()> {
-    if harness == HarnessKind::OpenCode {
-        return configure_opencode(policy, denials, environment);
-    }
-    if policy != ExecutionPolicy::ConfiguredApprovals {
-        return Ok(());
-    }
-    match harness {
-        HarnessKind::Muse => {
-            let mut prefixes: Vec<Vec<String>> = environment
-                .get("MUSE_ACP_ALLOW_COMMAND_PREFIXES")
-                .map(|value| serde_json::from_str(value))
-                .transpose()
-                .context("parse Muse native command prefixes")?
-                .unwrap_or_default();
-            ensure!(
-                prefixes
-                    .iter()
-                    .all(|prefix| !prefix.is_empty() && prefix.iter().all(|word| !word.is_empty())),
-                "Muse native command prefixes must contain nonempty argv words"
-            );
-            if !prefixes.iter().any(|prefix| prefix.as_slice() == ["gh"]) {
-                prefixes.push(vec!["gh".into()]);
-            }
-            environment.insert(
-                "MUSE_ACP_ALLOW_COMMAND_PREFIXES".into(),
-                serde_json::to_string(&prefixes)?,
-            );
-            Ok(())
-        }
-        _ => Ok(()),
-    }
 }
 
 fn document(text: &str) -> Result<(CstRootNode, CstObject)> {
@@ -107,8 +63,11 @@ pub(super) fn configure_opencode_plugin(
 /// One native permission rule, as OpenCode 2.2.7 lists them in `permissions`.
 type Rule = (&'static str, &'static str, &'static str);
 
-/// The rules this launch appends after every rule the profile supplies, so
-/// they win: OpenCode takes the last rule that matches.
+/// The rules this launch appends after every rule a document already supplies,
+/// so they win: OpenCode takes the last rule that matches, and a project
+/// document or a profile's own `OPENCODE_CONFIG_CONTENT` follows the staged
+/// file. Both the `gh` approval and the denials are one suffix, so one
+/// idempotence check covers them.
 fn opencode_rules(policy: ExecutionPolicy, denials: OpenCodeDenials) -> Vec<Rule> {
     let mut rules = Vec::new();
     if policy == ExecutionPolicy::ConfiguredApprovals {
@@ -125,27 +84,16 @@ fn opencode_rules(policy: ExecutionPolicy, denials: OpenCodeDenials) -> Vec<Rule
     rules
 }
 
-fn configure_opencode(
-    policy: ExecutionPolicy,
-    denials: OpenCodeDenials,
-    environment: &mut BTreeMap<String, String>,
-) -> Result<()> {
-    let original = environment
-        .get(OPENCODE_CONTENT)
-        .map(String::as_str)
-        .unwrap_or("{}");
-    let (document, object) = document(original).context(OPENCODE_CONTENT)?;
-    let rules = object
-        .array_value_or_create("permissions")
-        .context("OPENCODE_CONFIG_CONTENT permissions must be an array")?;
-    // OpenCode 2.2.7 concatenates native permission arrays across config documents.
-    // Keeping this as its own document preserves even scalar legacy defaults.
-    let wanted = opencode_rules(policy, denials);
+/// Append `wanted` after the rules the document already supplies, unless a
+/// previous launch already appended exactly them. OpenCode takes the last
+/// rule that matches, so an earlier identical rule may be shadowed by later
+/// restrictions.
+fn append_rules(rules: &jsonc_parser::cst::CstArray, wanted: &[Rule]) {
     let elements = rules.elements();
     let final_rules = elements.len() >= wanted.len()
         && elements[elements.len() - wanted.len()..]
             .iter()
-            .zip(&wanted)
+            .zip(wanted)
             .all(|(node, (action, resource, effect))| {
                 node.as_object().is_some_and(|rule| {
                     [
@@ -160,16 +108,42 @@ fn configure_opencode(
                     })
                 })
             });
-    // An earlier identical rule may be shadowed by later restrictions.
-    if !final_rules {
-        for (action, resource, effect) in wanted {
-            rules.append(CstInputValue::Object(vec![
-                ("action".into(), action.into()),
-                ("resource".into(), resource.into()),
-                ("effect".into(), effect.into()),
-            ]));
-        }
+    if final_rules {
+        return;
     }
+    for (action, resource, effect) in wanted {
+        rules.append(CstInputValue::Object(vec![
+            ("action".into(), (*action).into()),
+            ("resource".into(), (*resource).into()),
+            ("effect".into(), (*effect).into()),
+        ]));
+    }
+}
+
+/// Add this launch's `gh` approval, and the tools Mjolnir turns off, to
+/// `OPENCODE_CONFIG_CONTENT`.
+///
+/// OpenCode merges its configuration documents in order and takes the last
+/// matching permission rule. The staged `opencode.json` is read first, and a
+/// project's own `opencode.json` or a profile's `OPENCODE_CONFIG_CONTENT`
+/// follows it, so only the document Mjolnir supplies there is guaranteed to
+/// win. The staged file keeps everything else the profile configured.
+pub(super) fn configure_opencode_rules(
+    policy: ExecutionPolicy,
+    denials: OpenCodeDenials,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let original = environment
+        .get(OPENCODE_CONTENT)
+        .map(String::as_str)
+        .unwrap_or("{}");
+    let (document, object) = document(original).context(OPENCODE_CONTENT)?;
+    let rules = object
+        .array_value_or_create("permissions")
+        .context("OPENCODE_CONFIG_CONTENT permissions must be an array")?;
+    // OpenCode 2.2.7 concatenates native permission arrays across config documents.
+    // Keeping this as its own document preserves even scalar legacy defaults.
+    append_rules(&rules, &opencode_rules(policy, denials));
     let updated = document.to_string();
     if updated != original {
         environment.insert(OPENCODE_CONTENT.into(), updated);
@@ -181,15 +155,12 @@ fn configure_opencode(
 mod tests {
     use super::*;
 
-    fn configure(harness: HarnessKind, environment: &mut BTreeMap<String, String>) -> Result<()> {
-        configure_json_gh_rules(
-            harness,
-            ExecutionPolicy::ConfiguredApprovals,
-            OpenCodeDenials {
-                native_subagent: false,
-            },
-            environment,
-        )
+    fn configure(
+        policy: ExecutionPolicy,
+        denials: OpenCodeDenials,
+        environment: &mut BTreeMap<String, String>,
+    ) -> Result<()> {
+        configure_opencode_rules(policy, denials, environment)
     }
 
     #[test]
@@ -206,7 +177,14 @@ mod tests {
   "providers": {"z":{}, "a":{}},
 }"#;
         let mut environment = BTreeMap::from([(OPENCODE_CONTENT.into(), original.into())]);
-        configure(HarnessKind::OpenCode, &mut environment).unwrap();
+        configure(
+            ExecutionPolicy::ConfiguredApprovals,
+            OpenCodeDenials {
+                native_subagent: false,
+            },
+            &mut environment,
+        )
+        .unwrap();
         let updated = environment[OPENCODE_CONTENT].clone();
         assert!(updated.contains("// retain the user's scalar default and native rule order"));
         assert!(updated.contains("\"permission\": \"ask\""));
@@ -219,8 +197,9 @@ mod tests {
                 string_value(node.as_object().unwrap().get("resource").unwrap().value()).unwrap()
             })
             .collect();
-        // The gh allows come first, then the `execute` denial, which no
-        // earlier user rule can override.
+        // The `gh` allows come last, after every rule this document supplies,
+        // so an earlier blanket deny cannot shadow them; the `execute` denial
+        // follows them and covers only its own tool.
         assert_eq!(resources, ["gh *", "*", "rm *", ".env", "gh", "gh *", "*"]);
         let actions = rules
             .iter()
@@ -229,12 +208,27 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(actions[actions.len() - 3..], ["bash", "bash", "execute"]);
-        configure(HarnessKind::OpenCode, &mut environment).unwrap();
+        configure(
+            ExecutionPolicy::ConfiguredApprovals,
+            OpenCodeDenials {
+                native_subagent: false,
+            },
+            &mut environment,
+        )
+        .unwrap();
         assert_eq!(environment[OPENCODE_CONTENT], updated);
     }
 
+    /// Both approval modes keep the denials, and a guardian launch also keeps
+    /// the `gh` allows, in one suffix that never grows on a repeat launch.
     #[test]
-    fn opencode_denials_apply_in_every_approval_mode_and_stay_idempotent() {
+    fn opencode_rules_apply_in_every_approval_mode_and_stay_idempotent() {
+        // The table names the document OpenCode accepts the approval in; the
+        // writer must supply that same one.
+        assert_eq!(
+            mj_core::config::HarnessKind::OpenCode.gh_approval(),
+            mj_core::config::GhApproval::SessionConfigDocument(OPENCODE_CONTENT)
+        );
         let rules = |environment: &BTreeMap<String, String>| -> Vec<(String, String)> {
             let (_, object) = document(&environment[OPENCODE_CONTENT]).unwrap();
             object
@@ -256,8 +250,7 @@ mod tests {
             for native_subagent in [false, true] {
                 let denials = OpenCodeDenials { native_subagent };
                 let mut environment = BTreeMap::new();
-                configure_json_gh_rules(HarnessKind::OpenCode, policy, denials, &mut environment)
-                    .unwrap();
+                configure(policy, denials, &mut environment).unwrap();
                 let first = environment[OPENCODE_CONTENT].clone();
                 let mut expected = Vec::new();
                 if policy == ExecutionPolicy::ConfiguredApprovals {
@@ -276,23 +269,57 @@ mod tests {
                     expected,
                     "{policy:?} {native_subagent}"
                 );
-                configure_json_gh_rules(HarnessKind::OpenCode, policy, denials, &mut environment)
-                    .unwrap();
+                configure(policy, denials, &mut environment).unwrap();
                 assert_eq!(environment[OPENCODE_CONTENT], first);
             }
         }
-        // Other harnesses get nothing outside configured approvals.
-        let mut environment = BTreeMap::new();
-        configure_json_gh_rules(
-            HarnessKind::Muse,
-            ExecutionPolicy::Unconstrained,
+    }
+
+    /// A profile may supply its own `OPENCODE_CONFIG_CONTENT` with a blanket
+    /// ask. OpenCode takes the last matching rule, so the managed allows must
+    /// follow it; the profile's own rule and text stay.
+    #[test]
+    fn opencode_gh_approval_follows_a_profiles_own_later_rules() {
+        let original = r#"{
+  // keep the person's rule order
+  "permissions": [
+    {"action":"bash","resource":"*","effect":"ask"},
+    {"action":"read","resource":".env","effect":"ask"},
+  ],
+  "providers": {"z":{}, "a":{}},
+}"#;
+        let mut environment = BTreeMap::from([(OPENCODE_CONTENT.into(), original.into())]);
+        configure(
+            ExecutionPolicy::ConfiguredApprovals,
             OpenCodeDenials {
-                native_subagent: true,
+                native_subagent: false,
             },
             &mut environment,
         )
         .unwrap();
-        assert!(environment.is_empty());
+        let updated = environment[OPENCODE_CONTENT].clone();
+        assert!(updated.contains("// keep the person's rule order"));
+        assert!(updated.contains("\"providers\": {\"z\":{}, \"a\":{}}"));
+        let (_, object) = document(&updated).unwrap();
+        let rules = object.array_value("permissions").unwrap().elements();
+        let described: Vec<_> = rules
+            .iter()
+            .map(|node| {
+                let rule = node.as_object().unwrap();
+                let get = |key| string_value(rule.get(key).unwrap().value()).unwrap();
+                (get("resource"), get("effect"))
+            })
+            .collect();
+        assert_eq!(
+            described,
+            [
+                ("*".to_owned(), "ask".to_owned()),
+                (".env".to_owned(), "ask".to_owned()),
+                ("gh".to_owned(), "allow".to_owned()),
+                ("gh *".to_owned(), "allow".to_owned()),
+                ("*".to_owned(), "deny".to_owned()),
+            ]
+        );
     }
 
     /// Serve OpenCode's provider requests from this thread, recording the
@@ -403,9 +430,8 @@ mod tests {
                 })
                 .to_string(),
             )]);
-            configure_json_gh_rules(
-                HarnessKind::OpenCode,
-                ExecutionPolicy::Unconstrained,
+            configure_opencode_rules(
+                mj_core::config::ExecutionPolicy::Unconstrained,
                 OpenCodeDenials { native_subagent },
                 &mut environment,
             )
@@ -458,7 +484,7 @@ mod tests {
                 "session/new",
                 serde_json::json!({"cwd": work, "mcpServers": [{
                     "name": "mj-agents", "command": worker.to_string_lossy(),
-                    "args": ["worker", "subagent-mcp", "--socket", socket, "--harness", HarnessKind::OpenCode.id(), "--role", "parent"],
+                    "args": ["worker", "subagent-mcp", "--socket", socket, "--harness", mj_core::config::HarnessKind::OpenCode.id(), "--role", "parent"],
                     "env": []}]}),
             );
             let session_id = session["sessionId"].clone();

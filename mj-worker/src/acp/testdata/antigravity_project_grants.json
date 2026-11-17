@@ -9,7 +9,8 @@
         "read_file(/personal-notes/)",
         "mcp(mj-memory/*)",
         "mcp(mj-agents/*)",
-        "read_file(@USER_HOME@)"
+        "read_file(@USER_HOME@)",
+        "command(gh)"
       ],
       "deny": [
         "command(rm)"

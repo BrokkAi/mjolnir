@@ -905,6 +905,7 @@ from the profile home:
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
 | OpenCode | `opencode.json`, `opencode.jsonc`, `AGENTS.md`, `skills/`, and the logins from `opencode.db`, as `.data/opencode/mjolnir-credentials.json` |
+| Antigravity | `antigravity-cli/antigravity-oauth-token`, `AGENTS.md`, `skills/` |
 | DSH | `AGENTS.md`, `skills/` (staged, but DSH does not read skills) |
 
 Staging follows symbolic links: a linked file or directory is copied with the
@@ -937,10 +938,21 @@ Mjolnir then adds its own files to the staged home:
   that turn off OpenCode's `execute` tool, so the `mj-agents` tools are
   ordinary tools named `mj-agents_spawn` and so on instead of reachable only
   through scripts, and, unless the session uses OpenCode's own delegation
-  (Native), its own `subagent` tool. OpenCode names a tool
+  (Native), its own `subagent` tool, and that carry the GitHub CLI approval
+  under configured approvals. OpenCode names a tool
   `<server>_<tool>`, so another server can carry the same name as a Mjolnir
   tool; the worker therefore never answers OpenCode's permission requests,
   and under configured approvals the person approves Mjolnir's tools too;
+- the GitHub CLI approval in the harness's own configuration, under configured
+  approvals: `rules/mj-gh.rules` for Codex, `config.toml` for Kimi Code and
+  Grok Build, muse-acp's command prefixes for Muse Code, and agy's project
+  grants for Antigravity. Claude Code takes `Bash(gh:*)` in the `allowedTools`
+  of each session-open request, so the grant is scoped to the session and no
+  settings file is edited. OpenCode reads its configuration documents in order
+  and takes the last matching rule, so its approval goes in
+  `OPENCODE_CONFIG_CONTENT`, the document Mjolnir supplies last, where a
+  project's or profile's later rule cannot shadow it. DSH has no configuration
+  file, so its `gh` permission requests are answered by the worker;
 - for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
   `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
   session open: `ask` under configured approvals, `allow` under an
