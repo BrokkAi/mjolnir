@@ -8,12 +8,12 @@ Issue #1584 has two parts.
 
 1. On a local rootless Podman target, `podman exec` into a running session container sometimes fails with
    `crun: write file /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-<id>.scope/container/cgroup.procs: Permission denied`.
-   After this change the host daemon runs inside a systemd user-manager scope, so every Podman subprocess it starts (provisioning execs, worker staging, relay proxies) begins under `user@<uid>.service`. The failure cannot happen from there.
+   On hosts where systemd user lingering is enabled, the host daemon runs inside a systemd user-manager scope, so every Podman subprocess it starts (provisioning execs, worker staging, relay proxies) begins under `user@<uid>.service`. The failure cannot happen from there.
 2. A session whose first launch failed before it ever ran is a dead end today. Resume returns 409 "no checkpoint", and the owner has to archive the record and create a new session by hand. After this change, Resume on such a session (from the TUI, `mj resume`, the HTTP API, or the web viewer) runs the session's create again under the same session id from its stored launch request. The user sees the same session go back to Starting and then Running.
 
 ## Progress
 
-- [ ] M1: launch the host daemon under a systemd user scope (mj-cli).
+- [x] (2026-11-17 22:33Z) M1: launch the host daemon under a systemd user scope (mj-cli), gated on existing linger; review clean at `9d94bb376`, pushed in `a1cb6a56e`.
 - [x] M2 implementation: failed-first-launch retry through Resume (mj-controller, mj-tui, web viewer).
 - [x] Traced startup-step failure settlement. The parent resolved the startup-step policy below.
 - [x] M2 targeted API and wait tests, terminal event test, web golden, and four-crate Clippy.
@@ -21,7 +21,6 @@ Issue #1584 has two parts.
 - [x] M2 final lab run.
 - [x] M2 review follow-up shares one cancellation control from phone Resume through daemon admission.
 - [x] M2 review follow-up cancellation tests, controller Clippy, and isolated restart lab.
-- [ ] M1 validation and review.
 
 ## Surprises & Discoveries
 
@@ -32,6 +31,13 @@ Issue #1584 has two parts.
   Evidence: `daemon/state.rs::wait_for_ready_session` formats Error and StartupCleanup as ordinary errors. Its drain forwards the formatted text to `database/startup.rs::fail_unavailable_startup_groups`, which only updates pending grouped rows, but stores them as the generic `failed` phase. `fail_startup_group` can write the same phase for pending steps for other reasons. An in-flight step can also end in `failed` through `rejecting` without an acceptance ordinal. The only legacy difference is human-readable error text. The readiness failure can mark pending tail steps even when the group's head was already delivering. The Decision Log records the resulting dismissal policy.
 
 - Observation: the launch hook deliberately blocks even after cancellation. The Resume and Destroy race leaves the hook released so Destroy can observe the real operation stopping.
+
+- M1 observation. Startup, explicit restart, and upgrade replacement reach the same detached host launcher. Container-daemon startup uses its own engine launch path.
+- M1 observation. The session-origin launch strips its ambient environment and reconstructs the account login environment. The reconstructed environment can omit the runtime directory PAM assigns.
+
+- M1 observation. The CLI exposes `daemon endpoint --json` as the explicit management command that starts a stopped daemon. The plan’s original `daemon start` command does not exist in this checkout.
+
+- M1 observation. On hel, systemd 259.5 successfully ran a transient scope with a deliberately nonexistent DBUS_SESSION_BUS_ADDRESS. The user manager and its private socket were active.
 
 ## Decision Log
 
@@ -44,6 +50,10 @@ Issue #1584 has two parts.
 - Decision: the executable passed to `systemd-run` is `/proc/<client pid>/exe`, not `/proc/self/exe`.
   Rationale: `daemon_launch_executable()` uses `/proc/self/exe` so the daemon executes the client's running inode, which survives upgrade replacement. Inside `systemd-run`, `/proc/self/exe` would name `systemd-run` itself. The client stays alive until the daemon is ready, so its `/proc/<pid>/exe` link is valid when `systemd-run` `exec`s it. Keep `arg0` set to `mj` if `systemd-run` allows it. If it does not, record that here: only argv[1] (`daemon-run`) is read to recognize a daemon.
   Date/Author: 2026-11-17 / parent session.
+- M1 checks PATH and XDG_RUNTIME_DIR in the effective launcher environment, after restoring the account login environment for session-origin clients. If XDG_RUNTIME_DIR is absent, check for systemd/private in the standard PAM runtime directory /run/user/<uid>. On a scoped launch pass the discovered directory to systemd-run, which passes it through to mj. This lets a session-origin client enter the user scope without inheriting the rest of its session overlay. An explicit runtime directory takes precedence. Parent decision, 2026-11-17.
+- systemd-run scope mode supplies the executable path as argv[0] and offers no argv[0] option. The wrapper executes /proc/<client pid>/exe directly. Daemon discovery still reads daemon-run from argv[1]. Direct launches retain mj as argv[0]. M1 implementer, 2026-11-17.
+- Add one integration test that launches the real CLI from outside a systemd user subtree and verifies the published daemon PID's cgroup and argv[1]. It skips when no user manager can start a scope the account does not have a linger file, or the test process is already in the user subtree. Keep the existing argv[0] regression test on the direct launch path by giving it an isolated runtime directory without a manager. M1 implementer, 2026-11-17.
+- Require logind's existing linger file at `/var/lib/systemd/linger/<account name>` before wrapping. On hosts without lingering, logind can stop the user manager after the last login ends. Keep the old placement there to preserve the background daemon and detached bare workers. Mjolnir does not enable lingering. If logind would C-escape the account name, use the direct launch because the literal account name cannot establish the presence of its marker. These hosts can still hit the rootless Podman `cgroup.procs` failure with old crun. crun 1.30 fixes it upstream. Parent decision, 2026-11-17.
 - Decision: a "failed first launch" is a top-level session (no sub-agent relation) that is not archived, has no Move in progress, has `checkpoint == None` and `native_session_id == None`, and is in `Error` (target cleared after cleanup) or `StartupCleanup` (cleanup still pending). Exactly one predicate in one place answers this. The API capability, the viewer's `has_resume_source`, TUI gating, and the daemon's admission all call it. None of them recomputes it from its own copy of the inputs.
   Rationale: with no checkpoint and no native session id, nothing exists that a resume could restore, so a fresh launch is the only recovery and loses nothing recoverable. The launch retry never re-arms startup input. Legacy session rows qualify on the same durable session evidence.
   Date/Author: 2026-11-17 / parent session.
@@ -65,6 +75,8 @@ Issue #1584 has two parts.
   Date/Author: 2026-11-17 / M2 review follow-up.
 
 ## Outcomes & Retrospective
+
+M1 verification on Linux used isolated instance stores and cleared launcher environments. Daemons launched from `session-c14.scope` started under `user@1000.service/app.slice/run-*.scope`, including after a restart and with XDG_RUNTIME_DIR unset (via `/run/user/<uid>`); an explicit runtime directory without a manager kept the direct launch and `mj daemon-run` in `ps`. A cached-image Podman launch made 19 successful execs from the scoped daemon. Hosts without linger keep the old placement and can still hit the crun error with crun older than 1.30.
 
 M2 accepts the same session id and stored destination only after the Create intent commits. The interrupted-create recovery path resumes that intent after daemon replacement. The terminal and viewer offer Retry launch without a restore wizard. The isolated run also confirmed that a failed startup prompt is retired, the next prompt runs once, and an unsent terminal draft survives. The isolated lab uses a local bare target and deterministic ACP harness. M1 validation covers the Podman cgroup behavior separately.
 
@@ -90,7 +102,7 @@ Part 2 (map: `.mj/agents/64df2a6614f1a8fc1813ac9636d425f9/issue-1584-retry-map.m
 
 ## Plan of Work
 
-M1. In `launch_daemon`, build the command through a small helper next to it. The helper decides whether to wrap, using the conditions in the Decision Log; the `/proc/self/cgroup` read and the existence checks are non-blocking enough for this already-blocking task. When it wraps, it runs `systemd-run --user --scope --quiet --collect --description="Mjolnir daemon (<instance>)" -- /proc/<client pid>/exe daemon-run`, applies the same environment edits and `env_remove` calls as today, and spawns with `spawn_detached`. Add a short comment that names #1584 and the cgroup-v2 common-ancestor rule. Check that no other host daemon spawn site exists, including the upgrade handoff and `mj daemon restart`. If one does, route it through the same helper.
+M1. In `launch_daemon`, build the command through a small helper next to it. The helper decides whether to wrap using the effective environment and the existing linger marker, as described in the Decision Log; the `/proc/self/cgroup` read and the existence checks are non-blocking enough for this already-blocking task. When it wraps, it runs `systemd-run --user --scope --quiet --collect --description="Mjolnir daemon (<instance>)" -- /proc/<client pid>/exe daemon-run`, applies the same environment edits and `env_remove` calls as today, and spawns with `spawn_detached`. Add a short comment that names #1584 and the cgroup-v2 common-ancestor rule. Check that no other host daemon spawn site exists, including the upgrade handoff and `mj daemon restart`. If one does, route it through the same helper.
 
 M2.
 1. Add the single predicate, for example `fn failed_first_launch(record, is_subagent) -> bool`. Put it where both the controller and the viewer projection can call it; if the TUI reads it, it must come from the projection or the IPC record, not from a recomputation. Use it in `resume_source_available` and the runtime capability, in the v1 handler and `resume_refusal`, in `turns.rs` refusal advice, and at the daemon resume entry.
@@ -115,7 +127,7 @@ Run tests outside the sandbox, on the dev profile.
 
 ## Validation and Acceptance
 
-M1: in an isolated instance (`env -i` launcher with its own MJ_CONFIG_DIR, MJ_DATA_DIR and MJ_INSTANCE, plus the real `XDG_RUNTIME_DIR`), `mj --instance <name> daemon start` and then `cat /proc/<daemon pid>/cgroup` shows a path under `/user.slice/user-<uid>.slice/user@<uid>.service/`. `ps` still shows `daemon-run` as argv[1]. Without `XDG_RUNTIME_DIR`, the daemon starts unwrapped as before. Stop the daemon afterwards. Run a local Podman exec smoke through the isolated daemon if a cached image is available.
+M1. On a host with lingering already enabled, use an isolated instance (`env -i` launcher with its own MJ_CONFIG_DIR, MJ_DATA_DIR and MJ_INSTANCE, plus the real `XDG_RUNTIME_DIR`) and run `mj --instance <name> daemon endpoint --json >/dev/null` to start the daemon. Then `cat /proc/<daemon pid>/cgroup` shows a path under `/user.slice/user-<uid>.slice/user@<uid>.service/`. `ps` still shows `daemon-run` as argv[1]. With `XDG_RUNTIME_DIR` unset, check whether the daemon enters the scope through the standard PAM runtime directory `/run/user/<uid>`. To verify direct launch on a host with a user manager, use an explicit, empty test runtime directory. The daemon should remain in the launcher cgroup and report `mj daemon-run` in `ps`. Stop the daemon afterwards. Run a local Podman exec smoke through the isolated daemon if a cached image is available.
 
 M2: in an isolated instance with a deterministic one-shot failure after target reservation and before worker start, a session fails its launch, `mj resume <id>` is accepted, and the same id reaches Running with the same project and options. The startup prompt that failed with the old launch is not resent. `mj wait` reports the retry, a new prompt submitted after retry runs once, and the TUI draft is preserved. Reuse an existing test hook if there is one; otherwise add the smallest test-only one. Also check:
 
@@ -137,3 +149,7 @@ The retry transaction is a compare-and-set, so a repeated Resume after acceptanc
 ## Interfaces and Dependencies
 
 No new crates. Use `systemd-run` from the host systemd. Use the shared subprocess helpers. No relay protocol change is expected. If the TUI needs a new projected field, add it with a serde default and record whether the protocol revision must rise.
+
+M1 revision, 2026-11-17. Recorded the effective launch environment and the standard PAM runtime directory lookup needed by session-origin clients. Updated the acceptance check to cover both runtime directory discovery and direct launch.
+
+M1 review revision, 2026-11-17. Require existing user lingering to protect daemon and bare-worker lifetime after logout.
