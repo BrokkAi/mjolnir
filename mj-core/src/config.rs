@@ -1187,9 +1187,10 @@ fn refuse_unread_keys(path: &Path, unread: &[String]) -> Result<()> {
     )
 }
 
-/// A key path as the configuration file spells it, such as
-/// `profiles.codex.models`.
-fn setting_key(path: &serde_ignored::Path<'_>) -> String {
+/// A key path as the configuration file spells it, one segment per table or
+/// array level, such as `["profiles", "codex", "models"]`. Filters compare
+/// segments, so a quoted key that contains a dot is still one key.
+fn setting_path(path: &serde_ignored::Path<'_>) -> Vec<String> {
     fn push(path: &serde_ignored::Path<'_>, segments: &mut Vec<String>) {
         use serde_ignored::Path;
         match path {
@@ -1209,7 +1210,7 @@ fn setting_key(path: &serde_ignored::Path<'_>) -> String {
     }
     let mut segments = Vec::new();
     push(path, &mut segments);
-    segments.join(".")
+    segments
 }
 
 /// `build_cache` keys that no setting reads, under a machine or runtime whose
@@ -1258,7 +1259,10 @@ fn unread_build_cache_keys(document: &toml::Value) -> Vec<String> {
             // The whole file has already been read, this table with it, so
             // only the names this read gathers matter.
             let _ = serde_ignored::deserialize(build_cache.clone(), |key| {
-                unread.push(format!("{section}.{id}.build_cache.{}", setting_key(&key)));
+                unread.push(format!(
+                    "{section}.{id}.build_cache.{}",
+                    setting_path(&key).join(".")
+                ));
             })
             .map(|_: TargetBuildCache| ());
         }
@@ -2258,15 +2262,18 @@ impl Config {
         let mut unread = Vec::new();
         let config: Self = with_secret_resolver(SecretResolver::beside(path), || {
             serde_ignored::deserialize(toml::Deserializer::new(&contents), |key| {
-                unread.push(setting_key(&key));
+                let key = setting_path(&key);
+                // These sections never refused a key, and files still carry
+                // retired ones such as `advanced.show_stopped_sessions`.
+                // Refusing them now would stop an upgraded daemon from
+                // starting.
+                if !(key.len() > 1 && matches!(key[0].as_str(), "advanced" | "notify")) {
+                    unread.push(key.join("."));
+                }
             })
         })
         .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         unread.extend(unread_build_cache_keys(&document));
-        // These sections never refused a key, and files still carry retired
-        // ones such as `advanced.show_stopped_sessions`. Refusing them now
-        // would stop an upgraded daemon from starting.
-        unread.retain(|key| !matches!(key.split('.').next(), Some("advanced" | "notify")));
         refuse_unread_keys(path, &unread)?;
         config.validate()?;
         Ok(config)

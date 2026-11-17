@@ -65,9 +65,9 @@ impl DaemonConfig {
         let mut unread = Vec::new();
         let placement: Placement =
             serde_ignored::deserialize(toml::Deserializer::new(&contents), |key| {
-                let key = super::setting_key(&key);
-                if key.starts_with("daemon.") {
-                    unread.push(key);
+                let key = super::setting_path(&key);
+                if key.len() > 1 && key[0] == "daemon" {
+                    unread.push(key.join("."));
                 }
             })
             .with_context(|| format!("parse placement {}", path.display()))?;
