@@ -1,0 +1,1970 @@
+[
+  {
+    "stage": "leak-0",
+    "batch": "batch-0-A",
+    "session": {
+      "session_id": "6cbdd3ce7be8b40322460a0def1f0473",
+      "profile": "codex4",
+      "time_ns": 1794950042328382801,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794950139849299410
+    },
+    "usage": {
+      "session_id": "6cbdd3ce7be8b40322460a0def1f0473",
+      "turns": [
+        {
+          "answered_through": 221,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 634896,
+            "input_tokens": 63918,
+            "output_tokens": 3426,
+            "thought_tokens": 702,
+            "cached_read_tokens": 567552,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-blind-sonnet-leak-0-batch-0-A-6cbdd3ce7be8",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 221,
+          "completed_at_ms": 1794950262267,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 221,
+      "latest_seq": 221,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 567552,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 63918,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3426,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 702,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 634896,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 2188512000,
+      "turn_selections": {
+        "review-arms-blind-sonnet-leak-0-batch-0-A-6cbdd3ce7be8": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 567552,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 63918,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 3426,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 702,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 634896,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.2188512,
+    "tokens": 634896,
+    "prompt_to_completion_s": 122.418
+  },
+  {
+    "stage": "leak-0",
+    "batch": "batch-0-B",
+    "session": {
+      "session_id": "0c7ec18710144cc80236dd6bde02fb1a",
+      "profile": "codex4",
+      "time_ns": 1794950042337859393,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794950139809118234
+    },
+    "usage": {
+      "session_id": "0c7ec18710144cc80236dd6bde02fb1a",
+      "turns": [
+        {
+          "answered_through": 291,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 508768,
+            "input_tokens": 66013,
+            "output_tokens": 2947,
+            "thought_tokens": 822,
+            "cached_read_tokens": 439808,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-blind-sonnet-leak-0-batch-0-B-0c7ec1871014",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 291,
+          "completed_at_ms": 1794950254349,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 291,
+      "latest_seq": 291,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 439808,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 66013,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2947,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 822,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 508768,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 2054768000,
+      "turn_selections": {
+        "review-arms-blind-sonnet-leak-0-batch-0-B-0c7ec1871014": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 439808,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 66013,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2947,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 822,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 508768,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.2054768,
+    "tokens": 508768,
+    "prompt_to_completion_s": 114.54
+  },
+  {
+    "stage": "rewrite",
+    "batch": "batch-activity-recorder-kills-api",
+    "session": {
+      "session_id": "c7c896c034313ebdf92a3d6dbf628145",
+      "profile": "codex4",
+      "time_ns": 1794950361076480935,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794950426811643929
+    },
+    "usage": {
+      "session_id": "c7c896c034313ebdf92a3d6dbf628145",
+      "turns": [
+        {
+          "answered_through": 200,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 140236,
+            "input_tokens": 19688,
+            "output_tokens": 996,
+            "thought_tokens": 360,
+            "cached_read_tokens": 119552,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-3e49372ba62d2cf75ffb2eb0-c7c896c03431",
+          "accepted_ordinal": 44,
+          "turn_start_position": 45,
+          "completed_ordinal": 200,
+          "completed_at_ms": 1794950479918,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 200,
+      "latest_seq": 200,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 119552,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 19688,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 996,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 360,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 140236,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 612912000,
+      "turn_selections": {
+        "review-arms-3e49372ba62d2cf75ffb2eb0-c7c896c03431": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 119552,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 19688,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 996,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 360,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 140236,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.0612912,
+    "tokens": 140236,
+    "prompt_to_completion_s": 53.106
+  },
+  {
+    "stage": "rewrite",
+    "batch": "batch-github-token-in-container-argv",
+    "session": {
+      "session_id": "b2d5fe4135438ed917dae5205d14536d",
+      "profile": "codex4",
+      "time_ns": 1794950361072200256,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794950418243173021
+    },
+    "usage": {
+      "session_id": "b2d5fe4135438ed917dae5205d14536d",
+      "turns": [
+        {
+          "answered_through": 182,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 137224,
+            "input_tokens": 24855,
+            "output_tokens": 753,
+            "thought_tokens": 225,
+            "cached_read_tokens": 111616,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-e98499f1e1668fdcb7cc34e8-b2d5fe413543",
+          "accepted_ordinal": 44,
+          "turn_start_position": 45,
+          "completed_ordinal": 182,
+          "completed_at_ms": 1794950456348,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 182,
+      "latest_seq": 182,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 111616,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 24855,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 753,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 225,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 137224,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 684016000,
+      "turn_selections": {
+        "review-arms-e98499f1e1668fdcb7cc34e8-b2d5fe413543": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 111616,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 24855,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 753,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 225,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 137224,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.0684016,
+    "tokens": 137224,
+    "prompt_to_completion_s": 38.105
+  },
+  {
+    "stage": "rewrite",
+    "batch": "batch-pending-assessment-hidden-when-idle",
+    "session": {
+      "session_id": "b5c9107035ad23f6cd8233fb6ce62357",
+      "profile": "codex4",
+      "time_ns": 1794950515558433239,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794950588236693855
+    },
+    "usage": {
+      "session_id": "b5c9107035ad23f6cd8233fb6ce62357",
+      "turns": [
+        {
+          "answered_through": 188,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 164220,
+            "input_tokens": 16337,
+            "output_tokens": 1067,
+            "thought_tokens": 298,
+            "cached_read_tokens": 146816,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-3903032adf06c300aca4bed9-b5c9107035ad",
+          "accepted_ordinal": 44,
+          "turn_start_position": 45,
+          "completed_ordinal": 188,
+          "completed_at_ms": 1794950629079,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 188,
+      "latest_seq": 188,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 146816,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 16337,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 1067,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 298,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 164220,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 580256000,
+      "turn_selections": {
+        "review-arms-3903032adf06c300aca4bed9-b5c9107035ad": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 146816,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 16337,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 1067,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 298,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 164220,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.0580256,
+    "tokens": 164220,
+    "prompt_to_completion_s": 40.842
+  },
+  {
+    "stage": "rewrite",
+    "batch": "batch-web-feed-self-deadlock",
+    "session": {
+      "session_id": "c75d2669e8332fd711d94d680131a187",
+      "profile": "codex4",
+      "time_ns": 1794950527228882439,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794950599466353594
+    },
+    "usage": {
+      "session_id": "c75d2669e8332fd711d94d680131a187",
+      "turns": [
+        {
+          "answered_through": 186,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 164544,
+            "input_tokens": 19191,
+            "output_tokens": 1097,
+            "thought_tokens": 446,
+            "cached_read_tokens": 144256,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-44a7e8b38e5786a57a82b438-c75d2669e833",
+          "accepted_ordinal": 44,
+          "turn_start_position": 45,
+          "completed_ordinal": 186,
+          "completed_at_ms": 1794950650570,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 186,
+      "latest_seq": 186,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 144256,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 19191,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 1097,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 446,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 164544,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 637776000,
+      "turn_selections": {
+        "review-arms-44a7e8b38e5786a57a82b438-c75d2669e833": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 144256,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 19191,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 1097,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 446,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 164544,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.0637776,
+    "tokens": 164544,
+    "prompt_to_completion_s": 51.104
+  },
+  {
+    "stage": "leak-1",
+    "batch": "batch-0-A",
+    "session": {
+      "session_id": "3f09326a9df98b1402c8d09f34a9a75f",
+      "profile": "codex4",
+      "time_ns": 1794950766443178782,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794950821881579885
+    },
+    "usage": {
+      "session_id": "3f09326a9df98b1402c8d09f34a9a75f",
+      "turns": [
+        {
+          "answered_through": 223,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 133532,
+            "input_tokens": 19153,
+            "output_tokens": 1867,
+            "thought_tokens": 629,
+            "cached_read_tokens": 112512,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-blind-sonnet-leak-1-batch-0-A-3f09326a9df9",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 223,
+          "completed_at_ms": 1794950873519,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 223,
+      "latest_seq": 223,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 112512,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 19153,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 1867,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 629,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 133532,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 682272000,
+      "turn_selections": {
+        "review-arms-blind-sonnet-leak-1-batch-0-A-3f09326a9df9": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 112512,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 19153,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 1867,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 629,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 133532,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.0682272,
+    "tokens": 133532,
+    "prompt_to_completion_s": 51.637
+  },
+  {
+    "stage": "leak-1",
+    "batch": "batch-0-B",
+    "session": {
+      "session_id": "8ef85aa3e218eac460c6644a6d5c3139",
+      "profile": "codex4",
+      "time_ns": 1794950766440273712,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794950821734884691
+    },
+    "usage": {
+      "session_id": "8ef85aa3e218eac460c6644a6d5c3139",
+      "turns": [
+        {
+          "answered_through": 171,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 112505,
+            "input_tokens": 52329,
+            "output_tokens": 1552,
+            "thought_tokens": 349,
+            "cached_read_tokens": 58624,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-blind-sonnet-leak-1-batch-0-B-8ef85aa3e218",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 171,
+          "completed_at_ms": 1794950868871,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 171,
+      "latest_seq": 171,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 58624,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 52329,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 1552,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 349,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 112505,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 1260404000,
+      "turn_selections": {
+        "review-arms-blind-sonnet-leak-1-batch-0-B-8ef85aa3e218": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 58624,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 52329,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 1552,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 349,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 112505,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.1260404,
+    "tokens": 112505,
+    "prompt_to_completion_s": 47.136
+  },
+  {
+    "stage": "contains",
+    "batch": "batch-unit",
+    "session": {
+      "session_id": "fed401f850962581cac28ac1555fd853",
+      "profile": "codex4",
+      "time_ns": 1794950782439966736,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794950879186223840
+    },
+    "usage": {
+      "session_id": "fed401f850962581cac28ac1555fd853",
+      "turns": [
+        {
+          "answered_through": 590,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 1329391,
+            "input_tokens": 91046,
+            "output_tokens": 11081,
+            "thought_tokens": 2210,
+            "cached_read_tokens": 1227264,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-writer-contains-sonnet-batch-unit-fed401f85096",
+          "accepted_ordinal": 302,
+          "turn_start_position": 303,
+          "completed_ordinal": 590,
+          "completed_at_ms": 1794951240435,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 590,
+      "latest_seq": 590,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 1227264,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 91046,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 11081,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 2210,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 1329391,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 4156284000,
+      "turn_selections": {
+        "review-arms-writer-contains-sonnet-batch-unit-fed401f85096": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 1227264,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 91046,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 11081,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 2210,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 1329391,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.4156284,
+    "tokens": 1329391,
+    "prompt_to_completion_s": 361.249
+  },
+  {
+    "stage": "round-k",
+    "batch": "batch-0-A",
+    "session": {
+      "session_id": "5f2bffe6ab98a049638819b169c77721",
+      "profile": "codex4",
+      "time_ns": 1794953653658369780,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794953742157216915
+    },
+    "usage": {
+      "session_id": "5f2bffe6ab98a049638819b169c77721",
+      "turns": [
+        {
+          "answered_through": 219,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 397280,
+            "input_tokens": 72672,
+            "output_tokens": 2944,
+            "thought_tokens": 504,
+            "cached_read_tokens": 321664,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-brief-judge-k-batch-0-A-5f2bffe6ab98",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 219,
+          "completed_at_ms": 1794953829354,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 219,
+      "latest_seq": 219,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 321664,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 72672,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2944,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 504,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 397280,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 2069504000,
+      "turn_selections": {
+        "review-arms-brief-judge-k-batch-0-A-5f2bffe6ab98": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 321664,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 72672,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2944,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 504,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 397280,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.2069504,
+    "tokens": 397280,
+    "prompt_to_completion_s": 87.197
+  },
+  {
+    "stage": "round-k",
+    "batch": "batch-0-B",
+    "session": {
+      "session_id": "14002608c19f0c49435238b2b919c15f",
+      "profile": "codex4",
+      "time_ns": 1794953653651492602,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794953736195031046
+    },
+    "usage": {
+      "session_id": "14002608c19f0c49435238b2b919c15f",
+      "turns": [
+        {
+          "answered_through": 173,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 389266,
+            "input_tokens": 58211,
+            "output_tokens": 2351,
+            "thought_tokens": 390,
+            "cached_read_tokens": 328704,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-brief-judge-k-batch-0-B-14002608c19f",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 173,
+          "completed_at_ms": 1794953814262,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 173,
+      "latest_seq": 173,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 328704,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 58211,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2351,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 390,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 389266,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 1728024000,
+      "turn_selections": {
+        "review-arms-brief-judge-k-batch-0-B-14002608c19f": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 328704,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 58211,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2351,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 390,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 389266,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.1728024,
+    "tokens": 389266,
+    "prompt_to_completion_s": 78.067
+  },
+  {
+    "stage": "round-k",
+    "batch": "batch-1-A",
+    "session": {
+      "session_id": "aecd06390cb9e893f6440d32365a6dc3",
+      "profile": "codex4",
+      "time_ns": 1794953833677661875,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794953894385204382
+    },
+    "usage": {
+      "session_id": "aecd06390cb9e893f6440d32365a6dc3",
+      "turns": [
+        {
+          "answered_through": 208,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 314897,
+            "input_tokens": 44383,
+            "output_tokens": 2610,
+            "thought_tokens": 249,
+            "cached_read_tokens": 267904,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-brief-judge-k-batch-1-A-aecd06390cb9",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 208,
+          "completed_at_ms": 1794954005781,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 208,
+      "latest_seq": 208,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 267904,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 44383,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2610,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 249,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 314897,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 1416564000,
+      "turn_selections": {
+        "review-arms-brief-judge-k-batch-1-A-aecd06390cb9": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 267904,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 44383,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2610,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 249,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 314897,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.1416564,
+    "tokens": 314897,
+    "prompt_to_completion_s": 111.396
+  },
+  {
+    "stage": "round-k",
+    "batch": "batch-1-B",
+    "session": {
+      "session_id": "2ac8e49ac0205907df9a67600e2729e8",
+      "profile": "codex4",
+      "time_ns": 1794953839642391789,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794953894327991997
+    },
+    "usage": {
+      "session_id": "2ac8e49ac0205907df9a67600e2729e8",
+      "turns": [
+        {
+          "answered_through": 221,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 318350,
+            "input_tokens": 46793,
+            "output_tokens": 2757,
+            "thought_tokens": 291,
+            "cached_read_tokens": 268800,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-brief-judge-k-batch-1-B-2ac8e49ac020",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 221,
+          "completed_at_ms": 1794954007265,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 221,
+      "latest_seq": 221,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 268800,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 46793,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2757,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 291,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 318350,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 1480360000,
+      "turn_selections": {
+        "review-arms-brief-judge-k-batch-1-B-2ac8e49ac020": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 268800,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 46793,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2757,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 291,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 318350,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.148036,
+    "tokens": 318350,
+    "prompt_to_completion_s": 112.937
+  },
+  {
+    "stage": "round-k",
+    "batch": "batch-2-A",
+    "session": {
+      "session_id": "6e5410d2072d60adebfe3c25d169bfeb",
+      "profile": "codex4",
+      "time_ns": 1794954053596200427,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794954140531592409
+    },
+    "usage": {
+      "session_id": "6e5410d2072d60adebfe3c25d169bfeb",
+      "turns": [
+        {
+          "answered_through": 231,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 391254,
+            "input_tokens": 47494,
+            "output_tokens": 2896,
+            "thought_tokens": 438,
+            "cached_read_tokens": 340864,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-brief-judge-k-batch-2-A-6e5410d2072d",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 231,
+          "completed_at_ms": 1794954253261,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 231,
+      "latest_seq": 231,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 340864,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 47494,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2896,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 438,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 391254,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 1580344000,
+      "turn_selections": {
+        "review-arms-brief-judge-k-batch-2-A-6e5410d2072d": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 340864,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 47494,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2896,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 438,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 391254,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.1580344,
+    "tokens": 391254,
+    "prompt_to_completion_s": 112.729
+  },
+  {
+    "stage": "round-k",
+    "batch": "batch-2-B",
+    "session": {
+      "session_id": "2709669b7d283127141d72d4d3790bcb",
+      "profile": "codex4",
+      "time_ns": 1794954053591997290,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794954140922459236
+    },
+    "usage": {
+      "session_id": "2709669b7d283127141d72d4d3790bcb",
+      "turns": [
+        {
+          "answered_through": 317,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 501825,
+            "input_tokens": 49061,
+            "output_tokens": 3100,
+            "thought_tokens": 484,
+            "cached_read_tokens": 449664,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-brief-judge-k-batch-2-B-2709669b7d28",
+          "accepted_ordinal": 38,
+          "turn_start_position": 39,
+          "completed_ordinal": 317,
+          "completed_at_ms": 1794954262265,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 317,
+      "latest_seq": 317,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 449664,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 49061,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3100,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 484,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 501825,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 1740884000,
+      "turn_selections": {
+        "review-arms-brief-judge-k-batch-2-B-2709669b7d28": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 449664,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 49061,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 3100,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 484,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 501825,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.1740884,
+    "tokens": 501825,
+    "prompt_to_completion_s": 121.343
+  },
+  {
+    "stage": "handcheck",
+    "batch": "handcheck",
+    "session": {
+      "session_id": "f2fa6d9429f65b274c950b7806b80593",
+      "profile": "codex4",
+      "time_ns": 1794954361018742088,
+      "config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "prompted": 1794954416759513394
+    },
+    "usage": {
+      "session_id": "f2fa6d9429f65b274c950b7806b80593",
+      "turns": [
+        {
+          "answered_through": 544,
+          "usage": {
+            "scope": "turn",
+            "total_tokens": 873353,
+            "input_tokens": 77921,
+            "output_tokens": 4520,
+            "thought_tokens": 890,
+            "cached_read_tokens": 790912,
+            "cached_write_tokens": 0
+          },
+          "command_id": "review-arms-handcheck-run-batch-handcheck-f2fa6d9429f6",
+          "accepted_ordinal": 68,
+          "turn_start_position": 69,
+          "completed_ordinal": 544,
+          "completed_at_ms": 1794954582390,
+          "outcome": {
+            "kind": "completed",
+            "stop_reason": "EndTurn"
+          }
+        }
+      ],
+      "next_after_seq": 544,
+      "latest_seq": 544,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 790912,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 77921,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 4520,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 890,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 873353,
+          "reported_turns": 1
+        }
+      },
+      "coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "turn_cost_usd_ticks": 2801332000,
+      "turn_selections": {
+        "review-arms-handcheck-run-batch-handcheck-f2fa6d9429f6": {
+          "model": "gpt-6.1-sol",
+          "effort": null
+        }
+      },
+      "by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 790912,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 77921,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 4520,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 890,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 873353,
+              "reported_turns": 1
+            }
+          }
+        }
+      ]
+    },
+    "estimated_api_usd": 0.2801332,
+    "tokens": 873353,
+    "prompt_to_completion_s": 165.63
+  }
+]

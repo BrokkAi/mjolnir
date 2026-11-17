@@ -1,0 +1,442 @@
+{
+  "round": "brief-judge-k",
+  "reviewer_model": "gpt-6.1-terra",
+  "reviewer_effort": "high",
+  "writer_models": {
+    "TS": "sonnet",
+    "BT": "gpt-6.1-sol"
+  },
+  "writer_effort": "high",
+  "metric": "mean per-diff caught share; partial is separate and never counts as caught",
+  "bootstrap": {
+    "resamples": 10000,
+    "seed": 20261116,
+    "unit": "diff",
+    "paired": true,
+    "confidence": 0.95,
+    "interval": "percentile order statistics at floor(0.025*n), floor(0.975*n)"
+  },
+  "decision_rule": "Primary P only: TS >= BT - 0.10 AND lower95(TS-no-brief) > 0; else Sol",
+  "margin_criterion": "point estimate only; no significance claim for TS-BT",
+  "decision_checks": {
+    "TS_at_least_BT_minus_10_points": false,
+    "TS_minus_no_brief_lower95_above_zero": false
+  },
+  "acceptable_writer": false,
+  "sonnet_decision": "Sol writes",
+  "production_default_changed": false,
+  "sets": {
+    "P": {
+      "diffs": 18,
+      "arms": {
+        "no-brief": {
+          "condition": "no-brief",
+          "sessions": 60,
+          "catch_rate": 0.2037037037037037,
+          "partial_rate": 0.018518518518518517
+        },
+        "BT": {
+          "condition": "blind",
+          "sessions": 54,
+          "catch_rate": 0.5555555555555556,
+          "partial_rate": 0.0
+        },
+        "TS": {
+          "condition": "blind-sonnet",
+          "sessions": 54,
+          "catch_rate": 0.2222222222222222,
+          "partial_rate": 0.0
+        }
+      },
+      "contrasts": {
+        "TS-BT": {
+          "difference": -0.3333333333333333,
+          "ci95": [
+            -0.5370370370370371,
+            -0.14814814814814814
+          ]
+        },
+        "TS-no-brief": {
+          "difference": 0.018518518518518517,
+          "ci95": [
+            -0.09259259259259259,
+            0.16666666666666666
+          ]
+        }
+      }
+    },
+    "S": {
+      "diffs": 4,
+      "arms": {
+        "no-brief": {
+          "condition": "no-brief",
+          "sessions": 12,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "condition": "blind",
+          "sessions": 12,
+          "catch_rate": 0.4166666666666667,
+          "partial_rate": 0.0
+        },
+        "TS": {
+          "condition": "blind-sonnet",
+          "sessions": 12,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        }
+      },
+      "contrasts": {
+        "TS-BT": {
+          "difference": -0.08333333333333333,
+          "ci95": [
+            -0.25,
+            0.0
+          ]
+        },
+        "TS-no-brief": {
+          "difference": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    }
+  },
+  "judge_consistency": {
+    "reference_round": "brief-judge-j",
+    "reviewer_model": "gpt-6.1-terra",
+    "judges": {
+      "brief-judge-k": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "profile": "codex4"
+      },
+      "brief-judge-j": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "profile": "codex4"
+      }
+    },
+    "scope": "all 22 diffs, identical BT and no-brief Terra session IDs; mean per-diff caught share",
+    "affects_writer_decision": false,
+    "diffs": 22,
+    "arms": {
+      "BT": {
+        "sessions": 66,
+        "rates": {
+          "brief-judge-k": {
+            "catch_rate": 0.5303030303030303,
+            "partial_rate": 0.0
+          },
+          "brief-judge-j": {
+            "catch_rate": 0.5303030303030303,
+            "partial_rate": 0.0
+          }
+        },
+        "difference_points": 0.0,
+        "differs_over_10_points": false
+      },
+      "no-brief": {
+        "sessions": 72,
+        "rates": {
+          "brief-judge-k": {
+            "catch_rate": 0.22727272727272727,
+            "partial_rate": 0.01515151515151515
+          },
+          "brief-judge-j": {
+            "catch_rate": 0.22727272727272727,
+            "partial_rate": 0.01515151515151515
+          }
+        },
+        "difference_points": 0.0,
+        "differs_over_10_points": false
+      }
+    },
+    "caveats": [],
+    "groups": {
+      "P": {
+        "diffs": 18,
+        "arms": {
+          "BT": {
+            "sessions": 54,
+            "rates": {
+              "brief-judge-k": {
+                "catch_rate": 0.5555555555555556,
+                "partial_rate": 0.0
+              },
+              "brief-judge-j": {
+                "catch_rate": 0.5555555555555556,
+                "partial_rate": 0.0
+              }
+            },
+            "difference_points": 0.0,
+            "differs_over_10_points": false
+          },
+          "no-brief": {
+            "sessions": 60,
+            "rates": {
+              "brief-judge-k": {
+                "catch_rate": 0.2037037037037037,
+                "partial_rate": 0.018518518518518517
+              },
+              "brief-judge-j": {
+                "catch_rate": 0.2037037037037037,
+                "partial_rate": 0.018518518518518517
+              }
+            },
+            "difference_points": 0.0,
+            "differs_over_10_points": false
+          }
+        },
+        "caveats": []
+      },
+      "S": {
+        "diffs": 4,
+        "arms": {
+          "BT": {
+            "sessions": 12,
+            "rates": {
+              "brief-judge-k": {
+                "catch_rate": 0.41666666666666663,
+                "partial_rate": 0.0
+              },
+              "brief-judge-j": {
+                "catch_rate": 0.41666666666666663,
+                "partial_rate": 0.0
+              }
+            },
+            "difference_points": 0.0,
+            "differs_over_10_points": false
+          },
+          "no-brief": {
+            "sessions": 12,
+            "rates": {
+              "brief-judge-k": {
+                "catch_rate": 0.3333333333333333,
+                "partial_rate": 0.0
+              },
+              "brief-judge-j": {
+                "catch_rate": 0.3333333333333333,
+                "partial_rate": 0.0
+              }
+            },
+            "difference_points": 0.0,
+            "differs_over_10_points": false
+          }
+        },
+        "caveats": []
+      }
+    }
+  },
+  "historical_beside": {
+    "arm": "TT",
+    "kind": "blind-terra",
+    "source_round": "brief-judge-j",
+    "pooled_with_primary": false,
+    "contrasts": null,
+    "sets": {
+      "P": {
+        "diffs": 18,
+        "sessions": 54,
+        "catch_rate": 0.2962962962962963,
+        "partial_rate": 0.0
+      },
+      "S": {
+        "diffs": 4,
+        "sessions": 12,
+        "catch_rate": 0.4166666666666667,
+        "partial_rate": 0.0
+      }
+    }
+  },
+  "provenance": {
+    "writer": {
+      "arm": "TS",
+      "kind": "blind-sonnet",
+      "model": "sonnet",
+      "effort": "high",
+      "launches": {
+        "archive-resume-hint-without-prompt": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "catalog-cache-key-collision": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "child-model-wrong-efforts": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "codex-effort-alias-lost": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "export-relative-read-root": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "github-token-in-container-argv": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "held-prompt-ignores-interrupt": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "journal-valid-json-corruption": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "path-completion-lost-on-step-redraw": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "pending-assessment-hidden-when-idle": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "projection-mixed-sqlite-snapshots": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "reserved-workspace-internal-error": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "restore-through-profile-symlink": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "stale-model-launch-spec": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "symbol-change-keeps-cached-transcript": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "terminal-id-reused": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "unused-thread-above-archive-floor": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "web-feed-self-deadlock": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "activity-recorder-kills-api": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "dropdown-click-hits-covered-field": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "metadata-checkpoint-overwrites-checkout": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        },
+        "shortcut-escape-opens-unvisited-manager": {
+          "model": "sonnet",
+          "effort": "high",
+          "profile": "claude5"
+        }
+      }
+    },
+    "graders": "gpt-6.1-sol/high on codex4: paired leak checks, judging, hand check and containment",
+    "source_rounds": [
+      "brief-judge-k",
+      "brief-judge-j"
+    ],
+    "raw_artifacts": {
+      "brief-judge-k": {
+        "key": "76f9ef2e37aabb23a17291faf4c5eef93e857c7d84e4dd2b7ef9cd0864f6006c",
+        "merged": "c0854f3f0603f2db0756e19550a47eee6c8a2c4b67eb89555c9979a55c2e8267",
+        "handcheck_decisions": "a0890b45884be346b702d8f14e0b34eee769945683de849de6845bed90f62b7b"
+      },
+      "brief-judge-j": {
+        "key": "ef204b3cae3d620b6d2b742879595c495a1e5d79544194c1a450c04e7e11a795",
+        "merged": "10e9c9b4b25c5d4a1c39f279553b41d55370e9a48fe410609362c0c1328f9b2a",
+        "handcheck_decisions": "589a6cdf616fbbd8457f9b8ec65772c638895292adffabdec466d09b7d5e36c6"
+      }
+    },
+    "briefs": {
+      "blind": {
+        "archive-resume-hint-without-prompt": "ac2f29d75384558d46d3328c4a74a7a792d3723af16c6a47b8ce49c5ad651795",
+        "catalog-cache-key-collision": "aa54fcd67a00e5b1dd390d08e0f3c65a0b9ac6eeb28bba8d700dd1011a89e5a9",
+        "child-model-wrong-efforts": "de70481a90af3566f2615a3d1be4c565a05e68ef7172c54ac5ebeed6a06ac5af",
+        "codex-effort-alias-lost": "e0bb47b70aa61ebdd518b88c3798252a07b567b77bc09a683e68e4b0795ee9aa",
+        "export-relative-read-root": "7ac995fee77ea09c3455665b060403f737282f23e65538c296f4f27ebd7a4497",
+        "github-token-in-container-argv": "e446f157539865c847ca15e8619312450b4be2cfb62083f3e9e4878929ef0999",
+        "held-prompt-ignores-interrupt": "62c7b0fb966870c75e413c80b630004eceb4c399de3240ad8aef2650e6a8f129",
+        "journal-valid-json-corruption": "e0c2beca7a01ae25b0d15cf94ee3d33d35441a34a016ba319ceb155eb39db50d",
+        "path-completion-lost-on-step-redraw": "9bbcd02b8d05651e18106c30fcaf42748349c88f80776c38afbb9e048c023cf2",
+        "pending-assessment-hidden-when-idle": "64899aad2029ea276d8acdc037d3d1940eca90a236b91ff88bec1b43f13a88ac",
+        "projection-mixed-sqlite-snapshots": "73b33d8f2e15f8536bee178487006fa29fa2484164daec454111769b6bc901f5",
+        "reserved-workspace-internal-error": "1e0b134bfb958b78f7e3959f3a78a82d47eec5c11b89382d0283bc83316cd3a4",
+        "restore-through-profile-symlink": "f4873ab260335b9a2f8f9bbf59ab3aa36c9e629e70eeedc7b41e780d48c30bb8",
+        "stale-model-launch-spec": "7d4e991bdcfd6a8cdf21b8b512aa203208d1db5db48e557e1875a0b27b29e0d1",
+        "symbol-change-keeps-cached-transcript": "e1d2e8269128afafc38d89c2a71862d6c03c8c5c1a681895c0ed54d3e19f29de",
+        "terminal-id-reused": "6de7fe7327417d7ad6f29a7927f54f80669e4666825113911ae64ce2855abf32",
+        "unused-thread-above-archive-floor": "40fd99f623bcdbf0db41726c6f4c7df12f49f7e0c92084752777848611ede149",
+        "web-feed-self-deadlock": "379c388b6e672130e51aee01f90b1d4e3aab64ced7eaa07b7935fb892be2df89",
+        "activity-recorder-kills-api": "ad83d21283cf02ccb55d27c59c25a1f1c4d579dae038c2d37e13c7935ce2a9b8",
+        "dropdown-click-hits-covered-field": "204a27b9af48a5be86997be908ef12352c7c27375b54aa2dd2dc678c7c4b72f5",
+        "metadata-checkpoint-overwrites-checkout": "0056d7c498444e7a0929340999b6252b92d704e4310d3fd02e8bafc1789f3e9e",
+        "shortcut-escape-opens-unvisited-manager": "08213df09a0b775f8754246b1b73c30c09d5ce8d0fc30771190d08f356650aa4"
+      },
+      "blind-sonnet": {
+        "archive-resume-hint-without-prompt": "8d668f1e6e8fc270e8f7203ccce51ce42f25250e6536c38a8b629ecdf403158a",
+        "catalog-cache-key-collision": "87535a3f2f7d659024e3f7e82d091c94c0d44172224538e053a82c1a80c633e0",
+        "child-model-wrong-efforts": "65deeec866d2e474e384358964f34cd523917568cfdb2f4495906fb0bd6f4747",
+        "codex-effort-alias-lost": "96b8ac43a096155a37ca38c4ca9cde47cd22bf0c68506e6b6287c74c3ad1ace4",
+        "export-relative-read-root": "6cbc39476f2b009ed3ecdb480f8d3fe19c769989281ec5a795bc445d1e9cc768",
+        "github-token-in-container-argv": "e18b42cab3b80fdb9520df8d549d3820b34c8144c40d7e82eaca26e50d626f6f",
+        "held-prompt-ignores-interrupt": "ae33dba8ed17cebf604ad9ff38c7f7616718a0d8481d28849a2cbb08206cf22a",
+        "journal-valid-json-corruption": "fb35b77ce6cafe24281be4a8e44ee185096f7f05079c2856a17fcf108a3e33e6",
+        "path-completion-lost-on-step-redraw": "33237d46195450c3e5eef6e9249c88a1c8c220f90ef0dde8e939df93b63c3167",
+        "pending-assessment-hidden-when-idle": "3513aa96cedea71c5a3c97b1313edbb2f0bbfcdb1feb6b74e1d2bf09f1a7da72",
+        "projection-mixed-sqlite-snapshots": "f1bf56a173956ce3c4d7a964a68298022642eae32258118faf6cb9edf40e6977",
+        "reserved-workspace-internal-error": "59caa43e422f32d5f42fcae7618d5fb2596a92231ca0c0ca968a8eea9b2fd546",
+        "restore-through-profile-symlink": "9c958853373f84e9173e8339c5318f55d0682ae9dc30f2924be2753b79f04ebc",
+        "stale-model-launch-spec": "04096e40527b2a482e2e1f69a3976e11d8fae0ab2fda4434a78dc8aad0ce7050",
+        "symbol-change-keeps-cached-transcript": "578a35cd1adc323e81c975bc89dc57f4f241de141774d11e634bedf71aeb264c",
+        "terminal-id-reused": "09215dc14131f48ef1e1b6629fd62ba95dcfbbed40985f8b90106eeff88915ba",
+        "unused-thread-above-archive-floor": "4c56781d7ef9beac45c16a9a90a22f737c289c4c93e4472617aa36f9d20577e7",
+        "web-feed-self-deadlock": "76c6fe6e7eebf97662cf0e2aa1ede1b4eb5694428514591b1e30907f820e8069",
+        "activity-recorder-kills-api": "25d06df53a57a1750c614e25ddea8fdfc77c63430f243826dd7b4bc447fd5fea",
+        "dropdown-click-hits-covered-field": "2d7be0ad8ea2f8177eb3bbffbf4539c7c332117aafa6360d205d48b56086be2b",
+        "metadata-checkpoint-overwrites-checkout": "78e96615ca58b1fc69364027e0ec7205e8395bc5b6c34df1bfb5ff096ac636ff",
+        "shortcut-escape-opens-unvisited-manager": "229244dabb5d417ebdbc66c3802bc737525c8d938eb66679100bfb38b0ebb6c6"
+      }
+    }
+  }
+}

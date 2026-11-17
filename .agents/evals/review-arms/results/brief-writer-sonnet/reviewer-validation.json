@@ -1,0 +1,911 @@
+{
+  "jobs": [
+    {
+      "bug": "archive-resume-hint-without-prompt",
+      "carrier": "6d15f134ff7ffb22711d27f0c7c195c4",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "f1af2c8d27c23a912d5d8294064197d3",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "bc01a277032f1874e20ae5b54b4e1cd8",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "a6ae553cb34c1af0827894acd3e07e93",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "56ee559259b510df14caee38af06d303ed3c04bfdf5393af128a6cd72cbd1df2",
+      "job_wall_s": 477.174,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "catalog-cache-key-collision",
+      "carrier": "eec7820c04521821abc314dc8b5f3993",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "c81ab4175e40deb6e5530a9be59ccc17",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "cd13227be2b350b166a3cefd24f26ebb",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "3f848b6331650a0dd28032bd737139b5",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "b1d684e91f6971d75f4b0229fdd164316e3f7e07eb6bbca436205eea3c89fc12",
+      "job_wall_s": 301.037,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "child-model-wrong-efforts",
+      "carrier": "0df0c32fe595347a56fb35f9eb154da0",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "ad91876da736f508ac07704d9cc66010",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "c230026dda2c3970f1639536e92453a6",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "1d843e7d484d13e9cbf67b10b6f063a5",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "5fb9becea0e17d0a264ae98dbcf612eb05514f0eba2e46ee97bb0f670de7d410",
+      "job_wall_s": 316.067,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "codex-effort-alias-lost",
+      "carrier": "5d4f3806dd11164a2d7bd95df33ecec0",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "f6b2e10a054ba697d75e94ec14ee63d1",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "93aa7fde29d249fabe4e4b3a330925dc",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "40e95d8f29ac60fef1a0202382e1c9de",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "1421febf5b2c7a19d126b33aa0140c4a1af36c8255097a2849d6d9ba73477de8",
+      "job_wall_s": 379.245,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "export-relative-read-root",
+      "carrier": "af9117107e5af215a255fcae54fe1d23",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "1b2b80a781d80d301979f9ae9921148a",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "35a8c6bf1738b6c90c6c5210d10add6e",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "2f0a37fafe6844c9f55f879f35a389f8",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "d9a1c9b342dd95653f55f9d5ad9f79e88bf91fdaff53743becef4c9ec345cc41",
+      "job_wall_s": 463.045,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "github-token-in-container-argv",
+      "carrier": "4abd2399e9e71fd7d40d05850abeb750",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "c5542b6bc84491b5263820032032a6e7",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "3c422d42ac5d29e8f07462907110929c",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "baf91be1263180e8756dd6453199f999",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "36f2b006a37d0a265d8b53518d16c7a6be4814cb5f11cc78be0c9d36282b2c11",
+      "job_wall_s": 417.697,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "held-prompt-ignores-interrupt",
+      "carrier": "ec0b2db7db7a062b2784db6d0f2c64be",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "6f650a104a8892f2b5a4c5626f87767e",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "05f318217f11677c3032b4a62ec75c50",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "02adfa25a608fdcd6222c2278a0bf024",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "b8a0cecfce9fa2e79d4b281319ee7b46ea6c969b37c85f2bc0e1a33e89aa60ee",
+      "job_wall_s": 462.546,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "journal-valid-json-corruption",
+      "carrier": "4ec860fa7d3b8e7e6ab4fb70f9675830",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "2005e47c57c63055a5a980591d93ca98",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "66e00c4e9c5f8ec09d72a28cb258d067",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "367455512483699ce5d0f50b1b86e585",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "cb23ab649c3ccfacd6dbf2f9b830969b42d77d72df7cfe14e26520291accc6d7",
+      "job_wall_s": 335.705,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "path-completion-lost-on-step-redraw",
+      "carrier": "89968756c1f6203a8b441aeced060a2c",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "0feb5bc02eaacc5b92e745c038c4c025",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "377e2083fcb086696beac0d548e546bd",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "ce92829780f5ab893f30e194c61adc95",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "4e3c2dcf612138e5130c37ddc824a50dbcd09eec7b8d286393db080fa1caa0fa",
+      "job_wall_s": 320.506,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "pending-assessment-hidden-when-idle",
+      "carrier": "12ba91af28370f46413f5b5811811f4e",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "f3e2ba5b478c1eafcb1c30d8ef385e73",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "8604492b74be7ef71012981770201361",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "fa513d0dc2b5068092daa5a9529aabb0",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": [
+          "refs/mj/push-base/9969e2d75b752f113de39cb476b90f761d4f9a8baa77f1cb427443d534413119 b72adcc6f7c8697e329bdf880780bbd3cc70a1b7",
+          "refs/mj/reviewed/a3c7b310af37590edcb3421acd8a1a5e5ad8a691 b72adcc6f7c8697e329bdf880780bbd3cc70a1b7"
+        ]
+      },
+      "context_sha256": "7493c50a9f808005dfd2fb2c5923efee7fc60150f4949de56a21e5f9e0953b69",
+      "job_wall_s": 171.823,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "projection-mixed-sqlite-snapshots",
+      "carrier": "554b169d21ae37c3a2ebf294b2b582ea",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "79cca939e8d5a44e3bd523db260d3781",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "e9a2cf5fcab27337fe04cdde0a94ede7",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "268c6624083caa65e6d124ed1e47d2cc",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "6ce4b7337d7d54591ead3b878c62710ec3bdf3936862538c7f94bf7b5938ad6e",
+      "job_wall_s": 255.513,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "reserved-workspace-internal-error",
+      "carrier": "4b80b53ba508bb54fc06e024b8b32247",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "95d6373aaebbea6d24a380a5e48aae4d",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "6b063d8a481325cee5200c46a1937d96",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "dab8a62713e38ad02a35281627878a5d",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "7563df8878b37f51291f4fa7ed025ffa661fb0aa72cdb5fa46570ea45d2df6bb",
+      "job_wall_s": 755.282,
+      "same_id_recovery": true
+    },
+    {
+      "bug": "restore-through-profile-symlink",
+      "carrier": "4f9fd124fdf59419325f0dc396c7f650",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "5315d56db8cdc2eb2542d87b5c3ecfcb",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "f6cdd3e6882835b60c19c1b87f6a0be1",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "1f523724d9fcfc904bc034f2efed0985",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "fc432dd1ab3568753d8f13c41e572f3bd55f6061a2584c6f1c9ca47e0cc4c54d",
+      "job_wall_s": 765.841,
+      "same_id_recovery": true
+    },
+    {
+      "bug": "stale-model-launch-spec",
+      "carrier": "4ffeec684ea22159988d420eae16f021",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "9f49b6dc1c1ee42f887a418349b0b6f6",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "dcccb72ddc689a5053695a3872648bc0",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "619033ffc30dddf0cff71f677a727b47",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "61e5660a63f95110c2c540ffe34149d1357498caef35e24c52734b0da86ff651",
+      "job_wall_s": 377.129,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "symbol-change-keeps-cached-transcript",
+      "carrier": "add852ceee7daa134c728d2b5d8e663c",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "c4d6eaff2b95a9a391d2b4ef80fc6b99",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "c7056aa1b545497292aafe2317578565",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "2e2c5015728c089a1976a2e8b69998a5",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "955c61e1cf09589f734a2a0f8ca03a0e2b25878212a9ea0bb8329041de8735e3",
+      "job_wall_s": 309.486,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "terminal-id-reused",
+      "carrier": "d7a7a60f848879dcf9d996c772200318",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "bfbe510570a0050fabec5ada8e88c218",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "b2a14806e74741e06692b49573090311",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "c366f401b0940cc14303136061dc6391",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "555f51a574b6b03d49a190b26bd4383e5ddf095274e4fd80d05a7fce5ede92e4",
+      "job_wall_s": 316.228,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "unused-thread-above-archive-floor",
+      "carrier": "55cb4ae7985e6fe779548af56baf72d4",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "16bf4cfda40fcee7526acf4c351b828e",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "727bbc7e6cb2e9ffb9106d3aff0f5549",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "0e60c68036633c9cd2b659189865bf47",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "9dd50792acbf16642b10f527524649d367b3aa9707196b481a94b6853e1c697b",
+      "job_wall_s": 238.366,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "web-feed-self-deadlock",
+      "carrier": "17a58b642a28a56c56a7ec5fe866381a",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "dce01e8e117c8685b3cece04dcc9d2c7",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "41fc30ff44d6753e77a78f3d8b6c2f98",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "72f43ea3c760eb17d576d501c8d6c526",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "e6939d4aa091e42258f7f8e94515b40ff57b4e69299803b4ee63645b8a3f0d3d",
+      "job_wall_s": 247.324,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "activity-recorder-kills-api",
+      "carrier": "5a73b8296518cbadf6b4f3220ae8551c",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "c6f93736b27516f14b97193b9c550e7c",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "cf20036a9e09a46c574bf86094605777",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "9cff3963c8da6d22dd52334a8cf8a958",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "8e3c07dc6ba92c05a5a90c601ad7229b374275a223b8465bfb5850cb2c3d876b",
+      "job_wall_s": 189.44,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "dropdown-click-hits-covered-field",
+      "carrier": "e417d15dafbf10c8c18596ecef6d2abc",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "055d9a44e19f25cd41685dec73ab354f",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "ed8389a315da6c66807ce1d010c3c687",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "4c8645378730ff2f0968e83abce82fa4",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "90378e62d9f3efe3140faa84509903b3c2025e2906d5f9d8f057935b51b9d9b7",
+      "job_wall_s": 186.007,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "metadata-checkpoint-overwrites-checkout",
+      "carrier": "2038f1be0611a865420454a6d8a992ac",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "af9003d0b7b7e4977b045ed096006d01",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "1fede2ff6bd9d30dcd4c4b7f03487255",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "80592918a5e6906c1d587a3959c48324",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "2adabb55047e9442da2562c28a2213044e1d28e6509a432e84fcea1ee26ecd98",
+      "job_wall_s": 674.183,
+      "same_id_recovery": false
+    },
+    {
+      "bug": "shortcut-escape-opens-unvisited-manager",
+      "carrier": "f94692b07920f3a0a978edb885db7238",
+      "image": "9a1d16144cc1759206f95dc59942360e3bfa54264b0b5c5ea172fffb0469a470",
+      "reviewers": [
+        {
+          "child": "a48adbb0aa51c2a00c55dec93a2b1f34",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "15592bbac321feea47c8366dbf5aea40",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "332d1f12418ada2b9b5c68fb3d7ebb89",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "context_sha256": "140ad01f1259032f1e27b6c837673129ad139b09d5fc4c924a5c330137bbed5c",
+      "job_wall_s": 283.119,
+      "same_id_recovery": false
+    }
+  ],
+  "unique_carriers": 22,
+  "unique_reviewers": 66
+}
