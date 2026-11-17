@@ -14,8 +14,11 @@ Measure whether blind relation briefs improve three Terra/high reviewers on Bifr
 - [x] Registered Sol leak/judge amendment and relation-first details before any brief; job-order seed20261119 recorded before34job shuffle.
 - [x] Shared harness source/scoring/leak integration reviewed and committedbe74a5cb9;6runtime and13scoring/default offline tests pass. Real frozen-input import check confirms70records,17/13sets and3Terra/highA/BT cells.
 - [x] Changed harness interfaces validated offline; owned production workspace35b2367fbd89852d91b79743c552c3e1 and verifier workspace7dbd0e675f40b2d0792dec118a7ffba4 prepared against the owned full-history Bifrost clone.
-- [ ] Freeze relation stage jobs, input/code hashes, launch quota and estimate; write17 blind Sol briefs, check leakage, run A/BT with3 Terra/high each, judge twice and hand-check required rows.
-- [ ] Report the relation reading, cost/coverage/limitations and stage commit; suspend own carriers/writers/judges. Reestimate remaining13+40 and wait for lead direction before continuing if full plan remains below-floor risk.
+- [x] Freeze relation jobs and inputs; write 17 blind Sol briefs, check leakage, run both arms with three Terra/high each, judge twice, and complete parent review of all 15 required handchecks.
+- [x] Report relation reading in e03007684: A9/51 versus BT4/51, paired −9.8 points (95% CI −19.6 to −2.0); all primary model roles ended or suspended. Lead authorized continuing after the reading, with the unchanged 25% floor.
+- [x] Register and complete one blinded contains diagnostic; read all four negative diffs and 12 brief-arm handbacks, and tabulate size/length from artifacts. Freeze these exploratory diagnostics separately; primary labels and reading remain unchanged.
+- [ ] Complete the 13 non-relation writers, paired leak checks, reviews and judging; writer operator is active, using the frozen order and unchanged harness.
+- [ ] Complete 40 ordinary controls with the registered single pooled group-and-verify pass, handmark rejected brief-reliant findings, report final retention and costs, and suspend own remaining sessions.
 
 ## Surprises & Discoveries
 
@@ -39,7 +42,7 @@ Decision: writers/leak checks/both catch judges use codex4 Sol/high; every revie
 
 ## Outcomes & Retrospective
 
-M1 is complete and the UTC correction is committed. No study writer, brief, reviewer or judge has run yet. Own master is now7106e3fab, fast-forwarded per lead to the reviewed production baseline. The next milestone is shared-harness readiness, not an experimental result.
+M1 and the primary relation stage are complete. Blind Sol briefs reduced the observed catch share from 17.6% to 7.8%, failing the registered uplift bar. The primary result is frozen in e03007684; its known recorded API-equivalent cost is $11.692545648, incomplete because carrier usage coverage is partial. The exploratory contains diagnostic found three yes, four partial and ten no labels among 17 briefs. Four negative diffs have three no labels and one partial; artifact reads do not establish reviewer attention, deference or stopping. The lead authorized continuing the 13 non-relation diffs and 40 controls without waiting after the primary report. The 13 writers are active; no later reviewer/control stage is admitted yet.
 
 ## Context and Orientation
 

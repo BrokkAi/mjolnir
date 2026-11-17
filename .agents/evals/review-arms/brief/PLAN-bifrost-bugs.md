@@ -166,3 +166,18 @@ this input. No engine queries or repository investigation run. Missing or
 invalid classifications remain unavailable, never implicit none. This
 assessment does not change the corpus, relation membership, briefs or
 catch-rate reading and is not supplied to writers, reviewers or judges.
+
+Amendment, 2026-11-17, before the decisive-fact contains diagnostic.
+Following the completed negative primary reading, run one blinded GPT-6.1
+Sol/high session on codex4 using the unchanged stageA/V1 contains rule in
+`results/brief-writer-terra/contains-rule.md`. It receives opaque item IDs,
+the frozen census fact/evidence/other_facts/kind, historical intro/base and
+the final17 relation brief texts, with no writer/arm/model identities, catch
+outcomes, private attribution or H6 result. It classifies yes/partial/no and
+quotes any matching item exactly. This is diagnostic only: it does not
+change the registered reading, case membership, briefs or catch labels.
+Additional diagnostics use existing artifacts only, with no new model runs:
+read each observed negative-paired-change brief and brief-arm handbacks,
+quoting evidence and marking attention/deference unobservable when it is;
+and tabulate each brief's characters/words/items and frozen diff size beside
+the paired change. These exploratory diagnostics do not alter decision bars.
