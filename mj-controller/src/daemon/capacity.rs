@@ -869,6 +869,7 @@ mod tests {
     }
 
     // Hard-won: #1375: summed cgroup ceilings refused idle Podman hosts.
+    // Hard-won: ea55df324: a queued Move reserved a conflicting launch before the owning Resume.
     #[tokio::test]
     async fn shared_admission_preserves_apple_ram_and_warns_for_cgroup_overcommit() {
         use crate::controller::test_support::{IsolatedTest, test_name};
@@ -911,7 +912,7 @@ mod tests {
             },
         );
         config.save().unwrap();
-        let state = crate::daemon::tests::test_runtime_state();
+        let state = crate::daemon::tests::test_runtime_state_loading_the_store();
         // Hard-won: 5e70f76a1: admission fixtures omitted the serving profile catalog.
         state.profile_catalog.get_or_init(|| {
             crate::server_runtime::profile_catalog::ProfileCatalog::new(
@@ -1063,6 +1064,79 @@ mod tests {
             Refusal::of(&error).unwrap().code(),
             Some("container-capacity-exceeded")
         );
+
+        // A later queued Move must not reserve capacity before the owning Resume.
+        let reserve_now = Arc::new(tokio::sync::Notify::new());
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+        let first = state
+            .start_or_join_lifecycle(stopped.id.clone(), LifecycleKind::Resume, {
+                let reserve_now = reserve_now.clone();
+                let finish = finish.clone();
+                let allocation = allocation(16);
+                move |state, id, _, _session_admission| async move {
+                    reserve_now.notified().await;
+                    let admitted = state
+                        .admit_container_launch(
+                            "podman",
+                            Some(allocation),
+                            Some(&id),
+                            BTreeSet::new(),
+                            None,
+                        )
+                        .await;
+                    admitted_tx
+                        .send(
+                            admitted
+                                .as_ref()
+                                .map(|_| ())
+                                .map_err(|error| format!("{error:#}")),
+                        )
+                        .unwrap();
+                    let _lease = admitted?.into_lease();
+                    finish.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .await
+            .unwrap();
+        let control = LifecycleControl::default();
+        let pending = tokio::spawn({
+            let state = state.clone();
+            let control = control.clone();
+            let request = serde_json::from_value(serde_json::json!({
+                "preparation": {
+                    "selection": {"session_id": stopped.id, "target_template_id": "apple", "resource_allocation": allocation(4)},
+                    "source_profile_id": "codex", "source_target_template_id": "podman",
+                    "cross_harness": false, "active": false, "queued_commands": [],
+                    "fingerprint": "prepared", "operation_id": "queued-capacity-move"
+                },
+                "queue": null, "acknowledge_interruption": true
+            })).unwrap();
+            async move { state.start_move_session(request, control).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !state.owner().lifecycle_intents.contains_key(&stopped.id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Move queues before the owning Resume reserves capacity");
+        reserve_now.notify_one();
+        let capacity_result = admitted_rx.await.unwrap();
+        // Always release the earlier lifecycle before asserting, so a failed
+        // regression cannot leave its executor waiting during test teardown.
+        control.request_cancel("cancel queued Move after the owning capacity decision");
+        finish.notify_one();
+        let queued_result = pending.await.unwrap();
+        let first_result = RuntimeState::wait_lifecycle_result(first).await;
+        capacity_result.expect("the later Move must not preempt the owner's capacity reservation");
+        first_result.unwrap();
+        assert!(
+            queued_result.is_err(),
+            "the cancelled queued Move does not run"
+        );
+        assert!(state.container_capacity_reservations().is_empty());
 
         let admitted = state
             .admit_container_launch(

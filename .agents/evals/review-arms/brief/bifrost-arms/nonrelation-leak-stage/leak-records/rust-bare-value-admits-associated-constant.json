@@ -1,0 +1,28 @@
+{
+  "id": "rust-bare-value-admits-associated-constant",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "8b87487a3f46e445fd94f0a8e2561506bbc5b873d29dd221370cec22164eb7f1",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes Rust role predicates and resolution, but never identifies associated constants being admitted into bare current-module value lookup or competing with a module constant.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes Rust reference roles and namespace predicates, but does not identify associated constants being admitted to bare current-module value lookup or competing with module constants.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

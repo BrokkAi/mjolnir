@@ -129,7 +129,7 @@ impl WorkerUpgradeCoordinator {
                         if !policy.due(&observation, Utc::now()) {
                             continue;
                         }
-                        let Some(upgrade_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::WorkerReplacement)
+                        let Ok(upgrade_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::WorkerReplacement).inspect_err(|refusal| tracing::debug!(%session_id, holders = ?refusal.holders, "worker upgrade deferred"))
                         else {
                             continue;
                         };
@@ -148,9 +148,10 @@ impl WorkerUpgradeCoordinator {
                                     config: observation.config,
                                     state,
                                 };
-                                let executor = CancellableProcessExecutor::new(cancelled)
+                                let executor = CancellableProcessExecutor::new(cancelled.cancellation())
                                     .with_deadline(WORKER_UPGRADE_TIMEOUT);
                                 let outcome = mj_core::runtime::block_on(controller.upgrade_session_worker(
+                                    &crate::recovery_gate::SessionAdmission::Background(cancelled.clone()),
                                     &task_session_id,
                                     &executor,
                                     &session_manager,
@@ -650,18 +651,18 @@ mod tests {
     fn the_shared_gate_keeps_an_upgrade_and_a_recovery_copy_apart() {
         let gate = Arc::new(RecoveryGate::default());
         let recovery_copy = gate
-            .try_start("session-1", BackgroundWork::RecoveryCopy)
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
             .expect("the slot starts free");
 
         assert!(
             gate.try_start("session-1", BackgroundWork::WorkerReplacement)
-                .is_none()
+                .is_err()
         );
 
         drop(recovery_copy);
         assert!(
             gate.try_start("session-1", BackgroundWork::WorkerReplacement)
-                .is_some()
+                .is_ok()
         );
     }
 
@@ -747,7 +748,7 @@ mod tests {
         assert!(!settling.is_finished());
         assert!(
             gate.try_start(&session.id, BackgroundWork::WorkerReplacement)
-                .is_none()
+                .is_err()
         );
         let independent = gate
             .try_start("other-session", BackgroundWork::WorkerReplacement)

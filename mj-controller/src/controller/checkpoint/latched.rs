@@ -5,6 +5,7 @@ impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn checkpoint_session_latched_for_operation(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -14,6 +15,7 @@ impl Controller {
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
         self.checkpoint_session_latched_with_recovery_stage(
+            admission,
             session_id,
             executor,
             manager,
@@ -29,6 +31,7 @@ impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn checkpoint_session_latched_with_recovery_stage(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -51,6 +54,7 @@ impl Controller {
         // thread stack; a direct `mj checkpoint` overflowed a 2 MiB Tokio
         // worker stack that way. Boxing it once here keeps them small.
         Box::pin(self.checkpoint_session_latched_with_layout(
+            admission,
             session_id,
             executor,
             manager,
@@ -73,6 +77,7 @@ impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn checkpoint_session_latched_with_layout(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -259,7 +264,7 @@ impl Controller {
             }
         }
         let (mut relay, mut restarted_worker) = self
-            .open_checkpoint_relay(
+            .open_checkpoint_relay(admission,
                 session_id,
                 executor,
                 manager,
@@ -422,14 +427,14 @@ impl Controller {
             let mut settled = barrier.operational.clone();
             settled.checkpoint_barrier = None;
             if !settled.safe_to_move(session.harness_kind, purpose) {
-                relay.cancel_abandoned_barrier().await?;
+                relay.cancel_abandoned_barrier(admission).await?;
                 return Err(CheckpointDeferred::harness_busy().into());
             }
         }
         if let Some(expected) = &quota_recovery
             && super::super::move_session::quota_move_recovery(&barrier.operational).ok() != Some(expected)
         {
-            relay.cancel_abandoned_barrier().await?;
+            relay.cancel_abandoned_barrier(admission).await?;
             anyhow::bail!("quota Move recovery changed before source close");
         }
         let barrier_ready_at = Instant::now();
@@ -527,6 +532,7 @@ impl Controller {
         // and submitting while the slow phase runs.
         if exclusivity == LatchExclusivity::ReleaseAfterLatch {
             relay.end_latch();
+            admission.narrow_copy()?;
         }
 
         // Reuse before exporting: verifying an installed archive costs far less
@@ -548,6 +554,7 @@ impl Controller {
             )
         {
             return Ok(LatchedCheckpoint {
+                admission: admission.clone(),
                 _worker_owner: crate::worker_lifecycle::require(session_id)?,
                 artifact,
                 relay,
@@ -817,7 +824,7 @@ impl Controller {
                 // harness frozen until that connection happens to drop. A
                 // barrier released after the export is already gone.
                 if completion == CheckpointCompletion::HeldBarrier
-                    && let Err(cancel_error) = relay.cancel_abandoned_barrier().await
+                    && let Err(cancel_error) = relay.cancel_abandoned_barrier(admission).await
                 {
                     tracing::warn!(
                         session_id,
@@ -828,6 +835,7 @@ impl Controller {
             }
         };
         Ok(LatchedCheckpoint {
+                admission: admission.clone(),
                 _worker_owner: crate::worker_lifecycle::require(session_id)?,
             artifact,
             relay,

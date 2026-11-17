@@ -1,0 +1,17 @@
+{
+  "accepted_at": "2026-11-17T11:32:11.655029+00:00",
+  "scope": "Mechanical exact coverage/schema acceptance of registered ONE pooled source-reading verification pass; no relabeling/adjudication/secondpass.",
+  "reviewer_sessions": 240,
+  "findings": 192,
+  "nonempty_diffs": 29,
+  "zero_finding_diffs": 11,
+  "groups": 69,
+  "raw_verdicts": {
+    "confirmed": 54,
+    "rejected": 15
+  },
+  "all15verifiers_suspended": true,
+  "all_input_output_key_hashes_rechecked": true,
+  "registered_SPEC_unchanged": true,
+  "semantic_limit": "Confirmed means this source-reading verifier traced a reachable introduced/exposed defect under SPEC, not runtime test proof. Parent reliance handmarks do not rejudge these raw groups."
+}

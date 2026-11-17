@@ -1,0 +1,58 @@
+{
+  "commits": [
+    {
+      "intro": "bb39a5fd493f91f3e9f0ec0e6670fb60a557894c",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-d577508b",
+            "f-610bf37d",
+            "f-5b8df756",
+            "f-9e52e0ac",
+            "f-c8216128",
+            "f-df823f94"
+          ],
+          "summary": "An external alias inside a generic argument incorrectly blocks navigation to the workspace generic type.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, for a field typed Container<ext::Item>, with an indexed Container<T> and using ext = External, selecting Container promotes its identifier to generic_name in crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:1780-1813 and classifies it as Type at :1844-1848. The newly added check at :562-568 runs before workspace resolution at :570-600. csharp_alias_qualified_boundary traverses all named descendants (:2188-2189, :2217-2218), including the type argument, finds ext::Item, and returns true when External and External.Item are unindexed (:2190-2215). Thus it returns an import boundary for Container itself. The base did not apply this boundary predicate to ordinary type references.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-b0863c8c",
+            "f-4460c7ba"
+          ],
+          "summary": "Comments between an anonymous-object member name and its equals token bypass declaration-name classification, but this failure predates the diff.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, crates/bifrost-csharp/src/graph/extractor.rs:1091-1094 checks the immediate next_sibling for =, so a comment between Name and = does bypass the new branch. However, base d112084d980f1401cf511b551c71ae5c41d76f5a has no anonymous-object branch at all: extractor.rs:1082-1107 only recognizes the listed declaration parents, excluding anonymous_object_creation_expression, and returns false for this same Name. The remaining classifier at intro (:1098-1119) retains that behavior. Both revisions therefore let this commented name pass the declaration gate in crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:543-547. This is an unhandled pre-existing case, not a failure introduced or newly exposed by the diff; the specification explicitly rejects pre-existing problems.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "a75a035026aedb57d18b9f4332e6d0a2d475b344",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-b6963d38",
+            "f-e4e4cec2",
+            "f-544f0a98",
+            "f-7b1a6d0b",
+            "f-33df6f04",
+            "f-b3920a64"
+          ],
+          "summary": "A same-package panic declaration in another file is misclassified as the builtin, eliminating the actual call and its normal continuation.",
+          "verdict": "confirmed",
+          "severity": "high",
+          "evidence": "At intro, two files can declare package p, with func panic(v int) {} in one and func run() { panic(1); sink() } in the other. In crates/bifrost-analysis/src/analyzer/go/semantic.rs:44-57, lowering receives only the current prepared tree; enumerate_procedures starts from that tree (:225-243) and collects package shadowing only from its nodes (:255-280). Top-level procedures inherit that incomplete inventory (:599-605), while binding_value checks only locals and parameters (:913-916). Consequently builtin_panic_argument (:1178-1194) accepts panic(1). The new arm at :2766-2805 emits Throw, routes exceptional completion, and ignores next, bypassing ordinary call lowering at :2807. In base a759d64749447aac3f939650b966f2037df07af3, this was an ordinary call at semantic.rs:2736. Later mitigation b757656ef83d3aa4b02c0342c8869593e2139914 records builtin assumptions including Panic and checks same-package declarations in workspace value-flow and race queries, leaving shadowed assumptions open rather than silently accepting builtin semantics; it does not itself reconstruct the ordinary call CFG.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

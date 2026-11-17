@@ -1,0 +1,212 @@
+{
+  "recorded_at": "2026-11-17T11:48:13.527543+00:00",
+  "registered_reading": "Does not generalize",
+  "full_study_complete": true,
+  "source_repository": "BrokkAi/bifrost-dev",
+  "source_pin": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+  "data_root": "/mnt/optane/review-arms-bifrost-20261116",
+  "writer": "gpt-6.1-sol/high on codex4; unchanged StageB blind prompt/tools/history",
+  "reviewer": "3gpt-6.1-terra/high per diff per A/BT arm via normal native selection",
+  "judge": "gpt-6.1-sol/high on codex4, one model both arms",
+  "corpus": {
+    "known_bugs": 30,
+    "ordinary_controls": 40,
+    "confirmed_intro_attributions": 30,
+    "source": "allhard-won; bug-issuefallbackunused",
+    "relation_diffs": 17,
+    "nonrelation_diffs": 13,
+    "feature_families": 24,
+    "max_per_family": 2,
+    "cutoff": "strictly before2026-11-01T00:00:00Z",
+    "known_median_changed_lines": 827,
+    "ordinary_median_changed_lines": 387,
+    "primary_relation_median_changed_lines": 675
+  },
+  "census": {
+    "primary": "Sol/high30",
+    "partial_replication": "Carbon/high5",
+    "replication_agreement": "4/5",
+    "unavailable_replication": 25,
+    "relation_classification": "primarykind!=none",
+    "limits": "Partial replication under recorded quota amendment, not two complete censuses; primary model differs from mjolnir."
+  },
+  "primary": {
+    "diffs": 17,
+    "sessions_per_arm": 51,
+    "A_caught": 9,
+    "BT_caught": 4,
+    "A_rate": 0.17647058823529413,
+    "BT_rate": 0.0784313725490196,
+    "effect_points": -9.8,
+    "paired_ci95_points": [
+      -19.6,
+      -2.0
+    ],
+    "required_uplift_points": 17,
+    "required_interval_above_zero": true,
+    "passes": false
+  },
+  "secondary": {
+    "diffs": 13,
+    "sessions_per_arm": 39,
+    "A_caught": 13,
+    "BT_caught": 15,
+    "A_rate": 0.3333333333333333,
+    "BT_rate": 0.38461538461538464,
+    "effect_points": 5.1,
+    "paired_ci95_points": [
+      0.0,
+      12.8
+    ],
+    "changes": {
+      "positive": 2,
+      "negative": 0,
+      "tied": 11
+    }
+  },
+  "known_pooled_descriptive": {
+    "diffs": 30,
+    "sessions_per_arm": 90,
+    "A_caught": 22,
+    "BT_caught": 19,
+    "primary_not_replaced": true
+  },
+  "ordinary": {
+    "recorded_at": "2026-11-17T11:38:03.865014+00:00",
+    "stage": "40 ordinary controls, single pooled Control2 verification and parent semantic handmarks",
+    "diffs": 40,
+    "sessions": {
+      "A": 120,
+      "BT": 120
+    },
+    "unique_reviewer_sessions": 240,
+    "raw_findings": 192,
+    "nonempty_diffs": 29,
+    "zero_finding_diffs": 11,
+    "zero_finding_reviewer_outputs": 105,
+    "raw_groups": {
+      "confirmed": 54,
+      "plausible": 0,
+      "rejected": 15
+    },
+    "confirmed_distinct_group_incidences": {
+      "A": 78,
+      "BT": 86
+    },
+    "confirmed_distinct_groups_per_session": {
+      "A": 0.65,
+      "BT": 0.7166666666666667
+    },
+    "retention_ratio": 1.1025641025641026,
+    "paired_difference_ci95": [
+      -0.05,
+      0.175
+    ],
+    "retention_bar": 0.9,
+    "retention_pass": true,
+    "broad_anchor_candidates": 8,
+    "outside_changed_line_candidates": 2,
+    "rejected_findings_semantically_relying": 7,
+    "relying_limit": 8,
+    "reliance_pass": true,
+    "control2_pass": true,
+    "handmark_method": "Parent read all8fullfindings/6fullbriefs; original builds-on/restates rubric, not mere anchor overlap or actual causal dependence. Per findingID, no deduplication.",
+    "verification_method": "ONE15sessionSol/high pooled group-and-verify pass, complete192finding coverage; no replication/secondpass/catchjudging/handmark model.",
+    "raw_group_labels_changed": false,
+    "all15verifiers_suspended": true,
+    "estimated_verifier_cost_usd_api_equivalent": 3.8380024,
+    "cost_scope": "Verification only;15completepricedreports. Overall model-role/carrier accounting is separate and incomplete.",
+    "primary_reading_unchanged": true,
+    "primary_generalization_pass": false,
+    "limitations": [
+      "Ordinary controls have unknown truth; zero findings are reviewer output, not confirmed-clean cases.",
+      "Confirmed groups are source-reading verifier judgments under SPEC, not runtime reproduction.",
+      "One verifier pass; no independent ordinary-verdict replication.",
+      "Reviewer tool transcripts/latency unavailable after normal destruction.",
+      "Review images changed during80jobs and are not perfectly balanced byarm; no post-hoc cell exclusions.",
+      "Verifier audit has14read/search requests without full argument capture; no observed violation is qualified, not a fully clean runtime claim."
+    ],
+    "verifier_tool_audit": {
+      "represented_requests": 270,
+      "exact_commands": 256,
+      "read_search_payloads_incomplete": 14,
+      "observed_violations": 0,
+      "fully_clean_runtime_claim": false
+    }
+  },
+  "contains_diagnostic": {
+    "yes": 3,
+    "partial": 4,
+    "no": 10,
+    "n": 17,
+    "yes_rate": 0.17647058823529413,
+    "assessors": 1,
+    "model": "Sol/high",
+    "post_primary_followup": true
+  },
+  "template_applicability": {
+    "metric": "template applicability (reach unmeasured)",
+    "applicable": 15,
+    "n": 17,
+    "T8a": 13,
+    "T2": 1,
+    "T3": 1,
+    "none": 2,
+    "reach_measured": false,
+    "candidate_confidence": {
+      "medium": 14,
+      "low": 1
+    },
+    "limits": "One labels-only Sol/high assessment; no legal diff-seed/backend/actual engine reach demonstrated."
+  },
+  "known_bug_judging": {
+    "outputs": 180,
+    "paired_verdicts": 360,
+    "paired_agreement": 180,
+    "handcheck_required": 43,
+    "final_handchecked_caught": 41,
+    "final_handchecked_partial": 2,
+    "parent_decisions_before_arm_attribution": true
+  },
+  "execution": {
+    "writer_briefs": 70,
+    "review_jobs": 140,
+    "Terra_reviewer_sessions": 420,
+    "ordinary_verifiers": 15,
+    "unique_campaign_role_sessions": 669,
+    "noncarrier_sessions": 529,
+    "carrier_sessions": 140,
+    "role_or_cell_retries": 0,
+    "role_or_cell_replacements": 0,
+    "recovered_readback_failures": 1,
+    "ordinary_review_image_mix": "A11/18/11 vsBT12/20/8 acrossa621/8743/2cab; no caseadjustments"
+  },
+  "cost": {
+    "estimated_supported_recorded_subtotal_usd_api_equivalent": 45.59074528,
+    "fully_priced_session_subtotal_usd_api_equivalent": 41.241004016,
+    "fully_priced_sessions": 618,
+    "incomplete_carrier_sessions": 51,
+    "full_total_usd_api_equivalent": null,
+    "missing_reports": 24,
+    "persisted_unfinished_turn_records": 57,
+    "scope": "Campaign model roles and carriers only; excludes M1/corpus/census/tracing and parent/helperorchestration. AuxH6/contains included separately in ledger.",
+    "not_subscription_charge": true,
+    "deployed_aggregation_revision_not_proven": true
+  },
+  "cleanup": {
+    "Terra_reviewers_ended": 420,
+    "Sol_role_sessions_suspended": 109,
+    "carrier_sessions_suspended": 140,
+    "accepted_background_work_remaining": 0
+  },
+  "limitations": [
+    "Preregistered small historical corpus; paired confidence intervals resample diffs, not an unseen codebase.",
+    "Census replication only5/30 under recorded amendment; primaryrelationclassification fromSol/high.",
+    "Ordinary verification is one source-reading pass; confirmed is not runtime reproduction.",
+    "Reviewer tool transcripts and latency unavailable after normal destruction.",
+    "Verifier audit270representedcalls,14read/search argumentpayloads incomplete; noobservedviolation, notcertifiedfullyclean.",
+    "Reviewimages changed during controls and are not perfectly balanced byarm.",
+    "Carrier usage gaps and unavailable installed-daemoncommit keep fullcostunknown.",
+    "H6reach unmeasured; applicability does not demonstrate executed retrieval."
+  ]
+}

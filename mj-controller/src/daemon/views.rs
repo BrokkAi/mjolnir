@@ -30,6 +30,10 @@ pub(super) enum StalledCreate {
 }
 
 impl RuntimeState {
+    pub(crate) fn session_gate(&self) -> &Arc<crate::recovery_gate::RecoveryGate> {
+        &self.recovery_observer.gate
+    }
+
     fn request_lifecycle_cancel(
         &self,
         session_id: &str,
@@ -361,13 +365,27 @@ impl RuntimeState {
         if let Some(busy) = self.session_lifecycle_busy(session_id) {
             return Err(anyhow::Error::new(busy));
         }
+        let session_admission = crate::recovery_gate::SessionAdmission::Foreground(
+            self.recovery_observer
+                .gate
+                .enter_foreground(
+                    session_id,
+                    "checkpoint",
+                    crate::recovery_gate::LifecycleOrigin::Person,
+                    &AtomicBool::new(false),
+                    &ProcessExecutor,
+                )
+                .await?,
+        );
         let session_id = session_id.to_owned();
         // Checkpoint capture and cleanup run synchronous filesystem, database
         // and SSH operations between relay awaits. Keep the whole future,
         // including its destructors, off the daemon's event loop.
         let checkpoint = blocking(move || {
             let mut controller = Controller::load()?;
-            mj_core::runtime::block_on(controller.checkpoint_session(&session_id))?
+            mj_core::runtime::block_on(
+                controller.checkpoint_session(&session_admission, &session_id),
+            )?
         })
         .await?;
         refresh_runtime_controller(self).await;

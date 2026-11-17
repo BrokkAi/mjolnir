@@ -1,0 +1,14 @@
+{
+ "diffs": 40,
+ "sessions": 240,
+ "sessions_per_model": {
+  "gpt-6.1-terra": 240
+ },
+ "groups": 69,
+ "verdicts": {
+  "confirmed": 54,
+  "rejected": 15
+ },
+ "missing_latency": 240,
+ "unverified_diffs_left_out": []
+}

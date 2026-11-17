@@ -52,6 +52,19 @@ impl HostState {
                     } else {
                         Ok(())
                     };
+                    let resolution = match slot.driver.phase() {
+                        TurnReviewPhase::Resolved(Resolution::Cancelled) => {
+                            crate::database::FinishedReviewResolution::Cancelled
+                        }
+                        _ => match slot.driver.last_verdict() {
+                            Some(ReviewVerdict::Failed { .. }) => {
+                                crate::database::FinishedReviewResolution::Failed
+                            }
+                            Some(_) => crate::database::FinishedReviewResolution::Completed,
+                            // A cleared review without a verdict was cancelled.
+                            None => crate::database::FinishedReviewResolution::Cancelled,
+                        },
+                    };
                     answer(slot.start_reply.take(), outcome);
                     slot.state.active = None;
                     slot.state.active_group = None;
@@ -60,7 +73,7 @@ impl HostState {
                     if let Err(error) = self.persist(
                         session_id.to_owned(),
                         state,
-                        Some(PersistenceCompletion::Close),
+                        Some(PersistenceCompletion::Close(resolution)),
                     ) {
                         tracing::warn!(session_id, %error, "could not queue review close persistence");
                         self.closing.remove(session_id);

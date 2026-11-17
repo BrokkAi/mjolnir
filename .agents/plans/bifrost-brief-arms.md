@@ -17,8 +17,15 @@ Measure whether blind relation briefs improve three Terra/high reviewers on Bifr
 - [x] Freeze relation jobs and inputs; write 17 blind Sol briefs, check leakage, run both arms with three Terra/high each, judge twice, and complete parent review of all 15 required handchecks.
 - [x] Report relation reading in e03007684: A9/51 versus BT4/51, paired −9.8 points (95% CI −19.6 to −2.0); all primary model roles ended or suspended. Lead authorized continuing after the reading, with the unchanged 25% floor.
 - [x] Register and complete one blinded contains diagnostic; read all four negative diffs and 12 brief-arm handbacks, and tabulate size/length from artifacts. Freeze these exploratory diagnostics separately; primary labels and reading remain unchanged.
-- [ ] Complete the 13 non-relation writers, paired leak checks, reviews and judging; writer operator is active, using the frozen order and unchanged harness.
-- [ ] Complete 40 ordinary controls with the registered single pooled group-and-verify pass, handmark rejected brief-reliant findings, report final retention and costs, and suspend own remaining sessions.
+- [x] Complete and freeze all 13 non-relation writers; every session is suspended, final lint/inventory/hash checks pass, one historical-path scanner hit is classified from its captured own-workspace git diff.
+- [x] Complete paired non-relation leak checks: all 13 briefs missed by both judges, 26 hash-bound verdicts, no flags or wording edits; both Sol/high judges suspended.
+- [x] Run and freeze the 26 registered non-relation A/BT jobs: 78 unique actual Terra/high outputs, clean inventories, all 26 own carriers API-confirmed suspended.
+- [x] Complete paired non-relation catch judging and all 28 required handchecks. Independent parent review and one blinded Sol/high proposal agree; final decisions were sealed before arm attribution. Secondary reading: A13/39 versus BT15/39, +5.1 points (95% paired interval 0.0 to +12.8).
+- [x] Complete and freeze all 40 ordinary blind writers: zero lint repairs, clean inventories, all writers suspended. Four audit hits are literal quoted-heredoc brief writes; capture limitations retained.
+- [x] Complete and freeze all 80 ordinary A/BT jobs and 240 original Terra/high handbacks; every carrier is suspended. One readback transport failure was recovered using the same accepted IDs, with zero reviewer role/cell retries or replacements.
+- [x] Complete ONE pooled verification pass: 15 Sol/high sessions, all suspended; 192 findings/29 nonempty diffs grouped into 54 confirmed and 15 rejected groups, with all 240 reviewer sessions retained.
+- [x] Parent-read all eight broad-match rejected findings and six briefs; mark seven as semantically relying on an item, one as overlap only. Final Control2 passes: 110.3% confirmed-group retention and seven reliance findings within the limit of eight. No extra assessor or verification pass.
+- [x] Freeze the final combined readout/accounting and qualified audits. Independent delivery validation passed all 729 frozen file entries against working-copy and Git-index bytes, all 17 manifests and six README links. Generated CSV bytes are preserved by scoped attributes. All campaign roles ended/suspended; both execution helpers closed, no accepted background work remains. Final handback is local only, without push.
 
 ## Surprises & Discoveries
 
@@ -42,7 +49,11 @@ Decision: writers/leak checks/both catch judges use codex4 Sol/high; every revie
 
 ## Outcomes & Retrospective
 
-M1 and the primary relation stage are complete. Blind Sol briefs reduced the observed catch share from 17.6% to 7.8%, failing the registered uplift bar. The primary result is frozen in e03007684; its known recorded API-equivalent cost is $11.692545648, incomplete because carrier usage coverage is partial. The exploratory contains diagnostic found three yes, four partial and ten no labels among 17 briefs. Four negative diffs have three no labels and one partial; artifact reads do not establish reviewer attention, deference or stopping. The lead authorized continuing the 13 non-relation diffs and 40 controls without waiting after the primary report. The 13 writers are active; no later reviewer/control stage is admitted yet.
+The complete registered experiment reads **Does not generalize**. The primary relation result is A9/51 versus BT4/51, −9.8 points (95% paired interval −19.6 to −2.0), failing the required +17-point uplift and positive interval. The secondary result is A13/39 versus BT15/39, +5.1 points (0.0 to +12.8); descriptive pooled known-bug counts are A22/90 versus BT19/90 and do not replace the primary.
+
+Ordinary Control2 passes: confirmed distinct groups per reviewer are 0.650 versus 0.717, retention 110.3% with difference interval −0.050 to +0.175. The single pooled pass covered all 192 findings and 240 reviewer sessions, including zero-finding cases. All eight broad-match rejected findings were manually checked against six full briefs; seven semantically rely on an item, within the ceiling of eight. No extra verification pass, handmark model or changed case/label was introduced. One usage-read correlation failure was recovered on the same accepted IDs; zero reviewer roles or cells were repeated or replaced.
+
+Final campaign-role accounting has 669 unique SIDs and $45.59074528 supported recorded API-equivalent cost, incomplete because 51 carrier sessions have usage gaps. Full cost remains null; M1 and parent/helper orchestration are excluded. Reviewer transcripts/latency are unavailable, verifier audit has 14 incomplete read/search payloads, image changes are not perfectly balanced by arm, and the deployed daemon commit is unproven. The final readout preserves these limits, partial census replication and unmeasured engine reach. All 729 frozen-file hashes pass working-copy/index validation. Full report: `brief/bifrost-arms/README.md`; data-root report: `/mnt/optane/review-arms-bifrost-20261116/FINAL-READOUT.md`. All requested work is complete; campaign roles are ended/suspended and the execution helpers are closed. No push or further model/engine/deployment work is performed.
 
 ## Context and Orientation
 

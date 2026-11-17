@@ -3,6 +3,8 @@ use super::*;
 use crate::test_log::CapturedLog;
 use mj_core::relay::RelayObservation;
 use mj_worker::relay::DurableRelay;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What a direct (no actor) reconciliation of one session borrows.
 macro_rules! access {
@@ -278,8 +280,13 @@ exit 1
     let Err(error) = connected else {
         panic!("a proxy that exits 1 is a real failure");
     };
-    // Not a refusal, so it is a warning, and the proxy's own complaint is in it.
-    let warnings = log.at_or_above(tracing::Level::WARN);
+    // The lifecycle/actor caller reports the failure, without a duplicate here.
+    assert!(log.at_or_above(tracing::Level::WARN).is_empty());
+    let warnings = log
+        .at(tracing::Level::DEBUG)
+        .into_iter()
+        .filter(|event| event.contains("relay request failed"))
+        .collect::<Vec<_>>();
     assert_eq!(warnings.len(), 1, "{warnings:#?}");
     assert!(
         warnings[0].contains("worker socket path is too long")
@@ -379,7 +386,13 @@ fn a_worker_socket_that_appears_within_the_retry_budget_is_not_a_warning() {
         return;
     };
     let directory = tempfile::tempdir().expect("temp dir");
-    let spec = relay_proxy_before_the_worker_binds(directory.path(), Some(2));
+    let mut spec = relay_proxy_before_the_worker_binds(directory.path(), Some(2));
+    // Hard-won: 583e6ea48: a stale socket after park returns ECONNREFUSED until the new worker binds.
+    spec.args = spec
+        .args
+        .into_iter()
+        .map(|arg| arg.replace("No such file or directory", "Connection refused"))
+        .collect();
 
     let client = connect_and_let_reapers_report(&spec)
         .expect("the connection is retried until the worker binds its socket");
@@ -396,12 +409,11 @@ fn a_worker_socket_that_appears_within_the_retry_budget_is_not_a_warning() {
     assert_eq!(retries, 2, "{:#?}", log.events());
 }
 
-/// A socket still missing after the retry budget is a real failure: one
-/// warning that carries the proxy's complaint, and the same dead-transport
-/// error that worker recovery reads.
+/// A socket still missing after the retry budget returns the dead-transport
+/// error to the caller that owns recovery and reachability warnings.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_worker_socket_still_missing_after_the_retry_budget_is_one_warning() {
+async fn a_worker_socket_still_missing_returns_the_failure_to_its_owner() {
     let directory = tempfile::tempdir().expect("temp dir");
     let spec = relay_proxy_before_the_worker_binds(directory.path(), None);
     let log = CapturedLog::default();
@@ -425,7 +437,12 @@ async fn a_worker_socket_still_missing_after_the_retry_budget_is_one_warning() {
         "a missing socket is retried before it is reported"
     );
 
-    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert!(log.at_or_above(tracing::Level::WARN).is_empty());
+    let warnings = log
+        .at(tracing::Level::DEBUG)
+        .into_iter()
+        .filter(|event| event.contains("control socket is still missing"))
+        .collect::<Vec<_>>();
     assert_eq!(warnings.len(), 1, "{warnings:#?}");
     assert!(
         warnings[0].contains("control socket is still missing")
@@ -700,8 +717,15 @@ async fn a_proxy_that_exits_before_hello_reports_a_dead_transport() {
 async fn a_hello_failure_carries_the_proxy_stderr_tail() {
     const COMPLAINT: &str =
         "connect worker socket /x/control.sock: path must be shorter than SUN_LEN";
-    let spec = CommandSpec::new("sh", ["-c", &format!("echo '{COMPLAINT}' >&2; exit 1")])
-        .purpose("complaining relay proxy");
+    // Hard-won: 583e6ea48: embedded worker ERROR lines and backtraces were pasted into daemon warnings.
+    let stderr = format!(
+        "2026-11-17T13:45:12Z ERROR mj_worker: worker failed\nError: {COMPLAINT}\n\nCaused by:\n    0: connect unix socket /x/control.sock\n    1: path must be shorter than SUN_LEN"
+    );
+    let spec = CommandSpec::new(
+        "sh",
+        ["-c", &format!("printf '%s\\n' '{stderr}' >&2; exit 1")],
+    )
+    .purpose("complaining relay proxy");
 
     let error = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
         .await
@@ -709,6 +733,11 @@ async fn a_hello_failure_carries_the_proxy_stderr_tail() {
         .expect("a proxy that exits cannot complete hello");
 
     assert!(format!("{error:#}").contains(COMPLAINT), "{error:#}");
+    assert!(!format!("{error:#}").contains('\n'), "{error:#}");
+    assert!(
+        !format!("{error:#}").contains("ERROR mj_worker"),
+        "{error:#}"
+    );
     // Added context must not hide the classification recovery reads.
     assert!(RelayTransportDead::marks(&error), "{error:#}");
     assert!(RelayTransportDead::marks_failed_handshake(&error));
@@ -1467,6 +1496,18 @@ for line in sys.stdin:
             open(fail_first, "w").close()
             sys.exit(1)
         payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "credential-fixture", "session_id": session}}
+    elif method == "status" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        payload = {"type": "status", "data": json.loads(os.environ["MJ_TEST_CREDENTIAL_ACTOR_STATE"])}
+    elif method == "attach" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        state = json.loads(os.environ["MJ_TEST_CREDENTIAL_ACTOR_STATE"])
+        payload = {"type": "attached", "data": {"state": state, "events": [], "through_ordinal": 0, "through_digest": state["latest_digest"]}}
+    elif method == "acknowledge" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        state = json.loads(os.environ["MJ_TEST_CREDENTIAL_ACTOR_STATE"])
+        payload = {"type": "acknowledged", "data": {"through_ordinal": 0, "through_digest": state["latest_digest"]}}
+    elif method == "history_requests" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        payload = {"type": "history_requests", "data": {"requests": []}}
+    elif method == "subagent_requests" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        payload = {"type": "subagent_requests", "data": {"requests": [], "results": []}}
     elif method == "credential_state":
         if os.path.exists(received):
             data = open(received, "rb").read()
@@ -3674,7 +3715,8 @@ async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
             gate.try_start(
                 &session,
                 crate::recovery_gate::BackgroundWork::CredentialSync,
-            ),
+            )
+            .ok(),
             Some(steps.enter(&session).await),
             None,
             None,
@@ -4573,7 +4615,8 @@ async fn a_running_credential_job_stops_when_its_admission_is_cancelled() {
             gate.try_start(
                 &session,
                 crate::recovery_gate::BackgroundWork::CredentialSync,
-            ),
+            )
+            .ok(),
             Some(steps.enter(&session).await),
             None,
             None,
@@ -5102,7 +5145,7 @@ async fn a_new_login_reaches_a_session_while_its_recovery_copy_runs() {
     drop(replacement);
 
     let copy = gate
-        .try_start(SESSION_ID, BackgroundWork::RecoveryCopy)
+        .try_start(SESSION_ID, BackgroundWork::RecoveryCopyCapturing)
         .unwrap();
     let outcomes = sync().await;
     assert_eq!(
@@ -5792,4 +5835,114 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
             assert!(peer.await.unwrap_err().is_cancelled());
         }
     }
+}
+
+/// The periodic pass must be woken by lease return, without retaining an actor job.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
+    const CHILD: &str = "MJ_TEST_CREDENTIAL_ACTOR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "credential-lease-wake")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&crate::controller::test_support::checkpoint_test_session(
+        SESSION_ID,
+    ))
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let received = scratch.path().join("received");
+    let mut target = codex_sync_target(
+        home.path(),
+        SESSION_ID,
+        "2026-09-25T20:00:00.000Z",
+        &received,
+    );
+    // This fixture needs no newer feeds; its actor still owns the real relay connection.
+    target.spec.args[2] = "16".into();
+    target.spec.env.insert(
+        "MJ_TEST_CREDENTIAL_ACTOR_STATE".into(),
+        serde_json::to_string(
+            &mj_core::relay::RelaySnapshot::new(SESSION_ID.into()).operational_state(),
+        )
+        .unwrap(),
+    );
+    let login = codex_login("2026-09-25T22:49:05.000Z");
+    std::fs::write(home.path().join("auth.json"), &login).unwrap();
+    credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![crate::session_manager::RelaySessionTarget {
+            session_id: SESSION_ID.into(),
+            spec: target.spec.clone(),
+            worker_recovery: None,
+            project_memory: None,
+        }])
+        .unwrap();
+    let handle = channels
+        .control
+        .wait_for_session(SESSION_ID, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let copy = gate
+        .try_start(
+            SESSION_ID,
+            crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+        )
+        .unwrap();
+    let lease = handle.lease_connection(&copy).await.unwrap();
+    let sync = CredentialSyncCoordinator::spawn_inner(
+        SessionRelays::Actors(channels.control.clone()),
+        Some(gate.clone()),
+        None,
+        credential_sync::unknown_slopcop_login,
+        mj_core::credentials::SYNC_INTERVAL,
+    );
+    let sync_handle = sync.handle();
+    sync_handle.set_targets(vec![target]);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !gate.credentials_deferred_for_test(SESSION_ID) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the actor must defer the initial pass while capture holds its connection");
+    assert!(!received.exists());
+    assert!(!copy.load(Ordering::Acquire));
+    let released = tokio::time::Instant::now();
+    lease.release();
+    copy.narrow(crate::recovery_gate::BackgroundWork::RecoveryCopyTransferring)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !received.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("lease return must wake the profile pass immediately");
+    assert!(released.elapsed() < mj_core::credentials::SYNC_INTERVAL);
+    assert_eq!(std::fs::read(&received).unwrap(), login);
+    assert!(
+        !copy.load(Ordering::Acquire),
+        "credential wake must not preempt the copy"
+    );
+    sync_handle.set_targets(Vec::new());
+    drop(sync_handle);
+    drop(sync);
+    drop(copy);
+    channels.shutdown.shutdown().await.unwrap();
 }

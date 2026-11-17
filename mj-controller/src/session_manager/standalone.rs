@@ -11,7 +11,7 @@ pub struct StandaloneSession {
         mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
     pub(super) subagent_completions:
         mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
-    subagent_queue: super::subagent_queue::SubagentQueueObserver,
+    subagent_queue: Option<super::subagent_queue::SubagentQueueObserver>,
     subagent_queue_error: Option<String>,
     history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
     operator_presence_revision: Option<u64>,
@@ -52,7 +52,7 @@ impl StandaloneSession {
             project_memory: target.project_memory.clone(),
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
-            subagent_queue: super::subagent_queue::SubagentQueueObserver::spawn(target),
+            subagent_queue: None,
             subagent_queue_error: None,
             history_jobs: tokio::task::JoinSet::new(),
             operator_presence_revision: None,
@@ -111,13 +111,47 @@ impl StandaloneSession {
     /// Whether this session's worker reports changes as they happen, so a
     /// quiet session need not be polled.
     pub(super) fn waits_for_changes(&self) -> bool {
-        self.subagent_queue.waits_for_changes()
+        self.subagent_queue
+            .as_ref()
+            .is_some_and(|queue| queue.waits_for_changes())
     }
 
     /// Resolves when the worker reported a relay change, the delegation queue
     /// changed, or its change waits failed and the session must be polled.
     pub(super) async fn relay_changed(&mut self) {
-        self.subagent_queue.relay_changed().await;
+        match self.subagent_queue.as_mut() {
+            Some(queue) => queue.relay_changed().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Only the actor starts replication, after control sync succeeds. Lifecycle
+    /// connections never acquire their own background dialer.
+    pub(super) async fn start_observing(&mut self, target: &RelaySessionTarget) {
+        // The worker serves control while preparing, but cannot serve its
+        // delegation queue yet. Its published preparation state owns readiness.
+        if self.operational.execution == mj_core::relay::RelayExecutionState::Closed
+            || matches!(
+                self.operational.harness_preparation,
+                Some(
+                    mj_core::relay::HarnessPreparation::Preparing { .. }
+                        | mj_core::relay::HarnessPreparation::Failed { .. }
+                )
+            )
+        {
+            self.stop_observing().await;
+            return;
+        }
+        self.subagent_queue
+            .get_or_insert_with(|| super::subagent_queue::SubagentQueueObserver::spawn(target));
+    }
+
+    /// Join cancellation before granting the lifecycle lease: its owner may
+    /// stop or replace the worker as soon as it receives the connection.
+    pub(super) async fn stop_observing(&mut self) {
+        if let Some(queue) = self.subagent_queue.take() {
+            queue.stop().await;
+        }
     }
 
     pub(super) fn follows_closely(&self) -> bool {
@@ -195,18 +229,21 @@ impl StandaloneSession {
                 Err(error) => return Err(error),
             }
         }
-        if let Some(digest) = self.client.known_state_digest() {
-            self.subagent_queue
-                .note_synced(self.operational.latest_ordinal, digest);
+        if let Some(queue) = &self.subagent_queue
+            && let Some(digest) = self.client.known_state_digest()
+        {
+            queue.note_synced(self.operational.latest_ordinal, digest);
         }
         let previous_requests = self.subagent_requests.clone();
         let previous_results = self.subagent_completions.clone();
         let previous_error = self.subagent_queue_error.clone();
-        (
-            self.subagent_requests,
-            self.subagent_completions,
-            self.subagent_queue_error,
-        ) = self.subagent_queue.observe(self.follows_closely());
+        if let Some(queue) = &self.subagent_queue {
+            (
+                self.subagent_requests,
+                self.subagent_completions,
+                self.subagent_queue_error,
+            ) = queue.observe(self.follows_closely());
+        }
         let changed = repaired
             || self.materialized.applied_event_ordinal != original_ordinal
             || self.materialized.applied_event_digest != original_digest

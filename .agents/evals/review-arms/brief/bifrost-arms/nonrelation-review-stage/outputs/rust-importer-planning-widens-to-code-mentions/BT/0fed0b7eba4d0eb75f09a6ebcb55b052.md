@@ -1,0 +1,5 @@
+- [P1] Include module aliases in importer candidates — crates/bifrost-analysis/src/analyzer/rust/usage_walks.rs:935-938
+  A file can import a module through an alias without mentioning the target module name. For example, `pub use crate::alias::*` can re-export items from `original` when `alias` names `original`. This file is absent from the candidate set if it mentions neither `original` nor the item name. The reverse walk then misses the re-export and its downstream usages.
+
+- [P2] Reset walk caches when changing the project — crates/bifrost-analysis/src/analyzer/rust/mod.rs:102-105
+  `clone_with_project` retains this shared cache while replacing the project, Cargo routes, and package index. If a walk ran before the clone and the new project has different Cargo metadata or file membership, the clone can reuse results computed for the old project. Walks in the clone can also populate results later used by the original analyzer. This can give incorrect ownership, import, and visibility results across project snapshots.

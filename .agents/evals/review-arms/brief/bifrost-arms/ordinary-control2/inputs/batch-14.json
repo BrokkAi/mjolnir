@@ -1,0 +1,24 @@
+[
+ {
+  "intro": "1c0f689be10f72194cf49e6363366e3188def335",
+  "base": "470968f9be8cc6540ac0fc75322b64635a182a3a",
+  "findings": [
+   {
+    "id": "f-e5464973",
+    "text": "- [P1] Keep the incomplete probe out of the normal test suite \u2014 crates/bifrost-tools/src/engine_tests/csharp_demand.rs:12-13\n\n  A normal tools test run executes this test, but the C# producer does not emit a canonical root-reference half for the unqualified names in its fixture. Consequently `probe_type` reaches `assert!(closed)` and the child fails, making the parent test fail on every run. The probe needs the producer obligation resolved or must be excluded from the ordinary suite until it can pass."
+   },
+   {
+    "id": "f-ef27134b",
+    "text": "- [P1] Avoid registering the failing C# demand probe as a normal test \u2014 crates/bifrost-tools/src/engine_tests/csharp_demand.rs:12-13. The current C# producer does not emit the root-reference half for the unqualified names in this fixture, so `probe_type` reaches its `assert!(closed)` and the child process fails. Because this test is unconditionally registered, ordinary tools test runs fail as well; the checkpoint needs the producer obligation resolved or the unfinished probe kept out of the normal suite."
+   },
+   {
+    "id": "f-aa3f5552",
+    "text": "- [P1] Keep the unfinished source-half probe from failing the test suite \u2014 crates/bifrost-tools/src/engine_tests/csharp_demand.rs:12-13. This test runs unconditionally in the normal tools test suite, but the current C# producer does not emit the root-reference half for the unqualified names in its fixture. Consequently `probe_type` reaches its `assert!(closed)` and the child process fails, so every ordinary run of this test fails until the producer/identity work is completed."
+   },
+   {
+    "id": "f-7888d607",
+    "text": "- [P1] Keep the incomplete probe out of the normal test suite \u2014 crates/bifrost-tools/src/engine_tests/csharp_demand.rs:12-13. The existing C# producer does not emit the canonical root-reference half for these unqualified names, so `probe_type` reaches its `assert!(closed)` and this unconditional test fails on the first fixture. Because the test is registered in the ordinary engine test module, it makes the tools test suite fail until the producer obligation is resolved."
+   }
+  ]
+ }
+]

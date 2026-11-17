@@ -390,6 +390,21 @@ pub trait SubagentBackend: Send + Sync {
         })
     }
 
+    /// One finished review's per-role output, or the latest when `review_id`
+    /// is `None`. The rows outlive the reviewer child sessions.
+    fn finished_review(
+        &self,
+        session_id: String,
+        review_id: Option<String>,
+    ) -> BoxFuture<'_, AnyResult<Option<crate::database::FinishedReview>>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::database::finished_review(&session_id, review_id.as_deref())
+            })
+            .await?
+        })
+    }
+
     fn usage_tree(
         &self,
         parent: String,

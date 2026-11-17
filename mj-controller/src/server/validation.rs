@@ -82,6 +82,11 @@ pub(super) async fn decode_prompt_images_off_task(
                 image.height = optimized.height;
             }
         }
+        // Every image is now the reference the worker will receive, so the
+        // whole prompt is measured as its command.
+        if let ControllerAction::Prompt { text, images, .. } = &action {
+            ensure_prompt_command_fits(text, images)?;
+        }
         Ok(action)
     })
     .await
@@ -292,17 +297,64 @@ pub(super) fn validate_prompt_text(text: &str, has_images: bool) -> Result<(), A
             "leading ! is reserved for shell commands",
         ));
     }
-    if text.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(
-            "prompt must contain 1-65536 characters",
-        ));
-    }
+    // The worker refuses a relay command over its budget, so a prompt is
+    // held to that budget here, measured as the command the worker receives
+    // and with the worker's own limit (#1556). Images are measured once they
+    // are attachment references, in `decode_prompt_images_off_task`.
+    mj_core::relay::ensure_byte_budget(
+        text_prompt_command_bytes(text),
+        mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
+        "prompt",
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if text.trim().is_empty() && !has_images {
         return Err(ApiError::bad_request(
             "prompt must contain text or an image",
         ));
     }
     Ok(())
+}
+
+/// Serialized bytes of the relay command a text prompt becomes, counted
+/// without copying the text, since callers hold the snapshot while they
+/// validate: the command around an empty text block, with the text as JSON
+/// writes it in place of that empty string.
+fn text_prompt_command_bytes(text: &str) -> usize {
+    use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
+    let empty = mj_core::relay::RelayCommand::Prompt {
+        prompt: vec![ContentBlock::Text(TextContent::new(""))],
+    };
+    serialized_len(&empty) - serialized_len("") + serialized_len(text)
+}
+
+fn serialized_len(value: &(impl serde::Serialize + ?Sized)) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).expect("prompt text serializes to JSON");
+    count.0
+}
+
+/// The relay command a phone prompt becomes, once its images are attachment
+/// references, held to the worker's budget.
+fn ensure_prompt_command_fits(text: &str, images: &[ViewerPromptImage]) -> Result<(), ApiError> {
+    let command = mj_core::relay::RelayCommand::Prompt {
+        prompt: crate::server_runtime::phone_prompt_blocks(text.to_owned(), images.to_vec()),
+    };
+    mj_core::relay::ensure_serialized_budget(
+        &command,
+        mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
+        "prompt",
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
 pub(super) fn validate_action(
@@ -830,7 +882,7 @@ fn validate_action_against(
         } => {
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
-            if command.trim().is_empty() || command.chars().count() > MAX_PROMPT_CHARS {
+            if command.trim().is_empty() || command.chars().count() > MAX_SHELL_COMMAND_CHARS {
                 return Err(ApiError::bad_request(
                     "shell command must contain 1-65536 characters",
                 ));
@@ -892,7 +944,11 @@ fn validate_action_against(
 }
 
 pub(super) fn validate_public_id(id: &str) -> Result<(), ApiError> {
-    validate_id("request", id).map_err(|_| ApiError::bad_request("invalid id"))
+    // The validator's own sentence quotes the id; this one states the rule
+    // without echoing caller input back to a browser.
+    validate_id("request", id).map_err(|_| {
+        ApiError::bad_request("invalid id; use 1-64 ASCII letters, digits, '.', '-' or '_'")
+    })
 }
 
 pub(super) fn validate_title(title: &str) -> Result<(), ApiError> {

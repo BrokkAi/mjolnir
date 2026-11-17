@@ -107,11 +107,12 @@ impl Controller {
     /// stop got that far.
     pub async fn park_subagent_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<ParkOutcome> {
-        self.stop_idle_subagent_worker(session_id, executor, manager, None)
+        self.stop_idle_subagent_worker(admission, session_id, executor, manager, None)
             .await
     }
 
@@ -127,12 +128,13 @@ impl Controller {
     /// worker was stopped and the record now says `Error`.
     pub async fn fail_subagent_start_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         cause: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<ParkOutcome> {
-        self.stop_idle_subagent_worker(session_id, executor, manager, Some(cause))
+        self.stop_idle_subagent_worker(admission, session_id, executor, manager, Some(cause))
             .await
     }
 
@@ -140,6 +142,7 @@ impl Controller {
     /// `Parked`, or `Error` with `failure` as its cause.
     async fn stop_idle_subagent_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -162,7 +165,8 @@ impl Controller {
                 .wait_for_session(session_id, PARK_ACTOR_TIMEOUT)
                 .await?;
             let Some(mut lease) =
-                IdleWorkspaceLease::acquire_for_upgrade(&handle, session.harness_kind).await?
+                IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, session.harness_kind)
+                    .await?
             else {
                 return Ok(ParkOutcome::Busy);
             };
@@ -1005,7 +1009,12 @@ mod tests {
         });
 
         let outcome = loaded_controller()
-            .park_subagent_worker(LATCH_RELAY_SESSION, &executor, &control)
+            .park_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                &executor,
+                &control,
+            )
             .await
             .unwrap();
 
@@ -1098,7 +1107,13 @@ mod tests {
         let cause = "this agent does not offer high as a effort";
 
         let outcome = loaded_controller()
-            .fail_subagent_start_worker(LATCH_RELAY_SESSION, cause, &executor, &control)
+            .fail_subagent_start_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                cause,
+                &executor,
+                &control,
+            )
             .await
             .unwrap();
 
@@ -1150,7 +1165,12 @@ mod tests {
         let executor = RacingStop::default();
 
         let outcome = loaded_controller()
-            .park_subagent_worker(LATCH_RELAY_SESSION, &executor, &channels.control)
+            .park_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                &executor,
+                &channels.control,
+            )
             .await
             .unwrap();
 

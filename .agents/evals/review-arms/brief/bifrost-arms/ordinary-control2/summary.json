@@ -1,0 +1,63 @@
+{
+  "recorded_at": "2026-11-17T11:38:03.865014+00:00",
+  "stage": "40 ordinary controls, single pooled Control2 verification and parent semantic handmarks",
+  "diffs": 40,
+  "sessions": {
+    "A": 120,
+    "BT": 120
+  },
+  "unique_reviewer_sessions": 240,
+  "raw_findings": 192,
+  "nonempty_diffs": 29,
+  "zero_finding_diffs": 11,
+  "zero_finding_reviewer_outputs": 105,
+  "raw_groups": {
+    "confirmed": 54,
+    "plausible": 0,
+    "rejected": 15
+  },
+  "confirmed_distinct_group_incidences": {
+    "A": 78,
+    "BT": 86
+  },
+  "confirmed_distinct_groups_per_session": {
+    "A": 0.65,
+    "BT": 0.7166666666666667
+  },
+  "retention_ratio": 1.1025641025641026,
+  "paired_difference_ci95": [
+    -0.05,
+    0.175
+  ],
+  "retention_bar": 0.9,
+  "retention_pass": true,
+  "broad_anchor_candidates": 8,
+  "outside_changed_line_candidates": 2,
+  "rejected_findings_semantically_relying": 7,
+  "relying_limit": 8,
+  "reliance_pass": true,
+  "control2_pass": true,
+  "handmark_method": "Parent read all8fullfindings/6fullbriefs; original builds-on/restates rubric, not mere anchor overlap or actual causal dependence. Per findingID, no deduplication.",
+  "verification_method": "ONE15sessionSol/high pooled group-and-verify pass, complete192finding coverage; no replication/secondpass/catchjudging/handmark model.",
+  "raw_group_labels_changed": false,
+  "all15verifiers_suspended": true,
+  "estimated_verifier_cost_usd_api_equivalent": 3.8380024,
+  "cost_scope": "Verification only;15completepricedreports. Overall model-role/carrier accounting is separate and incomplete.",
+  "primary_reading_unchanged": true,
+  "primary_generalization_pass": false,
+  "limitations": [
+    "Ordinary controls have unknown truth; zero findings are reviewer output, not confirmed-clean cases.",
+    "Confirmed groups are source-reading verifier judgments under SPEC, not runtime reproduction.",
+    "One verifier pass; no independent ordinary-verdict replication.",
+    "Reviewer tool transcripts/latency unavailable after normal destruction.",
+    "Review images changed during80jobs and are not perfectly balanced byarm; no post-hoc cell exclusions.",
+    "Verifier audit has14read/search requests without full argument capture; no observed violation is qualified, not a fully clean runtime claim."
+  ],
+  "verifier_tool_audit": {
+    "represented_requests": 270,
+    "exact_commands": 256,
+    "read_search_payloads_incomplete": 14,
+    "observed_violations": 0,
+    "fully_clean_runtime_claim": false
+  }
+}

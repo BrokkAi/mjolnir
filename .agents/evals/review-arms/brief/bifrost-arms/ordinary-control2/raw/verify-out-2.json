@@ -1,0 +1,73 @@
+{
+  "commits": [
+    {
+      "intro": "1cfbe59c5b4458d3536821893d4568507cbbbbf6",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-902a61e1",
+            "f-1352eb1f"
+          ],
+          "summary": "Solver budget exhaustion or cancellation falsely changes complete semantic input into partial semantic evidence in the published reason.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-flow/src/value_flow/plan.rs:3575-3584 makes execution_result_modeled false whenever solver termination is not FixedPoint; result.rs:122,154-155 exposes that as ValueFlowSummaryResult::is_complete(). Semantic status can independently remain Complete: plan.rs:3749-3779 folds semantic boundaries without folding solver termination. crates/bifrost-rql/src/structural/search/value_flow.rs:674-707 passes the combined completion flag into public_semantic_status, changing Complete to Partial. Lines 752-800 then append 'semantic status partial: value-flow analysis retained incomplete semantic evidence' to the solver failure. A budget-limited solve still reaches endpoint projection (lines 197-232), including inconclusive sink rows (325-349), so the incorrect reason is observable. The base published semantic_status independently; this loss and false attribution are introduced by the new mapping.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-3c8ce226",
+            "f-d9cf89d4",
+            "f-90426ec3",
+            "f-1259d7e6"
+          ],
+          "summary": "Unavailable absent-member witnesses retain unproven/partial evidence rather than null dimensions.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "The described initializer and error behavior exist, but predate this diff. At intro, crates/bifrost-rql/src/structural/search/witness_projection.rs:75-95 initializes Unproven/Partial and adds error reasons without changing the axes; witness_status remains Unavailable (86) and unavailable_reason is populated (95), so unavailable witnesses are distinguishable. At base 0f997b56a2d1a5afca95e66c20eba971c68e96c0, the same file:75-96 already does exactly this under quality, with separate axis reasons and the same unavailable discriminator. The diff renames the object and combines reasons; it does not introduce this semantic behavior. The commit message's stated null-dimension goal is incompletely implemented (intro results/semantic.rs:833-837 still requires both enums), but the reported runtime problem is pre-existing under the specification's exclusion.",
+          "confidence": "high"
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-abb5db43"
+          ],
+          "summary": "Untruncated partial or unproven flow and taint witnesses omit explanatory reasons.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "This omission predates the change. At intro, crates/bifrost-rql/src/structural/search/value_flow.rs:1092-1105 passes None to the evidence constructor; witness_projection.rs:789-809 supplies a reason only for truncation. At base 0f997b56a2d1a5afca95e66c20eba971c68e96c0, value_flow.rs:1018-1032 already sets both proof_reason and completeness_reason to None, and witness_projection.rs:791-812 already sets proof_reason to None and completeness_reason only on truncation. The new constructor preserves the same axes and missing explanations. No formerly available reason is discarded or new failure introduced by these edits.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "57069dc4f77fbc6d06ad07c2aa8831807751336e",
+      "groups": [
+        {
+          "group": "g4",
+          "findings": [
+            "f-2ba7ce5c"
+          ],
+          "summary": "The new stage property-gap unique index omits kind and source-site distinctions.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_stage/rows.rs:138-142 defines the restrictive index and lines 329-336 generate its SQL. The ordinary lowering does preserve these distinctions (resolution_prepare/typed_rows.rs:766-787), and the ordinary table permits them (resolution_draft_schema.sql:388-396). However, no code at intro inserts into selected_resolution_stage_definition_property_gaps or projects ordinary typed rows into stage tables. resolution_selection.rs:135 merely installs the schema; resolution_stage.rs:117-187 defines an admission callback API with no call sites. The introduction commit explicitly identifies producer writes and projection as pending. Thus the alleged second-row projection failure is not reachable at this commit; it requires later implementation, rather than unsettled runtime or SQLite semantics.",
+          "confidence": "high"
+        },
+        {
+          "group": "g5",
+          "findings": [
+            "f-71200974"
+          ],
+          "summary": "The new stage deferred-owner unique index permits only one owner fact per definition.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_stage/rows.rs:116-121 declares definition-only uniqueness, materialized by lines 329-336. Ordinary lowering assigns separate sequence numbers to owner facts (resolution_prepare/typed_rows.rs:673-722), and ordinary storage allows them (resolution_draft_schema.sql:353-361). But there are no inserts into selected_resolution_stage_deferred_member_owners at intro, nor callers of resolution_stage.rs:117-187's with_capsule_admission callback. The schema is installed via resolution_selection.rs:135 without a typed projection implementation. The proposed constraint conflict is consequently a prospective schema concern, not a reachable failure introduced by this source-only checkpoint.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

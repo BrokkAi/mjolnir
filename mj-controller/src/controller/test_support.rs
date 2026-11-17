@@ -725,3 +725,21 @@ impl IsolatedTest {
         output
     }
 }
+
+/// Explicit owner capability for controller fixtures that run without a daemon.
+pub(crate) fn session_admission(session_id: &str) -> crate::recovery_gate::SessionAdmission {
+    let gate = std::sync::Arc::new(crate::recovery_gate::RecoveryGate::default());
+    crate::recovery_gate::SessionAdmission::Foreground(
+        futures::executor::block_on(gate.enter_foreground(
+            session_id,
+            "test lifecycle",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &std::sync::atomic::AtomicBool::new(false),
+            &crate::targets::ProcessExecutor,
+        ))
+        .unwrap(),
+    )
+}
+pub(crate) fn relay_admission(session_id: &str) -> crate::recovery_gate::RelayLeaseAdmission {
+    futures::executor::block_on(session_admission(session_id).lease(session_id)).unwrap()
+}

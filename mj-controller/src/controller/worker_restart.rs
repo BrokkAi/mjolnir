@@ -238,6 +238,7 @@ impl Controller {
     /// working between an observation and this call.
     pub async fn upgrade_session_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -311,7 +312,7 @@ impl Controller {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
                 let Some(mut lease) =
-                    super::IdleWorkspaceLease::acquire_for_upgrade(&handle, harness).await?
+                    super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, harness).await?
                 else {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };

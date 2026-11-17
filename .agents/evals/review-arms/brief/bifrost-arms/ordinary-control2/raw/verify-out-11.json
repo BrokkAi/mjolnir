@@ -1,0 +1,62 @@
+{
+  "commits": [
+    {
+      "intro": "22207e44f0c4fd28f29b49f236f9c5ecedc08981",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-7746b61e"
+          ],
+          "summary": "The constructor-kind guard prevents JavaScript function constructors from receiving their allocated this object.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, js_ts/semantic/syntax.rs:147-153 inventories function Item as ProcedureKind::Function (full prefix crates/bifrost-analysis/src/analyzer/). js_ts/semantic/inventory.rs:177-198 and js_ts/semantic/mod.rs:377-383 make a function reading this own a receiver; js_ts/semantic/values.rs:1102-1108 publishes it. js_ts/semantic/control.rs:2468-2469 gives new Item(x) no receiver operand, and :2555-2557 allocates its result. semantic/oracle/call.rs:487-488 now rejects that allocation solely because the target is Function. semantic/workspace_oracle/value_flow.rs:5067-5083 consequently cannot bind the allocated result; its implicit receiver fallback (:1374-1404) cannot supply this from an ordinary caller function. The binding stays open at :5122-5123 with no Receiver transport, losing receiver-based member effects. The base helper in value_flow.rs:1021-1030 matched the result allocation without the new kind restriction, and therefore supplied this actual. No matching later fix was identified.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "6f9a2656f3a72bb23b3549c3dff738d78b19110b",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-00d64097",
+            "f-898d68b6",
+            "f-6d577554",
+            "f-62870af8"
+          ],
+          "summary": "Reverse-index construction retains all importers' resolved declaration sets simultaneously outside the memo-cache budget.",
+          "verdict": "confirmed",
+          "severity": "high",
+          "evidence": "At intro, src/analyzer/capabilities.rs:71-74 collects every resolved BTreeSet<CodeUnit> before the reduction at :76-86. Go resolution at src/analyzer/go_analyzer.rs:199-215 includes all non-module declarations of matching package files; JavaScript wildcard resolution at src/analyzer/javascript_analyzer.rs:175-181 does likewise. For N files importing one package/module with D declarations, the vector retains N*D CodeUnits even though the reverse map needs only file edges. CodeUnit owns cloned String fields (src/analyzer/model.rs:162-169). Cache hits also return cloned sets (go_analyzer.rs:185-187; javascript_analyzer.rs:165-167), so cache eviction cannot release the vector's copies. The old helper (capabilities.rs:49-60) consumed one candidate set at a time. This introduces an unbounded temporary working set capable of exhausting memory on large repositories. Later commit 2111bf7a3d8407be937879be8250e4034d504014 removes the all-CodeUnit-sets vector by projecting to file edges inside the parallel closure; it still retains a temporary edge vector and is not proof of fully bounded memory.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-7cc662ec",
+            "f-f7e82f51"
+          ],
+          "summary": "The claimed newly quadratic Go cold lookup already occurred through the old filter's full-resolution fallback.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, src/analyzer/go_analyzer.rs:270-287 shows could_import_file falling back to imported_code_units_of(source_file) whenever the requested target does not match an import path. This fallback is unchanged from base 5cfbe06f0104331f1899b2a8a666865eb432d62f, go_analyzer.rs:259-276. The old referencing_files_via_imports helper (src/analyzer/capabilities.rs:49-59) called that predicate for every candidate, then resolved matching candidates too. Thus nonmatching importers were not cheaply filtered out: a cold lookup already reached the all_files scan (intro go_analyzer.rs:190-207) for essentially every candidate. The new eager index does not introduce the claimed asymptotic regression.",
+          "confidence": "high"
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-53c48270"
+          ],
+          "summary": "JavaScript's higher first-lookup work is the explicit tradeoff of the reusable whole-project reverse index.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, src/analyzer/javascript_analyzer.rs:226-234 intentionally builds a OnceLock-backed reverse index from every analyzed file, so it does perform more forward resolution on a sparse first query than the old capabilities.rs:53-59 filter using javascript_analyzer.rs:266-276. However, subsequent distinct target queries reuse that index instead of repeating a repository scan. The intro commit message explicitly identifies replacing on-demand per-target scans with one cached project-wide index as the change's purpose. The finding supplies no measured timeout, violated latency contract, or independent correctness failure beyond this intentional cold-versus-repeated-query tradeoff; the separate excessive temporary declaration retention is covered by g1. Later 04f4b4c7aee69455df5c32563ee1a03b30021a9c deliberately extends the same shared lazy indexing design to Java and Python.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

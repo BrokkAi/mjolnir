@@ -17,7 +17,6 @@ pub const DEFAULT_BEDROCK_SESSION_POLICY: &str = r#"{"Version":"2012-10-17","Sta
 /// session receives short-lived credentials limited to that role instead of a
 /// copy of the controller host's own credentials.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AwsRoleConfig {
     /// The role to assume, `arn:aws:iam::<account>:role/<name>`. The host's
     /// AWS login must be allowed to assume it.

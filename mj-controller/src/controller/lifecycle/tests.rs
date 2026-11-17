@@ -1104,7 +1104,13 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
     };
     persist_controller_fixture(&controller);
     controller
-        .suspend_subagent_controlled(session_id, &unreachable, None, None)
+        .suspend_subagent_controlled(
+            &crate::controller::test_support::session_admission(session_id),
+            session_id,
+            &unreachable,
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -1134,7 +1140,13 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
     };
     persist_controller_fixture(&controller);
     controller
-        .suspend_subagent_controlled(session_id, &answered, None, None)
+        .suspend_subagent_controlled(
+            &crate::controller::test_support::session_admission(session_id),
+            session_id,
+            &answered,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1224,7 +1236,13 @@ async fn close_child_with_partial_root(
     };
     persist_controller_fixture(&controller);
     let result = controller
-        .suspend_subagent_controlled(session_id, &executor, None, None)
+        .suspend_subagent_controlled(
+            &crate::controller::test_support::session_admission(session_id),
+            session_id,
+            &executor,
+            None,
+            None,
+        )
         .await;
     let purposes = executor.purposes.lock().unwrap().clone();
     Some((
@@ -3077,6 +3095,7 @@ async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation()
     let _subscriber = tracing::subscriber::set_default(log.clone());
     let outcome = controller
         .suspend_subagent_controlled(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             executor.as_ref(),
             Some(&channels.control),

@@ -1,0 +1,28 @@
+{
+  "id": "javascript-object-method-indexed-as-field",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "5ed703879717faed99c5b8cf3228d2e1611b67d6aec00bc92cc2f935ac04c5e2",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output says the visitor registers properties as fields, but never identifies callable object members as wrongly classified or connects that classification to missing function results. This is a description of indexing, without the required defect or related faulty symptom.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes object properties being registered as fields, but never distinguishes callable members or identifies their incorrect symbol kind or omission from function results. It therefore describes implementation without identifying the defect.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

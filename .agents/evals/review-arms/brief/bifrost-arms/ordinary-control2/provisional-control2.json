@@ -1,0 +1,35 @@
+{
+  "diffs": 40,
+  "sessions": {
+    "A": 120,
+    "BT": 120
+  },
+  "confirmed_per_session": {
+    "A": 0.65,
+    "BT": 0.717
+  },
+  "ratio_BT_to_A": 1.103,
+  "difference_ci95": [
+    -0.05,
+    0.175
+  ],
+  "rejected_findings_citing_brief": 2,
+  "rejected_findings_citing_any_brief_anchor": 8,
+  "rejected_findings_relying_on_brief_hand_marked": null,
+  "limit_citing": 8.0,
+  "confirmed_criterion_passes": true,
+  "citing_criterion_passes": true,
+  "control_2_passes": true,
+  "citing": [
+    {
+      "finding": "f-5c1a5886",
+      "bug": "diff-2eaec0a7ad",
+      "text": "- [P2] Preserve current line endings for structural facts \u2014 crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:3383-3385. When indexed source uses LF and the working file uses CRLF, this returns the indexed text where the previous code returned the compatible working text. Structural fact "
+    },
+    {
+      "finding": "f-9d9bd027",
+      "bug": "diff-2eaec0a7ad",
+      "text": "- [P2] Keep structural facts aligned with CRLF source \u2014 crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:3383-3385. When Git stores LF text but the working file uses CRLF, this returns the indexed LF text. Previously, `structural_file_state` selected the current CRLF text. Structural fac"
+    }
+  ]
+}

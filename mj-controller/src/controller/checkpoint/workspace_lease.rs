@@ -17,6 +17,7 @@ pub struct IdleWorkspaceLease {
 impl IdleWorkspaceLease {
     /// Reserve an idle worker without taking a busy turn's control channel.
     pub async fn acquire_for_upgrade(
+        admission: &crate::recovery_gate::SessionAdmission,
         handle: &ManagedSessionHandle,
         harness: HarnessKind,
     ) -> Result<Option<Self>> {
@@ -28,7 +29,7 @@ impl IdleWorkspaceLease {
             return Ok(None);
         };
         tokio::time::timeout(IDLE_WORKER_RESERVATION_TIMEOUT, async {
-            let Some(mut lease) = handle.lease_idle_connection(harness).await? else {
+            let Some(mut lease) = handle.lease_idle_connection(harness, admission).await? else {
                 return Ok(None);
             };
             let Some((command_id, ready_cursor)) =
@@ -175,7 +176,11 @@ impl IdleWorkspaceLease {
         self.lease.release();
     }
 
-    pub async fn acquire(handle: &ManagedSessionHandle, harness: HarnessKind) -> Result<Self> {
+    pub async fn acquire(
+        admission: &crate::recovery_gate::SessionAdmission,
+        handle: &ManagedSessionHandle,
+        harness: HarnessKind,
+    ) -> Result<Self> {
         let worker_owner = crate::worker_lifecycle::WorkerPermit::acquire(
             handle.session_id(),
             "workspace write",
@@ -183,7 +188,7 @@ impl IdleWorkspaceLease {
         )
         .await?;
         tokio::time::timeout(Duration::from_secs(30), async {
-            let mut lease = handle.lease_connection().await?;
+            let mut lease = handle.lease_connection(admission).await?;
             let snapshot = lease.connection_mut().sync().await?;
             ensure!(
                 snapshot.operational.safe_to_replace(harness),

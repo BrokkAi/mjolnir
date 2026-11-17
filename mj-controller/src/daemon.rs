@@ -56,7 +56,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
     dashboard_worker_targets, interrupted_destroy_session_ids, interrupted_suspend_session_ids,
-    reserve_recovery_or_cancel, spawn_image_refresher, unowned_interrupted_lifecycles,
+    spawn_image_refresher, unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -586,6 +586,7 @@ struct StartupQueue {
 }
 
 struct ActiveLifecycle {
+    origin: lifecycle::LifecycleOrigin,
     move_operation_id: Option<String>,
     /// Durable intent bound by Restart admission; cleanup names this exact owner.
     restart_intent: Option<String>,

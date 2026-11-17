@@ -385,12 +385,12 @@ fn no_follow_directory(path: &Path) -> String {
     )
 }
 
-#[cfg(test)]
+// The only case plants a symbolic link, which needs Unix.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     // Hard-won: #1419: a directory swapped for a link between the check and the write redirected the write.
-    #[cfg(unix)]
     #[test]
     fn a_directory_swapped_for_a_link_after_opening_does_not_redirect_changes() {
         let temporary = tempfile::tempdir().unwrap();

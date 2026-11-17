@@ -31,6 +31,17 @@ impl Drop for SubagentQueueObserver {
 }
 
 impl SubagentQueueObserver {
+    pub async fn stop(mut self) {
+        self.task.abort();
+        // Borrow the handle because Drop also owns cancellation.
+        match (&mut self.task).await {
+            Err(error) if !error.is_cancelled() => {
+                tracing::error!(%error, "delegation observer failed during retirement")
+            }
+            _ => {}
+        }
+    }
+
     pub fn spawn(target: &RelaySessionTarget) -> Self {
         let (tx, view) = watch::channel(Observation {
             requests: Default::default(),
@@ -136,10 +147,18 @@ impl SubagentQueueObserver {
                         // The actor polls again until a wait works, so it
                         // must not miss whatever the lost wait would have seen.
                         relay_changed.send_modify(|count| *count = count.wrapping_add(1));
+                        // Reachability belongs to the control actor. A lost wait
+                        // is also normal when its lifecycle owner stops a worker.
+                        let transport_dead =
+                            crate::worker_client::RelayTransportDead::marks(&error);
                         let error = format!("delegation queue synchronization failed: {error:#}");
                         tx.send_if_modified(|view| {
                             if view.error.as_deref() == Some(&error) { return false }
-                            tracing::warn!(session_id = %target.session_id, %error, "delegation is unavailable; worker controls remain attached");
+                            if !transport_dead && view.error.as_deref().is_none_or(|previous| previous == "delegation queue is connecting") {
+                                tracing::warn!(session_id = %target.session_id, %error, "delegation is unavailable; worker controls remain attached");
+                            } else {
+                                tracing::debug!(session_id = %target.session_id, %error, "delegation synchronization retry");
+                            }
                             view.error = Some(error);
                             true
                         });

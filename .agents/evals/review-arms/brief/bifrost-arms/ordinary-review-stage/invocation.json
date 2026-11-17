@@ -1,0 +1,419 @@
+{
+  "started_at": "2026-11-17T08:40:02.624480+00:00",
+  "HEAD": "60b1ac91d3453676709ad6e90e6616d3135d41a2",
+  "runtime_commit": "be74a5cb9",
+  "runtime_hashes": {
+    "driver.py": "0aca7b9b18f79f15f8c606f5513000c9ab556db9cd9720e3e623c75c2343ed36",
+    "brief_driver.py": "efda957e92fad2cec0e34cafe6a8fdb11f8fd8b625522c05c1e0fd4b2a2a71cb",
+    "verify_driver.py": "e0a8d6f9a88b617125e2469afa246c4e71977a11f08c93f11975455faeca6abb",
+    "brief_oracle.py": "730716e02d4fe502fe33d9b4babe2d6acbe24c33cdfb46361f980b881d2f94da",
+    "brief_score.py": "4977cc022b7b2fb09161894a3c699860dc82079c0a053998611960dae5fa208a",
+    "brief_writer_terra.py": "6d61b76958a56d4e4a5834cac82a4abeb8ec499bc36cd58764de3c3d6ddcc5e7",
+    "build_verify.py": "ceb28ca62e815eece31eb6499c1e05b35639c95485f51d8a3a0d8968ea183058",
+    "score.py": "3659aaa994c631a3656f06b5308da3a09a1a77f6aab0913f2e1ee5bea5c1b896",
+    "carrier_test.py": "14e7e64f16665b5b461508b800050cf70b7133ec5c82fa221e8065efd540f66a",
+    "mjx": "03168f1bd86b5427964e5241d18255a46618c5f0446a61d0427a7beed435e714",
+    "brief/WRITER.md": "ce7ff171838c0c1071a01877844b56ea423d48cd7dd93be6b2fec9a244d333e5",
+    "judge/SPEC.md": "424d065e62c57a8d103262017fb2a4b9f401fdb3d02f4b27f6b1f334b2770a4c",
+    "inventory.py": "0bb074b955e56d8165237e29c87c2f32137b3993c7033107f7bc0f941f2114aa",
+    "test_runtime_source.py": "b5495b12f32926fe80058e2fc406efc059584cf98ac59d60cbcc3183c9ce3f09",
+    "test_scoring_interfaces.py": "8c4b551b53379b733bbe6fbe42c4d485d565f83029a3f1ed6a7bf8bfd70534be"
+  },
+  "argv": [
+    "python3",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/driver.py",
+    "--jobs",
+    "/mnt/optane/review-arms-bifrost-20261116/stageB-ordinary-jobs.json",
+    "--concurrency",
+    "3",
+    "--stop-on-failure"
+  ],
+  "environment": {
+    "REVIEW_ARMS_DIR": "/mnt/optane/review-arms-bifrost-20261116",
+    "REVIEW_ARMS_INSTANCE": "default",
+    "REVIEW_ARMS_REPO": "/mnt/optane/tmp/d2fa-bifrost/bifrost-dev",
+    "REVIEW_ARMS_CORPUS": "/mnt/optane/review-arms-bifrost-20261116/corpus/corpus.jsonl",
+    "REVIEW_ARMS_DIFFS": "/mnt/optane/review-arms-bifrost-20261116/corpus/diffs.jsonl",
+    "REVIEW_ARMS_BUNDLE": "bifrost-dev",
+    "REVIEW_ARMS_REPO_DIR": "bifrost-dev",
+    "REVIEW_ARMS_SETS": "/mnt/optane/review-arms-bifrost-20261116/arms/sets.json",
+    "REVIEW_ARMS_QUOTA_FLOOR": "codex4=25"
+  },
+  "input_hashes": {
+    "arms/ordinary-ids.json": "a30e5dd0474059ab4ef9cb9243f8f047c38e16d90360c8cffa418e20cc76bbc5",
+    "stageB-ordinary-jobs.json": "96e569306bacd89a8c10dee87c1a79aa60ffd650abf560d8efb9bac94427593a",
+    "corpus/corpus.jsonl": "f6fda0200ac7fecbb7f03bc3a27fb193fd08620c82476118f33533972c8ea749",
+    "corpus/diffs.jsonl": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
+    "arms/sets.json": "3ac4178ce4cdff9465a77f1fb52f3d8c055386eb39828888a21479a031d77738",
+    "arms/environment.json": "0645458150e4b6bd0a423f1904355e2bb90784d479896551d51402af3b5c29b5",
+    "arms/ordinary-writer-stage/FREEZE.json": "1bfe5457d770f22bd1450c8c909ec0aa98e9c0d2f23e72c136a67d1a14e9b2a2"
+  },
+  "jobs": [
+    {
+      "bug": "diff-b607037341",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-d3b5598051",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-8a51f05e0a",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-4d3aaeb3d1",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-1cfbe59c5b",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-9f61b39391",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-5febdb1c44",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-695a400f18",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-1c0f689be1",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-6449f901ba",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-5053bc5bea",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-62d65b4fab",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-c2e0ac6264",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-a3b59a9183",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-9dad3f2c71",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-c9cd4a27f9",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-5febdb1c44",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-43553e0d35",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-9dad3f2c71",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-57069dc4f7",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-4a12c7dafa",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-0041fe831a",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-bb4addf48b",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-a3b59a9183",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-43823779fb",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-c9cd4a27f9",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-4a12c7dafa",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-bb4addf48b",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-22207e44f0",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-22207e44f0",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-df5fb945bf",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-0041fe831a",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-0dc1b2afef",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-b607037341",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-27a65d6991",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-378bd893ed",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-9f61b39391",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-5e17ecf53c",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-2eaec0a7ad",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-63713569c1",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-5053bc5bea",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-6f9a2656f3",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-fdcd0552e9",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-df5fb945bf",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-1cfbe59c5b",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-43553e0d35",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-5c3a37983d",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-b4dc5c62d0",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-63713569c1",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-1c0f689be1",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-bb39a5fd49",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-62d65b4fab",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-5c3a37983d",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-b4dc5c62d0",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-95655a5e97",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-4d3aaeb3d1",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-95655a5e97",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-fdcd0552e9",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-bb39a5fd49",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-6449f901ba",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-d3b5598051",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-57069dc4f7",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-7e35e90ce9",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-8df49fdb43",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-c2e0ac6264",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-8df49fdb43",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-7e35e90ce9",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-b58235b247",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-27a65d6991",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-378bd893ed",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-b58235b247",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-a75a035026",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-6f9a2656f3",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-5e17ecf53c",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-0dc1b2afef",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-2eaec0a7ad",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-43823779fb",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-695a400f18",
+      "arm": "BT"
+    },
+    {
+      "bug": "diff-a75a035026",
+      "arm": "A"
+    },
+    {
+      "bug": "diff-8a51f05e0a",
+      "arm": "BT"
+    }
+  ],
+  "prior_artifact_hash_count": 3631,
+  "published_brief_hashes": {
+    "diff-6f9a2656f3": "30e98aa7931fcda98810b6f7fd37f0cf1a688bf4ad59f31c43791e3f57d2bb54",
+    "diff-5febdb1c44": "6ae7f6241f6cd5e0c1321fc975e4f10d5e294adda3dcd6fc96449df3418623a5",
+    "diff-95655a5e97": "dd23325a4da326d4d131261d6e4ee966baf259c953f03178ea56a1bda8c5dd17",
+    "diff-6449f901ba": "ded986fc1d4e8032217f3324e20c0806155740d42da17306a9a8900c657048e8",
+    "diff-5e17ecf53c": "6974c966332ecec4b6098ab8b67e7868f4dec723b0e9127680c2e143fcc4b392",
+    "diff-2eaec0a7ad": "69292de07c5f4ebb53363f1329cf8e5662e1873f667693f122767fa9fce2fd26",
+    "diff-63713569c1": "cc320b15b9fcf7c264d11d08b2075911d0851eda192ee443f07c7a2eb1f1482c",
+    "diff-bb39a5fd49": "85fa4ca9f423c855d1f651104be6ddbce3e9ea4ad545b53d9e82302b871ed590",
+    "diff-9f61b39391": "315aa85fa85c996e01aa8115945455a119753b05688e204273bd092ff3fdbb71",
+    "diff-c9cd4a27f9": "f27aa220abb8c45bbdb408538d9c70716a018b949ebc024b6d1d867aed961502",
+    "diff-b58235b247": "4c2862f892698020f3f02d23d2591f769a436db46ac0c8e5ac649568a6810631",
+    "diff-a75a035026": "2fde7ac998f445a5ad1e9d667045a2c9ab0143cedddccf45efca530eb2e93115",
+    "diff-b607037341": "42bb51ba95742f3348c425791fb6b522f1d8385b50f2ed1920c5164d412ac18d",
+    "diff-fdcd0552e9": "8fc0b46eb1bed0fe4d6742b86d124e1defba952f4b469931b352bcb1cf0d02b9",
+    "diff-0041fe831a": "70047c8969c9185c0d370cfc37123932503223f0a43e2f347c3f1d3447658147",
+    "diff-4d3aaeb3d1": "e9c7fb0f65a0fe39f738ed331cccffcd7d54b7f62cdd99e246e99cc373641531",
+    "diff-1cfbe59c5b": "b3a1ee6ba5388535671cd76fb72c3619872af3bdfeb23aa7737446aa0a85f176",
+    "diff-695a400f18": "8a3ccd1ded86180fe45a140866107af191689debb95b595fe43bd5bd809dff02",
+    "diff-22207e44f0": "85dc10a8d724284df26c79f32b535e7389264f8bb8826949f9341e1aea71ae6a",
+    "diff-57069dc4f7": "f23cf4d7335ccfd6d843ffb8d874a8f93b9aae7672b38fb644665fe0fdd199d0",
+    "diff-df5fb945bf": "0d64ede138e9acf55df080c64632fe1148ec657a4c90d14019c175edc1304cfa",
+    "diff-0dc1b2afef": "1c2bfbb10583c20a56e09d2411e542edbf4f334fbe6fca02be8816fccf75e036",
+    "diff-43823779fb": "783837e3156bbb25d244ff09b98918811c90f1ef4ec78e81bdfb0fbdec2d1f2e",
+    "diff-378bd893ed": "6078722b05fdc10e27129509789e7a305631ff2614600820998a55c7df3c80da",
+    "diff-5053bc5bea": "9749fcf492732c71d61103191dd0be0ac15aef636b02f0e3eeefad4d6ea96eb1",
+    "diff-c2e0ac6264": "49cea5d6997a16e56b73a96a82eaa0c4e9afef8e940726dac350f2d92aa6f5ac",
+    "diff-9dad3f2c71": "6f8c7ec0bf7b2ce54046d376c79caca57049a0764765747baa0eabe9386f83db",
+    "diff-62d65b4fab": "0b088c3b98f5492045e5ade30b668e9c01235218503eb299de400eaa8fecf3b4",
+    "diff-d3b5598051": "d4343a6391a4a6ee54b625e88699634b59cac9c399585ca2eaa045907c5f22e9",
+    "diff-4a12c7dafa": "aa579b23160d2b73ef50aa25e62be9900fb18901b0051e5504cd81dd07fd602f",
+    "diff-a3b59a9183": "0674b2254f4c4c4ad7c8bf486491394b0331a504e60f4a72532f8a00559e5154",
+    "diff-43553e0d35": "f6e3aa999978ed74269e88a5ada7d477292e8ca7c7942a6ba2cfd12964f346ab",
+    "diff-bb4addf48b": "161a8881362ef394aba97735f983fb5b83b56ff0774b2f0ee801526aeaad06ba",
+    "diff-8a51f05e0a": "cce859cfe22fb8be0da96656c478373d73125eea0c734468d5c0accbf5612821",
+    "diff-8df49fdb43": "a84512ed09a480fd7eead50de82d461e7e9ae2628c06abd021d3be137088b3d2",
+    "diff-b4dc5c62d0": "8d89393bf544b61fd1ce2ab07fe2571a7d34acee70e8bdfc2ae95fdc2574e5a3",
+    "diff-5c3a37983d": "06a724cd5b27cd5f1a84f983df752c4da28fade5813a5863b1c161e81ecc1f9c",
+    "diff-1c0f689be1": "cfce07defddb32bb8f9b83f4f0dfa5c905191f767aff107c570ca1da4f97e0c7",
+    "diff-27a65d6991": "4497f2da9d5e48e1f7a00b10c1f6627a77b50ca77f24bae36ee5c91713554dbc",
+    "diff-7e35e90ce9": "200f5c373ca89f3bd4b66573c1d07f24b431fbf05732f9620c268abbfb216bc8"
+  },
+  "prelaunch_quota_age_seconds": 430,
+  "admission": "normalcachedvalid/noerror>=25,not extra freshness gate",
+  "scope": "80ordinaryA/BTreviews only; no Control2/semantic leak/catchjudge stages"
+}
