@@ -1153,6 +1153,14 @@ impl RejectedLogins {
         }
     }
 
+    /// An authentication event can arrive as both a relay signal and a
+    /// completed turn. Both have the same ordinal.
+    pub fn was_accepted(&self, session_id: &str, ordinal: u64) -> bool {
+        self.failures
+            .get(session_id)
+            .is_some_and(|session| session.contains_key(&ordinal))
+    }
+
     /// A preceding failure cannot be used to report a later turn. Warnings
     /// after a terminal failure have their own ordinals and leave it intact.
     pub fn supersede(&mut self, session_id: &str, ordinal: u64) {
