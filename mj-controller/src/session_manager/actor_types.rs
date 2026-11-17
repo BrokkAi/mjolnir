@@ -59,11 +59,17 @@ pub(super) enum ActorCommand {
 /// uses this instead of opening a connection of its own to every worker.
 pub trait RelayConnectionJob: Send + Sync + 'static {
     fn deferred_by_lease(&self, _lease: &crate::recovery_gate::RelayLeaseAdmission) {}
+    fn deferred_by_reconnect(&self) -> bool {
+        false
+    }
     fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()>;
 
     /// The actor did not run the job; `error` says why.
     fn refuse(self: Box<Self>, error: anyhow::Error);
 }
+
+pub(crate) const RELAY_JOB_LEASED: &str = "a lifecycle operation holds the relay connection";
+pub(crate) const RELAY_JOB_RECONNECTING: &str = "the relay connection is reconnecting";
 
 /// The actor had no connection to lend: a lifecycle operation holds it, or
 /// the actor is reconnecting. The job belongs to the next cycle.

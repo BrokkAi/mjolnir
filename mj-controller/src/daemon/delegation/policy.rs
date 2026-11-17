@@ -187,9 +187,7 @@ impl Policy {
         let (quotas_tx, quotas) = watch::channel(QuotaReportMap::new());
         let (refresh, refresh_rx) = mpsc::unbounded_channel();
         catalog.set_quota_reports(reports.clone());
-        let rejected = Arc::new(std::sync::Mutex::new(
-            mj_core::credentials::RejectedLogins::default(),
-        ));
+        let rejected = state.rejected_logins.clone();
         let runtime = state.clone();
         let backend = Arc::new(
             ApiBackend::new(
@@ -219,6 +217,7 @@ impl Policy {
             manager.clone(),
             state.worker_background_gate(),
             state.clone(),
+            rejected.clone(),
         );
         let mut policy = Self {
             services: Services {

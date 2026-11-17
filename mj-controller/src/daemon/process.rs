@@ -1403,6 +1403,7 @@ pub(super) fn spawn_manager_target_refresher(
                     &closing,
                     prepared,
                     &state.credential_targets,
+                    Some(&state.worker_background_gate()),
                 ) {
                     continue;
                 }

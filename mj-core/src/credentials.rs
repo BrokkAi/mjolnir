@@ -1084,6 +1084,7 @@ impl CredentialSyncResult {
 pub struct RejectedLogins {
     profiles: std::collections::BTreeMap<String, (HarnessKind, PathBuf, LoginFingerprint)>,
     failures: BTreeMap<String, BTreeMap<u64, LoginFailure>>,
+    deliveries: BTreeMap<String, LoginDelivery>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1136,7 +1137,121 @@ impl LoginFailure {
     }
 }
 
+/// The current profile login's delivery to a live session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoginDeliveryState {
+    Pending,
+    Concluded { reason: String },
+}
+
+#[derive(Debug)]
+struct LoginDelivery {
+    target: CredentialSyncTarget,
+    fingerprint: String,
+    state: LoginDeliveryState,
+    /// A worker that read back a different login already tried this delivery.
+    /// The same requested login is not reinstalled unless the held copy changes.
+    mismatch: Option<CredentialSnapshot>,
+}
+
 impl RejectedLogins {
+    pub fn delivery_state(&self, profile_id: &str, session_id: &str) -> Option<LoginDeliveryState> {
+        let delivery = self.deliveries.get(session_id)?;
+        (delivery.target.profile_id == profile_id).then(|| delivery.state.clone())
+    }
+
+    pub fn start_delivery(
+        &mut self,
+        target: &CredentialSyncTarget,
+        fingerprint: &str,
+        state: LoginDeliveryState,
+    ) {
+        if self
+            .deliveries
+            .get(&target.session_id)
+            .is_some_and(|delivery| {
+                delivery.target == *target
+                    && delivery.fingerprint == fingerprint
+                    && delivery.mismatch.is_some()
+            })
+            && state == LoginDeliveryState::Pending
+        {
+            return;
+        }
+        self.record_delivery(target, fingerprint, state, None);
+    }
+
+    pub fn record_delivery(
+        &mut self,
+        target: &CredentialSyncTarget,
+        fingerprint: &str,
+        state: LoginDeliveryState,
+        mismatch: Option<CredentialSnapshot>,
+    ) {
+        self.deliveries.insert(
+            target.session_id.clone(),
+            LoginDelivery {
+                target: target.clone(),
+                fingerprint: fingerprint.to_owned(),
+                state,
+                mismatch,
+            },
+        );
+    }
+
+    pub fn delivery_mismatch(
+        &self,
+        target: &CredentialSyncTarget,
+        fingerprint: &str,
+        held: &CredentialSnapshot,
+    ) -> bool {
+        self.deliveries
+            .get(&target.session_id)
+            .is_some_and(|delivery| {
+                delivery.target == *target
+                    && delivery.fingerprint == fingerprint
+                    && delivery
+                        .mismatch
+                        .as_ref()
+                        .is_some_and(|observed| observed == held)
+            })
+    }
+
+    pub fn observe_delivered_login(
+        &mut self,
+        profile_id: &str,
+        session_id: &str,
+        fingerprint: &str,
+    ) {
+        if let Some(delivery) = self.deliveries.get_mut(session_id)
+            && delivery.target.profile_id == profile_id
+            && delivery.fingerprint == fingerprint
+            && delivery.state == LoginDeliveryState::Pending
+        {
+            delivery.state = LoginDeliveryState::Concluded {
+                reason: "worker reports holding the current login".into(),
+            };
+        }
+    }
+
+    pub fn retain_deliveries(&mut self, exists: impl Fn(&str) -> bool) {
+        self.deliveries.retain(|id, _| exists(id));
+    }
+
+    pub fn end_delivery(
+        &mut self,
+        target: &CredentialSyncTarget,
+        fingerprint: Option<&str>,
+        reason: String,
+    ) {
+        if let Some(delivery) = self.deliveries.get_mut(&target.session_id)
+            && delivery.target == *target
+            && fingerprint.is_none_or(|fingerprint| delivery.fingerprint == fingerprint)
+        {
+            delivery.state = LoginDeliveryState::Concluded { reason };
+        }
+    }
+
     /// The poller accepted a reconciliation for this failure. A later turn
     /// supersedes it even when the worker used the same token for both.
     pub fn accept(&mut self, profile_id: &str, cause: &CredentialSyncCause) {
@@ -1177,6 +1292,7 @@ impl RejectedLogins {
     /// A sync finishing after removal cannot revive a retired decision.
     pub fn retain_failures(&mut self, mut keep: impl FnMut(&str) -> bool) {
         self.failures.retain(|id, _| keep(id));
+        self.deliveries.retain(|id, _| keep(id));
     }
 
     /// Take in one finished sync of a configured profile. A removed profile
@@ -1305,6 +1421,9 @@ impl RejectedLogins {
                 reason: "credential reconciliation has no result for this turn".into(),
             };
         };
+        if self.delivery_state(profile_id, &cause.session_id) == Some(LoginDeliveryState::Pending) {
+            return Deciding;
+        }
         let Some(conclusion) = &failure.conclusion else {
             return Deciding;
         };

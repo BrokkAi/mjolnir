@@ -19,7 +19,10 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
 - [x] (2026-11-17) Diagnosis of the 2026-11-17 occurrence (two read-only children, reports under `.mj/agents/83a84352…/diagnosis.md` and `.mj/agents/91d33c3f…/credential-diagnosis.md` in the planning clone; summarized in `Surprises & Discoveries`).
 - [x] (2026-11-17) Design reviewed with the senior advisor session; decisions recorded in `Decision Log`.
 - [x] (2026-11-17) Milestone 1: classification. The refusal owner decides each accepted turn failure and typed wake failure. Child reporting and park eligibility share that verdict.
-- [ ] Milestone 2: delivery. INFO logging of every per-session delivery deferral and conclusion (first commit), then per-session delivery owed until the worker reports the current login.
+- [x] (2026-11-17) Milestone 2 logging checkpoint `ca40e93fc`. Carry the authentication failure's ordinal into credential sync and log per-session dispositions.
+- [x] (2026-11-17) Milestone 2 delivery. Concurrent per-session delivery and worker read-back publication implemented. Targeted controller and worker tests passed, as did clippy and formatting.
+- [x] (2026-11-17) Isolated Claude acceptance passed. Both workers received the replacement login and both transfers appeared at INFO. The workers were destroyed and the `t1581` daemon stopped.
+- [x] (2026-11-17) Validated the combined Milestone 1 and 2 path. Seven focused tests passed, including the test where the auth decision is settled and delivery remains pending until the worker reports the held login. Core and controller clippy passed.
 - [ ] Milestone 3: the hold. Worker publishes retry intent separately from its submit gate; the daemon holds a child only while the retry is owed and the login is coming or already present.
 - [ ] Integrated review, merge, push; close #1581.
 
@@ -36,6 +39,9 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
   Evidence: a claude6 pass was still on session 419e3471 (sorted before d5a964ac) at 15:24:29.9 (`credential_state` waiting), 15:24:37.9 (`skills_state`), 15:24:44.6 (`github_token_state`). The serial slot is in `worker_client/credential_sync.rs:449–483,754–777,2373–2428`.
 
 - Observation: the "16:50 resume and new-start refusals" in #1581 have no producer in the store or logs; most likely a conflation with the same parent's 2026-11-16 10:06Z note, made under a daemon that predates #1547.
+
+- Observation: the repository already has a lease-return integration test using an isolated store and a real session actor.
+  Evidence: `a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns` in `mj-controller/src/worker_client/tests.rs` now checks that the delivery is pending during the lease and concludes when the worker answers. The existing worker test `credential_install_reports_the_newer_file_found_after_waiting_for_native_lock` also checks the published fingerprint against the read-back.
 
 - Observation: the wake staging path can read the identity of the exact temporary login copy it installs, including the file copied from the Keychain for Claude. Local bare Codex links to the profile login instead of installing a fixed copy, so a failed wake through that link has no staged identity to attest. The failure is retryable.
   Evidence: `controller/worker_binary/launch.rs` and `controller/worker_binary/install.rs` distinguish staged copies from live links.
@@ -83,6 +89,13 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
   Rationale: the daemon staged that token itself, so equality with the current token is sound evidence of refusal there.
   Date/Author: 2026-11-17, advisor.
 
+- Decision: use the profile owner only to publish an authoritative login after a marker read or adoption of a fresher session copy. Its lock never spans a session relay call. Each session's delivery then uses the existing per-session relay admission, with a separate per-session turn held through delivery result publication.
+  Rationale: the canonical store has one writer decision. Each eligible session can converge independently, and its next attempt cannot overtake the previous attempt's published conclusion. A pull wakes the profile's own fan-out. Lease return, actor reconnect and revalidation wake only affected sessions. Unsignalled deferrals back off.
+  Date/Author: 2026-11-17, Milestone 2 implementation.
+
+- Decision: publish `held_login_fingerprint` at relay protocol 69. Existing peers can omit the field and the established credential-state exchange still reports what their file holds. The daemon concludes a successful protocol 69 delivery when it publishes the worker's matching operational fingerprint, after the RPC has returned. A different install read-back ends the attempt. The controller remembers that read-back for the attempted login so it does not keep pushing until the observed copy or the desired login changes.
+  Rationale: a successful command response alone cannot prove which login the worker retained. The actual worker-side fingerprint is also the evidence Milestone 3 will use for an owed retry.
+  Date/Author: 2026-11-17, Milestone 2 implementation.
 
 - Decision: keep wake detail in `last_error` and append typed evidence only when the failed boot staged an identifiable login. Current readers separate the evidence from the detail. Older readers still see the original failure at the start of the same text column. The write that releases the boot intent persists both together, with no schema migration.
   Rationale: helps distinguish old text from identity evidence without changing how old daemons update or clear session errors.
@@ -92,9 +105,12 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
   Rationale: two turns can fail on the same token, and later warning events can follow a failed turn. Neither can use that turn's pending decision or conclusion.
   Date/Author: 2026-11-17, Milestone 1 implementation.
 
+
 ## Outcomes & Retrospective
 
 Milestone 1: the parent receives `login_invalid` only for a refusal of the current login. A missing or inconclusive reconciliation leaves the child promptable, and a pending reconciliation keeps it unfinished. The live worker retry publication still holds a child whose login was renewed. The isolated incident test passes with Milestone 1 and fails on `15183b431`, where the durable mailbox contains `login_invalid` and an instruction to sign in again. Targeted controller and core tests passed (164 passed, one existing AWS CLI fixture ignored), as did clippy and formatting checks for both crates.
+
+Milestone 2 adds diagnostic context before changing delivery. The runtime then uses a profile credential decision and per-session relay operations. The same refusal registry exposes the resulting delivery state to the subsequent child-hold milestone. The targeted dev run passed 62 controller tests and 13 worker tests with one existing AWS CLI fixture ignored. Clippy with warnings denied passed for the controller, core, worker, CLI and chat crates. In `--instance t1581`, two live Claude workers backed by a fixture ACP transport initially held the same synthetic login. Replacing the profile marker updated both staged copies and produced two INFO transfers, one per session.
 
 
 ## Context and Orientation
@@ -169,8 +185,8 @@ Implementers work in detached worktrees so builds do not collide, for example:
 Commit on the detached HEAD; do not push; the planning session cherry-picks and requests review. Run `cargo test` outside the restricted sandbox. Run targeted tests only, e.g.:
 
     cargo test -p brokk-mj-core --lib credentials
-    cargo test -p brokk-mj-controller --lib -- server_runtime::api subagent_park credential_sync
-    cargo test -p brokk-mj-worker --lib -- relay::authentication_tests
+    cargo test -p brokk-mj-controller --lib -- server_runtime::api subagent_park credential
+    cargo test -p brokk-mj-worker --lib -- relay::authentication_tests credential
     cargo clippy -p brokk-mj-core -p brokk-mj-controller -p brokk-mj-worker --all-targets -- -D warnings
 
 Relay protocol or schema revision numbers are assigned at merge time; if a milestone needs one, take the next free number and expect the planning session to renumber.
@@ -194,3 +210,5 @@ Diagnosis reports (planning clone): `.mj/agents/83a843526c1f475b63ad2f3d6e7c028b
 ## Interfaces and Dependencies
 
 No new crates or libraries. New public surface: in `mj_core::credentials`, the per-failure verdict API on the refusal owner (Milestone 1) and delivery-state queries (Milestone 2); in `mj_core::relay::snapshot` operational state, a held-login fingerprint field (Milestone 2) and an authentication-retry-intent field (Milestone 3), both `Option`, both defaulting to `None` so older peers decode them. The daemon API `list_agents` / wait output keeps its JSON shape; only which children carry `failure.kind == "login_invalid"` changes.
+
+Milestone 2 update, 2026-11-17. Recorded the delivery ownership, event sources and worker read-back behavior so the classification and hold milestones can consume one result. Updated Cargo package names to match this checkout.

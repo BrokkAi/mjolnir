@@ -917,6 +917,7 @@ fn ready_view_waiting(model: &str, waiting: Option<String>) -> ManagedSessionVie
         capacity_retry: None,
         retry_assessment_pending: false,
         authentication_retry_waiting: waiting,
+        held_login_fingerprint: None,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,
         store_id: None,
@@ -2267,6 +2268,44 @@ async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
     ));
 
     let backend = fixture.backend(None);
+    let target = mj_core::credentials::CredentialSyncTarget {
+        session_id: "child-1".into(),
+        profile_id: "helper".into(),
+        harness: fixture.profile.kind,
+        profile_home: fixture.profile.home.clone(),
+        aws_credentials: None,
+        skips_login_file_sync: false,
+        sync_github_token: false,
+        github: Default::default(),
+        skills_scope: mj_core::skills::SkillsScope::Localhost,
+        spec: mj_core::targets::CommandSpec::new("unused", Vec::<String>::new()),
+    };
+    let Some(mj_core::credentials::LoginFingerprint::AccessToken(renewed)) =
+        mj_core::credentials::LoginFingerprint::read_file(
+            fixture.profile.kind,
+            &fixture.profile.authentication_marker(),
+        )
+        .unwrap()
+    else {
+        panic!("expected the fixture to have a renewed login");
+    };
+    fixture.rejected.lock().unwrap().start_delivery(
+        &target,
+        &renewed,
+        mj_core::credentials::LoginDeliveryState::Pending,
+    );
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::NotFinished
+    ));
+    fixture
+        .rejected
+        .lock()
+        .unwrap()
+        .observe_delivered_login("helper", "child-1", &renewed);
     assert!(matches!(
         backend
             .reconcile_child_report("parent-1", "child-1", 9)

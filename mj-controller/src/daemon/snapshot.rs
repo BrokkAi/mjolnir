@@ -366,7 +366,26 @@ impl RuntimeState {
             } else {
                 owner.background_policies.remove(&session_id);
             }
+            let observed_login = view
+                .connected
+                .then(|| {
+                    let record = owner.controller().state.sessions.get(&session_id)?;
+                    let fingerprint = view
+                        .snapshot
+                        .as_ref()?
+                        .operational
+                        .held_login_fingerprint
+                        .as_ref()?;
+                    Some((record.last_profile.clone(), fingerprint.clone()))
+                })
+                .flatten();
             owner.publish_view(session_id.clone(), view);
+            if let Some((profile_id, fingerprint)) = observed_login {
+                self.rejected_logins
+                    .lock()
+                    .expect("rejected logins poisoned")
+                    .observe_delivered_login(&profile_id, &session_id, &fingerprint);
+            }
             recovered_failure
         };
         if let Some(recorded_error) = recovered_failure {
