@@ -819,26 +819,19 @@ impl ApiBackend {
         })
         .await?;
         let prepared = if let Some((prepared, result)) = stored {
-            if let Some(mut result) = result {
+            if let Some(result) = result {
                 if matches!(
                     prepared.request.action,
                     mj_core::subagent::SubagentToolAction::LegacyWaitAgents
                         | mj_core::subagent::SubagentToolAction::LegacyAwaitChildren
                 ) {
-                    blocking("retire legacy wait", {
+                    return blocking("retire legacy wait", {
                         let parent = parent.clone();
                         let id = request.request_id.clone();
                         move || crate::database::retire_legacy_wait(parent, id)
                     })
-                    .await?;
-                    // Retain the compatibility answer for every delivery retry.
-                    result.result.is_error = false;
-                    result.result.message = serde_json::json!({
-                        "status": "reports_arrive_as_messages",
-                        "next_action": mj_core::subagent::REPORT_NOTIFICATION_NEXT_ACTION
-                    })
-                    .to_string();
-                    result.reported_finishes.clear();
+                    .await?
+                    .context("legacy wait result disappeared before conversion");
                 }
                 return Ok(result);
             }

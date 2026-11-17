@@ -180,7 +180,7 @@ struct RecoveryGateState {
     deferred_credentials: BTreeSet<String>,
 }
 
-/// Reviews exclude automatic work for their whole lifetime, but cannot hold
+/// Reviews exclude automatic work except accepted replies, but cannot hold
 /// up a person's lifecycle or daemon handoff. Their worker work survives it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReservationKind {
@@ -306,7 +306,7 @@ impl RecoveryGate {
         .await
     }
 
-    /// Reviews exclude background work without preempting it. They share
+    /// Reviews exclude background work except delegation replies without preempting it. They share
     /// the session with foreground lifecycles, whose worker actions already
     /// cancel or refuse overlapping review capture/selection requests.
     pub async fn reserve_when_idle(self: &Arc<Self>, session_id: &str) -> RecoveryReservation {
@@ -439,16 +439,9 @@ impl RecoveryGate {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A review reservation is compatible with the foreground operation.
-        // It cannot block the completion work that foreground explicitly yields
-        // to during its drain; other background exclusions remain unchanged.
-        let delegation_drain = kind == BackgroundWork::DelegationDelivery
-            && state
-                .reservations
-                .get(session_id)
-                .into_iter()
-                .flatten()
-                .any(|holder| holder.kind == ReservationKind::ForegroundDelegationDrain);
+        // Replies finish the work a review accepted and the work a foreground
+        // Move explicitly yields to while draining. Neither reservation can
+        // defer these completions for the lifetime of the review/drain.
         if state.closed
             || (kind.needs_lease() && state.leases.contains_key(session_id))
             || state
@@ -456,7 +449,12 @@ impl RecoveryGate {
                 .get(session_id)
                 .into_iter()
                 .flatten()
-                .any(|holder| !delegation_drain || holder.kind == ReservationKind::Foreground)
+                .any(|holder| match holder.kind {
+                    ReservationKind::Foreground => true,
+                    ReservationKind::Review | ReservationKind::ForegroundDelegationDrain => {
+                        kind != BackgroundWork::DelegationDelivery
+                    }
+                })
             || state
                 .busy
                 .get(session_id)

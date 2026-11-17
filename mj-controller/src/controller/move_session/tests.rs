@@ -4393,6 +4393,7 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
 #[cfg(unix)]
 // Hard-won: #1470: the child-stop hook could stop daemon-side children after the quota check.
 // Hard-won: dd56c0341: foreground Move blocked the result delivery its mutation drain needed.
+// Hard-won: 05b7a7f89: review holds blocked replies and legacy wait retirement discarded delivery state.
 #[test]
 fn in_place_move_drains_the_queue_of_a_native_source() {
     let name = test_name("in_place_move_drains_the_queue_of_a_native_source");
@@ -4466,6 +4467,61 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
     mj_core::config::atomic_write(&queue_path, &serde_json::to_vec(&serde_json::json!({
         "requests": {request.request_id.clone(): request}, "results": {}, "mutating_admission_open": true,
     })).unwrap()).unwrap();
+    let review_request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "review-acceptance".into(),
+        created_at_ms: 2,
+        action: mj_core::subagent::SubagentToolAction::RequestReview { path: None },
+    };
+    let legacy_request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "legacy-acceptance".into(),
+        created_at_ms: 3,
+        action: mj_core::subagent::SubagentToolAction::LegacyWaitAgents,
+    };
+    let mut queue: serde_json::Value =
+        serde_json::from_slice(&fs::read(&queue_path).unwrap()).unwrap();
+    for request in [&review_request, &legacy_request] {
+        crate::database::prepare_delegation(
+            LATCH_RELAY_SESSION.into(),
+            crate::database::PreparedDelegation {
+                request: request.clone(),
+                turn_target: None,
+                spawn: None,
+            },
+        )
+        .unwrap();
+        queue["requests"].as_object_mut().unwrap().insert(
+            request.request_id.clone(),
+            serde_json::to_value(request).unwrap(),
+        );
+        crate::database::record_delegation_result(
+            LATCH_RELAY_SESSION.into(),
+            mj_core::subagent::SubagentToolResult {
+                request_id: request.request_id.clone(),
+                completed_at_ms: 4,
+                is_error: false,
+                message: if request.request_id == "legacy-acceptance" {
+                    "old wait answer"
+                } else {
+                    "review registered"
+                }
+                .into(),
+            },
+        )
+        .unwrap();
+    }
+    mj_core::config::atomic_write(&queue_path, &serde_json::to_vec(&queue).unwrap()).unwrap();
+    let review_result =
+        crate::database::load_delegation(LATCH_RELAY_SESSION, &review_request.request_id)
+            .unwrap()
+            .unwrap()
+            .1
+            .unwrap();
+    let legacy_result =
+        crate::database::retire_legacy_wait(LATCH_RELAY_SESSION.into(), legacy_request.request_id)
+            .unwrap()
+            .unwrap();
     let wait = std::sync::Arc::new(tokio::sync::Notify::new());
     let executor = RecordingProcessExecutor {
         drain_wait: Some(wait.clone()),
@@ -4496,6 +4552,17 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
         // A worker-owned review can outlive a foreground Move; its compatible
         // reservation must not exclude the completion work Move waits for.
         let review = gate.reserve_when_idle(LATCH_RELAY_SESSION).await;
+        let acceptance = gate.try_start(LATCH_RELAY_SESSION, crate::recovery_gate::BackgroundWork::DelegationDelivery)
+            .expect("review acceptance replies cannot wait for the review to finish");
+        for result in [review_result, legacy_result] {
+            crate::daemon::delegation::deliver(&handle, &acceptance, result, async {}).await.unwrap();
+        }
+        drop(acceptance);
+        let delivered: serde_json::Value = serde_json::from_slice(&fs::read(&queue_path).unwrap()).unwrap();
+        assert_eq!(delivered["results"]["review-acceptance"]["message"], "review registered");
+        let compatibility: serde_json::Value = serde_json::from_str(delivered["results"]["legacy-acceptance"]["message"].as_str().unwrap()).unwrap();
+        assert_eq!(compatibility["status"], "reports_arrive_as_messages");
+        assert!(crate::database::load_delegation(LATCH_RELAY_SESSION, "legacy-acceptance").unwrap().is_none());
         let admission = crate::recovery_gate::SessionAdmission::Foreground(
             gate.enter_foreground(
                 LATCH_RELAY_SESSION,
@@ -4567,7 +4634,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
                     .1
                     .is_none()
             );
-            assert!(!queue_path.with_extension("deliveries").exists());
+            assert_eq!(fs::read_to_string(queue_path.with_extension("deliveries")).unwrap(), "review-acceptance\nlegacy-acceptance\n");
         } else {
             result.unwrap();
             assert!(
@@ -4578,7 +4645,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
             );
             assert_eq!(
                 fs::read_to_string(queue_path.with_extension("deliveries")).unwrap(),
-                "native-mutation\n"
+                "review-acceptance\nlegacy-acceptance\nnative-mutation\n"
             );
         }
         channels.shutdown.shutdown().await.unwrap();
@@ -4595,7 +4662,15 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
 
     let queue: serde_json::Value =
         serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
-    assert_eq!(queue["admission_transitions"][0], false, "{queue}");
+    let transitions = queue["admission_transitions"].as_array().unwrap();
+    assert_eq!(
+        &transitions[transitions.len() - 2..],
+        &[
+            serde_json::Value::Bool(false),
+            serde_json::Value::Bool(true)
+        ],
+        "Move must close mutation admission and reopen it after completion or cancellation: {queue}"
+    );
     assert_eq!(queue["mutating_admission_open"], true, "{queue}");
     if mode == "cancel" {
         assert!(queue["requests"]["native-mutation"].is_object(), "{queue}");
