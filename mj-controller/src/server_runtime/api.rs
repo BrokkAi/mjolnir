@@ -1915,7 +1915,7 @@ impl ApiBackend {
                     &state,
                     output.as_deref(),
                     finished,
-                    inputs.last_failed_delivery(&id),
+                    inputs.failed_deliveries(&id),
                     &progress,
                     relation.reported_finish.as_ref(),
                 );
@@ -1982,8 +1982,10 @@ impl ApiBackend {
         let (inputs, children) = self.notification_children(parent_id).await?;
         // Each child has one of a few ends here: not news (and why), not seen as
         // finished, held for its facts, or its finish is reported (by an earlier
-        // reconcile or by this one).
+        // reconcile or by this one). Whatever its finish, every message to a
+        // child that is news and failed is a notice of its own.
         let mut ready = Vec::new();
+        let mut failures = Vec::new();
         for child in children {
             let id = child.relation.child_session_id.clone();
             let disposition = if child.relation.kind == mj_core::subagent::SubagentKind::Reviewer {
@@ -1997,6 +1999,9 @@ impl ApiBackend {
                 // turns while it waits, and handback refuses until the verdict.
                 ChildDisposition::NotNews("the child awaits its review's verdict")
             } else {
+                for failed in inputs.failed_deliveries(&id) {
+                    failures.push(failed_delivery_notice(&inputs, &child, &failed)?);
+                }
                 match &child.identity {
                     None => ChildDisposition::NotFinished,
                     Some(identity) if child.relation.reported_finish.as_ref() == Some(identity) => {
@@ -2010,7 +2015,16 @@ impl ApiBackend {
             };
             reconciled.children.insert(id, disposition);
         }
-        if ready.is_empty() {
+        // Told failures stay listed until they leave the delivery window, so
+        // the store, not this snapshot, says which are news.
+        if !failures.is_empty() {
+            let parent = parent_id.to_owned();
+            failures = blocking("find untold failed child messages", move || {
+                crate::database::untold_failed_deliveries(&parent, failures)
+            })
+            .await?;
+        }
+        if ready.is_empty() && failures.is_empty() {
             return Ok(reconciled);
         }
         let spans = ready
@@ -2022,10 +2036,14 @@ impl ApiBackend {
                 )
             })
             .collect::<Vec<_>>();
-        let reports = blocking("load finished child reports", move || {
-            crate::database::load_child_answer_messages(&spans)
-        })
-        .await?;
+        let reports = if spans.is_empty() {
+            BTreeMap::new()
+        } else {
+            blocking("load finished child reports", move || {
+                crate::database::load_child_answer_messages(&spans)
+            })
+            .await?
+        };
         let mut notifications = Vec::with_capacity(ready.len());
         let mut enqueued = Vec::with_capacity(ready.len());
         for child in ready {
@@ -2075,7 +2093,7 @@ impl ApiBackend {
         }
         let parent = parent_id.to_owned();
         blocking("enqueue finished child reports", move || {
-            crate::database::enqueue_subagent_reports(parent, notifications)
+            crate::database::enqueue_subagent_reports(parent, notifications, failures)
         })
         .await?;
         for id in enqueued {
@@ -2495,45 +2513,74 @@ pub enum ReportNudge {
     Holding { give_up_at_ms: i64 },
 }
 
-/// What makes a child's report new for its parent: its finish, or a message
-/// delivery to it that failed. The failed delivery keeps the child's own
-/// state (#1381); the parent still hears of it, once per failed request, in
-/// a report that carries the state and the `Message <id> failed` line. A
-/// finish that is still unreported travels in the same report.
+/// What makes a child's finish new for its parent. A message delivery that
+/// failed is not part of it: it keeps the child's own state (#1381) and is told
+/// by a notice of its own, once per failed request (#1459), so a failure never
+/// hides, moves or repeats a finish, and a later delivery never hides a failure.
 ///
-/// Whether a failed delivery is news is decided against what the parent was
-/// last told (`reported`). A finished child's identity carries its state, so
-/// every finish after the failure reaches the parent, including one that
-/// settles without a new turn. A child that is not finished has news only if
-/// this failure was never reported: a message queued after it turns a
-/// finished child "running" with nothing new to say.
-fn report_identity(
+/// Reports before #1459 folded the child's newest failed delivery into this
+/// identity: a `Terminal` whose detail is `Message <id>: <error>`, with the
+/// child's state when it was finished. Such a marker with the child's current
+/// state and last completed turn is the finish the parent was told of, so it
+/// is kept rather than reported again after an upgrade.
+fn report_identity<'a>(
     state: &str,
     output: Option<&str>,
     finished: bool,
-    failed_delivery: Option<(&str, &str)>,
+    mut failed_deliveries: impl Iterator<Item = subagent_input::FailedDelivery<'a>>,
     progress: &ChildProgress,
     reported: Option<&mj_core::subagent::SubagentFinishIdentity>,
 ) -> Option<mj_core::subagent::SubagentFinishIdentity> {
-    let Some((request_id, error)) = failed_delivery else {
-        return finished.then(|| finish_identity(state, output, progress));
-    };
-    let detail = format!("Message {request_id}: {error}");
-    if !finished
-        && let Some(
-            reported @ mj_core::subagent::SubagentFinishIdentity::Terminal {
-                detail: Some(reported_detail),
-                ..
-            },
-        ) = reported
-        && *reported_detail == detail
+    if !finished {
+        return None;
+    }
+    if let Some(
+        reported @ mj_core::subagent::SubagentFinishIdentity::Terminal {
+            state: reported_state,
+            detail: Some(detail),
+            last_completed_ordinal,
+        },
+    ) = reported
+        && reported_state == state
+        && *last_completed_ordinal == progress.last_completed_ordinal
+        && failed_deliveries.any(|failed| *detail == failed.legacy_marker_detail())
     {
         return Some(reported.clone());
     }
-    Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
-        state: if finished { state } else { "message-failed" }.to_owned(),
-        detail: Some(detail),
-        last_completed_ordinal: progress.last_completed_ordinal,
+    Some(finish_identity(state, output, progress))
+}
+
+/// The notice that tells a parent one message to its child was not delivered:
+/// the child's own state, whether it can take the message again, what is still
+/// queued for it, and that one failed delivery. What the child's finish says
+/// (its output, facts and failure) is its finish report's to tell.
+fn failed_delivery_notice(
+    inputs: &subagent_input::InputProgress,
+    child: &NotificationChildSnapshot,
+    failed: &subagent_input::FailedDelivery<'_>,
+) -> Result<crate::database::FailedDeliveryNotice> {
+    let id = &child.relation.child_session_id;
+    let mut entry = serde_json::json!({
+        "child_session_id": id,
+        "child_name": live_child_name(child.record.as_ref(), &child.relation.task_name),
+        "task_name": child.relation.task_name,
+        "state": child.state,
+        "finished": false,
+        "message_deliveries": [failed.delivery],
+        "output": null,
+        "report_dir": null,
+    });
+    inputs.annotate_pending(id, &mut entry);
+    mark_parked(&mut entry, child.record.as_ref());
+    mark_promptable(
+        &mut entry,
+        &child.state,
+        &child.progress,
+        child.record.as_ref(),
+    );
+    Ok(crate::database::FailedDeliveryNotice {
+        request_id: failed.request_id.to_owned(),
+        report: serde_json::from_value(entry)?,
     })
 }
 

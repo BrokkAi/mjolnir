@@ -158,17 +158,138 @@ pub(crate) fn record_stored_delegation_result(
     })
 }
 
-/// The outbox row and report marker have one serialized database owner.
+/// A notice that one message a parent sent its child was not delivered. The
+/// notice is not a finish: it never moves the child's `reported_finish`.
+pub(crate) struct FailedDeliveryNotice {
+    pub request_id: String,
+    pub report: mj_core::mailbox::SubagentFinishedReport,
+}
+
+/// The notices among `notices` whose failure the parent has not been told of.
+/// This read only spares the writer a transaction when nothing is new;
+/// [`enqueue_subagent_reports`] asks the same question again where it decides.
+pub(crate) fn untold_failed_deliveries(
+    parent: &str,
+    notices: Vec<FailedDeliveryNotice>,
+) -> Result<Vec<FailedDeliveryNotice>> {
+    let connection = open_reader(&database_path())?;
+    let mut untold = Vec::with_capacity(notices.len());
+    for notice in notices {
+        if !failed_delivery_told(
+            &connection,
+            parent,
+            &notice.report.child_session_id,
+            &notice.request_id,
+        )? {
+            untold.push(notice);
+        }
+    }
+    Ok(untold)
+}
+
+/// Whether the parent has been told that its message `request_id` to `child`
+/// was not delivered, or has nothing to be told: the child is not its own, or
+/// is a reviewer, which its review reports.
+///
+/// The notice's outbox row is the fact, and report rows are never pruned while
+/// the parent exists. Reports before #1459 told a failure only inside a report
+/// row: they folded the child's newest failure into its finish marker, and every
+/// report listed all of the child's deliveries. The deliveries a reader sees
+/// only grow until the oldest leave the window, so the report the child's marker
+/// names lists every failure known when it was made; a failure it lists as
+/// failed was told.
+fn failed_delivery_told(
+    connection: &Connection,
+    parent: &str,
+    child: &str,
+    request_id: &str,
+) -> Result<bool> {
+    let key = failed_delivery_key(parent, child, request_id)?;
+    if connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
+        [&key],
+        |row| row.get(0),
+    )? {
+        return Ok(true);
+    }
+    let Some(stored) = connection
+        .query_row(
+            "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1 AND parent_session_id=?2",
+            params![child, parent],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(true);
+    };
+    let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
+    if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
+        return Ok(true);
+    }
+    let Some(identity) = relation.reported_finish else {
+        return Ok(false);
+    };
+    let Some(report) = connection
+        .query_row(
+            "SELECT event_json FROM mailbox_outbox WHERE event_key=?1",
+            [subagent_report_key(parent, child, &identity)?],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&report)?;
+    Ok(matches!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::SubagentFinished { report }
+            if report.message_deliveries.iter().any(|delivery| {
+                delivery["request_id"] == request_id && delivery["status"] == "failed"
+            })
+    ))
+}
+
+/// The outbox rows and the report marker have one serialized database owner.
+/// A failed delivery is told once by its own notice, keyed by its request, so
+/// a later delivery cannot hide it and a stale or concurrent reconcile cannot
+/// tell it twice. Notices go first: a finish enqueued here lists the same
+/// failures, and the notice's key, not that listing, is what records them.
 pub(crate) fn enqueue_subagent_reports(
     parent: String,
     reports: Vec<(
         mj_core::subagent::SubagentFinishIdentity,
         mj_core::mailbox::SubagentFinishedReport,
     )>,
+    failures: Vec<FailedDeliveryNotice>,
 ) -> Result<()> {
     let inserted = submit_database_write("enqueue finished child reports", move |connection| {
         let transaction = connection.transaction()?;
         let mut inserted = false;
+        for notice in failures {
+            let child = &notice.report.child_session_id;
+            if failed_delivery_told(&transaction, &parent, child, &notice.request_id)? {
+                continue;
+            }
+            let key = failed_delivery_key(&parent, child, &notice.request_id)?;
+            let event = mj_core::mailbox::MailboxEvent {
+                key: key.clone(),
+                source: "mjolnir".into(),
+                wake: true,
+                created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+                body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+                    report: Box::new(notice.report),
+                },
+            };
+            inserted |= super::mailbox::enqueue_mailbox_event_with(
+                &transaction,
+                &key,
+                &parent,
+                &serde_json::to_string(&event)?,
+                true,
+                false,
+            )?
+            .inserted();
+        }
         for (identity, report) in reports {
             let child_id = &report.child_session_id;
             let stored: String = transaction.query_row(
@@ -279,6 +400,18 @@ fn subagent_report_key(
         "subagent-finished-{}",
         mj_core::hex::lower_hex(Sha256::digest(serde_json::to_vec(&(
             parent, child, identity
+        ))?))
+    ))
+}
+
+/// One key per failed request. It must not start with `subagent-message-`,
+/// which names a parent's message to its child.
+fn failed_delivery_key(parent: &str, child: &str, request_id: &str) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!(
+        "subagent-delivery-failed-{}",
+        mj_core::hex::lower_hex(Sha256::digest(serde_json::to_vec(&(
+            parent, child, request_id
         ))?))
     ))
 }
@@ -548,8 +681,12 @@ mod tests {
             Ok(())
         }).unwrap();
         assert!(
-            enqueue_subagent_reports("parent".into(), vec![(identity.clone(), report.clone())])
-                .is_err()
+            enqueue_subagent_reports(
+                "parent".into(),
+                vec![(identity.clone(), report.clone())],
+                Vec::new()
+            )
+            .is_err()
         );
         assert!(pending_mailbox_events(10).unwrap().is_empty());
         assert!(
@@ -564,10 +701,18 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        enqueue_subagent_reports("parent".into(), vec![(identity.clone(), report.clone())])
-            .unwrap();
-        enqueue_subagent_reports("parent".into(), vec![(identity.clone(), report.clone())])
-            .unwrap();
+        enqueue_subagent_reports(
+            "parent".into(),
+            vec![(identity.clone(), report.clone())],
+            Vec::new(),
+        )
+        .unwrap();
+        enqueue_subagent_reports(
+            "parent".into(),
+            vec![(identity.clone(), report.clone())],
+            Vec::new(),
+        )
+        .unwrap();
         assert_eq!(pending_mailbox_events(10).unwrap().len(), 1);
         assert_eq!(
             load_subagent("child").unwrap().unwrap().reported_finish,
@@ -578,10 +723,15 @@ mod tests {
         })).unwrap();
         let mut newer_report = report.clone();
         newer_report.output = Some("new report".into());
-        enqueue_subagent_reports("parent".into(), vec![(newer.clone(), newer_report)]).unwrap();
+        enqueue_subagent_reports(
+            "parent".into(),
+            vec![(newer.clone(), newer_report)],
+            Vec::new(),
+        )
+        .unwrap();
         let mut stale = report;
         stale.parked = Some(true);
-        enqueue_subagent_reports("parent".into(), vec![(identity, stale)]).unwrap();
+        enqueue_subagent_reports("parent".into(), vec![(identity, stale)], Vec::new()).unwrap();
         assert_eq!(pending_mailbox_events(10).unwrap().len(), 2);
         assert_eq!(
             load_subagent("child").unwrap().unwrap().reported_finish,

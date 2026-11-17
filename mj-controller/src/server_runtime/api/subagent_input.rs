@@ -877,7 +877,7 @@ impl InputProgress {
     /// that is queued for a child that can take it means the child is about
     /// to run, whatever its last turn said. Nothing else changes the state: a
     /// delivery that failed is a fact about the message (see
-    /// [`Self::last_failed_delivery`]), not about the child, whose record
+    /// [`Self::failed_deliveries`]), not about the child, whose record
     /// alone says whether it can be given work (#1381).
     pub fn status(
         &self,
@@ -902,31 +902,54 @@ impl InputProgress {
         current
     }
 
-    /// The request id and error of the child's newest message delivery, when
-    /// that delivery failed. A later delivery that succeeded supersedes it.
-    pub fn last_failed_delivery(&self, child: &str) -> Option<(&str, &str)> {
-        let last = self.deliveries.get(child)?.last()?;
-        (last["status"] == "failed").then(|| {
-            (
-                last["request_id"].as_str().unwrap_or_default(),
-                last["error"].as_str().unwrap_or("delivery failed"),
-            )
-        })
+    /// Every message delivery to the child that failed, oldest first. A
+    /// delivery that succeeded later does not undo one that failed: the work
+    /// in the failed message is still lost, so each one is news (#1459).
+    pub fn failed_deliveries(&self, child: &str) -> impl Iterator<Item = FailedDelivery<'_>> {
+        self.deliveries
+            .get(child)
+            .into_iter()
+            .flatten()
+            .filter(|delivery| delivery["status"] == "failed")
+            .map(|delivery| FailedDelivery {
+                request_id: delivery["request_id"].as_str().unwrap_or_default(),
+                error: delivery["error"].as_str().unwrap_or("delivery failed"),
+                delivery,
+            })
     }
 
     pub fn annotate(&self, child: &str, entry: &mut serde_json::Value) {
-        if let Some(pending) = self.pending.get(child) {
-            let pending = serde_json::json!(pending);
-            entry["pending_messages"] = pending.clone();
-            // Earlier parents already consume these field names.
-            entry["pending_inputs"] = pending;
-        }
+        self.annotate_pending(child, entry);
         if let Some(deliveries) = self.deliveries.get(child) {
             let deliveries = serde_json::json!(deliveries);
             entry["message_deliveries"] = deliveries.clone();
             // Earlier parents already consume these field names.
             entry["input_deliveries"] = deliveries;
         }
+    }
+
+    pub fn annotate_pending(&self, child: &str, entry: &mut serde_json::Value) {
+        if let Some(pending) = self.pending.get(child) {
+            let pending = serde_json::json!(pending);
+            entry["pending_messages"] = pending.clone();
+            // Earlier parents already consume these field names.
+            entry["pending_inputs"] = pending;
+        }
+    }
+}
+
+/// One failed message delivery, as `list_agents` shows it.
+pub(super) struct FailedDelivery<'a> {
+    pub request_id: &'a str,
+    pub error: &'a str,
+    pub delivery: &'a serde_json::Value,
+}
+
+impl FailedDelivery<'_> {
+    /// The detail a report before #1459 folded into the child's finish
+    /// marker for this failure.
+    pub fn legacy_marker_detail(&self) -> String {
+        format!("Message {}: {}", self.request_id, self.error)
     }
 }
 
