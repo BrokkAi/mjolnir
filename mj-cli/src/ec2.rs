@@ -1950,6 +1950,15 @@ else:
         )
         .unwrap();
         fs::set_permissions(&uname, fs::Permissions::from_mode(0o700)).unwrap();
+        // The host's scripts write `chmod MODE -- FILE`, as GNU chmod allows.
+        // The chmod on a Mac that runs this fixture reads `--` there as a file.
+        let chmod = remote_bin.join("chmod");
+        fs::write(
+            &chmod,
+            "#!/bin/sh\nmode=$1\nshift\n[ \"$1\" = -- ] && shift\nexec /bin/chmod \"$mode\" \"$@\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&chmod, fs::Permissions::from_mode(0o700)).unwrap();
         let mbx_version = mj_controller::controller::MBX_VERSION;
         let cached_mbx = directory
             .path()

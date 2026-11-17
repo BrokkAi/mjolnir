@@ -1547,7 +1547,10 @@ mod tests {
         assert!(assessment.selection_problem(&selection).is_none());
     }
 
+    // Unix only: one source is read through a session locator, and a local
+    // bare worker root is a POSIX path, which no Windows directory is.
     // Hard-won: #1542: a Move into a fresh environment left the checkout unmarked, so Suspend could not export it
+    #[cfg(unix)]
     #[test]
     fn moved_bundle_exports_each_repository_with_its_original_base() {
         use crate::controller::test_support::{
@@ -1562,12 +1565,10 @@ mod tests {
             CheckpointRepositorySpec, export_checkpoint,
         };
 
-        #[cfg(unix)]
         struct RemoteGit {
             remote_path: std::path::PathBuf,
             source_path: std::path::PathBuf,
         }
-        #[cfg(unix)]
         impl CommandExecutor for RemoteGit {
             fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
                 mj_core::targets::DeadlinePause::none()
@@ -1721,7 +1722,6 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
             };
-            #[cfg(unix)]
             let handoff = if index == 2 {
                 let remote_path = directory.path().join("exists-only-on-source");
                 assert!(!remote_path.exists());
@@ -1753,14 +1753,6 @@ mod tests {
                 )
                 .unwrap()
             };
-            #[cfg(not(unix))]
-            let handoff = record_move_handoff_bases(
-                &source_record,
-                &handoff,
-                &local,
-                &targets::ProcessExecutor,
-            )
-            .unwrap();
             snapshot.metadata =
                 mj_checkpoint::archive::read_checkpoint_manifest(&handoff.archive_path)
                     .unwrap()
