@@ -2430,6 +2430,14 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
             )
             .unwrap(),
     );
+    // The destination stage is named after what the capture holds.
+    let captured = &operation
+        .workspace_transfer
+        .as_ref()
+        .unwrap()
+        .controller_stage;
+    std::fs::create_dir_all(captured).unwrap();
+    std::fs::write(captured.join("move-workspace.json"), b"{}").unwrap();
     crate::database::save_move_operation(&operation).unwrap();
 
     // Resume reshapes the record for the container before provisioning it.
@@ -2652,6 +2660,12 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
     )
     .unwrap();
     operation.workspace_transfer = Some(transfer);
+    operation.checkpoint = Some(CheckpointMetadata {
+        archive_path: "unused.hel.zip".into(),
+        sha256: "0".repeat(64),
+        created_at: "2026-08-14T12:00:00Z".into(),
+        event_frontier: 0,
+    });
     crate::database::save_move_operation(&operation).unwrap();
 
     // Resume gives the session its checkout before the transfer fills it.
