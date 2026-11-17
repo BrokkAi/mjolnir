@@ -1,0 +1,193 @@
+{
+  "recorded_at": "2026-11-17T04:20:21.543426+00:00",
+  "live_own_writers": [],
+  "sessions": [
+    {
+      "id": "python-filescope-enclosing-tie",
+      "sid": "28e9c397720cd9bb1d42b81a7cf4cdc7",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "8ea28a492d39d520bc5e8c41d676460147910400",
+      "base": "96f5f3a9b099cfe72e83994dbc99dcad3db6b516",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/28e9c397720cd9bb1d42b81a7cf4cdc7.json"
+    },
+    {
+      "id": "cpp-template-inherited-base-signature",
+      "sid": "8095fe47578050d13f25347609b200cf",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "9c367d3f2eb0eabcbc97c36596d09052e1c3395d",
+      "base": "cf916ccd7dc0afc240f9bf3ad382039dbef6e2c5",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/8095fe47578050d13f25347609b200cf.json"
+    },
+    {
+      "id": "incompatible-semantic-bundle-late-gate",
+      "sid": "5e9f645330d5eb3cad02af0b360c3f09",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "3e51cfde577a31b83a72b8686694f3a2c0ea70ed",
+      "base": "5d35b1cee7daf81b46ed9cda1d14aca4275a7716",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/5e9f645330d5eb3cad02af0b360c3f09.json"
+    },
+    {
+      "id": "retained-fill-java-memo-loses-gap",
+      "sid": "a46055aabdeb5b391e251d9f4900002e",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "38ac5b5b2b51de7742b7995669f6e335fd78afe2",
+      "base": "b0b914fcc274025118adee8cc655b6b707676a29",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/a46055aabdeb5b391e251d9f4900002e.json"
+    },
+    {
+      "id": "kotlin-source-constructor-steals-class-header-comment",
+      "sid": "ede392e43ea1890ef890077edb579231",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "48c156c965b70729c1aa2bac2f148d530166fda0",
+      "base": "afba7e70c9da9f081212d1846854589227f04a40",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/ede392e43ea1890ef890077edb579231.json"
+    },
+    {
+      "id": "mcp-default-advisory-reported-clean",
+      "sid": "a1b551d2cf7fabc0d9340fab0bcb150b",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "a830471d19390c947b93e047483ab4e41f49ebe5",
+      "base": "91d814e88dba028fc8f32e30986ca444093755a5",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/a1b551d2cf7fabc0d9340fab0bcb150b.json"
+    },
+    {
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "sid": "3dcb549c0d6e3f4038b00e00ca9753af",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "69e3afb5d2c4a2799c14e9d5e092b8619c9f8e1f",
+      "base": "82151e1e5636bfc3215ccce8ed64b079b68f1dc4",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/3dcb549c0d6e3f4038b00e00ca9753af.json"
+    },
+    {
+      "id": "python-module-binding-representative-after-event",
+      "sid": "dc9a9ed4e1c7a44fd4cbf6b47501aafe",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "776315a465bc83ad98650b4f283762ab981659ca",
+      "base": "be40e535ab21de550581f7b39fc5f700c7e63820",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/dc9a9ed4e1c7a44fd4cbf6b47501aafe.json"
+    },
+    {
+      "id": "jvm-protected-unindexed-hierarchy-denied",
+      "sid": "cb573829340d86e72ff7d8280a9dda57",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "41f159d3e2b88a6b8444444e59ad590ca6cadba5",
+      "base": "5a8370cfadcec547065ee1704af3142989baf840",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/cb573829340d86e72ff7d8280a9dda57.json"
+    },
+    {
+      "id": "python-module-mutation-repeated-scan-budget",
+      "sid": "66e6c11e6c9bad029f787ba7fb24c004",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "6ac4593deee3adba092ab6e72cada15f431e731e",
+      "base": "530ffcf825709529232c4e602cd7cdf1f43dfe7a",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/66e6c11e6c9bad029f787ba7fb24c004.json"
+    },
+    {
+      "id": "dependency-failure-drops-independent-model-evidence",
+      "sid": "fd415b8bfe6a826913055da8bfee291c",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "dc0ba96f220bf0066892f98a6757a4c96d38335f",
+      "base": "8f11273e451dd41ba0b3fff1e73fbf41e57d3158",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/fd415b8bfe6a826913055da8bfee291c.json"
+    },
+    {
+      "id": "php-indexed-write-reenters-current-rhs",
+      "sid": "52a475e42993c43d6e43ea9806bc12f1",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "e55ed6f4a8aa392bd5186df034d9e4eede8eb250",
+      "base": "b8750280dd21c94110c4e0dfdf39700cfbf66305",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/52a475e42993c43d6e43ea9806bc12f1.json"
+    },
+    {
+      "id": "kotlin-value-class-this-loses-underlying-projection",
+      "sid": "cbf5d90d3e58a06108bf1a31c3f127d4",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "ba47ae3f428ea3e1d51d999176397a21ea71bff5",
+      "base": "3f2ebbee4f13dcd764c7b767c4370c5f5dfe1f97",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/cbf5d90d3e58a06108bf1a31c3f127d4.json"
+    },
+    {
+      "id": "go-nilness-ignores-modeled-nonreturn",
+      "sid": "c0a5690cda49adc1310232ee5776149f",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "09b006454e308fe885b4b6b10b35aaa7e86dcb7f",
+      "base": "58f59aa767dc1ed86efc9a4ff2e5647644f50de2",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/c0a5690cda49adc1310232ee5776149f.json"
+    },
+    {
+      "id": "java-static-getter-drops-incomplete-route",
+      "sid": "c299e2de2f181da4db287f3a35472612",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "02a3329d1d54ec101e636f31a3427178edd97f58",
+      "base": "c6e05f1044055726082a50f194221451db3fef8f",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/c299e2de2f181da4db287f3a35472612.json"
+    },
+    {
+      "id": "unproven-override-family-certifies-empty",
+      "sid": "b640ee52042c2e1f1e86ea7e871fb2c2",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "f5cf77da184060e453f69b0c4f04e27d1ba2ae8b",
+      "base": "c07ddd4c89ec3333fbeec270d510b35320cdcc37",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/b640ee52042c2e1f1e86ea7e871fb2c2.json"
+    },
+    {
+      "id": "js-synthetic-owner-leaks-file-summary",
+      "sid": "194256d409d2a69853ec58e64fe1daec",
+      "lifecycle": "suspended",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "at": "b73a383797683a2128fe176f85d9457a5f073ad0",
+      "base": "d64255dfec7971fa22bc48a85960fedfa149ef56",
+      "no_later_history": true,
+      "session_record": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-final-sessions/194256d409d2a69853ec58e64fe1daec.json"
+    }
+  ]
+}

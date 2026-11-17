@@ -1,0 +1,9 @@
+{
+  "recorded_at": "2026-11-17T04:47:40.024970+00:00",
+  "deadline_utc": "2026-11-17T05:17:40.024970+00:00",
+  "deadline_epoch": 1794892660.02497,
+  "lead_instruction": "Wait for ordinary usable codex4 cached report >=25; if unavailable in30minutes report to lead for decision. No profile switch/probe/restart/config change.",
+  "publication": "Parent completed accepted4local publications;13unchanged",
+  "prepared_batch": "briefs/bifrost-relation-leak-1",
+  "ready_manifest": "arms/leak-round1-driver/ready-to-recheck.json"
+}

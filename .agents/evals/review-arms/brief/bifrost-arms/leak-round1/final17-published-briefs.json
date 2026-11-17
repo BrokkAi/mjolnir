@@ -1,0 +1,309 @@
+{
+  "recorded_epoch": 1794891397.8788033,
+  "scope": "final17 published briefs after accepted single wording pass; no review admission performed",
+  "published_count": 17,
+  "edited_count": 4,
+  "unchanged_original_count": 13,
+  "briefs": [
+    {
+      "id": "python-filescope-enclosing-tie",
+      "sha256": "e177db0a803e68e3b94fb4ae387524ca704197db0336d6bde1fb7c2c2a3bb6f3",
+      "edited": false,
+      "original_writer_sha256": "e177db0a803e68e3b94fb4ae387524ca704197db0336d6bde1fb7c2c2a3bb6f3",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/python-filescope-enclosing-tie/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/python-filescope-enclosing-tie/blind-leak.json",
+      "blind_leak_record_sha256": "7455ea07e4301e8654bdb263bf0a898d4b478845f07b5f88b62734593eb20192"
+    },
+    {
+      "id": "cpp-template-inherited-base-signature",
+      "sha256": "7d64698bed4679ac74d926cc1864705ceaf7104dddf892a82efc34f9394ecbf3",
+      "edited": false,
+      "original_writer_sha256": "7d64698bed4679ac74d926cc1864705ceaf7104dddf892a82efc34f9394ecbf3",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/cpp-template-inherited-base-signature/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/cpp-template-inherited-base-signature/blind-leak.json",
+      "blind_leak_record_sha256": "2e5934a8ace15e2b501cb85895aeae4b2dddae2287d696ce261fa0e20099470c"
+    },
+    {
+      "id": "incompatible-semantic-bundle-late-gate",
+      "sha256": "75aa589daf0f1a09fb1a50c6a579e4208cc5cf4469543dff25dc22ac918fcf39",
+      "edited": false,
+      "original_writer_sha256": "75aa589daf0f1a09fb1a50c6a579e4208cc5cf4469543dff25dc22ac918fcf39",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/incompatible-semantic-bundle-late-gate/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/incompatible-semantic-bundle-late-gate/blind-leak.json",
+      "blind_leak_record_sha256": "6a9c2ee4481347916d81aeb53a620a98b5006376ad524f202322a607e8e52b55"
+    },
+    {
+      "id": "retained-fill-java-memo-loses-gap",
+      "sha256": "94d2e5da82871b5ad6f0fc116a3f6b4d8177e2ab38ee1788231055583291598b",
+      "edited": false,
+      "original_writer_sha256": "94d2e5da82871b5ad6f0fc116a3f6b4d8177e2ab38ee1788231055583291598b",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/retained-fill-java-memo-loses-gap/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/retained-fill-java-memo-loses-gap/blind-leak.json",
+      "blind_leak_record_sha256": "1f5457e989e83a5ed466072b9e8c72900e42a6e53d963fb4d51a6dac748ce1a8"
+    },
+    {
+      "id": "kotlin-source-constructor-steals-class-header-comment",
+      "sha256": "d36fcd30ab8544e8398541a034f34f3824f6ae6be23d83f341c5d75cd30dad0b",
+      "edited": false,
+      "original_writer_sha256": "d36fcd30ab8544e8398541a034f34f3824f6ae6be23d83f341c5d75cd30dad0b",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/kotlin-source-constructor-steals-class-header-comment/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/kotlin-source-constructor-steals-class-header-comment/blind-leak.json",
+      "blind_leak_record_sha256": "5955bbfe7ac7d3dc33092dc7b86c40749bf2e0785e1c5cee09fc366b22371f01"
+    },
+    {
+      "id": "mcp-default-advisory-reported-clean",
+      "sha256": "717c2880a703a6b2016aa96d0d116a0116d3073ddbe11d8f43499b5102c5ee46",
+      "edited": true,
+      "original_writer_sha256": "58cbbab7c391af92b80c56994089e49bcd6f22fb2a3574fb965ed900cac82555",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/mcp-default-advisory-reported-clean/brief.md",
+      "final_leak_round": 1,
+      "final_leak_label": "partial",
+      "judge_labels": {
+        "A": "partial",
+        "B": "partial"
+      },
+      "remaining_neutral_flag": true,
+      "retention_rule": "Neutral relations retained after single accepted wording rewrite; no second rewrite",
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/mcp-default-advisory-reported-clean/blind-leak.json",
+      "blind_leak_record_sha256": "e56fd60df36882c144be314f054b58f9a6af4b629bf5f7ff101cb9642ebb4e06"
+    },
+    {
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "sha256": "9fddbbb7634ef2cbd21d2969c22ee653515274e4ae6a7867859305b92f7c7367",
+      "edited": true,
+      "original_writer_sha256": "d3d5ab41659aec2e013db20b804b6db2104ef7124e2231ce07c849f9cc4dae47",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/go-receiver-poisons-package-result-contract-discovery/brief.md",
+      "final_leak_round": 1,
+      "final_leak_label": "partial",
+      "judge_labels": {
+        "A": "partial",
+        "B": "partial"
+      },
+      "remaining_neutral_flag": true,
+      "retention_rule": "Neutral relations retained after single accepted wording rewrite; no second rewrite",
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/go-receiver-poisons-package-result-contract-discovery/blind-leak.json",
+      "blind_leak_record_sha256": "c18954d29148fb46a4e401708840061143b0baf68f1f217306286287e83dd3b3"
+    },
+    {
+      "id": "python-module-binding-representative-after-event",
+      "sha256": "01a936a33c239537efdd025576eb1465279d193c7e402b1a820e26d86af8a95e",
+      "edited": true,
+      "original_writer_sha256": "f0a6730b61dd66e9698abc27fd487ad7a1dece75224ffb2d7f77985f4579bcc9",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/python-module-binding-representative-after-event/brief.md",
+      "final_leak_round": 1,
+      "final_leak_label": "partial",
+      "judge_labels": {
+        "A": "partial",
+        "B": "partial"
+      },
+      "remaining_neutral_flag": true,
+      "retention_rule": "Neutral relations retained after single accepted wording rewrite; no second rewrite",
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/python-module-binding-representative-after-event/blind-leak.json",
+      "blind_leak_record_sha256": "ae5329991542beecc1cfce691b7eeadf2e1b8d6ef161cf85a01cfc8115c114c7"
+    },
+    {
+      "id": "jvm-protected-unindexed-hierarchy-denied",
+      "sha256": "743e007aaa81b8252cc83bd4fb9da5f23c9449f0b42dfaa531a719dda90fe145",
+      "edited": false,
+      "original_writer_sha256": "743e007aaa81b8252cc83bd4fb9da5f23c9449f0b42dfaa531a719dda90fe145",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/jvm-protected-unindexed-hierarchy-denied/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/jvm-protected-unindexed-hierarchy-denied/blind-leak.json",
+      "blind_leak_record_sha256": "c6185137d0ca4bef014ce0523600343d2e7587ba7b11fe47403f63f331cb3871"
+    },
+    {
+      "id": "python-module-mutation-repeated-scan-budget",
+      "sha256": "29ea15013818656269f9d460976ae0057c4af7336de23f4d43419b3b6975a66f",
+      "edited": false,
+      "original_writer_sha256": "29ea15013818656269f9d460976ae0057c4af7336de23f4d43419b3b6975a66f",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/python-module-mutation-repeated-scan-budget/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/python-module-mutation-repeated-scan-budget/blind-leak.json",
+      "blind_leak_record_sha256": "6dd9f950990af52a947cb2c4b3494758f42877784b0a7cba8adb95cc888e0b62"
+    },
+    {
+      "id": "dependency-failure-drops-independent-model-evidence",
+      "sha256": "6dd8a1b188e7fb9eb74ec72646499a6a50efd630891b22729848752438f8db97",
+      "edited": false,
+      "original_writer_sha256": "6dd8a1b188e7fb9eb74ec72646499a6a50efd630891b22729848752438f8db97",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/dependency-failure-drops-independent-model-evidence/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/dependency-failure-drops-independent-model-evidence/blind-leak.json",
+      "blind_leak_record_sha256": "5b7fd8c021f4db14a614f9eb514ca1e43e013764bad10eb4889b2506b771dc0c"
+    },
+    {
+      "id": "php-indexed-write-reenters-current-rhs",
+      "sha256": "d864ae77f88daeeb3e3066200706c1fcb8931b8262da17a7ddd852ecbc198993",
+      "edited": false,
+      "original_writer_sha256": "d864ae77f88daeeb3e3066200706c1fcb8931b8262da17a7ddd852ecbc198993",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/php-indexed-write-reenters-current-rhs/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/php-indexed-write-reenters-current-rhs/blind-leak.json",
+      "blind_leak_record_sha256": "32ac294c11651bb7e5f16c47d9744d0e261593b08ceccf9b426c41c18735592f"
+    },
+    {
+      "id": "kotlin-value-class-this-loses-underlying-projection",
+      "sha256": "5b50798aa48da2ef569cf623d2faf8cfba109e669ba50b8916730b05b9184a2d",
+      "edited": false,
+      "original_writer_sha256": "5b50798aa48da2ef569cf623d2faf8cfba109e669ba50b8916730b05b9184a2d",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/kotlin-value-class-this-loses-underlying-projection/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/kotlin-value-class-this-loses-underlying-projection/blind-leak.json",
+      "blind_leak_record_sha256": "be5ea0212bfe81615eab46d0de0cb6d06899837b583c0797e5cde97c97d62e21"
+    },
+    {
+      "id": "go-nilness-ignores-modeled-nonreturn",
+      "sha256": "1cdec7f090f20dc9cd6b6f477ecd550135216fed591f9ba8e02e219dd631ec7c",
+      "edited": false,
+      "original_writer_sha256": "1cdec7f090f20dc9cd6b6f477ecd550135216fed591f9ba8e02e219dd631ec7c",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/go-nilness-ignores-modeled-nonreturn/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/go-nilness-ignores-modeled-nonreturn/blind-leak.json",
+      "blind_leak_record_sha256": "ed856acf26fa1260a4cbf71346881df602c7c895f0466f9542c30320d92689df"
+    },
+    {
+      "id": "java-static-getter-drops-incomplete-route",
+      "sha256": "a8bbdf1ff7330471b1b8c64622b8786e00c8c6e97d160ae61925d5775714bff4",
+      "edited": false,
+      "original_writer_sha256": "a8bbdf1ff7330471b1b8c64622b8786e00c8c6e97d160ae61925d5775714bff4",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/java-static-getter-drops-incomplete-route/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/java-static-getter-drops-incomplete-route/blind-leak.json",
+      "blind_leak_record_sha256": "203d87f58ddca0ed297988d48e64ada472e0e1d905b8f447a9f980dcfdf86499"
+    },
+    {
+      "id": "unproven-override-family-certifies-empty",
+      "sha256": "e3b1f5c97bcf02a1cdc20edfb0b4a58c9e084b60b0eb36462017899005054b8c",
+      "edited": true,
+      "original_writer_sha256": "1a8fcf5b391b01269b2a45339f2be60ada9a20541f39b2dd85995a2863ace629",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/unproven-override-family-certifies-empty/brief.md",
+      "final_leak_round": 1,
+      "final_leak_label": "caught",
+      "judge_labels": {
+        "A": "caught",
+        "B": "caught"
+      },
+      "remaining_neutral_flag": true,
+      "retention_rule": "Neutral relations retained after single accepted wording rewrite; no second rewrite",
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/unproven-override-family-certifies-empty/blind-leak.json",
+      "blind_leak_record_sha256": "fb87cc6dae6e09ff3773abf1f203e75909cc39e0f44ddff86770226367910046"
+    },
+    {
+      "id": "js-synthetic-owner-leaks-file-summary",
+      "sha256": "7fcafd151e1f8f8d185e7fd44ab7cfc446107c33ed5a1b7c0f5219a266270f70",
+      "edited": false,
+      "original_writer_sha256": "7fcafd151e1f8f8d185e7fd44ab7cfc446107c33ed5a1b7c0f5219a266270f70",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/js-synthetic-owner-leaks-file-summary/brief.md",
+      "final_leak_round": 0,
+      "final_leak_label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "remaining_neutral_flag": false,
+      "retention_rule": null,
+      "blind_leak_record_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/js-synthetic-owner-leaks-file-summary/blind-leak.json",
+      "blind_leak_record_sha256": "3ac33c2220d697b777a066fabab5c92116a50e5dd6df85a7a95fdbdc4e796aad"
+    }
+  ],
+  "final_label_counts": {
+    "missed": 13,
+    "partial": 3,
+    "caught": 1
+  },
+  "remaining_neutral_flags": [
+    "mcp-default-advisory-reported-clean",
+    "go-receiver-poisons-package-result-contract-discovery",
+    "python-module-binding-representative-after-event",
+    "unproven-override-family-certifies-empty"
+  ]
+}
