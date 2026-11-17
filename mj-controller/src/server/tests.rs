@@ -983,7 +983,9 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
     let response = app
         .clone()
         .oneshot(
-            Request::get("/api/sessions/session-1/notification-message")
+            Request::get(
+                "/api/sessions/session-1/notification-message?holder=session-1&requests=elicitation-1",
+            )
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -999,12 +1001,40 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
         "Which CI architecture should the workflow use?"
     );
 
-    let missing = app
-        .oneshot(
-            Request::get("/api/sessions/unknown-session/notification-message")
-                .header(COOKIE, cookie)
+    // A card that captured another holder or request gets a conflict, never text.
+    for stale in [
+        "holder=other-session&requests=elicitation-1",
+        "holder=session-1&requests=elicitation-0",
+        "holder=session-1&requests=elicitation-1&question=agent:9",
+        "holder=session-1",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{stale}"
+                ))
+                .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["code"], "notification_changed");
+    }
+
+    let missing = app
+        .oneshot(
+            Request::get(
+                "/api/sessions/unknown-session/notification-message?holder=unknown-session",
+            )
+            .header(COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap(),
         )
         .await
         .unwrap();

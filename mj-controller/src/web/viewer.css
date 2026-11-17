@@ -1097,6 +1097,11 @@ details.mailbox-event[open] > summary::before {
   margin-bottom: 12px;
 }
 
+/* Hidden must beat the flex above: a launch-failure card has no Quick reply. */
+.inbox-reply[hidden] {
+  display: none;
+}
+
 .inbox-reply input {
   flex: 1;
   min-width: 0;

@@ -157,6 +157,19 @@ pub(super) async fn session_row(
     Ok(response)
 }
 
+/// The identity a card captured: the session it opens, the pending request ids
+/// (comma separated) and the question message id. The answer is for exactly
+/// this identity or a conflict, so text is never shown under another's card.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NotificationMessageQuery {
+    holder: String,
+    #[serde(default)]
+    requests: String,
+    #[serde(default)]
+    question: String,
+}
+
 /// Resolve the first source of the shared rule to text. A question read that
 /// finds nothing is "not available", not a reason to show another message.
 pub(super) fn notification_message_text(
@@ -185,6 +198,7 @@ pub(super) fn notification_message_text(
 pub(super) async fn notification_message(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
+    Query(expected): Query<NotificationMessageQuery>,
 ) -> Result<Response<Body>, ApiError> {
     use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
     validate_public_id(&session_id)?;
@@ -199,6 +213,22 @@ pub(super) async fn notification_message(
             .unwrap_or(&session_id)
             .to_owned();
         let holder_session = snapshot.sessions.get(&holder).unwrap_or(session);
+        let requests = holder_session
+            .pending_elicitations
+            .iter()
+            .map(|request| request.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        if holder != expected.holder
+            || requests != expected.requests
+            || holder_session.question_message.as_deref().unwrap_or("") != expected.question
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "the notification changed; its message will be read again",
+            )
+            .with_code(Some("notification_changed")));
+        }
         (
             holder.clone(),
             if session.attention == mj_core::attention::SessionAttention::NeedsInput {

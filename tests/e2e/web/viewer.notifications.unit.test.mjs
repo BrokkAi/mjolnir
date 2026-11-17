@@ -51,7 +51,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
       createElement: tag => new Node(tag),
       querySelector: selector => (selector === '#inbox' ? container : (context.errorNode ??= new Node('p'))),
     },
-    viewerState: { rows: new Map(rows.map(row => [row.id, row])) },
+    viewerState: { cursor: { sequence: 1 }, rows: new Map(rows.map(row => [row.id, row])) },
     dismissedNotifications: new Map(),
     pendingActions: new Set(),
     route: { name: 'notifications' },
@@ -59,6 +59,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
     answers,
     nav,
     snapshot: { launch_failures: launchFailures },
+    URLSearchParams,
     dismissedLaunchFailures: new Set(),
     pendingSubmissions: new Map(),
     renderPendingSubmissions: () => {},
@@ -91,7 +92,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
     request: async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : null;
       requests.push({ url, body });
-      const answer = answers.get(body ? `${body.action}:${body.session_id}` : url);
+      const answer = answers.get(body ? `${body.action}:${body.session_id}` : url.split('?')[0]);
       if (answer instanceof Error) throw answer;
       if (typeof answer === 'function') return answer();
       return answer ?? null;
@@ -323,7 +324,7 @@ test('a failed message read is not cached: it retries when the card is shown aga
   const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2)],
     { texts: { '/api/sessions/a/notification-message': new Error('offline') } });
   await settle();
-  const reads = () => view.requests.filter(r => r.url.endsWith('/a/notification-message')).length;
+  const reads = () => view.requests.filter(r => r.url.includes('/a/notification-message')).length;
   assert.equal(reads(), 1);
   assert.match(view.nodes.body.textContent, /Could not read the message: offline/);
   assert.equal(view.nodes.retry.hidden, false);
@@ -353,7 +354,7 @@ test('a new pending form, from the same or another holder, reads the message aga
   view.answers.set('/api/sessions/p/notification-message', { text: 'form r1' });
   view.render();
   await settle();
-  const reads = () => view.requests.filter(r => r.url.endsWith('/p/notification-message')).length;
+  const reads = () => view.requests.filter(r => r.url.includes('/p/notification-message')).length;
   assert.equal(reads(), 1);
   view.context.viewerState.rows.get('c1').pending_elicitation_ids = ['r2'];
   view.answers.set('/api/sessions/p/notification-message', { text: 'form r2' });
@@ -503,4 +504,40 @@ test('when the draft cannot be checked, or the composer is no longer empty, noth
   assert.equal(typed.context.composer, 'hello');
   assert.equal(typed.nodes.input.value, '/model fast', 'the command stays in Quick reply');
   assert.equal(typed.read('composerHandoff'), null);
+});
+
+test('the message request carries the identity the card captured, and a conflict is discarded until the next snapshot', async () => {
+  const conflict = Object.assign(new Error('the notification changed'), { code: 'notification_changed', status: 409 });
+  const view = screen([row('p', 'needs_input', 3, { form_holder: 'c1', question_message: 'agent:p' }),
+    row('c1', 'working', 1, { subagent_parent_id: 'p', pending_elicitation_ids: ['r1', 'r2'] })],
+  { texts: { '/api/sessions/p/notification-message': conflict } });
+  await settle();
+  const reads = () => view.requests.filter(r => r.url.includes('/p/notification-message'));
+  const params = new URL(reads()[0].url, 'http://x').searchParams;
+  assert.deepEqual(Object.fromEntries(params), { holder: 'c1', requests: 'r1,r2', question: '' });
+  assert.equal(view.nodes.body.textContent, 'loading…', 'a conflicting answer shows no text');
+  assert.equal(view.read('[...inboxTexts.values()].some(entry => entry.state === "ready")'), false, 'nothing is cached under the card');
+  view.render(); view.render();
+  await settle();
+  assert.equal(reads().length, 1, 'the same snapshot does not ask again');
+  // The next snapshot brings the new holder; the card asks for that identity.
+  view.answers.set('/api/sessions/p/notification-message', { session_id: 'c2', text: 'B asks' });
+  view.context.viewerState.rows.set('c2', row('c2', 'working', 1, { subagent_parent_id: 'p', pending_elicitation_ids: ['r9'] }));
+  view.context.viewerState.rows.get('p').form_holder = 'c2';
+  view.context.viewerState.cursor = { sequence: 2 };
+  view.render();
+  await settle();
+  const latest = new URL(reads().at(-1).url, 'http://x').searchParams;
+  assert.deepEqual(Object.fromEntries(latest), { holder: 'c2', requests: 'r9', question: '' });
+  assert.equal(view.nodes.body.textContent, 'B asks');
+  assert.equal(view.read('inboxDestination(inboxEntries()[0])'), 'c2', 'text and destination name the same holder');
+});
+
+test('a card without a Quick reply hides its form even though the form is a flex box', () => {
+  const css = readFileSync(new URL('../../../mj-controller/src/web/viewer.css', import.meta.url), 'utf8');
+  assert.match(css, /\.inbox-reply\s*\{[^}]*display:\s*flex/);
+  assert.match(css, /\.inbox-reply\[hidden\]\s*\{\s*display:\s*none;/);
+  const view = screen([row('a', 'important', 1)], { launchFailures: [{ id: 'f', workspace_id: 'w' }] });
+  view.nodes.skip.onclick();
+  assert.equal(view.nodes.reply.hidden, true);
 });

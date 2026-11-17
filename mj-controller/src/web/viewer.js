@@ -1281,27 +1281,41 @@ function inboxEntries() {
 // request and which holder, so a new message or form reads again. A failed read
 // is not kept: it is tried again when the card is shown again or on Retry.
 const inboxTexts = new Map();
-function inboxTextKey(row) {
+/// What the card shows the message of: the destination, its pending request
+/// ids and its question message. The daemon answers for exactly this identity
+/// or reports a conflict, so a text is never kept under another card's key.
+function inboxTextIdentity(row) {
   const holder = inboxDestination(row);
   const holderRow = sessionById(holder) || row;
   const requests = holderRow.pending_elicitations?.map(request => request.id)
     ?? holderRow.pending_elicitation_ids ?? [];
-  return [row.id, holder, row.attention, requests.join(','), row.question_message || '',
+  return { holder, requests: requests.join(','), question: holderRow.question_message || '' };
+}
+function inboxTextKey(row) {
+  const identity = inboxTextIdentity(row);
+  return [row.id, identity.holder, row.attention, identity.requests, identity.question,
     JSON.stringify(row.notification_dismissal ?? null), row.last_message_at_ms || ''].join('|');
 }
 function inboxText(row, key) {
   const known = inboxTexts.get(key);
-  if (known) return known;
+  // A conflict waits for the next snapshot, once, rather than asking again.
+  if (known && !(known.state === 'stale' && known.sequence !== viewerState.cursor?.sequence)) return known;
   const entry = { state: 'loading', text: '' };
   inboxTexts.set(key, entry);
-  // The daemon resolves the same destination from the card's session.
-  request(`/api/sessions/${encodeURIComponent(row.id)}/notification-message`)
+  const identity = inboxTextIdentity(row);
+  const query = new URLSearchParams({ holder: identity.holder, requests: identity.requests, question: identity.question });
+  request(`/api/sessions/${encodeURIComponent(row.id)}/notification-message?${query}`)
     .then(answer => {
       entry.state = typeof answer?.text === 'string' ? 'ready' : 'missing';
       entry.text = answer?.text || '';
     }, error => {
-      entry.state = 'error';
-      entry.text = error.message;
+      if (error.code === 'notification_changed') {
+        entry.state = 'stale';
+        entry.sequence = viewerState.cursor?.sequence;
+      } else {
+        entry.state = 'error';
+        entry.text = error.message;
+      }
     })
     .then(() => { if (route.name === 'notifications') renderInbox(); });
   return entry;
@@ -1577,7 +1591,7 @@ function renderInbox() {
     inboxShownKey = key;
     const text = inboxText(entry, key);
     retryable = text.state === 'error';
-    setInboxText(nodes.body, text.state === 'loading' ? 'loading…'
+    setInboxText(nodes.body, text.state === 'loading' || text.state === 'stale' ? 'loading…'
       : text.state === 'missing' ? 'message not available'
       : text.state === 'error' ? `Could not read the message: ${text.text}`
       : text.text || (waiting ? 'Waiting for your input' : 'Important update'));
