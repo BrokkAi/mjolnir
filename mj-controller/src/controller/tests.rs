@@ -3188,6 +3188,12 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         "registration is idempotent"
     );
     assert_eq!(child.kind, mj_core::subagent::SubagentKind::Reviewer);
+    // A reviewer carries no project memory even though its parent does: the
+    // staged profile then holds none (#1580, memory was 99.96% of its upload).
+    assert!(
+        !controller.state.sessions[parent_id].no_project_memory
+            && controller.state.sessions[&child.child_session_id].no_project_memory
+    );
     assert_eq!(child.profile_id, "resolved-reviewer");
     assert_eq!(child.model.as_deref(), Some("resolved-model"));
     assert!(child.handback_tool);
