@@ -1082,6 +1082,15 @@ details.mailbox-event[open] > summary::before {
   border-color: var(--accent);
 }
 
+.inbox-message-pager:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .inbox-message {
   margin: 0 0 12px;
   padding: 0 1ch;

@@ -1200,10 +1200,9 @@ function liveSessions() {
 // The notifications screen
 // ---------------------------------------------------------------------------
 //
-// One card at a time, as in the terminal dashboard's pane: the sessions whose
-// daemon-owned attention is `?` or `!`, `?` first and newest first within each
-// band, followed by launch failures and sessions with `×`. Sub-agents are left
-// out; a parent promoted by a child's pending form opens that child.
+// The daemon publishes the message stacks, shown one card at a time with
+// `?` before `!` and newest first within each band. Launch failures and
+// sessions with `×` follow.
 
 /// Cards the person skipped, oldest skip first, by card identity: the session
 /// and the notification it shows. Skipping rotates a card to the back, so a key
@@ -1228,48 +1227,63 @@ function inboxSessionFailed(entry) {
   return entry.attention === 'failed' || entry.attention === 'unreachable';
 }
 
-/// The session a card is about: it shows that session's message, Quick reply
-/// sends to it and Go to Session opens it. A parent promoted by a child's
-/// pending request is about the child (the form holder); a launch failure is
-/// about the session it was for, when there is one.
+/// Quick reply sends to this session and Go to Session opens it. A parent
+/// promoted by a child's pending request opens the form holder. A launch
+/// failure opens the session it was for, when there is one.
 function inboxDestination(entry) {
   if (entry.launchFailure) return sessionById(entry.launchFailure.session_id)?.id ?? null;
+  if (entry.notification_card) return entry.notification_card.holder ?? entry.id;
   if (inboxSessionFailed(entry)) return entry.id;
   const holder = childFormHolder(entry);
   return holder && sessionById(holder) ? holder : entry.id;
 }
 
-/// The identity of a card, and the one owner of it: the session, the
-/// destination holding the request, the pending request ids, the question
-/// message and the dismissal target. Skip, the message cache and a gesture's
-/// captured card all key on this, so a new request, a new holder or a new
-/// notification is a new card for every one of them.
+/// Skip, message selection and captured gestures share the card's identity.
+/// A change to the visible messages or the live request starts a new card.
 function inboxKey(entry) {
   if (entry.launchFailure) return `launch-failure|${entry.launchFailure.id}`;
+  const stack = entry.notification_card;
+  if (stack) return JSON.stringify([entry.id, stack.holder, stack.badge, stack.dismissal,
+    stack.entries, stack.form?.request_id]);
   const identity = inboxTextIdentity(entry);
   return [entry.id, identity.holder, entry.attention, identity.requests, identity.question,
     JSON.stringify(entry.notification_dismissal ?? null), entry.last_message_at_ms || ''].join('|');
 }
 
+function inboxBadge(entry) {
+  return entry.notification_card?.badge ?? entry.attention;
+}
+
 /// What a gesture on a card acts on, captured when the gesture starts so a
 /// snapshot that changes the first card meanwhile cannot redirect it.
 function inboxCard(entry) {
+  const stack = entry.notification_card;
   return {
     key: inboxKey(entry),
     id: entry.id,
     destination: inboxDestination(entry),
-    dismissal: entry.notification_dismissal ?? null,
+    dismissal: stack ? stack.dismissal : entry.notification_dismissal ?? null,
     launchFailureId: entry.launchFailure?.id ?? null,
-    canReply: !entry.launchFailure && !inboxSessionFailed(entry),
-    important: entry.attention === 'important',
+    canReply: Boolean(stack) || (!entry.launchFailure && !inboxSessionFailed(entry)),
+    badge: inboxBadge(entry),
   };
 }
 
 /// Every card, in order. The one place the list, the count and the bulk clear
 /// read from, so they cannot disagree.
 function inboxEntries() {
-  const rows = [...viewerState.rows.values()].filter(row => !isSubagentSession(row) && hasNotification(row));
-  const band = row => row.attention === 'needs_input' ? 0 : row.attention === 'important' ? 1 : row.launchFailure ? 2 : 3;
+  const rows = [...viewerState.rows.values()].filter(row => {
+    const stack = row.notification_card;
+    if (stack) return dismissedNotifications.get(row.id) !== JSON.stringify(stack.dismissal);
+    // Older daemons omit notification_card. New daemons publish null for
+    // sessions with no card, while failures still come from attention.
+    return (!Object.hasOwn(row, 'notification_card') || inboxSessionFailed(row))
+      && !isSubagentSession(row) && hasNotification(row);
+  });
+  const band = row => {
+    const badge = inboxBadge(row);
+    return badge === 'needs_input' ? 0 : badge === 'important' ? 1 : row.launchFailure ? 2 : 3;
+  };
   const all = [...rows, ...launchFailureEntries()].sort((left, right) =>
     band(left) - band(right)
     || sessionMessageMs(right) - sessionMessageMs(left)
@@ -1280,19 +1294,15 @@ function inboxEntries() {
     if (!byKey.has(inboxSkipped[index])) inboxSkipped.splice(index, 1);
   }
   return [
-    ...all.filter(entry => !inboxSkipped.includes(inboxKey(entry))),
+    ...[...byKey].filter(([key]) => !inboxSkipped.includes(key)).map(([, entry]) => entry),
     ...inboxSkipped.map(key => byKey.get(key)),
   ];
 }
 
-// The full message per card, read from the daemon because a summary row
-// carries no text. The key names what the card shows, including which pending
-// request and which holder, so a new message or form reads again. A failed read
-// is not kept: it is tried again when the card is shown again or on Retry.
+// Transcript text is cached per session, holder and entry. A failed read
+// can be retried the next time the entry is shown or by pressing Retry.
 const inboxTexts = new Map();
-/// What the card shows the message of: the destination, its pending request
-/// ids and its question message. The daemon answers for exactly this identity
-/// or reports a conflict, so a text is never kept under another card's key.
+/// Text identity for a card served by an older daemon.
 function inboxTextIdentity(row) {
   const holder = inboxDestination(row);
   const holderRow = sessionById(holder) || row;
@@ -1300,23 +1310,43 @@ function inboxTextIdentity(row) {
     ?? holderRow.pending_elicitation_ids ?? [];
   return { holder, requests: requests.join(','), question: holderRow.question_message || '' };
 }
-function inboxText(row, key) {
-  const known = inboxTexts.get(key);
-  // A conflict waits for the next snapshot, once, rather than asking again.
-  if (known && !(known.state === 'stale' && known.sequence !== viewerState.cursor?.sequence)) return known;
-  const entry = { state: 'loading', text: '' };
-  inboxTexts.set(key, entry);
+function inboxMessageQuery(row, item) {
+  if (item) {
+    const messageId = item.message?.found;
+    return new URLSearchParams(messageId === undefined
+      ? { through: item.completed_ordinal }
+      : { message_id: messageId });
+  }
   const identity = inboxTextIdentity(row);
   const query = new URLSearchParams({ holder: identity.holder, requests: identity.requests, question: identity.question });
   // An `!` card names the message by its ReadThrough ordinal, so a newer reply
   // can never answer for it.
   const through = row.notification_dismissal?.read_through;
   if (through !== undefined) query.set('through', String(through));
+  return query;
+}
+
+function inboxText(row, key, item) {
+  const known = inboxTexts.get(key);
+  // A legacy conflict waits for the next snapshot before asking again.
+  if (known && !(known.state === 'stale' && known.sequence !== viewerState.cursor?.sequence)) return known;
+  const entry = { state: 'loading', text: '' };
+  inboxTexts.set(key, entry);
+  const query = inboxMessageQuery(row, item);
+  function isCurrent() {
+    if (inboxTexts.get(key) !== entry) return false;
+    if (route.name === 'notifications' && inboxShownKey === key) return true;
+    inboxTexts.delete(key);
+    return false;
+  }
   request(`/api/sessions/${encodeURIComponent(row.id)}/notification-message?${query}`)
     .then(answer => {
+      if (!isCurrent()) return;
       entry.state = typeof answer?.text === 'string' ? 'ready' : 'missing';
       entry.text = answer?.text || '';
+      renderInbox();
     }, error => {
+      if (!isCurrent()) return;
       if (error.code === 'notification_changed') {
         entry.state = 'stale';
         entry.sequence = viewerState.cursor?.sequence;
@@ -1324,8 +1354,8 @@ function inboxText(row, key) {
         entry.state = 'error';
         entry.text = error.message;
       }
-    })
-    .then(() => { if (route.name === 'notifications') renderInbox(); });
+      renderInbox();
+    });
   return entry;
 }
 
@@ -1336,6 +1366,7 @@ let inboxError = null; // { key | destination, text }: the refusal the card show
 let inboxBusy = false;
 let inboxShown = null; // the destination the quick-reply line currently holds
 let inboxShownKey = null; // the text key last rendered, to retry a failed read
+let inboxSelection = null; // { key, index } for the displayed stack
 
 const inboxNodes = (() => {
   const container = document.querySelector('#inbox');
@@ -1345,6 +1376,14 @@ const inboxNodes = (() => {
   const headerText = el('span', 'inbox-header-text');
   header.append(glyph, headerText);
   const body = el('pre', 'inbox-message');
+  const message = el('div', 'inbox-message-area');
+  const pager = el('div', 'inbox-message-pager');
+  const previous = button('Previous', 'secondary');
+  const position = el('span', 'dim');
+  position.setAttribute('aria-live', 'polite');
+  const next = button('Next', 'secondary');
+  previous.type = next.type = 'button';
+  pager.append(previous, position, next);
   const retry = button('Retry', 'secondary', { inboxAction: 'retry' });
   retry.type = 'button';
   const reply = el('form', 'inbox-reply');
@@ -1367,10 +1406,12 @@ const inboxNodes = (() => {
   const cardError = el('p', 'error');
   cardError.setAttribute('role', 'alert');
   const card = el('div', 'card inbox-card');
-  card.append(header, body, retry, cardError, reply, actions);
+  message.append(pager, body, retry);
+  card.append(header, message, cardError, reply, actions);
   const empty = el('p', 'dim', 'No notifications.');
   container.append(card, empty);
-  return { card, empty, glyph, headerText, body, retry, input, send, open, clear, skip, clearAll, cardError, reply };
+  return { card, empty, glyph, headerText, body, pager, previous, position, next, retry,
+    input, send, open, clear, skip, clearAll, cardError, reply };
 })();
 
 /// The persistent buttons outlive the card they show, so a gesture acts on the
@@ -1687,11 +1728,18 @@ bindInboxControl(inboxNodes.open, inboxOpen);
 bindInboxControl(inboxNodes.clear, inboxClearNext);
 bindInboxControl(inboxNodes.skip, inboxSkip);
 bindInboxControl(inboxNodes.clearAll, inboxClearAll);
-bindInboxControl(inboxNodes.retry, card => {
-  const entry = inboxEntries().find(item => inboxKey(item) === card.key);
-  if (entry && !entry.launchFailure) inboxTexts.delete(inboxKey(entry));
+bindInboxControl(inboxNodes.retry, key => {
+  if (key !== inboxShownKey) return;
+  inboxTexts.delete(key);
   renderInbox();
 });
+function moveInboxSelection(selection, offset) {
+  if (selection !== inboxSelection) return;
+  inboxSelection = { key: selection.key, index: selection.index + offset };
+  renderInbox();
+}
+bindInboxControl(inboxNodes.previous, selection => moveInboxSelection(selection, -1));
+bindInboxControl(inboxNodes.next, selection => moveInboxSelection(selection, 1));
 // Send and Enter in the line are one gesture on the card the form showed. An
 // empty line is Go to Session.
 bindInboxControl(inboxNodes.send, inboxSend);
@@ -1720,40 +1768,59 @@ function renderInbox() {
   const nodes = inboxNodes;
   nodes.card.hidden = !entry;
   nodes.empty.hidden = Boolean(entry);
-  if (!entry) { inboxShown = null; inboxShownKey = null; return; }
+  if (!entry) { inboxShown = null; inboxShownKey = null; inboxSelection = null; return; }
   const card = inboxCard(entry);
-  const cards = entries.filter(item => item.attention === 'important' && item.notification_dismissal).map(inboxCard);
-  for (const control of [nodes.open, nodes.clear, nodes.skip, nodes.retry, nodes.send]) control._binding = card;
+  const cards = entries.filter(item => inboxBadge(item) === 'important').map(inboxCard).filter(item => item.dismissal);
+  for (const control of [nodes.open, nodes.clear, nodes.skip, nodes.send]) control._binding = card;
   nodes.clearAll._binding = cards;
   const launchFailure = entry.launchFailure;
   const failure = !card.canReply;
-  const waiting = entry.attention === 'needs_input';
+  const waiting = card.badge === 'needs_input';
   setInboxText(nodes.glyph, failure ? '×' : waiting ? '?' : '!');
   nodes.glyph.className = `session-attention-item alert inbox-glyph ${failure ? 'failed' : waiting ? 'waiting' : 'important'}`;
-  const label = launchFailure ? 'Launch failed' : entry.attention === 'unreachable' ? 'Unreachable'
+  const label = launchFailure ? 'Launch failed' : card.badge === 'unreachable' ? 'Unreachable'
     : failure ? 'Failed' : waiting ? 'Input needed' : 'Important';
   nodes.glyph.setAttribute('aria-label', label);
   const age = launchFailure ? '' : `${formatClock(serverClockMs() - sessionMessageMs(entry))} ago`;
   setInboxText(nodes.headerText, [entry.title || entry.id, entry.project_label, age, `${entries.length} left`]
     .filter(Boolean).join(' · '));
+  const stack = entry.notification_card;
+  // The live form stays in front of completed messages when both are present.
+  const count = stack ? stack.entries.length + Number(Boolean(stack.form)) : 0;
+  if (!count) inboxSelection = null;
+  else if (inboxSelection?.key !== card.key) inboxSelection = { key: card.key, index: count - 1 };
+  const index = inboxSelection?.index;
+  nodes.pager.hidden = !count;
+  setInboxText(nodes.position, count ? `${index + 1} of ${count}` : '');
+  nodes.previous.disabled = !count || index === 0;
+  nodes.next.disabled = !count || index === count - 1;
+  nodes.previous._binding = nodes.previous.disabled ? null : inboxSelection;
+  nodes.next._binding = nodes.next.disabled ? null : inboxSelection;
+
   let retryable = false;
+  const item = stack?.entries[index];
+  const form = stack?.form;
   if (failure) {
     inboxShownKey = null;
     setInboxText(nodes.body, launchFailure ? launchFailure.error || LAUNCH_FAILURE_TEXT
       : entry.launch_error || entry.storage_problem || entry.configuration_issue || entry.move_recovery?.failure_notice || label);
+  } else if (stack && !item) {
+    inboxShownKey = null;
+    setInboxText(nodes.body, form?.message ?? 'message not available');
   } else {
-    const key = inboxKey(entry);
-    // Showing a card again tries a failed read again; the same card never loops.
+    const key = item ? JSON.stringify([entry.id, card.destination, item]) : card.key;
+    // Showing the entry again retries a failed read without looping on a render.
     if (key !== inboxShownKey && inboxTexts.get(key)?.state === 'error') inboxTexts.delete(key);
     inboxShownKey = key;
-    const text = inboxText(entry, key);
+    const text = inboxText(entry, key, item);
     retryable = text.state === 'error';
     setInboxText(nodes.body, text.state === 'loading' || text.state === 'stale' ? 'loading…'
       : text.state === 'missing' ? 'message not available'
       : text.state === 'error' ? `Could not read the message: ${text.text}`
-      : text.text || (waiting ? 'Waiting for your input' : 'Important update'));
+      : text.text || ((item?.kind ?? card.badge) === 'needs_input' ? 'Waiting for your input' : 'Important update'));
   }
   nodes.retry.hidden = !retryable;
+  nodes.retry._binding = retryable ? inboxShownKey : null;
   nodes.reply.hidden = failure;
   if (inboxShown !== card.destination) {
     inboxShown = card.destination;
