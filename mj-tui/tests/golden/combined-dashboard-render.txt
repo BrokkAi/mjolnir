@@ -1,3 +1,106 @@
+=== midsize support panes show nine content rows (160x100) ===
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default ?1                                      ≡ ││                                                                                                         │
+╰───────────────────────────────────────────────────╯│                                                                                                         │
+╭ Sessions ────────────────────────────── ▁   ▄   □ ╮│                                                                                                         │
+│ Create   Open   Filter: ________________________  ││                                                                                                         │
+│hel ───────────────────────────────────────────────││                                                                                                         │
+│› ? ACP pretty name                            ◇ ⋯ ││                                                                                                         │
+│  Question  podman  codex-1                        ││                                                                                                         │
+│  │ No messages yet                                ││                                                                                                         │
+│  │                                                ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                            ✦  M J O L N I R                                             │
+│                                                   ││                                                                                                         │
+│                                                   ││                               Select a session to open its conversation.                                │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ No conversation open ───────────────────────────────────────────────────────────────────────────────────╮
+│                                                   ││No conversation open.                                                                                    │
+│                                                   ││Press Tab for Sessions, then Enter on the one to open.                                                   │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ Targets ▾ ─────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                                   ││  Host / fleet  Targets  CPU          RAM                                                                ▐
+│                                                   ││  host-01       podman   unavailable                                                                     ▐
+│                                                   ││  host-02       podman   unavailable                                                                     ▐
+│                                                   ││  host-03       podman   unavailable                                                                     ▐
+│                                                   ││  host-04       podman   unavailable                                                                     ▐
+│                                                   ││  host-05       podman   unavailable                                                                     ▐
+│                                                   ││  host-06       podman   unavailable                                                                     │
+│                                                   ││  host-07       podman   unavailable                                                                     │
+│                                                   ││  host-08       podman   unavailable                                                                     │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                                   ││             Harness      Weekly      Resets  5H Resets                                                  ▐
+│                                                   ││  claude-01  Claude Code  refreshing…                                                                    ▐
+│                                                   ││  claude-02  Claude Code  refreshing…                                                                    ▐
+│                                                   ││  claude-03  Claude Code  refreshing…                                                                    ▐
+│                                                   ││  claude-04  Claude Code  refreshing…                                                                    │
+│                                                   ││  claude-05  Claude Code  refreshing…                                                                    │
+│                                                   ││  claude-06  Claude Code  refreshing…                                                                    │
+│                                                   ││  claude-07  Claude Code  refreshing…                                                                    │
+│                                                   ││  claude-08  Claude Code  refreshing…                                                                    │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ Notifications (1) ─────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                                   ││? ACP pretty name · hel · <age>                                                                          │
+│                                                   ││                                                                                                         │
+│                                                   ││ Question line 1                                                                                         │
+│                                                   ││ Question line 2                                                                                         │
+│                                                   ││ Question line 3                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││Quick reply:                                                                                        Send │
+│                                                   ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                                                   │
+╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · o next (?1) · b panes · q detach · : / ? palette
+layout: sessions=Rect { x: 0, y: 3, width: 53, height: 96 }; transcript=Rect { x: 53, y: 0, width: 107, height: 62 }; prompt=Rect { x: 53, y: 62, width: 107, height: 4 }; targets=Rect { x: 53, y: 66, width: 107, height: 11 }; quota=Rect { x: 53, y: 77, width: 107, height: 11 }; notifications=Rect { x: 53, y: 88, width: 107, height: 11 }
+
 === empty standby composer (100x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Transition · Resuming ─── ◇   ⋯ ? ╮
 │ default                            ≡ ││podman · ACP pretty name                                  │
@@ -39,7 +142,7 @@
 │                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · shift+c cancel resuming · q detach · : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 22 }; prompt=Rect { x: 40, y: 22, width: 60, height: 5 }; targets=Rect { x: 40, y: 27, width: 60, height: 3 }; quota=Rect { x: 40, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 22 }; prompt=Rect { x: 40, y: 22, width: 60, height: 5 }; targets=Rect { x: 40, y: 27, width: 60, height: 3 }; quota=Rect { x: 40, y: 30, width: 60, height: 6 }; notifications=Rect { x: 40, y: 36, width: 60, height: 3 }
 
 === split panes retain the inactive Moving draft and only focus the active composer (160x55) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ ◆ A | Conversation  Transition · Moving ── ◆   ⋯ × ╮╭ Browse | Conversation  Transition · Resum ◇   ⋯ ? ╮
@@ -140,7 +243,7 @@ inactive prompt height: 11; desired: 11; focused cursor: Position { x: 123, y: 3
 │                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 24 }; prompt=Rect { x: 40, y: 24, width: 60, height: 3 }; targets=Rect { x: 40, y: 27, width: 60, height: 3 }; quota=Rect { x: 40, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 24 }; prompt=Rect { x: 40, y: 24, width: 60, height: 3 }; targets=Rect { x: 40, y: 27, width: 60, height: 3 }; quota=Rect { x: 40, y: 30, width: 60, height: 6 }; notifications=Rect { x: 40, y: 36, width: 60, height: 3 }
 
 === wrapped standby draft (100x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Transition · Starting ─── ◇   ⋯ ? ╮
@@ -183,7 +286,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x
 │                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · shift+c cancel launch · q detach · : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 18 }; prompt=Rect { x: 40, y: 18, width: 60, height: 9 }; targets=Rect { x: 40, y: 27, width: 60, height: 3 }; quota=Rect { x: 40, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 18 }; prompt=Rect { x: 40, y: 18, width: 60, height: 9 }; targets=Rect { x: 40, y: 27, width: 60, height: 3 }; quota=Rect { x: 40, y: 30, width: 60, height: 6 }; notifications=Rect { x: 40, y: 36, width: 60, height: 3 }
 desired prompt height: 9
 standby prompt during suspension: false
 
@@ -228,7 +331,7 @@ standby prompt during suspension: false
 │                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · shift+c cancel launch · q detach · : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 22 }; prompt=Rect { x: 40, y: 22, width: 60, height: 5 }; targets=Rect { x: 40, y: 27, width: 60, height: 3 }; quota=Rect { x: 40, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 22 }; prompt=Rect { x: 40, y: 22, width: 60, height: 5 }; targets=Rect { x: 40, y: 27, width: 60, height: 3 }; quota=Rect { x: 40, y: 30, width: 60, height: 6 }; notifications=Rect { x: 40, y: 36, width: 60, height: 3 }
 layout allocation: prompt=6; targets=15; sessions=9; quota=3; transcript=3
 
 === support panes side=Left sessions=Minimized threshold=80 (80x40) ===
@@ -272,7 +375,7 @@ layout allocation: prompt=6; targets=15; sessions=9; quota=3; transcript=3
 │                  ││Nothing needs you                                         │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x: 20, y: 0, width: 60, height: 23 }; prompt=Rect { x: 20, y: 23, width: 60, height: 4 }; targets=Rect { x: 20, y: 27, width: 60, height: 3 }; quota=Rect { x: 20, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x: 20, y: 0, width: 60, height: 23 }; prompt=Rect { x: 20, y: 23, width: 60, height: 4 }; targets=Rect { x: 20, y: 27, width: 60, height: 3 }; quota=Rect { x: 20, y: 30, width: 60, height: 6 }; notifications=Rect { x: 20, y: 36, width: 60, height: 3 }
 
 === support panes side=Left sessions=Minimized threshold=80 (80x40) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
@@ -315,7 +418,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x
 │                  ││Nothing needs you                                         │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x: 20, y: 0, width: 60, height: 23 }; prompt=Rect { x: 20, y: 23, width: 60, height: 4 }; targets=Rect { x: 20, y: 27, width: 60, height: 3 }; quota=Rect { x: 20, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x: 20, y: 0, width: 60, height: 23 }; prompt=Rect { x: 20, y: 23, width: 60, height: 4 }; targets=Rect { x: 20, y: 27, width: 60, height: 3 }; quota=Rect { x: 20, y: 30, width: 60, height: 6 }; notifications=Rect { x: 20, y: 36, width: 60, height: 3 }
 
 === support panes side=Left sessions=Minimized threshold=80 (80x40) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
@@ -358,7 +461,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x
 │                  ││Nothing needs you                                         │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x: 20, y: 0, width: 60, height: 23 }; prompt=Rect { x: 20, y: 23, width: 60, height: 4 }; targets=Rect { x: 20, y: 27, width: 60, height: 3 }; quota=Rect { x: 20, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x: 20, y: 0, width: 60, height: 23 }; prompt=Rect { x: 20, y: 23, width: 60, height: 4 }; targets=Rect { x: 20, y: 27, width: 60, height: 3 }; quota=Rect { x: 20, y: 30, width: 60, height: 6 }; notifications=Rect { x: 20, y: 36, width: 60, height: 3 }
 
 === support panes side=Left sessions=Minimized threshold=80 (480x40) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -401,7 +504,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x
 │                  ││Nothing needs you                                                                                                                                                                                                                                                                                                                                                                                                                                                         │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x: 20, y: 0, width: 460, height: 23 }; prompt=Rect { x: 20, y: 23, width: 460, height: 4 }; targets=Rect { x: 20, y: 27, width: 460, height: 3 }; quota=Rect { x: 20, y: 30, width: 460, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x: 20, y: 0, width: 460, height: 23 }; prompt=Rect { x: 20, y: 23, width: 460, height: 4 }; targets=Rect { x: 20, y: 27, width: 460, height: 3 }; quota=Rect { x: 20, y: 30, width: 460, height: 6 }; notifications=Rect { x: 20, y: 36, width: 460, height: 3 }
 
 === support panes side=Left sessions=Standard threshold=96 (95x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
@@ -444,7 +547,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x
 │Nothing needs you                                                                            │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 24 }; transcript=Rect { x: 40, y: 0, width: 55, height: 23 }; prompt=Rect { x: 40, y: 23, width: 55, height: 4 }; targets=Rect { x: 0, y: 27, width: 95, height: 3 }; quota=Rect { x: 0, y: 30, width: 95, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 24 }; transcript=Rect { x: 40, y: 0, width: 55, height: 23 }; prompt=Rect { x: 40, y: 23, width: 55, height: 4 }; targets=Rect { x: 0, y: 27, width: 95, height: 3 }; quota=Rect { x: 0, y: 30, width: 95, height: 6 }; notifications=Rect { x: 0, y: 36, width: 95, height: 3 }
 
 === support panes side=Left sessions=Standard threshold=96 (96x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────── ◇   ⋯───╮
@@ -487,7 +590,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 24 }; transcript=Rect { x
 │                                      ││Nothing needs you                                     │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 56, height: 23 }; prompt=Rect { x: 40, y: 23, width: 56, height: 4 }; targets=Rect { x: 40, y: 27, width: 56, height: 3 }; quota=Rect { x: 40, y: 30, width: 56, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 56, height: 23 }; prompt=Rect { x: 40, y: 23, width: 56, height: 4 }; targets=Rect { x: 40, y: 27, width: 56, height: 3 }; quota=Rect { x: 40, y: 30, width: 56, height: 6 }; notifications=Rect { x: 40, y: 36, width: 56, height: 3 }
 
 === support panes side=Left sessions=Standard threshold=96 (80x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
@@ -530,7 +633,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x
 │Nothing needs you                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 24 }; transcript=Rect { x: 40, y: 0, width: 40, height: 23 }; prompt=Rect { x: 40, y: 23, width: 40, height: 4 }; targets=Rect { x: 0, y: 27, width: 80, height: 3 }; quota=Rect { x: 0, y: 30, width: 80, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 24 }; transcript=Rect { x: 40, y: 0, width: 40, height: 23 }; prompt=Rect { x: 40, y: 23, width: 40, height: 4 }; targets=Rect { x: 0, y: 27, width: 80, height: 3 }; quota=Rect { x: 0, y: 30, width: 80, height: 6 }; notifications=Rect { x: 0, y: 36, width: 80, height: 3 }
 
 === support panes side=Left sessions=Standard threshold=96 (480x40) ===
 ╭ Workspaces ──────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -573,7 +676,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 24 }; transcript=Rect { x
 │                                                                              ││Nothing needs you                                                                                                                                                                                                                                                                                                                                                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 80, height: 36 }; transcript=Rect { x: 80, y: 0, width: 400, height: 23 }; prompt=Rect { x: 80, y: 23, width: 400, height: 4 }; targets=Rect { x: 80, y: 27, width: 400, height: 3 }; quota=Rect { x: 80, y: 30, width: 400, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 80, height: 36 }; transcript=Rect { x: 80, y: 0, width: 400, height: 23 }; prompt=Rect { x: 80, y: 23, width: 400, height: 4 }; targets=Rect { x: 80, y: 27, width: 400, height: 3 }; quota=Rect { x: 80, y: 30, width: 400, height: 6 }; notifications=Rect { x: 80, y: 36, width: 400, height: 3 }
 
 === support panes side=Left sessions=Maximized threshold=111 (110x40) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
@@ -616,7 +719,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 80, height: 36 }; transcript=Rect { x
 │Nothing needs you                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 55, height: 24 }; transcript=Rect { x: 55, y: 0, width: 55, height: 23 }; prompt=Rect { x: 55, y: 23, width: 55, height: 4 }; targets=Rect { x: 0, y: 27, width: 110, height: 3 }; quota=Rect { x: 0, y: 30, width: 110, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 55, height: 24 }; transcript=Rect { x: 55, y: 0, width: 55, height: 23 }; prompt=Rect { x: 55, y: 23, width: 55, height: 4 }; targets=Rect { x: 0, y: 27, width: 110, height: 3 }; quota=Rect { x: 0, y: 30, width: 110, height: 6 }; notifications=Rect { x: 0, y: 36, width: 110, height: 3 }
 
 === support panes side=Left sessions=Maximized threshold=111 (111x40) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────── ◇   ⋯───╮
@@ -659,7 +762,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 55, height: 24 }; transcript=Rect { x
 │                                                     ││Nothing needs you                                     │
 ╰─────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 55, height: 36 }; transcript=Rect { x: 55, y: 0, width: 56, height: 23 }; prompt=Rect { x: 55, y: 23, width: 56, height: 4 }; targets=Rect { x: 55, y: 27, width: 56, height: 3 }; quota=Rect { x: 55, y: 30, width: 56, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 55, height: 36 }; transcript=Rect { x: 55, y: 0, width: 56, height: 23 }; prompt=Rect { x: 55, y: 23, width: 56, height: 4 }; targets=Rect { x: 55, y: 27, width: 56, height: 3 }; quota=Rect { x: 55, y: 30, width: 56, height: 6 }; notifications=Rect { x: 55, y: 36, width: 56, height: 3 }
 
 === support panes side=Left sessions=Maximized threshold=111 (80x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
@@ -702,7 +805,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 55, height: 36 }; transcript=Rect { x
 │Nothing needs you                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 24 }; transcript=Rect { x: 40, y: 0, width: 40, height: 23 }; prompt=Rect { x: 40, y: 23, width: 40, height: 4 }; targets=Rect { x: 0, y: 27, width: 80, height: 3 }; quota=Rect { x: 0, y: 30, width: 80, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 24 }; transcript=Rect { x: 40, y: 0, width: 40, height: 23 }; prompt=Rect { x: 40, y: 23, width: 40, height: 4 }; targets=Rect { x: 0, y: 27, width: 80, height: 3 }; quota=Rect { x: 0, y: 30, width: 80, height: 6 }; notifications=Rect { x: 0, y: 36, width: 80, height: 3 }
 
 === support panes side=Left sessions=Maximized threshold=111 (480x40) ===
 ╭ Workspaces ──────────────────────────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -745,7 +848,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 24 }; transcript=Rect { x
 │                                                                                                  ││Nothing needs you                                                                                                                                                                                                                                                                                                                                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 100, height: 36 }; transcript=Rect { x: 100, y: 0, width: 380, height: 23 }; prompt=Rect { x: 100, y: 23, width: 380, height: 4 }; targets=Rect { x: 100, y: 27, width: 380, height: 3 }; quota=Rect { x: 100, y: 30, width: 380, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 100, height: 36 }; transcript=Rect { x: 100, y: 0, width: 380, height: 23 }; prompt=Rect { x: 100, y: 23, width: 380, height: 4 }; targets=Rect { x: 100, y: 27, width: 380, height: 3 }; quota=Rect { x: 100, y: 30, width: 380, height: 6 }; notifications=Rect { x: 100, y: 36, width: 380, height: 3 }
 
 === support panes side=Right sessions=Minimized threshold=80 (80x40) ===
 ╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮╭ Workspaces ──────╮
@@ -788,7 +891,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 100, height: 36 }; transcript=Rect { 
 │Nothing needs you                                         ││                  │
 ╰──────────────────────────────────────────────────────────╯╰──────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 60, y: 3, width: 20, height: 36 }; transcript=Rect { x: 0, y: 0, width: 60, height: 23 }; prompt=Rect { x: 0, y: 23, width: 60, height: 4 }; targets=Rect { x: 0, y: 27, width: 60, height: 3 }; quota=Rect { x: 0, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 60, y: 3, width: 20, height: 36 }; transcript=Rect { x: 0, y: 0, width: 60, height: 23 }; prompt=Rect { x: 0, y: 23, width: 60, height: 4 }; targets=Rect { x: 0, y: 27, width: 60, height: 3 }; quota=Rect { x: 0, y: 30, width: 60, height: 6 }; notifications=Rect { x: 0, y: 36, width: 60, height: 3 }
 
 === support panes side=Right sessions=Minimized threshold=80 (80x40) ===
 ╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮╭ Workspaces ──────╮
@@ -831,7 +934,7 @@ layout: sessions=Rect { x: 60, y: 3, width: 20, height: 36 }; transcript=Rect { 
 │Nothing needs you                                         ││                  │
 ╰──────────────────────────────────────────────────────────╯╰──────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 60, y: 3, width: 20, height: 36 }; transcript=Rect { x: 0, y: 0, width: 60, height: 23 }; prompt=Rect { x: 0, y: 23, width: 60, height: 4 }; targets=Rect { x: 0, y: 27, width: 60, height: 3 }; quota=Rect { x: 0, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 60, y: 3, width: 20, height: 36 }; transcript=Rect { x: 0, y: 0, width: 60, height: 23 }; prompt=Rect { x: 0, y: 23, width: 60, height: 4 }; targets=Rect { x: 0, y: 27, width: 60, height: 3 }; quota=Rect { x: 0, y: 30, width: 60, height: 6 }; notifications=Rect { x: 0, y: 36, width: 60, height: 3 }
 
 === support panes side=Right sessions=Minimized threshold=80 (80x40) ===
 ╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮╭ Workspaces ──────╮
@@ -874,7 +977,7 @@ layout: sessions=Rect { x: 60, y: 3, width: 20, height: 36 }; transcript=Rect { 
 │Nothing needs you                                         ││                  │
 ╰──────────────────────────────────────────────────────────╯╰──────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 60, y: 3, width: 20, height: 36 }; transcript=Rect { x: 0, y: 0, width: 60, height: 23 }; prompt=Rect { x: 0, y: 23, width: 60, height: 4 }; targets=Rect { x: 0, y: 27, width: 60, height: 3 }; quota=Rect { x: 0, y: 30, width: 60, height: 6 }
+layout: sessions=Rect { x: 60, y: 3, width: 20, height: 36 }; transcript=Rect { x: 0, y: 0, width: 60, height: 23 }; prompt=Rect { x: 0, y: 23, width: 60, height: 4 }; targets=Rect { x: 0, y: 27, width: 60, height: 3 }; quota=Rect { x: 0, y: 30, width: 60, height: 6 }; notifications=Rect { x: 0, y: 36, width: 60, height: 3 }
 
 === support panes side=Right sessions=Minimized threshold=80 (480x40) ===
 ╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ──────╮
@@ -917,7 +1020,7 @@ layout: sessions=Rect { x: 60, y: 3, width: 20, height: 36 }; transcript=Rect { 
 │Nothing needs you                                                                                                                                                                                                                                                                                                                                                                                                                                                         ││                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯╰──────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
-layout: sessions=Rect { x: 460, y: 3, width: 20, height: 36 }; transcript=Rect { x: 0, y: 0, width: 460, height: 23 }; prompt=Rect { x: 0, y: 23, width: 460, height: 4 }; targets=Rect { x: 0, y: 27, width: 460, height: 3 }; quota=Rect { x: 0, y: 30, width: 460, height: 6 }
+layout: sessions=Rect { x: 460, y: 3, width: 20, height: 36 }; transcript=Rect { x: 0, y: 0, width: 460, height: 23 }; prompt=Rect { x: 0, y: 23, width: 460, height: 4 }; targets=Rect { x: 0, y: 27, width: 460, height: 3 }; quota=Rect { x: 0, y: 30, width: 460, height: 6 }; notifications=Rect { x: 0, y: 36, width: 460, height: 3 }
 
 === support panes side=Right sessions=Standard threshold=96 (95x40) ===
 ╭ Browse | Conversation ───────────────────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
@@ -960,7 +1063,7 @@ layout: sessions=Rect { x: 460, y: 3, width: 20, height: 36 }; transcript=Rect {
 │Nothing needs you                                                                            │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 55, y: 3, width: 40, height: 24 }; transcript=Rect { x: 0, y: 0, width: 55, height: 23 }; prompt=Rect { x: 0, y: 23, width: 55, height: 4 }; targets=Rect { x: 0, y: 27, width: 95, height: 3 }; quota=Rect { x: 0, y: 30, width: 95, height: 6 }
+layout: sessions=Rect { x: 55, y: 3, width: 40, height: 24 }; transcript=Rect { x: 0, y: 0, width: 55, height: 23 }; prompt=Rect { x: 0, y: 23, width: 55, height: 4 }; targets=Rect { x: 0, y: 27, width: 95, height: 3 }; quota=Rect { x: 0, y: 30, width: 95, height: 6 }; notifications=Rect { x: 0, y: 36, width: 95, height: 3 }
 
 === support panes side=Right sessions=Standard threshold=96 (96x40) ===
 ╭ Browse | Conversation ────────────────────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
@@ -1003,7 +1106,7 @@ layout: sessions=Rect { x: 55, y: 3, width: 40, height: 24 }; transcript=Rect { 
 │Nothing needs you                                     ││                                      │
 ╰──────────────────────────────────────────────────────╯╰──────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 56, y: 3, width: 40, height: 36 }; transcript=Rect { x: 0, y: 0, width: 56, height: 23 }; prompt=Rect { x: 0, y: 23, width: 56, height: 4 }; targets=Rect { x: 0, y: 27, width: 56, height: 3 }; quota=Rect { x: 0, y: 30, width: 56, height: 6 }
+layout: sessions=Rect { x: 56, y: 3, width: 40, height: 36 }; transcript=Rect { x: 0, y: 0, width: 56, height: 23 }; prompt=Rect { x: 0, y: 23, width: 56, height: 4 }; targets=Rect { x: 0, y: 27, width: 56, height: 3 }; quota=Rect { x: 0, y: 30, width: 56, height: 6 }; notifications=Rect { x: 0, y: 36, width: 56, height: 3 }
 
 === support panes side=Right sessions=Standard threshold=96 (80x40) ===
 ╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
@@ -1046,7 +1149,7 @@ layout: sessions=Rect { x: 56, y: 3, width: 40, height: 36 }; transcript=Rect { 
 │Nothing needs you                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 40, y: 3, width: 40, height: 24 }; transcript=Rect { x: 0, y: 0, width: 40, height: 23 }; prompt=Rect { x: 0, y: 23, width: 40, height: 4 }; targets=Rect { x: 0, y: 27, width: 80, height: 3 }; quota=Rect { x: 0, y: 30, width: 80, height: 6 }
+layout: sessions=Rect { x: 40, y: 3, width: 40, height: 24 }; transcript=Rect { x: 0, y: 0, width: 40, height: 23 }; prompt=Rect { x: 0, y: 23, width: 40, height: 4 }; targets=Rect { x: 0, y: 27, width: 80, height: 3 }; quota=Rect { x: 0, y: 30, width: 80, height: 6 }; notifications=Rect { x: 0, y: 36, width: 80, height: 3 }
 
 === support panes side=Right sessions=Standard threshold=96 (480x40) ===
 ╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ──────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
@@ -1089,7 +1192,7 @@ layout: sessions=Rect { x: 40, y: 3, width: 40, height: 24 }; transcript=Rect { 
 │Nothing needs you                                                                                                                                                                                                                                                                                                                                                                                             ││                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
-layout: sessions=Rect { x: 400, y: 3, width: 80, height: 36 }; transcript=Rect { x: 0, y: 0, width: 400, height: 23 }; prompt=Rect { x: 0, y: 23, width: 400, height: 4 }; targets=Rect { x: 0, y: 27, width: 400, height: 3 }; quota=Rect { x: 0, y: 30, width: 400, height: 6 }
+layout: sessions=Rect { x: 400, y: 3, width: 80, height: 36 }; transcript=Rect { x: 0, y: 0, width: 400, height: 23 }; prompt=Rect { x: 0, y: 23, width: 400, height: 4 }; targets=Rect { x: 0, y: 27, width: 400, height: 3 }; quota=Rect { x: 0, y: 30, width: 400, height: 6 }; notifications=Rect { x: 0, y: 36, width: 400, height: 3 }
 
 === support panes side=Right sessions=Maximized threshold=111 (110x40) ===
 ╭ Browse | Conversation ───────────────────── ◇   ⋯───╮╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮
@@ -1132,7 +1235,7 @@ layout: sessions=Rect { x: 400, y: 3, width: 80, height: 36 }; transcript=Rect {
 │Nothing needs you                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · : / ? palette
-layout: sessions=Rect { x: 55, y: 3, width: 55, height: 24 }; transcript=Rect { x: 0, y: 0, width: 55, height: 23 }; prompt=Rect { x: 0, y: 23, width: 55, height: 4 }; targets=Rect { x: 0, y: 27, width: 110, height: 3 }; quota=Rect { x: 0, y: 30, width: 110, height: 6 }
+layout: sessions=Rect { x: 55, y: 3, width: 55, height: 24 }; transcript=Rect { x: 0, y: 0, width: 55, height: 23 }; prompt=Rect { x: 0, y: 23, width: 55, height: 4 }; targets=Rect { x: 0, y: 27, width: 110, height: 3 }; quota=Rect { x: 0, y: 30, width: 110, height: 6 }; notifications=Rect { x: 0, y: 36, width: 110, height: 3 }
 
 === support panes side=Right sessions=Maximized threshold=111 (111x40) ===
 ╭ Browse | Conversation ────────────────────── ◇   ⋯───╮╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮
@@ -1175,7 +1278,7 @@ layout: sessions=Rect { x: 55, y: 3, width: 55, height: 24 }; transcript=Rect { 
 │Nothing needs you                                     ││                                                     │
 ╰──────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · : / ? palette
-layout: sessions=Rect { x: 56, y: 3, width: 55, height: 36 }; transcript=Rect { x: 0, y: 0, width: 56, height: 23 }; prompt=Rect { x: 0, y: 23, width: 56, height: 4 }; targets=Rect { x: 0, y: 27, width: 56, height: 3 }; quota=Rect { x: 0, y: 30, width: 56, height: 6 }
+layout: sessions=Rect { x: 56, y: 3, width: 55, height: 36 }; transcript=Rect { x: 0, y: 0, width: 56, height: 23 }; prompt=Rect { x: 0, y: 23, width: 56, height: 4 }; targets=Rect { x: 0, y: 27, width: 56, height: 3 }; quota=Rect { x: 0, y: 30, width: 56, height: 6 }; notifications=Rect { x: 0, y: 36, width: 56, height: 3 }
 
 === support panes side=Right sessions=Maximized threshold=111 (80x40) ===
 ╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
@@ -1218,7 +1321,7 @@ layout: sessions=Rect { x: 56, y: 3, width: 55, height: 36 }; transcript=Rect { 
 │Nothing needs you                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 40, y: 3, width: 40, height: 24 }; transcript=Rect { x: 0, y: 0, width: 40, height: 23 }; prompt=Rect { x: 0, y: 23, width: 40, height: 4 }; targets=Rect { x: 0, y: 27, width: 80, height: 3 }; quota=Rect { x: 0, y: 30, width: 80, height: 6 }
+layout: sessions=Rect { x: 40, y: 3, width: 40, height: 24 }; transcript=Rect { x: 0, y: 0, width: 40, height: 23 }; prompt=Rect { x: 0, y: 23, width: 40, height: 4 }; targets=Rect { x: 0, y: 27, width: 80, height: 3 }; quota=Rect { x: 0, y: 30, width: 80, height: 6 }; notifications=Rect { x: 0, y: 36, width: 80, height: 3 }
 
 === support panes side=Right sessions=Maximized threshold=111 (480x40) ===
 ╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ──────────────────────────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
@@ -1261,7 +1364,7 @@ layout: sessions=Rect { x: 40, y: 3, width: 40, height: 24 }; transcript=Rect { 
 │Nothing needs you                                                                                                                                                                                                                                                                                                                                                                         ││                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
-layout: sessions=Rect { x: 380, y: 3, width: 100, height: 36 }; transcript=Rect { x: 0, y: 0, width: 380, height: 23 }; prompt=Rect { x: 0, y: 23, width: 380, height: 4 }; targets=Rect { x: 0, y: 27, width: 380, height: 3 }; quota=Rect { x: 0, y: 30, width: 380, height: 6 }
+layout: sessions=Rect { x: 380, y: 3, width: 100, height: 36 }; transcript=Rect { x: 0, y: 0, width: 380, height: 23 }; prompt=Rect { x: 0, y: 23, width: 380, height: 4 }; targets=Rect { x: 0, y: 27, width: 380, height: 3 }; quota=Rect { x: 0, y: 30, width: 380, height: 6 }; notifications=Rect { x: 0, y: 36, width: 380, height: 3 }
 
 === short terminal scrolls workspaces within its sidebar band (70x25) ===
 ╭ Workspaces ────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
@@ -1289,7 +1392,7 @@ layout: sessions=Rect { x: 380, y: 3, width: 100, height: 36 }; transcript=Rect 
 │Nothing needs you                                                   │
 ╰────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-layout: sessions=Rect { x: 0, y: 4, width: 70, height: 4 }; transcript=Rect { x: 0, y: 8, width: 70, height: 3 }; prompt=Rect { x: 0, y: 11, width: 70, height: 4 }; targets=Rect { x: 0, y: 15, width: 70, height: 3 }; quota=Rect { x: 0, y: 18, width: 70, height: 3 }
+layout: sessions=Rect { x: 0, y: 4, width: 70, height: 4 }; transcript=Rect { x: 0, y: 8, width: 70, height: 3 }; prompt=Rect { x: 0, y: 11, width: 70, height: 4 }; targets=Rect { x: 0, y: 15, width: 70, height: 3 }; quota=Rect { x: 0, y: 18, width: 70, height: 3 }; notifications=Rect { x: 0, y: 21, width: 70, height: 3 }
 
 === short terminal scrolls workspaces within its sidebar band (80x16) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
@@ -1308,7 +1411,7 @@ layout: sessions=Rect { x: 0, y: 4, width: 70, height: 4 }; transcript=Rect { x:
 │Nothing needs you                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 3 }; transcript=Rect { x: 40, y: 0, width: 40, height: 3 }; prompt=Rect { x: 40, y: 3, width: 40, height: 3 }; targets=Rect { x: 0, y: 6, width: 80, height: 3 }; quota=Rect { x: 0, y: 9, width: 80, height: 3 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 3 }; transcript=Rect { x: 40, y: 0, width: 40, height: 3 }; prompt=Rect { x: 40, y: 3, width: 40, height: 3 }; targets=Rect { x: 0, y: 6, width: 80, height: 3 }; quota=Rect { x: 0, y: 9, width: 80, height: 3 }; notifications=Rect { x: 0, y: 12, width: 80, height: 3 }
 
 === short terminal scrolls workspaces within its sidebar band (160x16) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -1327,7 +1430,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 3 }; transcript=Rect { x:
 │                                                   ││Nothing needs you                                                                                        │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
-layout: sessions=Rect { x: 0, y: 9, width: 53, height: 6 }; transcript=Rect { x: 53, y: 0, width: 107, height: 3 }; prompt=Rect { x: 53, y: 3, width: 107, height: 3 }; targets=Rect { x: 53, y: 6, width: 107, height: 3 }; quota=Rect { x: 53, y: 9, width: 107, height: 3 }
+layout: sessions=Rect { x: 0, y: 9, width: 53, height: 6 }; transcript=Rect { x: 53, y: 0, width: 107, height: 3 }; prompt=Rect { x: 53, y: 3, width: 107, height: 3 }; targets=Rect { x: 53, y: 6, width: 107, height: 3 }; quota=Rect { x: 53, y: 9, width: 107, height: 3 }; notifications=Rect { x: 53, y: 12, width: 107, height: 3 }
 
 === selected checkout and branch (140x45) ===
 current · codex-1 · podman

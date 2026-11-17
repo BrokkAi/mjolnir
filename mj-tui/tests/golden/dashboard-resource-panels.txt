@@ -292,7 +292,6 @@
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a session.          ││                                                                                            │
 │                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ No live session ───────────────────────────────────────────────────────────────────────────╮
 │                                            ││No live session in this workspace.                                                          │
@@ -301,12 +300,13 @@
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Profiles ▾ (refreshed 0s ago)─────────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                            ││            Harness      Weekly          Resets  5H              Resets                     ▐
-│                                            ││  agy (Ge)  Antigravity  ▕███████▎  ▏73%         ▕████▊     ▏48%                            ▐
-│                                            ││› agy (Cl)  Antigravity  ▕          ▏0%                                                     ▐
-│                                            ││  claude-1  Claude Code  refreshing…                                                        ▐
+│                                            │╭ Profiles ▾ (refreshed 0s ago)─────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly          Resets  5H              Resets                     │
+│                                            ││  agy (Ge)  Antigravity  ▕███████▎  ▏73%         ▕████▊     ▏48%                            │
+│                                            ││› agy (Cl)  Antigravity  ▕          ▏0%                                                     │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │

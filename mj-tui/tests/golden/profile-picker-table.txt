@@ -66,19 +66,19 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰───────────────  ╭ × Resume · 1/3 profile (cross-harness supported) ────────────────────────────────╮                 │
 ╭ Sessions ─────  │                                                                                  │                 │
 │ Create   Open   │    PROFILE   HARNESS      WEEKLY      5H                                         │                 │
-│hel ───────────  │    claude-1  Claude Code  refreshing      (lossy: text-only transcript)          │                 │
-│› ■ ACP pretty   │    codex-1   Codex        refreshing                                             │  ───────────────╯
-│  Stopped  podm  │    codex-2   Codex        refreshing                                             │  ───────────────╮
+│hel ───────────  │    claude-1  Claude Code  refreshing      (lossy: text-only transcript)          │  ───────────────╯
+│› ■ ACP pretty   │    codex-1   Codex        refreshing                                             │  ───────────────╮
+│  Stopped  podm  │    codex-2   Codex        refreshing                                             │                 │
 │  │ No messages  │ !  kimi-1    Kimi Code    refreshing      (lossy: text-only transcript)          │                 │
-│  │              │                                                                                  │                 │
-│                 │ Same agent: the conversation continues natively.                                 │  ───────────────╯
-│                 │ !  No guardian approval mode; do not run on a raw, unsandboxed target.           │  ──────── ▁   ▄ ╮
-│                 │                                                                                  │                 │
+│  │              │                                                                                  │  ───────────────╯
+│                 │ Same agent: the conversation continues natively.                                 │  ──────── ▁   ▄ ╮
+│                 │ !  No guardian approval mode; do not run on a raw, unsandboxed target.           │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──── ▁   ▄   □ ╮
-│                 │                                                                                  │                 ▐
-│                 │                                                                                  │                 ▐
-│                 │                                                                                  │                 ▐
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │   Cancel     Next                                                                │  ──────── ▁   ▄ ╮

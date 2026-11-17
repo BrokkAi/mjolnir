@@ -42,6 +42,8 @@ const EMPTY_PROMPT_HEIGHT: u16 = 4;
 const PANE_MINIMUM: u16 = 3;
 /// The one-row form Targets and Quota collapse to.
 const SUMMARY_ROW: u16 = 1;
+/// Midsize support panes show nine content rows, excluding the border.
+const STANDARD_SUPPORT_PANE_HEIGHT: u16 = 11;
 
 /// The terminal height at or above which the minimized Sessions list gets its
 /// taller five-row cap; below it the list is capped at two rows. Compact
@@ -680,7 +682,7 @@ fn render_combined_themed(
             PaneDimensions {
                 minimized: SUMMARY_ROW,
                 full: table_height(capacity_table_lines(dashboard)),
-                standard_cap: area.height / 4,
+                standard_cap: STANDARD_SUPPORT_PANE_HEIGHT,
             },
         ),
         (
@@ -688,7 +690,7 @@ fn render_combined_themed(
             PaneDimensions {
                 minimized: SUMMARY_ROW,
                 full: table_height(dashboard.quota_profile_rows().len()),
-                standard_cap: area.height / 4,
+                standard_cap: STANDARD_SUPPORT_PANE_HEIGHT,
             },
         ),
         (
@@ -696,8 +698,7 @@ fn render_combined_themed(
             PaneDimensions {
                 minimized: SUMMARY_ROW,
                 full: notification_full,
-                // Nine rows fit the header, one text row and the reply controls/margins.
-                standard_cap: (area.height / 4).max(9),
+                standard_cap: STANDARD_SUPPORT_PANE_HEIGHT,
             },
         ),
     ];
@@ -1850,7 +1851,10 @@ fn table_height(rows: usize) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{buffer_lines, dashboard_with_session, key, running_session};
+    use crate::test_support::{
+        buffer_lines, dashboard_with_session, key, running_session, serve_attention,
+        test_capacity_target,
+    };
     use crate::{DashboardAction, SessionOperationKind};
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
@@ -2374,7 +2378,8 @@ mod tests {
         let prompt = dashboard.focused_prompt_area().expect("rendered prompt");
         writeln!(
             output,
-            "layout: sessions={sessions:?}; transcript={transcript:?}; prompt={prompt:?}; targets={targets:?}; quota={quota:?}"
+            "layout: sessions={sessions:?}; transcript={transcript:?}; prompt={prompt:?}; targets={targets:?}; quota={quota:?}; notifications={:?}",
+            dashboard.notifications_area.expect("rendered notifications pane")
         )
         .unwrap();
     }
@@ -2392,6 +2397,63 @@ mod tests {
         use std::fmt::Write as _;
 
         let mut output = String::new();
+        let mut midsize_support = dashboard_with_session(running_session());
+        midsize_support.set_deployment_capacity_targets(
+            (1..=12)
+                .map(|index| {
+                    let host = format!("host-{index:02}");
+                    mj_core::targets::DeploymentCapacityTarget {
+                        id: host.clone(),
+                        host,
+                        local: false,
+                        ..test_capacity_target()
+                    }
+                })
+                .collect(),
+        );
+        let mut config = midsize_support.config.clone();
+        for index in 1..=12 {
+            let profile = format!("claude-{index:02}");
+            config.profiles.insert(
+                profile.clone(),
+                mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Claude,
+                    std::path::Path::new("/profiles").join(profile),
+                ),
+            );
+        }
+        midsize_support.set_config(config);
+        serve_attention(
+            &mut midsize_support,
+            &["session-1"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        let question = (1..=12)
+            .map(|index| format!("Question line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        midsize_support
+            .session_details
+            .entry("session-1".into())
+            .or_default()
+            .last_agent_message = Some(question.into());
+        for pane in [
+            SupportPane::Targets,
+            SupportPane::Quota,
+            SupportPane::Notifications,
+        ] {
+            midsize_support.set_pane_size(pane, PaneSize::Standard);
+        }
+        let lines = render_combined_golden(&mut midsize_support, 160, 100);
+        append_combined_golden(
+            &mut output,
+            "midsize support panes show nine content rows",
+            160,
+            100,
+            &lines,
+        );
+        append_pane_geometry(&mut output, &midsize_support);
+
         let mut standby = dashboard_with_session(running_session());
         standby.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
         pin_combined_golden_operation_clock(&mut standby);
