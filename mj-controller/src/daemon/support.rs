@@ -21,7 +21,7 @@ pub(super) fn report_recovery(result: &crate::recovery::RecoveryResult) {
         if result.deferred {
             tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
         } else if result.cancelled {
-            tracing::info!(session_id = %result.session_id, %error, reason = "superseded by suspend", "daemon recovery checkpoint cancelled");
+            tracing::info!(session_id = %result.session_id, %error, reason = "cancelled by a session operation (close, suspend, destroy, move or upgrade)", "daemon recovery checkpoint cancelled");
         } else {
             tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
         }
