@@ -28,8 +28,8 @@ A person can see it work by running a review, letting it finish, and running `mj
 - [x] (2026-11-17T06:30Z) Review round 3: all three reviewers found that the cleared-group branch ignored the host's explicit resolution, which both production closes take. Restored it and added a regression for a review cancelled after its verdict was recorded. Re-ran `database::tests` (143), the schema reader tests (45), the review-host tests (75), and workspace clippy.
 - [x] (2026-11-17T07:20Z) Review round 4: a handback was re-read on every save, so a later one for another command could replace the accepted text. It is now copied once, when the role's outcome first appears, and the stored row keeps it; the existing regression records a later handback and asserts the retained text survives.
 - [x] (2026-11-17T08:40Z) Review round 5: narrowing the race was not a fix — the store still read a mutable row. The host now passes the exact accepted text through the persistence lane (`save_reviewer_outcome`, `AcceptedReport`), and the store writes it verbatim, never reading `subagent_handbacks`. Re-ran `database::` (265), the review-host suite (75), the API route test, and workspace clippy.
-- [x] (2026-11-17T09:30Z) Merged `origin/master` (upstream had reached revision 136). Renumbered the migration to 137 with the floor, adapted the merge-conflict assertions, and added upstream's new `brief`/`brief_writer` fields to the new test fixtures. Re-ran `database::` (267), `review_host::tests` (82), `server::api::tests` (134), and workspace clippy.
-- [ ] Commit and push.
+- [x] (2026-11-17T09:30Z) Merged `origin/master` (upstream had reached revision 136). Renumbered the migration to 137 with the floor, adapted the merge-conflict assertions, and added upstream's new `brief`/`brief_writer` fields to the new test fixtures. Re-ran `database::` (267), `review_host::tests` (83), `server::api::tests` (134), and workspace clippy.
+- [x] (2026-11-17T10:40Z) A second upstream merge (a3c39bbe7) was clean; re-ran the same suites plus `cargo check --workspace --all-targets`. Both merges were reviewed clean and pushed to `origin/master` (`db1492c96`).
 
 ## Surprises & Discoveries
 
@@ -85,7 +85,7 @@ A person can see it work by running a review, letting it finish, and running `mj
 
 ## Outcomes & Retrospective
 
-Implemented on 2026-11-17. The finished report is written as each reviewer settles and finalized when the review closes, so the read path does not depend on reviewer sessions. The report is readable through the CLI, JSON API, and database model. Effort is recorded for reviewer turns. Targeted tests pass: the database survival test, the API route test, the effort regression test, the CLI parse test, the 45 schema reader tests, and all 75 review-host tests. Workspace clippy, the full core suite, and the full CLI suite pass; the full controller suite has four unrelated container-baseline failures listed under Surprises. Publishing remains.
+Implemented on 2026-11-17 and published to `origin/master` as `db1492c96`. The finished report is written as each reviewer settles and finalized when the review closes, so the read path does not depend on reviewer sessions. The report is readable through the CLI, JSON API, and database model. Effort is recorded for reviewer turns. Reviews found and fixed six distinct defects across five rounds: missing cleanup on destroy, an unchanged compatibility floor, a stale handback retained for a failed role, the host's explicit resolution being overridden by a stored verdict, and a mutable handback row re-read during persistence — the last fixed structurally by carrying the accepted text through the persistence lane. Targeted tests pass; workspace clippy, `cargo check --workspace --all-targets`, and the full core and CLI suites pass. The full controller suite has four unrelated container-baseline failures listed under Surprises.
 
 ## Context and Orientation
 
