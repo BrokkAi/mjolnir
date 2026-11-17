@@ -1,0 +1,42 @@
+{
+  "bug": "archive-resume-hint-without-prompt",
+  "arm": "TT",
+  "session_id": "3fffe657e5305ad71273add219df981a",
+  "reviewers": [
+    {
+      "child": "340f1ebb5063fc09008b5dd5051d9fa0",
+      "slot": 0,
+      "profile": "codex4",
+      "model": "gpt-6.1-terra",
+      "effort": "high",
+      "has_output": true,
+      "handback": true
+    },
+    {
+      "child": "d21f5ac6a61e242ce36f1210365bf31b",
+      "slot": 1,
+      "profile": "codex4",
+      "model": "gpt-6.1-terra",
+      "effort": "high",
+      "has_output": true,
+      "handback": true
+    },
+    {
+      "child": "348f7bf80dfea07fb37cad0889108e24",
+      "slot": 2,
+      "profile": "codex4",
+      "model": "gpt-6.1-terra",
+      "effort": "high",
+      "has_output": true,
+      "handback": true
+    }
+  ],
+  "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+  "inventory": {
+    "problems": [],
+    "new_refs": []
+  },
+  "published_brief_in_context": true,
+  "shared_quota_week_before_batch_percent": 90,
+  "floor_percent": 25
+}

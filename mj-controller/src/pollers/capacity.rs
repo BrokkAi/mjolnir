@@ -5,7 +5,19 @@ pub fn spawn_dashboard_capacity_poller() -> (
     tokio::sync::mpsc::Sender<()>,
     tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
 ) {
-    spawn_capacity_poller_with(sample_capacity_target)
+    spawn_capacity_poller_with(sample_capacity_target, Arc::default())
+}
+
+/// The daemon's poller. `requested` counts refresh requests: a surface adds one
+/// to it, then sends the trigger. Each probe records the count when it starts.
+pub fn spawn_daemon_capacity_poller(
+    requested: Arc<std::sync::atomic::AtomicU64>,
+) -> (
+    tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+    tokio::sync::mpsc::Sender<()>,
+    tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
+) {
+    spawn_capacity_poller_with(sample_capacity_target, requested)
 }
 
 /// Sample one deployment host now. The periodic poller and launch admission
@@ -28,6 +40,7 @@ pub(crate) async fn sample_capacity_target(
 
 pub(super) fn spawn_capacity_poller_with<F, Fut>(
     collect: F,
+    requested: Arc<std::sync::atomic::AtomicU64>,
 ) -> (
     tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
     tokio::sync::mpsc::Sender<()>,
@@ -44,7 +57,7 @@ where
     tokio::spawn(async move {
         let mut targets = Vec::new();
         let collect = Arc::new(collect);
-        let mut samples = CapacitySamples::default();
+        let mut samples = CapacitySamples::new(requested.clone());
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + CAPACITY_POLL_INTERVAL,
             CAPACITY_POLL_INTERVAL,
@@ -79,7 +92,7 @@ where
                         Ok((id, result)) => (id, result.map_err(|error| format!("{error:#}"))),
                         Err(error) => (error.id(), Err(format!("capacity probe task failed: {error}"))),
                     };
-                    let sampled = samples.targets.remove(&id).expect("capacity task retains its target");
+                    let (sampled, refresh_generation) = samples.targets.remove(&id).expect("capacity task retains its target");
                     if let Err(error) = &result {
                         tracing::warn!(target_id = %sampled.id, %error, "capacity probe failed");
                     }
@@ -106,7 +119,18 @@ where
                         target_id: sampled.id,
                         result,
                         sampled_at_epoch_seconds: epoch_seconds(),
+                        refresh_generation,
                     });
+                    // A request that arrived while this probe was already
+                    // running is not answered by it, and the trigger skipped
+                    // the busy target; probe again now rather than wait for the
+                    // next round. The new probe starts after the request, so
+                    // this ends.
+                    if requested.load(std::sync::atomic::Ordering::Acquire) > refresh_generation
+                        && targets.contains(&current)
+                    {
+                        samples.schedule(std::iter::once(current), &collect);
+                    }
                 }
             }
         }
@@ -124,13 +148,22 @@ where
     (targets_tx, triggers_tx, updates_rx)
 }
 
-#[derive(Default)]
 pub(super) struct CapacitySamples {
     pub(super) tasks: tokio::task::JoinSet<Result<Option<DeploymentCapacityUsage>>>,
-    pub(super) targets: std::collections::HashMap<tokio::task::Id, DeploymentCapacityTarget>,
+    /// Each running probe's target and the refresh count taken before it began.
+    pub(super) targets: std::collections::HashMap<tokio::task::Id, (DeploymentCapacityTarget, u64)>,
+    requested: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacitySamples {
+    fn new(requested: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self {
+            tasks: tokio::task::JoinSet::new(),
+            targets: std::collections::HashMap::new(),
+            requested,
+        }
+    }
+
     pub(super) fn schedule<F, Fut>(
         &mut self,
         targets: impl IntoIterator<Item = DeploymentCapacityTarget>,
@@ -140,9 +173,16 @@ impl CapacitySamples {
         Fut: Future<Output = Result<Option<DeploymentCapacityUsage>>> + Send + 'static,
     {
         for target in targets {
-            if self.targets.values().any(|running| running.id == target.id) {
+            if self
+                .targets
+                .values()
+                .any(|(running, _)| running.id == target.id)
+            {
                 continue;
             }
+            // Read the count before the probe exists: any request it counts was
+            // made before the probe started, so the probe answers it.
+            let generation = self.requested.load(std::sync::atomic::Ordering::Acquire);
             let collect = collect.clone();
             let sampled = target.clone();
             let task = self.tasks.spawn(async move {
@@ -157,7 +197,7 @@ impl CapacitySamples {
                 );
                 result
             });
-            self.targets.insert(task.id(), target);
+            self.targets.insert(task.id(), (target, generation));
         }
     }
 }

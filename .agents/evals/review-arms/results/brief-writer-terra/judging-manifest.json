@@ -1,0 +1,70 @@
+{
+  "data_root": "/mnt/optane/review-arms-20261113",
+  "round": "brief-judge-j",
+  "files": [
+    {
+      "path": "brief-judge-j/batch-0.json",
+      "sha256": "9078206cc671de670f2d0ee0f598f5d64f344ba292015f52f8f57fb8e5cecd6d",
+      "bytes": 133035
+    },
+    {
+      "path": "brief-judge-j/batch-1.json",
+      "sha256": "613b7596b4472be4b67abac8abc54baa11612331f0b10e913f58bc9259ef6aad",
+      "bytes": 108817
+    },
+    {
+      "path": "brief-judge-j/batch-2.json",
+      "sha256": "69e75c6baa4f70f1e44b43de8dd56e80cf8b9393acfa684cbf4fe14907ad6c15",
+      "bytes": 83523
+    },
+    {
+      "path": "brief-judge-j/SPEC.md",
+      "sha256": "424d065e62c57a8d103262017fb2a4b9f401fdb3d02f4b27f6b1f334b2770a4c",
+      "bytes": 2064
+    },
+    {
+      "path": "brief-judge-j/workflow-out.json",
+      "sha256": "b7f18288b9190995ff431ab6238f155b8ca7ca952eefa2c7ec43f190422caef4",
+      "bytes": 254457
+    },
+    {
+      "path": "brief-judge-j/merged.jsonl",
+      "sha256": "10e9c9b4b25c5d4a1c39f279553b41d55370e9a48fe410609362c0c1328f9b2a",
+      "bytes": 32925
+    },
+    {
+      "path": "brief-judge-j/handcheck.jsonl",
+      "sha256": "5e4deffb73848fe6c353b5d17317dc7defe91bab78d31d7b802c5a16f2014d71",
+      "bytes": 211136
+    },
+    {
+      "path": "brief-judge-j/handcheck-decisions.json",
+      "sha256": "589a6cdf616fbbd8457f9b8ec65772c638895292adffabdec466d09b7d5e36c6",
+      "bytes": 2820
+    },
+    {
+      "path": "brief-judge-j/handcheck-run/handcheck/HANDCHECK.md",
+      "sha256": "cf2153d80d22315850c5627b078a0bc546f0b3092b2961ade335031e2a23c389",
+      "bytes": 1759
+    },
+    {
+      "path": "brief-judge-j/handcheck-run/handcheck/handcheck-proposal.json",
+      "sha256": "0bc80b156c176c0b20e92c539363720cbce6f26f901e54de06ba1258bbdc9f41",
+      "bytes": 24690
+    },
+    {
+      "path": "private/key-brief-judge-j.json",
+      "sha256": "ef204b3cae3d620b6d2b742879595c495a1e5d79544194c1a450c04e7e11a795",
+      "bytes": 109619
+    }
+  ],
+  "judge_model": "gpt-6.1-sol",
+  "judge_effort": "high",
+  "judge_profile": "codex4",
+  "handcheck_rows": 88,
+  "outputs": 270,
+  "individual_verdicts": 540,
+  "contains_status": "completed: one Sol/high diagnostic on codex4 under amendment 5a00ed102; writer decision unchanged",
+  "contains_summary": "contains-summary.json",
+  "contains_output_sha256": "5bcf9c8c2b5ec54caeb6a37f0d87066aff479cb3973b4631f89e820fa753c234"
+}

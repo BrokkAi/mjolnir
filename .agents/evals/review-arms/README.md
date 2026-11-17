@@ -644,6 +644,102 @@ Catch rate per session on the 10 diffs (mean over diffs):
   them today, so the result says what the engine must state, not that it
   can.
 
+## Relation briefs, dilution: does the decisive fact survive among its siblings?
+
+Plan `brief/PLAN-dilution.md`, registered before any run. Results:
+`results/brief-dilution/`. Outcome: **selection is not the bottleneck**.
+
+- Arm W is arm D's brief with every true fact of six kinds added. The kinds
+  are argument values at call sites, field and state writes, held scopes,
+  keys and comparisons, lifetimes, and shared state, for the functions the
+  diff changes and the call sites the brief cites. No budget.
+  - One blind carbon/high editor per diff listed 91 to 174 facts, and 1,550
+    for the 43-file symbol-change-keeps-cached-transcript.
+  - A blind truth check dropped 0 to 6.7% per diff as false.
+  - Recall of the decisive fact: the editors stated it on 1 of 10 diffs
+    (web-feed-self-deadlock, a held lock at a call). On the other 9 they had
+    only pieces of it: the counterpart outside the diff's functions (a
+    cache, a writer, a restart loop), or the link that joins true pieces.
+  - Briefs grew from 4-8 KB to 30-52 KB. The 300 KB symbol-change brief was
+    refused by the mj API (413), so W ran on 9 diffs and every arm is
+    compared on those 9.
+  - Leak check: every caught or partial verdict of the two Opus judges
+    quotes arm D's own item, none a sibling, so no sibling was dropped.
+- Runs: 3 Terra/high and 3 Sol/high per diff, 54 sessions, mj-estimated API
+  cost $6.72. The daemon replaced on 2026-11-16 destroys reviewer sessions
+  when their role ends (mj 8fe3c40bd), so driver.py now reads each handback
+  from the store. Every deviation is listed in
+  `results/brief-dilution/deviations.md`.
+- Blinding: with no reviewer transcript, `audit.py` cannot check these
+  reviewers' tool calls and reports them as unaudited. What still holds is
+  the checkout inventory check (no later history in the reviewer's
+  checkout), which passed for every run.
+- Judging round H: gemini-4-carbon/high, 220 outputs. The judges agree on
+  all; the hand check of 104 caught or partial verdicts changed none. Round
+  H reproduces round G's D and F exactly.
+
+Catch rate per session on the 9 diffs (mean over diffs):
+
+| Model | Bifrost (F) | Bifrost + item (D) | D + siblings (W) | Blind (B, round G) |
+|---|---:|---:|---:|---:|
+| Terra/high | 22.2% | 70.4% | 81.5% | 88.9% |
+| Sol/high | 33.3% | 59.3% | 59.3% | 66.7% |
+
+- Retention, (W − F) / (D − F): Terra 1.23 (95% 1.0 to 1.9), Sol 1.0 (0.25
+  to 3.0). Terra is above the plan's 0.7.
+- Reading: on these diffs a brief that states every fact of these kinds
+  keeps the decisive one's lift; W ≥ D may come from siblings that state
+  pieces of it. The open questions are elsewhere: whether the engine
+  computes these facts on real code, and whether a complete listing fits on
+  a large diff.
+
+## Wizard-of-Oz site tool: do reviewers fetch the decisive fact when they must ask?
+
+Plan `brief/PLAN-oz.md`, registered before any run. Results:
+`results/brief-oz/`. Outcome (Terra, primary): **querying fails**, because
+Terra never asked.
+
+- Arm Q: no brief. Reviewers have one MCP tool, `site_context`, which
+  answers for a function or `path:line` from arm W's facts (the truth-checked
+  siblings plus arm D's item), with completeness per answer. It is a
+  stand-in server reached by a forced-command ssh. The fixtures live only on
+  the server host; a blinding probe from a reviewer container could not read
+  them. Run from a second mj instance, so no other arm sees the tool.
+- Retrieval, from the server's call log:
+
+  | Model | Sessions | Called the tool | Calls | Got the decisive item |
+  |---|---:|---:|---:|---:|
+  | Terra/high | 30 | 0 | 0 | 0 |
+  | Sol/high | 30 | 26 | 71 | 9 |
+
+  Every Terra reviewer loaded the tool and listed it, then never called it.
+- Runs: 60 sessions on 10 diffs, mj-estimated API cost $6.87. Judging round
+  I (carbon/high, 244 outputs: Q, D, F and no brief) agrees on all; the hand
+  check of 104 caught or partial verdicts changed none. W's labels come from
+  round H, on its 9 diffs.
+- Blinding: as for arm W, reviewer tool calls are unaudited (no transcript).
+  The fixtures were outside every reviewer's reach (probe before the run),
+  the checkout inventory check passed, and the server log shows only
+  `site_context` calls.
+
+Catch rate per session on the 10 diffs (mean over diffs):
+
+| Model | No brief (N) | Bifrost (F) | Site tool (Q) | Bifrost + item (D) |
+|---|---:|---:|---:|---:|
+| Terra/high | 20.0% | 20.0% | 26.7% | 73.3% |
+| Sol/high | 33.3% | 40.0% | 53.3% | 63.3% |
+
+- Terra: Q − N +6.7 points (−6.7 to +20), Q − D −46.7 (−73.3 to −16.7).
+- Sol: Q − N +20.0 (+6.7 to +36.7), Q − D −10.0 (−26.7 to +3.3), Q − W on
+  the 9 diffs −11.1 (−29.6 to +7.4). By the plan's rule Sol alone would
+  read "querying works" (Q ≥ D − 10).
+- Reading: when the reviewer asks, the facts behind a query tool deliver
+  most of what handing them over does (Sol). Whether it asks depends on the
+  model: Terra/high, the best reviewer in this study, ignores an optional
+  tool. A tool-only design needs either a review procedure that makes the
+  reviewer query the changed code's sites, or the facts pushed into the
+  brief as well; that needs its own registered arm.
+
 ## Bifrost tool coverage: can a code graph produce the decisive fact?
 
 For the Bifrost session, at Jonathan's request (`toolcov/SPEC.md`,
@@ -688,22 +784,125 @@ diff-only question at the introducing commit and classed the result.
   8,000,000) are exhausted on this workspace; two flow runs gave no output in
   20 minutes. These became tickets under BrokkAi/bifrost-dev#13143.
 
+## Terra as the brief writer (V1, round J)
+
+**Sol writes.** Terra/high wrote all 22 mechanically valid, non-leaking briefs,
+but failed the effectiveness rule registered in
+[`brief/PLAN-writer-terra.md`](brief/PLAN-writer-terra.md). The MVP default writer
+stays Sol/high. This experiment uses the same Terra/high reviewers in both
+brief arms; BT reuses stage B's Sol-written briefs and reviewer outputs.
+
+On the 18 primary Hard-won relation diffs, the mean per-diff caught share was:
+
+| Reviewer context | Sessions | Catch rate |
+| --- | ---: | ---: |
+| No brief | 60 | 20.4% |
+| Sol/high brief (BT) | 54 | 55.6% |
+| Terra/high brief (TT) | 54 | 29.6% |
+
+Paired bootstrap intervals over diffs (10,000 resamples) give TT minus BT
+**−25.9 points [−44.4, −9.3]**, and TT minus no brief
+**+9.3 points [−5.6, +27.8]**. TT is more than 10 points below BT, and its
+gain over no brief does not have an interval above zero. Both registered
+criteria fail. On the four secondary diffs, TT and BT both caught 41.7%,
+against 33.3% without a brief; these diffs do not enter the decision.
+
+Two Carbon/high judges on gemini2 labelled every Terra brief `missed` when
+given it as a review output: 44 verdicts, no rewrites. Final lint and
+inventory checks passed for all 22 writers. A transcript audit covered all
+144 tool items; eight heuristic matches were checked and were brief text or
+repository searches, with no isolation violation observed.
+
+The pre-judging amendment selected Sol/high on codex4 for all round-J judges
+and the hand check, conserving Carbon for the leak checks and V2 census.
+Three batches contained 98, 98 and 74 outputs. The standard builder also
+included 66 stored no-brief Sol reviewer outputs; these are excluded from
+every V1 decision and comparison. All 270 judge pairs agreed: 86 caught,
+two partial and 182 missed. The hand check covered all 88 non-missed outputs,
+changing one secondary partial to missed. On the same Terra reviewer
+sessions from the ten ablation diffs, round J and round G's Carbon judgments
+gave BT 90.0% in both rounds, and no brief 23.3% versus 20.0%. Neither arm
+crossed the registered 10-point judge-consistency threshold.
+
+Writer API cost estimates totalled $1.18 for Terra and $4.37 for Sol. Median
+cost was $0.0515 versus $0.1978, reported total tokens 233,994 versus 507,276,
+and wall time 103.7 versus 197.1 seconds. Writer wall time runs from launch
+intent through the final writer turn, including provisioning and lint fixes.
+The 66 TT reviewers cost an estimated $2.8263; their individual latency is
+unknown because the retained handbacks lack prompt timestamps and child
+transcripts. Per-job wall times are recorded separately. These are API cost
+estimates, not actual subscription charges.
+
+TT's reviewer image was `8819974fc5ff…`; BT used the pinned `8eee5a3ab7e2…`.
+Both immutable image histories record the same install pins: Codex 0.168.0,
+codex-acp 1.15.0 and dsh-acp 0.6.0. This verifies install provenance rather
+than runtime package contents; other image changes remain a possible
+confound. Terra's writer image `a13305cd304b…` was recorded for every job but
+is no longer available locally for package inspection. The evidence concerns
+these Mjolnir diffs, not a general comparison across repositories.
+
+The blinded decisive-fact containment diagnostic ran in one Sol/high session
+on codex4. A one-line plan amendment, committed as `5a00ed102` before the
+run, moved it from Carbon when the Gemini weekly pool was closed after
+census use. The stage-A rule and all 44 brief texts were unchanged;
+the writer key stayed outside the uploaded inputs.
+
+| Set | Writer | Full fact (`yes`) | Weaker/different relation (`partial`) | `no` |
+| --- | --- | ---: | ---: | ---: |
+| Primary (18) | Sol/high | 7 | 8 | 3 |
+| Primary (18) | Terra/high | 1 | 13 | 4 |
+| Secondary (4) | Sol/high | 2 | 1 | 1 |
+| Secondary (4) | Terra/high | 1 | 3 | 0 |
+
+On the primary diffs, six pairs contained the full fact only in Sol's brief,
+one in both, none only in Terra's, and eleven in neither. Across those six
+Sol-only pairs, mean reviewer catch share was 66.7% for BT and 22.2% for TT.
+The one primary diff where both contained the full fact,
+`web-feed-self-deadlock`, was caught by all reviewers in both arms. This
+points to weaker fact coverage as one explanation for TT's deficit; most
+Terra briefs anchored a relevant location without stating the full relation.
+These are descriptive comparisons from a single blinded judge, separate from
+the registered reading. **The Sol-writes decision is unchanged.**
+
+All 44 output IDs, brief hashes and quoted matching items were validated.
+The diagnostic used 815,370 reported tokens, an estimated API price of
+$0.2861, and 178.3 seconds from recorded prompt to completion. Session
+configuration confirmed high effort; the usage attribution's effort field
+was null. Details, per-brief labels and quoted evidence are in
+[`contains-summary.json`](results/brief-writer-terra/contains-summary.json)
+and [`contains.jsonl`](results/brief-writer-terra/contains.jsonl).
+
+Results: [`summary.json`](results/brief-writer-terra/summary.json),
+[`per-diff.json`](results/brief-writer-terra/per-diff.json),
+[`usage.jsonl`](results/brief-writer-terra/usage.jsonl), and the accompanying
+audit, image and reviewer metadata under `results/brief-writer-terra/`.
+Raw inputs and judgments remain under
+`/mnt/optane/review-arms-20261113/brief-judge-j/`; the blinding key remains in
+that data root's `private/key-brief-judge-j.json`.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
-under `REVIEW_ARMS_DIR`. To set up a fresh data directory:
+under `REVIEW_ARMS_DIR`. Runs use the installed mj on the default instance;
+the earlier private instance is retired. The default instance needs the
+experiment's `carrier` profile and reviewer profiles before launching jobs.
+To initialize a fresh experiment's reviewer workspace record:
 
 ```sh
 export REVIEW_ARMS_DIR=/mnt/optane/review-arms-<date>
-mkdir -p $REVIEW_ARMS_DIR/instance/{config,data,carrier-dsh}
-# Edit the carrier `home` and the Podman image ID first; both are specific to the first run.
-cp instance-config.toml $REVIEW_ARMS_DIR/instance/config/config.toml
-cp carrier-AGENTS.md $REVIEW_ARMS_DIR/instance/carrier-dsh/AGENTS.md
-grep '^DEEPSEEK_API_KEY' ~/.config/mjolnir/secrets.toml > $REVIEW_ARMS_DIR/instance/config/secrets.toml
-chmod 600 $REVIEW_ARMS_DIR/instance/config/secrets.toml
+export REVIEW_ARMS_INSTANCE=default
+mkdir -p "$REVIEW_ARMS_DIR/default-instance"
 ./mjx doctor --json
-./mjx workspaces create "Review arms" --json > $REVIEW_ARMS_DIR/instance/workspace.json
+./mjx workspaces create "Review arms" --json > "$REVIEW_ARMS_DIR/default-instance/workspace.json"
 ```
+
+Scorers and imports do not require a reviewer workspace record. Writer and
+reviewer drivers read it only when launching a session. The verifier creates
+its own record at `default-instance/verify/workspace.json` and needs no
+reviewer workspace; the Git-only checkout at `verify/repo` is shared data,
+not daemon state. Existing verifier session records refer to the default
+daemon. Verifier runs explicitly reject `REVIEW_ARMS_INSTANCE=private`
+before doing any work, rather than sending those IDs to the retired daemon.
 
 Then:
 

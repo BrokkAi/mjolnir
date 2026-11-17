@@ -2,6 +2,13 @@
 
 Usage: python3 verify_driver.py <verify-dir> [--concurrency 7]
        python3 verify_driver.py <judge-dir> --kind judge [--concurrency 7]
+       python3 verify_driver.py <tasks-dir> --kind task --output siblings.jsonl [--concurrency 7]
+
+--kind task runs one session per unit: every subdirectory of <tasks-dir> that
+holds an INSTRUCTIONS.md. All files of the unit are uploaded to review-input/<unit>/,
+the session follows INSTRUCTIONS.md and writes --output in its working
+directory, and the driver fetches it into the unit directory (a .jsonl output
+must parse line by line). Used by brief_dilution.py's editor and verifier units.
 
 --kind judge runs the relation-brief judging round that `brief_score.py build`
 prepared: two independent judges (A and B) per batch, each a session of its own,
@@ -20,6 +27,7 @@ import argparse
 import collections
 import concurrent.futures
 import itertools
+import hashlib
 import json
 import os
 import pathlib
@@ -28,16 +36,19 @@ import threading
 import time
 
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
+MJX = pathlib.Path(__file__).resolve().parent / "mjx"
 # Subscription Claude Code profiles that offer opus; claude-aws bills Bedrock.
 # claude6 left out: its login failed with ACP auth_required on 2026-11-14.
 PROFILES = ["claude", "claude2", "claude3", "claude4", "claude5", "claude7"]
 p = argparse.ArgumentParser()
 p.add_argument("verify")
 p.add_argument("--concurrency", type=int, default=7)
-p.add_argument("--kind", choices=["verify", "judge"], default="verify")
+p.add_argument("--kind", choices=["verify", "judge", "task"], default="verify")
 # Model and profiles of the sessions; rounds A to F used Opus on the Claude profiles.
+p.add_argument("--output", help="task: the file each unit's session writes, fetched into the unit directory")
 p.add_argument("--model", default="opus")
 p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
+p.add_argument("--quota-scope", help="model pool for REVIEW_ARMS_QUOTA_FLOOR (for example gemini)")
 # Any mj target: each session gets SPEC.md and its batch uploaded into its workspace (INPUT), so the
 # session reads nothing of this host's filesystem and cannot reach the eval's results.
 p.add_argument("--target", default="localhost")
@@ -49,6 +60,11 @@ p.add_argument("--bundle")
 # which map sessions to models. 3c3fa4b13 is master just before the first eval commit.
 p.add_argument("--repo-commit", default="3c3fa4b13")
 a = p.parse_args()
+instance = os.environ.get("REVIEW_ARMS_INSTANCE", "default")
+if instance != "default":
+    p.error("verify_driver supports only REVIEW_ARMS_INSTANCE=default; the private instance is retired and existing verifier IDs belong to the default daemon")
+if a.kind == "task" and not a.output:
+    p.error("--kind task needs --output")
 PROFILES = a.profiles.split(",")
 V = ROOT / a.verify
 REPO = ROOT / "verify/repo"
@@ -67,14 +83,16 @@ for sub in ("out", "sessions", "prompts"):
     (V / sub).mkdir(parents=True, exist_ok=True)
 if a.kind == "verify" and not (V / "SPEC.md").exists():  # verifiers read the spec from the verify dir
     (V / "SPEC.md").write_text((pathlib.Path(__file__).resolve().parent / "verify/SPEC.md").read_text())
-if not (ROOT / "verify/workspace.json").exists():  # creates the workspace, or selects one with this name
-    r = subprocess.run(["mj", "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
-    (ROOT / "verify/workspace.json").write_bytes(r.stdout)
-WORKSPACE = json.loads((ROOT / "verify/workspace.json").read_text())["workspace"]["id"]
+WORKSPACE_RECORD = ROOT / "default-instance/verify/workspace.json"
+if not WORKSPACE_RECORD.exists():  # creates the workspace, or selects one with this name
+    WORKSPACE_RECORD.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([str(MJX), "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
+    WORKSPACE_RECORD.write_bytes(r.stdout)
+WORKSPACE = json.loads(WORKSPACE_RECORD.read_text())["workspace"]["id"]
 
 
 def mj(*args, timeout=300):
-    r = subprocess.run(["mj", *map(str, args), "--json"], capture_output=True, timeout=timeout)
+    r = subprocess.run([str(MJX), *map(str, args), "--json"], capture_output=True, timeout=timeout)
     if r.returncode:
         raise RuntimeError(f"mj {args[0]}: {r.stderr.decode()[-1200:]}")
     return json.loads(r.stdout) if r.stdout.strip() else {}
@@ -128,6 +146,15 @@ INPUT = "review-input"  # workspace folder that receives SPEC.md and the batch
 
 
 def prompt_text(batch_path, judge):
+    if a.kind == "task":
+        first = (f"Before you read anything, run `git checkout -q --detach {a.repo_commit}` in your working "
+                 "directory, and do not open .agents/evals/ at any point.\n\n") if a.bundle else ""
+        return first + f"""Read {INPUT}/{batch_path.name}/INSTRUCTIONS.md and follow it exactly. Your unit's files are in {INPUT}/{batch_path.name}/.
+
+Write {a.output} in your current working directory when you finish.
+
+The mjolnir checkout with full history is your current working directory. Read only {INPUT}/{batch_path.name}/ and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than {a.output}.
+"""
     spec, batch = f"{INPUT}/SPEC.md", f"{INPUT}/{batch_path.name}"
     first = (f"Before you read anything, run `git checkout -q --detach {a.repo_commit}` in your working "
              "directory, and do not open .agents/evals/ at any point.\n\n") if a.bundle else ""
@@ -148,28 +175,44 @@ The mjolnir checkout with full history is your current working directory. Read o
 
 
 def upload_inputs(sid, batch_path):
+    if a.kind == "task":
+        for src in sorted(f for f in batch_path.rglob("*") if f.is_file() and f.name != a.output):
+            rel = src.relative_to(batch_path)
+            r = subprocess.run([str(MJX), "put-file", "--session", sid, "--path", f"{INPUT}/{batch_path.name}/{rel}",
+                                "--overwrite", str(src)], capture_output=True, timeout=300)
+            if r.returncode:
+                raise RuntimeError(f"put-file {rel} into {sid}: {r.stderr.decode()[-400:]}")
+        return
     for src in (V / "SPEC.md", batch_path):
-        r = subprocess.run(["mj", "put-file", "--session", sid, "--path", f"{INPUT}/{src.name}", "--overwrite",
+        r = subprocess.run([str(MJX), "put-file", "--session", sid, "--path", f"{INPUT}/{src.name}", "--overwrite",
                             str(src)], capture_output=True, timeout=300)
         if r.returncode:
             raise RuntimeError(f"put-file {src.name} into {sid}: {r.stderr.decode()[-400:]}")
 
 
 def fetch_output(sid):
-    name = "verdicts.jsonl" if a.kind == "judge" else "verify-out.json"
-    r = subprocess.run(["mj", "fetch", "--session", sid, "--path", name, "--stdout"],
+    name = a.output if a.kind == "task" else "verdicts.jsonl" if a.kind == "judge" else "verify-out.json"
+    r = subprocess.run([str(MJX), "fetch", "--session", sid, "--path", name, "--stdout"],
                        capture_output=True, timeout=300)
     if r.returncode:
         raise RuntimeError(f"session {sid} left no {name}: {r.stderr.decode()[-400:]}")
+    if a.kind == "task":
+        text = r.stdout.decode()
+        if a.output.endswith(".jsonl"):
+            for line in text.splitlines():
+                if line.strip():
+                    json.loads(line)  # a malformed line fails the unit visibly
+        return {"text": text}
     if a.kind == "judge":
         return {"verdicts": [json.loads(line) for line in r.stdout.decode().splitlines() if line.strip()]}
     return json.loads(r.stdout)
 
 
 def run(batch_path, judge=None):
-    n = batch_path.stem.split("-")[1]
+    n = batch_path.name if a.kind == "task" else batch_path.stem.split("-")[1]
     tag = n if judge is None else f"{n}-{judge}"
-    out_path = V / "out" / (f"verify-out-{n}.json" if judge is None else f"verdicts-{tag}.json")
+    out_path = V / "out" / (f"task-{n}.json" if a.kind == "task" else
+                            f"verify-out-{n}.json" if judge is None else f"verdicts-{tag}.json")
     rec_path = V / "sessions" / f"batch-{tag}.json"
     if out_path.exists():
         return tag, "done"
@@ -178,6 +221,13 @@ def run(batch_path, judge=None):
         sid = rec["session_id"]
     else:
         profile = pick_profile()
+        if os.environ.get("REVIEW_ARMS_QUOTA_FLOOR"):
+            # Share the experiment drivers' floor interpretation. Import only
+            # for guarded runs; older verifier data has no driver workspace.
+            from driver import quota_hold
+            hold = quota_hold(a.quota_scope)
+            if hold:
+                raise RuntimeError("held before verifier session start: " + hold)
         source = ["--bundle", a.bundle] if a.bundle else ["--project-directory", REPO]
         sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", a.target,
                  *source, "--effort", "high", "--review", "off", "--no-project-memory",
@@ -207,8 +257,10 @@ def run(batch_path, judge=None):
         upload_inputs(sid, batch_path)
         # A stable command ID makes a resend after an interrupted run the same request,
         # which mj accepts once, instead of a second verifier turn.
-        mj("message", "--session", sid, "--command-id", f"review-arms-{V.name}-batch-{tag}-{sid[:12]}",
-           "--prompt-file", prompt)
+        cid = f"review-arms-{V.name}-batch-{tag}-{sid[:12]}"
+        if len(cid) > 64:  # mj accepts 1-64 characters (mj-core config::loading::validate_id)
+            cid = f"review-arms-{hashlib.sha256(cid.encode()).hexdigest()[:24]}-{sid[:12]}"
+        mj("message", "--session", sid, "--command-id", cid, "--prompt-file", prompt)
         rec = {**rec, "config": cfg, "prompted": time.time_ns()}
         save(rec_path, rec)
         time.sleep(30)
@@ -230,17 +282,23 @@ def run(batch_path, judge=None):
         print(json.dumps({"batch": tag, "state": "quota", "session": sid, "profile": s.get("profile_id")}), flush=True)
         return run(batch_path, judge)
     out = fetch_output(sid)
-    problems = check(batch_path, out)
+    problems = {} if a.kind == "task" else check(batch_path, out)
     if any(problems.values()):
         save(V / "out" / f"invalid-{tag}.json", {"session_id": sid, "problems": problems})
         raise RuntimeError(f"batch {tag} output does not cover its items exactly once: "
                            f"{ {k: len(v) for k, v in problems.items()} }")
+    if a.kind == "task":
+        (batch_path / a.output).write_text(out["text"])
+        out = {"output": str(batch_path / a.output), "session_id": sid}
     save(out_path, out)
     mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
     return tag, "done"
 
 
-batches = sorted(V.glob("batch-*.json"), key=lambda f: int(f.stem.split("-")[1]))
+if a.kind == "task":
+    batches = sorted(d for d in V.iterdir() if d.is_dir() and (d / "INSTRUCTIONS.md").exists())
+else:
+    batches = sorted(V.glob("batch-*.json"), key=lambda f: int(f.stem.split("-")[1]))
 units = [(b, j) for b in batches for j in (["A", "B"] if a.kind == "judge" else [None])]
 failed = 0
 with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:

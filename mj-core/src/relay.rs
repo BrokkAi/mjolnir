@@ -206,7 +206,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // and cannot replay child ownership or question-target observations.
 // Revision 24 is breaking: open turns own their autonomous fact; older readers reject the new field.
 // Revision 25 is breaking: older readers reject it. Upgrading seeds `withdrawn_ordinal` from the legacy flag.
-pub const RELAY_STATE_VERSION: u32 = 25;
+// Revision 26 is breaking: an older writer drops `set_aside_through`, so a dismissed ask would count again.
+pub const RELAY_STATE_VERSION: u32 = 26;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

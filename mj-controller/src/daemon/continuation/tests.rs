@@ -1418,6 +1418,7 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
         error: None,
         refreshed_at_epoch_seconds: now as u64,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     };
     let request = QuotaRefreshRequest::for_profile(
         "claude",
@@ -1767,6 +1768,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             error: None,
             refreshed_at_epoch_seconds: mj_core::clock::epoch_seconds(),
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         };
         let publish_report = |identity: &str, report: ProfileQuota| {
             let mut reports = reports.lock().unwrap();

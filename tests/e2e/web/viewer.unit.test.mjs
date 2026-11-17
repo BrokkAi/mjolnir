@@ -1337,6 +1337,22 @@ function delegationContext(kind = 'codex', configured = true) {
   return context;
 }
 
+test('Create gives a YOLO target its own configured Mjolnir choices', () => {
+  const context = delegationContext('codex', true);
+  context.snapshot.targets = [{ id: 'yolo', permission_mode: 'yolo', subagents_configured: false }];
+  const available = () => vm.runInContext(
+    `mjolnirAvailable({ profileId: 'profile', targetId: 'yolo', subagents: { mode: 'mjolnir' } })`,
+    context,
+  );
+  assert.equal(available(), false);
+  context.snapshot.targets[0].subagents_configured = true;
+  assert.equal(available(), true);
+  // A container target has no permission mode and keeps the shared choices.
+  context.snapshot.targets[0] = { id: 'yolo', subagents_configured: true };
+  context.snapshot.subagents_configured = false;
+  assert.equal(available(), true);
+});
+
 test('Create remembers delegation per profile and restores Mjolnir after an unavailable profile', () => {
   const context = delegationContext('codex', true);
   context.snapshot.profiles.push({ id: 'claude-profile', harness_kind: 'claude' }, { id: 'grok-profile', harness_kind: 'grok' });

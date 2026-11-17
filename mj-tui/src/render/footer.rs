@@ -190,17 +190,4 @@ pub(crate) fn prefix_banner_line(dashboard: &DashboardState) -> Line<'static> {
     )
 }
 
-pub(crate) fn refresh_age(now: u64, refreshed: u64) -> String {
-    if refreshed == 0 {
-        return "unknown".into();
-    }
-    let age = now.saturating_sub(refreshed);
-    let (value, unit) = if age < 60 {
-        (age, "s")
-    } else if age < 3_600 {
-        (age / 60, "m")
-    } else {
-        (age / 3_600, "h")
-    };
-    format!("{value}{unit} ago")
-}
+pub(crate) use mj_core::text::refresh_age;

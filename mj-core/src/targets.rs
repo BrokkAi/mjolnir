@@ -20,7 +20,9 @@ use crate::config::{HarnessKind, ImagePullPolicy};
 
 mod diagnostics;
 pub use diagnostics::{BlockingOperation, BlockingOperationSnapshot, active_blocking_operations};
+mod capacity_report;
 pub mod storage;
+pub use capacity_report::*;
 
 pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
@@ -599,7 +601,8 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeploymentCapacityKind {
     Host,
     AwsFleet,

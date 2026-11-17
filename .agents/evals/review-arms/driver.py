@@ -17,6 +17,7 @@ import json
 import os
 import pathlib
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -27,6 +28,13 @@ SCRIPTS = pathlib.Path(__file__).resolve().parent
 # Experiment data (instance, corpus, runs) lives outside the repository.
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 MJX = SCRIPTS / "mjx"
+# The mj instance mjx reaches (see mjx): the default instance, or the private one of the
+# earlier stages. Each keeps its workspace record in its own directory under ROOT.
+if os.environ.get("REVIEW_ARMS_INSTANCE", "default") == "private":
+    INSTANCE, STORE = ROOT / "instance", ROOT / "instance/data/mj.sqlite3"
+else:
+    INSTANCE = ROOT / "default-instance"
+    STORE = pathlib.Path.home() / ".local/share/mjolnir/mj.sqlite3"
 # The mjolnir checkout that supplies commit messages; defaults to the one holding these scripts.
 REPO = os.environ.get("REVIEW_ARMS_REPO") or subprocess.check_output(
     ["git", "-C", str(SCRIPTS), "rev-parse", "--show-toplevel"]).decode().strip()
@@ -53,7 +61,6 @@ ARMS = {
     "L": ["muse-ember-1.0:xhigh", "gemini-4-hydrogen:high", "kimi-code/k3.1-pro:high"],
     "M": ["glm-5.3:high", "glm-5.3-flash:high"],  # GLM, one session each
 }
-WORKSPACE = json.loads((ROOT / "instance/workspace.json").read_text())["workspace"]["id"]
 # Hard-won candidates and the sampled ordinary diffs share one id space.
 CORPUS = {c["id"]: c for name in ("candidates-all.jsonl", "diffs.jsonl")
           if (SCRIPTS / "corpus" / name).exists()
@@ -65,7 +72,22 @@ ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
              "FT": ["gpt-6.1-terra:high"] * 3, "FS": ["gpt-6.1-sol:high"] * 3,
              # Ablation (brief/PLAN-ablation.md): Bifrost plus the decisive item; blind minus it.
              "DT": ["gpt-6.1-terra:high"] * 3, "DS": ["gpt-6.1-sol:high"] * 3,
-             "XT": ["gpt-6.1-terra:high"] * 3, "XS": ["gpt-6.1-sol:high"] * 3})
+             "XT": ["gpt-6.1-terra:high"] * 3, "XS": ["gpt-6.1-sol:high"] * 3,
+             # Dilution (brief/PLAN-dilution.md): arm D's brief plus every sibling fact.
+             "WT": ["gpt-6.1-terra:high"] * 3, "WS": ["gpt-6.1-sol:high"] * 3,
+             # Wizard-of-Oz query arms (brief/PLAN-oz.md): no brief, a site_context tool.
+             "QT": ["gpt-6.1-terra:high"] * 3, "QS": ["gpt-6.1-sol:high"] * 3,
+             # Writer model (brief/PLAN-writer-terra.md): stage B's blind brief written by Terra/high.
+             "TT": ["gpt-6.1-terra:high"] * 3})
+
+
+def workspace_id():
+    """Read the selected instance's workspace only when a new session is launched."""
+    path = INSTANCE / "workspace.json"
+    try:
+        return json.loads(path.read_text())["workspace"]["id"]
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read workspace id from {path}; create the workspace with mjx and save its JSON there") from exc
 
 
 def save(path, value):
@@ -88,6 +110,33 @@ def session(sid):
     return value["sessions"][0] if "sessions" in value else value
 
 
+def quota_hold(scope=None):
+    """Why a new job must not start, or None. REVIEW_ARMS_QUOTA_FLOOR="codex4=25,..." names
+    shared profiles whose least window must keep that many percent (a coordinator's limit,
+    2026-11-16: codex4 is shared with other sessions). Checked once per launch, from the
+    daemon's stored report; a missing or unreadable report holds the job, since unknown is
+    not "enough"."""
+    floor = os.environ.get("REVIEW_ARMS_QUOTA_FLOOR")
+    if not floor:
+        return None
+    for spec in floor.split(","):
+        profile, _, percent = spec.partition("=")
+        rows = mj("quota", "--profile", profile).get("profiles") or []
+        report = (rows[0].get("report") or {}) if rows else {}
+        windows = report.get("windows") or []
+        # Antigravity reports separate Gemini and Claude/GPT pools. Unscoped
+        # windows apply to every model; an absent matching pool stays unknown.
+        if scope:
+            windows = [w for w in windows if not w.get("model_scope")
+                       or scope in w["model_scope"].split(",")]
+        left = [w.get("remaining_percent") for w in windows]
+        if not left or None in left or report.get("error"):
+            return f"{profile}: no usable quota report ({json.dumps(report)[:300]})"
+        if min(left) < float(percent):
+            return f"{profile}: {min(left)}% left, below the floor of {percent}%"
+    return None
+
+
 def wait_idle(sid, limit=1200):
     end = time.monotonic() + limit
     while time.monotonic() < end:
@@ -105,7 +154,9 @@ def container(sid):
                                    "--format", "{{.ID}}"]).decode().split()
     assert len(ids) == 1, ids
     mounts = json.loads(subprocess.check_output(["podman", "inspect", ids[0], "--format", "{{json .Mounts}}"]))
-    return {"container": ids[0], "cwd": f"/workspace/{sid}/mjolnir",
+    # The default instance's Podman target follows agent-dev:latest, so record the image per job.
+    image = subprocess.check_output(["podman", "inspect", ids[0], "--format", "{{.Image}}"]).decode().strip()
+    return {"container": ids[0], "image": image, "cwd": f"/workspace/{sid}/mjolnir",
             "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
                        for m in mounts]}
 
@@ -159,6 +210,42 @@ def handback_messages(items):
     return messages
 
 
+def stored_reviewer(child):
+    """A finished review's reviewer, read from the instance store.
+
+    mj destroys a reviewer session when its role ends (8fe3c40bd), so `mj sessions` and
+    `mj transcript` no longer know it. The handback text (subagent_handbacks) and the
+    turn selection (session_turn_selections) stay in the store; usage comes from `mj usage`.
+    The store is opened read-only; WAL mode lets that coexist with the running daemon.
+    """
+    db = sqlite3.connect(f"file:{STORE}?mode=ro", uri=True, timeout=30)
+    try:
+        report = db.execute("SELECT handback_message, handback_command_id FROM subagent_handbacks "
+                            "WHERE child_session_id = ?", (child,)).fetchone()
+        picks = db.execute("SELECT model, effort, profile FROM session_turn_selections "
+                           "WHERE session_id = ? ORDER BY rowid", (child,)).fetchall()
+    finally:
+        db.close()
+    model, effort, profile = picks[-1] if picks else (None, None, None)
+    return {"handback_message": report[0] if report else None,
+            "handback_command_id": report[1] if report else None,
+            "selection": {"model": model, "effort": effort, "profile": profile}}
+
+
+def status_efforts(d):
+    """Per-slot "model / effort" from the review status line ("codex: m / high; codex: m / high · ...").
+    The turn selection stores no effort for these reviewers, so the status text is its record."""
+    log = d / "review-status.jsonl"
+    found = []
+    if log.exists():
+        for line in log.read_text().splitlines():
+            text = ((json.loads(line)["status"].get("review") or {}).get("status")) or ""
+            m = re.match(r"((?:[^;·]+/ *\S+)(?:; *[^;·]+/ *\S+)*) *·", text)
+            if m:
+                found = [tuple(p.strip() for p in part.split(":", 1)[-1].split("/")) for part in m.group(1).split(";")]
+    return found  # [(model, effort), ...] in slot order; the last status that listed them
+
+
 def commit_message(bug):
     message = subprocess.check_output(["git", "-C", REPO, "log", "-1", "--format=%B", bug["intro_commit"]]).decode()
     # Trailers point at external sessions and other branches; the task intent is the rest.
@@ -168,7 +255,8 @@ def commit_message(bug):
 
 # Arms whose reviewers also get a relation brief (brief/PLAN.md), by brief kind.
 BRIEF_ARMS = {"OT": "oracle", "OS": "oracle", "BT": "blind", "BS": "blind", "FT": "bifrost", "FS": "bifrost",
-              "DT": "bifrost-plus", "DS": "bifrost-plus", "XT": "blind-minus", "XS": "blind-minus"}
+              "DT": "bifrost-plus", "DS": "bifrost-plus", "XT": "blind-minus", "XS": "blind-minus",
+              "WT": "bifrost-diluted", "WS": "bifrost-diluted", "TT": "blind-terra"}
 BRIEF_NOTE = ("These are relations computed from the repository at this commit, not findings. "
               "They may be incomplete.")
 
@@ -180,8 +268,21 @@ def brief_section(bug, arm):
     return f"\n## Relations computed from the repository\n\n{BRIEF_NOTE}\n\n{brief}\n"
 
 
+QUERY_ARMS = {"QT", "QS"}
+QUERY_TOOL_NOTE = ("A `site_context` tool (MCP server `bifrost`) is available, and it is the one exception "
+                   "to the network rule below. Give it a qualified function name or a `path:line` in this "
+                   "commit. It returns the facts a static analyzer recorded for that site and says whether "
+                   "the answer is complete.")
+
+
 def context_text(bug, arm=None):
     message = commit_message(bug)
+    if arm in QUERY_ARMS:
+        tool_note = f"\n{QUERY_TOOL_NOTE}\n"
+        network = "The reviewer does not fetch or use the network (except the `site_context` tool), GitHub, or other repositories"
+    else:
+        tool_note = ""
+        network = "The reviewer does not fetch or use the network, GitHub, or other repositories"
     return f"""# Historical change for code review
 
 This message is context for a separate code reviewer. The repository is
@@ -192,11 +293,11 @@ branches, tags or remotes. The change is complete and committed.
 ## Commit message
 
 {message}
-{brief_section(bug, arm)}
+{brief_section(bug, arm)}{tool_note}
 ## Reviewer constraints
 
 The reviewer reviews only this change, using this checkout and its history.
-The reviewer does not fetch or use the network, GitHub, or other repositories
+{network}
 or checkouts, and does not read user memory, session history, build caches, or
 /run/hel/git-cache. The reviewer does not build, run tests, run Cargo, install
 tools, or modify files. Helper agents it starts follow the same constraints.
@@ -235,11 +336,16 @@ def run_job(job, gate):
         return "needs-recovery"
     identity = {"bug": bug["id"], "arm": arm, "reviewers": ARMS[arm], "intro": bug["intro_commit"],
                 "base": bug["base_commit"], "time_ns": time.time_ns()}
+    with gate:
+        hold = quota_hold()
+    if hold:
+        return "held: " + hold  # nothing recorded; the job starts on a later run
+    workspace = workspace_id()
     save(d / "launch-intent.json", identity)
     # Neutral title: reviewers must not see the bug id.
     title = "review-arms " + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:8]
     with gate:
-        launch = mj("new", "--workspace-id", WORKSPACE, "--profile", "carrier", "--target", "podman",
+        launch = mj("new", "--workspace-id", workspace, "--profile", "carrier", "--target", "podman",
                     "--bundle", "mjolnir", "--at", bug["intro_commit"], "--base", bug["base_commit"],
                     "--no-later-history", *[v for r in ARMS[arm] for v in ["--reviewer", r]],
                     "--no-project-memory", "--no-github-events", "--no-github-credentials",
@@ -344,36 +450,25 @@ def collect(d, bug, identity, sid, place, before):
         reviewers = []
         for child, info in children.items():
             cd = d / "reviewers" / child[:12]
-            row = session(child)
-            save(cd / "session.json", row)
-            settings = {c["key"]: c.get("current") for c in row.get("config_options", [])}
-            pages = transcript(child)
-            save(cd / "transcript.json", pages)
+            stored = stored_reviewer(child)
+            save(cd / "stored.json", stored)
             usage = mj("usage", "--session", child)
             save(cd / "usage.json", usage)
-            items = [i for p in pages for i in p["items"]]
-            # A reviewer parked before capture reports no config options; its transcript
-            # records the model and effort it was given ("model set to ...").
-            for key in ("model", "effort"):
-                if not settings.get(key):
-                    set_to = [m.group(1) for i in items if i["role"] == "system"
-                              for m in [re.match(rf"{key} set to (\S+)$", i["body"].get("text") or "")] if m]
-                    settings[key] = set_to[-1] if set_to else None
-            messages = handback_messages([i for i in items if i["role"] == "tool" and "handback" in json.dumps(i)])
+            efforts = status_efforts(d)
+            slot_pick = efforts[info["slot"]] if info["slot"] is not None and info["slot"] < len(efforts) else (None, None)
+            if slot_pick[0] and stored["selection"]["model"] and slot_pick[0] != stored["selection"]["model"]:
+                raise RuntimeError(f"reviewer {child}: status line lists {slot_pick}, store has {stored['selection']}")
+            settings = {"model": stored["selection"]["model"] or slot_pick[0],
+                        "effort": stored["selection"]["effort"] or slot_pick[1]}
             # A reviewer that ends its turn with its findings as a message instead of a
-            # handback call (DeepSeek Flash on DSH did) leaves mj's review incomplete.
-            # Its review is still scored, from that last message, and the miss is recorded.
-            final = ["".join(c.get("content", {}).get("text", "") for c in i["body"].get("chunks", []))
-                     for i in items if i["role"] == "agent"]
-            # Only a turn that ended normally gives a final message; an errored or
-            # cancelled turn may stop on a progress message, so it counts as no output.
-            ended = ((row.get("last_turn_outcome") or {}).get("outcome") or {})
-            completed = ended.get("kind") == "completed" and ended.get("stop_reason") == "EndTurn"
-            output = messages[-1] if messages else (
-                next((t for t in reversed(final) if t.strip()), None) if completed else None)
+            # handback call (DeepSeek Flash on DSH did) leaves no stored handback and, with
+            # the session destroyed, no transcript to recover them from: it counts as no output.
+            message = (stored["handback_message"] or "").strip()
+            messages = [message] if message else []
+            output = message or None
             if output:
                 (cd / "output.md").write_text(output + "\n")
-            reviewers.append({"child": child, "slot": info["slot"], "profile": row.get("profile_id"),
+            reviewers.append({"child": child, "slot": info["slot"], "profile": stored["selection"]["profile"],
                               "model": settings.get("model"), "effort": settings.get("effort"),
                               "has_output": bool(output), "handback": bool(messages)})
         # A review can clear before every reviewer was observed, or with a reviewer
@@ -426,18 +521,30 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--jobs", required=True)
     p.add_argument("--concurrency", type=int, default=1)
+    p.add_argument("--stop-on-failure", action="store_true",
+                   help="stop admitting new jobs after a failed, held, or recovery-needed job")
     a = p.parse_args()
     jobs = json.loads(pathlib.Path(a.jobs).read_text())
     # Serialize session creation and startup; reviews themselves run concurrently.
     gate = threading.Semaphore(2)
+    admission_lock = threading.Lock()
+    stopped = False
 
     def one(job):
+        nonlocal stopped
+        with admission_lock:
+            if a.stop_on_failure and stopped:
+                return job, "not-started", None
         try:
-            return job, run_job(job, gate), None
+            state, error = run_job(job, gate), None
         except Exception as e:  # report every failure with its job
             d = ROOT / "runs" / job["bug"] / job["arm"]
             save(d / "error.json", {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
-            return job, "failed", str(e)
+            state, error = "failed", str(e)
+        if a.stop_on_failure and state != "done":
+            with admission_lock:
+                stopped = True
+        return job, state, error
 
     unfinished = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:

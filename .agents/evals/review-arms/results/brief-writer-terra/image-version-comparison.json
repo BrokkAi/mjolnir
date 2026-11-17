@@ -1,0 +1,87 @@
+{
+  "scope": [
+    "codex",
+    "@brokkai/codex-acp",
+    "@brokkai/dsh-acp"
+  ],
+  "images": {
+    "TT": {
+      "id": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "evidence": "podman image history --no-trunc; install RUN layer",
+      "versions": {
+        "codex": "0.168.0",
+        "@brokkai/codex-acp": "1.15.0",
+        "@brokkai/dsh-acp": "0.6.0"
+      }
+    },
+    "BT": {
+      "id": "8eee5a3ab7e2 (local tag review-arms:pinned-20261114)",
+      "evidence": "podman image history --no-trunc; install RUN layer",
+      "versions": {
+        "codex": "0.168.0",
+        "@brokkai/codex-acp": "1.15.0",
+        "@brokkai/dsh-acp": "0.6.0"
+      }
+    },
+    "writers": {
+      "id": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "versions": null,
+      "status": "unknown; image not present locally and no matching reference found in bounded prior-evidence search"
+    }
+  },
+  "comparison": {
+    "TT_vs_BT": "equal for all three requested packages based on immutable image history install command",
+    "writers_vs_TT_BT": "unknown"
+  },
+  "limitations": [
+    "Image history establishes the package versions in the recorded npm install layer; it is provenance evidence, not a runtime package.json read.",
+    "No source revision equality was used to infer package equality."
+  ],
+  "cleanup": "No query containers were left running. podman ps showed only existing Mjolnir carriers; none were stopped or altered.",
+  "parent_checked_history": {
+    "TT": {
+      "image_id": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "command": [
+        "podman",
+        "history",
+        "--no-trunc",
+        "--format",
+        "json",
+        "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c"
+      ],
+      "installation_layers": [
+        {
+          "layer_id": "<missing>",
+          "install_pins": [
+            "@brokkai/codex-acp@1.15.0",
+            "@brokkai/dsh-acp@0.6.0",
+            "@openai/codex@0.168.0"
+          ],
+          "recorded_command_sha256": "7a4ace3d586f97000e798296529ea32208f72de6c93b85d7e1f5000987e4b487"
+        }
+      ]
+    },
+    "BT": {
+      "image_id": "8eee5a3ab7e2321b472689a6066072794bea4288bc4bba6fcc15d8986eb2d5e8",
+      "command": [
+        "podman",
+        "history",
+        "--no-trunc",
+        "--format",
+        "json",
+        "8eee5a3ab7e2321b472689a6066072794bea4288bc4bba6fcc15d8986eb2d5e8"
+      ],
+      "installation_layers": [
+        {
+          "layer_id": "<missing>",
+          "install_pins": [
+            "@brokkai/codex-acp@1.15.0",
+            "@brokkai/dsh-acp@0.6.0",
+            "@openai/codex@0.168.0"
+          ],
+          "recorded_command_sha256": "7a4ace3d586f97000e798296529ea32208f72de6c93b85d7e1f5000987e4b487"
+        }
+      ]
+    }
+  }
+}

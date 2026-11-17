@@ -1,0 +1,224 @@
+{
+  "status": "Milestone1 complete; UTC-corrected controls frozen before any brief/review; Sol primary30, Carbon partial5",
+  "repository": "BrokkAi/bifrost-dev",
+  "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+  "data_dir": "/mnt/optane/review-arms-bifrost-20261116",
+  "cutoff": "2026-11-01T00:00:00Z",
+  "bug_issue_seed": 20261117,
+  "ordinary_seed": 20261117,
+  "ordinary_count": 40,
+  "known_bug_target": 30,
+  "tracing_model": "gpt-6.1-sol",
+  "tracing_effort": "medium",
+  "census_models": [
+    {
+      "model": "gemini-4-carbon",
+      "effort": "high",
+      "profile": "gemini2",
+      "target": "morannon-podman"
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    }
+  ],
+  "input_sha256": {
+    ".agents/evals/review-arms/corpus/SPEC.md": "410d22c1af2b77a6a9f5bd623b99d3d1e11b2e94fdb90e7ab3594c3c47c123ca",
+    ".agents/evals/review-arms/label/SPEC.md": "1da9eb2c40b2a42905a12c870d1facf109d816c391c39f247013b3079e0f2502",
+    ".agents/evals/review-arms/label/SPEC-pass2.md": "c98c16434f506cbe1fbfd85011d6e8e0b8c55e7f8d9f8e251a38ba0c977b4117",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/dbcece95f1cdc80785d2df3f995138f2/.agents/evals/review-arms/brief/PLAN-bifrost-bugs.md": "bd7e80aca9854a9c5e7b273624aca3134ed100dc0f8eb32d260079d6fa89e4c5",
+    "/mnt/optane/review-arms-bifrost-20261116/corpus-build/bug-issues-pool.jsonl": "69ed25d6d7477fdaecf788c995796d3fd9f7b128cd5f07c04843eff03a6dd730",
+    "/mnt/optane/review-arms-bifrost-20261116/corpus-build/bug-issues-order.jsonl": "b9fcee93f4c4f05feeee97bb7a39635185f15e5fd5b3d97fc7f28c26431b2c0b"
+  },
+  "source_inventory_correction": {
+    "original_literal_comments": 22,
+    "rust_attributes": 12932,
+    "attribute_files": 2244,
+    "distinct_attribute_reasons": 11969,
+    "distinct_attribute_issue_numbers": 2705,
+    "qualified_defects": null,
+    "attribute_inventory": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/hard-won/attribute-inventory.json",
+    "attribute_inventory_sha256": "7f927da7f193b33e44692857aa2453e8f7d92aa3d304983c0bae1fe82f989fa2",
+    "reason": "Bifrost AGENTS.md defines #[hardwon(...)] as canonical defect metadata; initial22 included literal comments only.",
+    "groups": {
+      "pinned_commit": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+      "markers": 12954,
+      "groups": 4168,
+      "group_kinds": {
+        "commit": 1479,
+        "issue": 2653,
+        "unresolved-sha": 36
+      },
+      "marker_kinds": {
+        "attribute": 12932,
+        "comment": 22
+      },
+      "grouping_basis": {
+        "first_named_sha": 3290,
+        "marker_added_commit_blame": 3,
+        "first_named_issue": 9661
+      },
+      "multiple_distinct_issue_markers": 168,
+      "multiple_distinct_sha_no_issue_markers": 8,
+      "no_explicit_reference_markers": 3,
+      "missing_primary_sha_markers": 60,
+      "named_sha_strings": 1557,
+      "resolved_sha_strings": 1518,
+      "missing_sha_strings": 39,
+      "collapsed_sha_alias_sets": 1,
+      "sha_aliases": {
+        "40457c5a89740d822a690a6b5ab08dd98df10ea2": [
+          "40457c5a89",
+          "40457c5a8974"
+        ]
+      },
+      "comments_joining_attribute_groups": 16,
+      "comment_only_groups": [
+        "commit:0dad4cdf5306d7bddd76d53da6fb6ab276534a81",
+        "commit:44c5cdebe29f71828a9a4fdcda5486201dc7f37f",
+        "commit:5b258841ad07af9a5ba47cddf02d977d0e992f5a",
+        "commit:97b137dbb54c142ec08428cdec101868d724f89d",
+        "issue:11595",
+        "issue:12198"
+      ],
+      "order": "Lexicographic group_key only; no draw or seed used.",
+      "qualification": "Canonical source groups only; not confirmed defects or eligible introductions.",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "pool_sha256": "edd448fd1d6cb5f97248ef09c1c3ebdcd8da5ff4270fcf8bc14283b384961631",
+      "normalized_markers_sha256": "99b86695b24e43bf2487f5441afb093e99726d8b283d533c5d3d1d5212185d31",
+      "validation": "All12954 raw markers retained exactly once;4168 sorted groups; numeric path/line member ordering; no draw performed."
+    }
+  },
+  "hardwon_group_seed": 20261118,
+  "hardwon_group_order": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/hardwon-groups-order.jsonl",
+  "second_source_amendment": {
+    "plan": "/home/jonathan/Projects/mjolnir/.mj/clones/dbcece95f1cdc80785d2df3f995138f2/.agents/evals/review-arms/brief/PLAN-bifrost-bugs.md",
+    "sha256": "82a56e2c8a7b3d8a0905d68400f20e6f2e12c7fcd8f57058e01cf85f81d4a0a2",
+    "method": "Group canonical comment/attribute markers by primary issue, else named commit (full SHA where resolvable); unreferenced comments use marker-added fix commit. Shuffle stable sorted groups with seed20261118, trace in order until30confirmed under unchanged SPEC. Existing bugissue order is fallback only if groups exhaust."
+  },
+  "hardwon_group_draw": {
+    "seed": 20261118,
+    "groups": 4168,
+    "markers": 12954,
+    "pool_sha256": "edd448fd1d6cb5f97248ef09c1c3ebdcd8da5ff4270fcf8bc14283b384961631",
+    "order_sha256": "20123d27b1ade9e3a30a9014a7d4242065c29f77a17dbccea775eb202063f7cf",
+    "method": "random.Random(20261118).shuffle over lexical group_key order; 1-based positions assigned after draw",
+    "seed_commit": "a04256027"
+  },
+  "selection_freeze": {
+    "frozen_at": "2026-11-17T03:41:57.338958+00:00",
+    "repository": "BrokkAi/bifrost-dev",
+    "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+    "known_bugs": 30,
+    "ordinary_controls": 40,
+    "attribution_confidence": {
+      "confirmed": 30
+    },
+    "source": {
+      "hard-won": 30,
+      "bug-issue": 0
+    },
+    "group_seed": 20261118,
+    "last_selected_group_position": 127,
+    "feature_families": 24,
+    "max_per_family": 2,
+    "spread_only_exclusion": {
+      "position": 122,
+      "reason": "Third inverse-usage candidate-file routing case; earlier77/117 retained."
+    },
+    "ordinary_seed": 20261117,
+    "ordinary_eligible": 8230,
+    "traced_intro_exclusions": 429,
+    "corpus_sha256": "f6fda0200ac7fecbb7f03bc3a27fb193fd08620c82476118f33533972c8ea749",
+    "ordinary_sha256": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
+    "exclusions_sha256": "49ec8753edae333d9a05d9f315cce7db0787ca397ee9801df3a177da71a6db77",
+    "source_order_sha256": "20123d27b1ade9e3a30a9014a7d4242065c29f77a17dbccea775eb202063f7cf",
+    "source_pool_sha256": "edd448fd1d6cb5f97248ef09c1c3ebdcd8da5ff4270fcf8bc14283b384961631",
+    "plan_snapshot_sha256": "9f6c1acbb53d9f8736f1bd0382a95d4d715b2d0071fd0efe1620dd982bd612b5",
+    "primary_census": {
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "labels": 30,
+      "relation_rule": "kind != none"
+    },
+    "independent_census": {
+      "model": "gemini-4-carbon",
+      "effort": "high",
+      "labels": 5,
+      "status": "partial replication under quota amendment"
+    },
+    "census_status": "complete under quota amendment; selected bugs and census bytes unchanged by UTC correction",
+    "selection_on_labels": false,
+    "known_bug_changed_lines": {
+      "median": 827.0,
+      "min": 109,
+      "max": 2936
+    },
+    "ordinary_changed_lines": {
+      "median": 387.0,
+      "min": 91,
+      "max": 1473
+    },
+    "found_by_status": {
+      "known": 18,
+      "unknown": 12
+    },
+    "original_frozen_at": "2026-11-17T02:04:18.118713+00:00",
+    "cutoff": "2026-11-01T00:00:00Z",
+    "utc_correction": "utc-cutoff-correction/correction.json",
+    "supersedes": "utc-cutoff-correction/pre-correction/corpus/selection-freeze.json"
+  },
+  "census_roles_plan_sha256": "9f6c1acbb53d9f8736f1bd0382a95d4d715b2d0071fd0efe1620dd982bd612b5",
+  "final_census_roles": {
+    "primary": "gpt-6.1-sol/high",
+    "primary_n": 30,
+    "replication": "gemini-4-carbon/high",
+    "replication_n": 5,
+    "relation_rule": "primary kind != none",
+    "agreement_n": 5,
+    "role_amendment_sha256": "9341ca7f1a94933a18bf67ef9619945fe1ad81465453e62af0993e82fd700a3e"
+  },
+  "utc_cutoff_correction": {
+    "recorded_at": "2026-11-17T03:41:57.338958+00:00",
+    "reason": "Review found control0549477459 at2026-11-01T01:14:32Z after registered UTC midnight; timezone-free Git argument used host UTC-6. SPEC local-time wording corrected too.",
+    "cutoff": "2026-11-01T00:00:00Z",
+    "strict_before": true,
+    "ordinary_seed": 20261117,
+    "ordinary_eligible_before": 8269,
+    "ordinary_eligible_after": 8230,
+    "ordinary_count": 40,
+    "old_ordinary_sha256": "5417b82b4426b2e8e640f6b9c91f99c1e7e2b407b180ce63ecc44aae7f6d2328",
+    "ordinary_sha256": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
+    "overlap": 1,
+    "removed": 39,
+    "added": 39,
+    "ordinary_changed_lines": {
+      "median": 387.0,
+      "min": 91,
+      "max": 1473
+    },
+    "known_bugs_checked": 30,
+    "known_bugs_changed": 0,
+    "corpus_census_relations_bytes_unchanged": true,
+    "fallback_issues_checked": 887,
+    "fallback_pool_order_unchanged": true,
+    "mjolnir_selected_checked": 70,
+    "mjolnir_affected_window_matches": 0,
+    "mjolnir_frozen_corpus_changed": false,
+    "selection_on_labels": false,
+    "study_brief_reviewer_judge_runs": 0,
+    "previous_freeze_sha256": "43fca4db9602c22ca5666c40bc1787586c441b1ff88066b7668007c1a4d087eb",
+    "historical_archive": "utc-cutoff-correction/pre-correction/",
+    "details": "utc-cutoff-correction/redraw-comparison.json",
+    "registration": "registration/CUTOFF-CORRECTION.md"
+  },
+  "historical_input_sha256": {
+    ".agents/evals/review-arms/corpus/SPEC.md": "516665e762842984f26ba868865972327e89753a745b96197fffce3724cffb45",
+    ".agents/evals/review-arms/label/SPEC.md": "1da9eb2c40b2a42905a12c870d1facf109d816c391c39f247013b3079e0f2502",
+    ".agents/evals/review-arms/label/SPEC-pass2.md": "c98c16434f506cbe1fbfd85011d6e8e0b8c55e7f8d9f8e251a38ba0c977b4117",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/dbcece95f1cdc80785d2df3f995138f2/.agents/evals/review-arms/brief/PLAN-bifrost-bugs.md": "bd7e80aca9854a9c5e7b273624aca3134ed100dc0f8eb32d260079d6fa89e4c5",
+    "/mnt/optane/review-arms-bifrost-20261116/corpus-build/bug-issues-pool.jsonl": "69ed25d6d7477fdaecf788c995796d3fd9f7b128cd5f07c04843eff03a6dd730",
+    "/mnt/optane/review-arms-bifrost-20261116/corpus-build/bug-issues-order.jsonl": "b9fcee93f4c4f05feeee97bb7a39635185f15e5fd5b3d97fc7f28c26431b2c0b"
+  }
+}

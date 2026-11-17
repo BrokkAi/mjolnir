@@ -1479,13 +1479,9 @@ fn follow_daemon_creation(
     lifecycle_updates: &UnboundedSender<DashboardLifecycleUpdate>,
     cancelled: Arc<AtomicBool>,
 ) {
-    let result = mj_core::runtime::block_on(async {
-        let mut daemon = daemon::connect_or_start().await?;
-        daemon.wait_create_session(session_id.clone()).await?;
-        Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
-    })
-    .and_then(|result| result)
-    .map_err(crate::pollers::DashboardLifecycleFailure::from);
+    let result = mj_core::runtime::block_on(await_daemon_creation(&session_id, &cancelled))
+        .and_then(|result| result)
+        .map_err(crate::pollers::DashboardLifecycleFailure::from);
     report(
         operation,
         lifecycle_updates,
@@ -1495,6 +1491,78 @@ fn follow_daemon_creation(
             operation: cancelled,
         },
     );
+}
+
+/// Wait for the daemon to finish creating a session, across daemon restarts.
+///
+/// A daemon that stops mid-create does not fail it: the next daemon finishes
+/// it from its durable record, and any daemon answers `WaitCreateSession`
+/// from that record. A lost connection therefore means "ask again", never
+/// "failed". The wait is
+/// read-only, so repeating it is safe; `StartCreateSession` is never repeated.
+/// Each retry follows a lost connection and waits a quarter second, and the
+/// loop ends with the daemon's answer or the caller's cancellation.
+async fn await_daemon_creation(
+    session_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<LifecycleSuccess> {
+    follow_create_wait(session_id, cancelled, daemon::connect_or_start).await
+}
+
+/// The loop of [`await_daemon_creation`], with the way it reaches a daemon
+/// given, so a test can answer it from a fake daemon.
+async fn follow_create_wait<Connect, Connecting>(
+    session_id: &str,
+    cancelled: &AtomicBool,
+    connect: Connect,
+) -> Result<LifecycleSuccess>
+where
+    Connect: Fn() -> Connecting,
+    Connecting: std::future::Future<Output = Result<mj_client::daemon::DaemonClient>>,
+{
+    const RETRY_DELAY: Duration = Duration::from_millis(250);
+    // Every wait below, including the connection and the backoff, is watched
+    // beside this, so a cancel ends the follow promptly.
+    let cancellation = || async {
+        while !cancelled.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    loop {
+        // One attempt, with no reconnect inside the client: a daemon that
+        // stops drops the connection, and this loop starts the next daemon
+        // through `connect`.
+        let attempt = async {
+            let mut daemon = connect().await?;
+            daemon.wait_create_session(session_id.to_owned()).await
+        };
+        let error = tokio::select! {
+            outcome = attempt => match outcome {
+                Ok(()) => return Ok(LifecycleSuccess::Created),
+                Err(error) => error,
+            },
+            () = cancellation() => bail!("operation cancelled"),
+        };
+        // Only a connection that dropped after the wait was sent means "ask
+        // again". A refusal, a failure to connect or start a daemon (which
+        // waits out a handoff before it fails) and a protocol mismatch are
+        // real answers and end the follow with their own error.
+        if error
+            .downcast_ref::<mj_client::daemon::DaemonTransportLost>()
+            .is_none()
+        {
+            return Err(error);
+        }
+        tracing::info!(
+            session_id,
+            error = format!("{error:#}"),
+            "lost the daemon while a session was being created; waiting again"
+        );
+        tokio::select! {
+            () = tokio::time::sleep(RETRY_DELAY) => {}
+            () = cancellation() => bail!("operation cancelled"),
+        }
+    }
 }
 
 /// Follow one query until the index settles. Dropping its guard cancels both
@@ -1906,5 +1974,88 @@ mod wiki_search_tests {
             assert_eq!(slow, Some(Duration::from_secs(30)));
             assert_eq!(fast, Some(Duration::ZERO));
         }
+    }
+}
+
+#[cfg(test)]
+mod create_wait_tests {
+    use super::*;
+    use mj_client::daemon::{
+        DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
+        RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
+    };
+
+    fn metadata(address: std::net::SocketAddr) -> DaemonMetadata {
+        DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address,
+            token: "create-wait-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        }
+    }
+
+    /// A fake daemon that serves one scripted answer per connection: `None`
+    /// reads the request and drops the connection.
+    async fn serve(
+        script: Vec<Option<std::result::Result<DaemonReply, String>>>,
+    ) -> (DaemonMetadata, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = metadata(listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for answer in script {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(
+                    request.action,
+                    DaemonAction::WaitCreateSession { .. }
+                ));
+                if let Some(result) = answer {
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: request.protocol_version,
+                            request_id: request.request_id,
+                            result,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        (metadata, server)
+    }
+
+    /// Dropped connections, then the answer: the wait reconnects each time
+    /// and ends Finished.
+    #[tokio::test]
+    async fn the_create_wait_reconnects_after_a_dropped_connection() {
+        let (metadata, server) = serve(vec![None, None, Some(Ok(DaemonReply::Done))]).await;
+        let cancelled = AtomicBool::new(false);
+        let outcome = follow_create_wait("session-1", &cancelled, || {
+            DaemonClient::connect(metadata.clone())
+        })
+        .await
+        .unwrap();
+        assert!(matches!(outcome, LifecycleSuccess::Created));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refusal_ends_the_create_wait_with_its_reason() {
+        let (metadata, server) = serve(vec![Some(Err("clone refused".to_owned()))]).await;
+        let cancelled = AtomicBool::new(false);
+        let error = follow_create_wait("session-1", &cancelled, || {
+            DaemonClient::connect(metadata.clone())
+        })
+        .await
+        .err()
+        .expect("a refusal ends the wait");
+        assert!(format!("{error:#}").contains("clone refused"), "{error:#}");
+        server.await.unwrap();
     }
 }

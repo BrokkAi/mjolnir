@@ -26,16 +26,21 @@ fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
         effort: Some("high".into()),
     };
     session.oracle = true;
-    assert!(!oracle_launch_enabled(&session, false, &choices));
+    assert!(!oracle_launch_enabled(&session, false, &choices, false));
     choices.oracle = Some(choice.clone());
-    assert!(oracle_launch_enabled(&session, false, &choices));
-    assert!(!oracle_launch_enabled(&session, true, &choices));
+    assert!(oracle_launch_enabled(&session, false, &choices, false));
+    assert!(!oracle_launch_enabled(&session, true, &choices, false));
     session.oracle = false;
-    assert!(!oracle_launch_enabled(&session, false, &choices));
+    assert!(!oracle_launch_enabled(&session, false, &choices, false));
     session.oracle = true;
     session.oracle_choice = Some(Box::new(choice));
     choices.oracle = None;
-    assert!(oracle_launch_enabled(&session, false, &choices));
+    assert!(oracle_launch_enabled(&session, false, &choices, false));
+
+    // A YOLO target reads its own oracle choice, which is absent here.
+    session.oracle_choice = None;
+    choices.use_same_on_all_targets = false;
+    assert!(!oracle_launch_enabled(&session, false, &choices, true));
 }
 
 fn stamped_worker(body: &[u8]) -> Vec<u8> {

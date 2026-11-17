@@ -3,6 +3,17 @@ use crate::session_manager::RelayJobDeferred;
 
 const CANCELLED: &str = "the credential sync was cancelled by a lifecycle operation";
 
+/// How long a request may wait before it counts as slow. A change wait is a
+/// long poll: the worker holds it for up to `RELAY_CHANGE_WAIT_BOUND` (the
+/// same constant the worker uses) before answering, so that hold is expected.
+fn slow_operation_warning_after(request: &RelayRequest) -> Duration {
+    RELAY_SLOW_OPERATION_WARNING
+        + match request {
+            RelayRequest::WaitForChange { .. } => mj_core::relay::RELAY_CHANGE_WAIT_BOUND,
+            _ => Duration::ZERO,
+        }
+}
+
 impl RelayClient {
     pub(super) async fn call(&mut self, request: RelayRequest) -> Result<RelayResponsePayload> {
         // Memory RPCs include filesystem work and worker-side queueing. Neither
@@ -122,6 +133,7 @@ impl RelayClient {
         }
         frame.push(b'\n');
         let session_id = self.session_id.clone();
+        let warning_after = slow_operation_warning_after(&envelope.request);
         let started = Instant::now();
         let exchange = async {
             self.input
@@ -142,11 +154,11 @@ impl RelayClient {
             tokio::pin!(response);
             let response = tokio::select! {
                 response = &mut response => response,
-                () = tokio::time::sleep(RELAY_SLOW_OPERATION_WARNING) => {
+                () = tokio::time::sleep(warning_after) => {
                     tracing::warn!(
                         %session_id,
                         %operation,
-                        warning_after_seconds = RELAY_SLOW_OPERATION_WARNING.as_secs_f64(),
+                        warning_after_seconds = warning_after.as_secs_f64(),
                         timeout_seconds = timeout.map(|duration| duration.as_secs_f64()),
                         "relay operation is still waiting for its response"
                     );
