@@ -2015,17 +2015,43 @@ fn seed_legacy_notification_stack(snapshot: &mut RelaySnapshot) {
     use mj_core::attention::{
         EntryMessage, NotificationKind, NotificationStack, NotificationStackEntry,
     };
+    let mut entries = Vec::new();
     if let Some(request) = snapshot.open_request() {
+        entries.push(NotificationStackEntry {
+            completed_ordinal: request.question.completed_ordinal,
+            kind: NotificationKind::NeedsInput,
+            message: request
+                .question_message
+                .clone()
+                .map_or(EntryMessage::None, EntryMessage::Found),
+        });
+    }
+    if let Some((assessment, reply)) = snapshot
+        .assessment
+        .as_deref()
+        .zip(snapshot.completed_reply_message.as_ref())
+        && assessment.current()
+        && assessment.attention == Some(mj_core::attention::AssessmentAttention::Important)
+        && assessment.completed_ordinal > snapshot.person_input_through
+        && snapshot.turn_completion.as_ref().is_none_or(|turn| {
+            turn.completed_ordinal == assessment.completed_ordinal
+                && turn.command_id == assessment.turn_id
+        })
+        && !entries
+            .iter()
+            .any(|entry| entry.completed_ordinal == assessment.completed_ordinal)
+    {
+        entries.push(NotificationStackEntry {
+            completed_ordinal: assessment.completed_ordinal,
+            kind: NotificationKind::Important,
+            message: EntryMessage::Found(reply.clone()),
+        });
+        entries.sort_by_key(|entry| entry.completed_ordinal);
+    }
+    if !entries.is_empty() {
         snapshot.notification_stack = Arc::new(NotificationStack {
             revision: snapshot.latest_ordinal,
-            entries: vec![NotificationStackEntry {
-                completed_ordinal: request.question.completed_ordinal,
-                kind: NotificationKind::NeedsInput,
-                message: request
-                    .question_message
-                    .clone()
-                    .map_or(EntryMessage::None, EntryMessage::Found),
-            }],
+            entries,
         });
     }
 }

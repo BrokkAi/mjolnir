@@ -1947,6 +1947,11 @@ impl RelaySnapshot {
         command: &RelayCommand,
     ) -> Result<(), &'static str> {
         match command {
+            RelayCommand::ClearNotifications { .. } | RelayCommand::NotificationsRead { .. }
+                if self.checkpoint_barrier.is_some() =>
+            {
+                Err("The session is checkpointing")
+            }
             RelayCommand::ClearNotifications { revision }
                 if self.notification_stack.revision != *revision
                     || self.notification_stack.entries.is_empty() =>

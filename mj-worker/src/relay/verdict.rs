@@ -1622,15 +1622,18 @@ mod settled_task_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
         relay.set_acp_ready(true);
-        let run = |relay: &mut DurableRelay, id: &str| {
+        let run = |relay: &mut DurableRelay, id: &str, reply_id: Option<&str>| {
             submit_relay(relay, id, prompt("Check results"));
             relay.claim_pending_commands(true).unwrap();
+            if let Some(reply_id) = reply_id {
+                reply_with_id(relay, Some(reply_id), "Important result");
+            }
             finish_prompt(relay, id);
             let mut assessment = (**relay.snapshot.assessment.as_ref().unwrap()).clone();
             assessment.status = Status::Assessed;
             assessment
         };
-        let mut important = run(&mut relay, "first-person");
+        let mut important = run(&mut relay, "first-person", Some("retained-reply"));
         important.attention = Some(AssessmentAttention::Important);
         important.action = Some(Action::Finished);
         relay.store_assessment(important.clone()).unwrap();
@@ -1638,8 +1641,27 @@ mod settled_task_tests {
         relay.store_assessment(important.clone()).unwrap();
         assert_eq!(relay.snapshot.notification_stack.revision, first_revision);
 
+        let mut legacy = serde_json::to_value(&relay.snapshot).unwrap();
+        legacy["format_version"] = serde_json::json!(26);
+        legacy.as_object_mut().unwrap().remove("notification_stack");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("notifications_read_through");
+        drop(relay);
+        std::fs::write(
+            dir.path().join(RELAY_STATE_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        assert_eq!(
+            relay.snapshot.notification_stack.entries[0].message,
+            EntryMessage::Found("agent:retained-reply".into()),
+        );
         let generated = mj_core::continuation::GeneratedPrompt::SessionMessageTurn;
-        let mut question = run(&mut relay, &generated.command_id("first-wake"));
+        let mut question = run(&mut relay, &generated.command_id("first-wake"), None);
         question.action = Some(Action::AwaitInput);
         relay.store_assessment(question.clone()).unwrap();
         assert!(
@@ -1655,7 +1677,10 @@ mod settled_task_tests {
                 .map(|entry| (entry.kind, &entry.message))
                 .collect::<Vec<_>>(),
             [
-                (NotificationKind::Important, &EntryMessage::None),
+                (
+                    NotificationKind::Important,
+                    &EntryMessage::Found("agent:retained-reply".into())
+                ),
                 (NotificationKind::NeedsInput, &EntryMessage::None)
             ]
         );
