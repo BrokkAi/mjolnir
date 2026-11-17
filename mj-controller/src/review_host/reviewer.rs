@@ -230,6 +230,8 @@ pub(super) async fn prepare(
             state,
             // No reviewer process starts for a turn with nothing to review.
             reviewers: vec![ReviewerIdentity::default()],
+            brief_writer: None,
+            brief_skipped: None,
             captured,
             background,
         });
@@ -252,10 +254,38 @@ pub(super) async fn prepare(
             .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
             .map_err(StartRefusal)?;
     }
+    // The writer is an aid: any trouble choosing it leaves the review to run
+    // without a brief and tells the requester, instead of refusing the review.
+    let (brief_writer, brief_skipped) = match config.brief_writer.as_ref().and_then(|w| w.choice())
+    {
+        None => (None, None),
+        Some(choice) => {
+            let _stage = stages.enter(session_id, "choosing the brief writer");
+            let chosen = match environment.resolve_choice(choice).await {
+                Ok(writer) => {
+                    let profile = writer.profile.clone();
+                    let session = session_id.to_owned();
+                    let environment = environment.clone();
+                    tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+                        .await
+                        .map_err(|e| format!("checking the brief writer: {e}"))
+                        .and_then(|checked| checked)
+                        .map(|()| writer)
+                }
+                Err(error) => Err(error),
+            };
+            match chosen {
+                Ok(writer) => (Some(writer), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+    };
     Ok(Prepared {
         seed: seed_from_session(&snapshot.materialized),
         state,
         reviewers: reviewer.clone(),
+        brief_writer,
+        brief_skipped,
         captured,
         background,
     })
@@ -406,5 +436,6 @@ pub(super) fn seed_from_session(session: &MaterializedSession) -> TurnReviewSeed
         task,
         user_messages,
         declined: Vec::new(),
+        brief: None,
     }
 }

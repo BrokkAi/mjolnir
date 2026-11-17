@@ -181,7 +181,7 @@ impl Drop for QueuedJob {
 }
 
 /// One holder at a time per session. Within a pass, a session's login step and
-/// its AWS install both need the session's single background admission slot
+/// its AWS install both need the session's credential-sync admission
 /// (`RecoveryGate::try_start`), which turns a second taker away; taking turns
 /// here first means the two never contend for it, so neither is skipped
 /// because the other held it. A step waits only for the same session's other
@@ -1085,18 +1085,22 @@ pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>
 ) -> Result<Option<T>> {
     match gate {
         Some(gate) => gate
-            .run_background_owned(&target.session_id, |admission| async move {
-                if !target_is_current(runtime, target).await? {
-                    return Ok(None);
-                }
-                work(JobHold::new(
-                    Some(admission),
-                    Some(turn),
-                    installing,
-                    runtime.cloned(),
-                ))
-                .await
-            })
+            .run_background_owned(
+                &target.session_id,
+                crate::recovery_gate::BackgroundWork::CredentialSync,
+                |admission| async move {
+                    if !target_is_current(runtime, target).await? {
+                        return Ok(None);
+                    }
+                    work(JobHold::new(
+                        Some(admission),
+                        Some(turn),
+                        installing,
+                        runtime.cloned(),
+                    ))
+                    .await
+                },
+            )
             .await
             .unwrap_or_else(|| Ok(None)),
         None => work(JobHold::new(None, Some(turn), installing, runtime.cloned())).await,

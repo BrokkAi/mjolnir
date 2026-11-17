@@ -3,14 +3,16 @@
 Usage: python3 brief_driver.py <diff id> ... [--concurrency N]
        python3 brief_driver.py --lint <diff id> ...   # lint existing briefs only
 
-Each writer is a session in the private instance with the reviewers'
+Each writer is a session with the reviewers'
 isolation: carrier-style checkout at the introducing commit with
 --no-later-history on the Podman target, no project memory, GitHub or helper
 agents. It gets brief/WRITER.md with the base commit and the commit message
 (trailers removed), writes brief.md in its checkout, and the driver fetches
 it, checks the rules a script can check (lint), and asks the same writer to
 fix a brief that breaks them, at most FIX_ROUNDS times. Output goes to
-$REVIEW_ARMS_DIR/briefs/blind/<diff>/; the transcript is stored under
+$REVIEW_ARMS_DIR/briefs/<kind>/<diff>/ (--kind, default blind: the Sol/high
+writer of stage B; blind-terra: the same writer run on Terra/high,
+brief/PLAN-writer-terra.md); the transcript is stored under
 reviewers/ so that audit.py can scan it. Every step writes a file; a writer
 with a session is resumed, never started twice.
 """
@@ -28,7 +30,12 @@ import traceback
 import driver
 from driver import ROOT, SCRIPTS, MJX, mj, save, session
 
-WRITER_MODEL, WRITER_EFFORT = "gpt-6.1-sol", "high"
+# Brief kind -> writer model and effort. Everything else (prompt, tools, blinding, lint) is shared.
+KINDS = {"blind": ("gpt-6.1-sol", "high"), "blind-terra": ("gpt-6.1-terra", "high")}
+KIND = "blind"
+WRITER_MODEL, WRITER_EFFORT = KINDS[KIND]
+# --profile pins the writer to one mj profile (None: load balancing picks one).
+WRITER_PROFILE = None
 FIX_ROUNDS = 2
 MAX_ITEMS = 25
 # "About 1,500 tokens" (brief/PLAN.md); at about 4 characters a token, with slack.
@@ -89,6 +96,8 @@ def wait_command(sid, command, limit=1800):
         s = session(sid)
         outcome = s.get("last_turn_outcome") or {}
         if outcome.get("command_id") == command and s.get("is_idle"):
+            if (outcome.get("outcome") or {}).get("stop_reason") == "QuotaLimit":
+                raise RuntimeError(f"writer turn hit QuotaLimit: {json.dumps(outcome)[:600]}")
             if outcome["outcome"]["kind"] != "completed":
                 raise RuntimeError(f"writer turn did not complete: {json.dumps(outcome)[:600]}")
             return outcome
@@ -117,21 +126,30 @@ def send(d, sid, name, command, text):
 
 def run(bug_id, gate):
     bug = driver.CORPUS[bug_id]
-    d = ROOT / "briefs" / "blind" / bug_id
+    d = ROOT / "briefs" / KIND / bug_id
     if (d / "done.json").exists():
         return "done"
-    tag = hashlib.sha256(("brief" + bug_id).encode()).hexdigest()
+    # Stage B's tag is kept for its kind, so its command ids and titles stay the same.
+    tag = hashlib.sha256(("brief" + ("" if KIND == "blind" else KIND) + bug_id).encode()).hexdigest()
     if (d / "launch.json").exists():
         sid = json.loads((d / "launch.json").read_text())["session_id"]
     elif (d / "launch-intent.json").exists():
         return "needs-recovery"  # a session may exist without a record; find it before rerunning
     else:
-        save(d / "launch-intent.json", {"bug": bug_id, "model": WRITER_MODEL, "effort": WRITER_EFFORT,
-                                        "time_ns": time.time_ns()})
         with gate:
-            launch = mj("new", "--workspace-id", driver.WORKSPACE, "--target", "podman", "--bundle", "mjolnir",
+            hold = driver.quota_hold()
+        if hold:
+            return "held: " + hold  # nothing recorded; the writer starts on a later run
+        workspace = driver.workspace_id()
+        save(d / "launch-intent.json", {"bug": bug_id, "model": WRITER_MODEL, "effort": WRITER_EFFORT,
+                                        "profile": WRITER_PROFILE, "time_ns": time.time_ns()})
+        with gate:
+            launch = mj("new", "--workspace-id", workspace, "--target", "podman", "--bundle", "mjolnir",
                         "--at", bug["intro_commit"], "--base", bug["base_commit"], "--no-later-history",
-                        "--model", WRITER_MODEL, "--effort", WRITER_EFFORT, "--review", "off",
+                        # mj new takes a profile or a model, not both; a pinned writer gets its
+                        # model below, before its first prompt, as verify_driver.py does.
+                        *(["--profile", WRITER_PROFILE] if WRITER_PROFILE else ["--model", WRITER_MODEL]),
+                        "--effort", WRITER_EFFORT, "--review", "off",
                         "--no-project-memory", "--no-github-events", "--no-github-credentials",
                         "--subagents", "none", "--title", "brief " + tag[:8], timeout=900)
             save(d / "launch.json", launch)
@@ -143,8 +161,14 @@ def run(bug_id, gate):
         for key in ("web_fetch", "web_search"):
             if any(c["key"] == key for c in s.get("config_options", [])):
                 mj("set-config", "--session", sid, "--key", key, "--value", "disabled")
+        for key, value in (("model", WRITER_MODEL), ("effort", WRITER_EFFORT)):
+            current = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
+            if current.get(key) != value:
+                mj("set-config", "--session", sid, "--key", key, "--value", value)
         settings = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
-        assert settings.get("model") == WRITER_MODEL, settings
+        assert settings.get("model") == WRITER_MODEL and settings.get("effort") == WRITER_EFFORT, settings
+        if WRITER_PROFILE:
+            assert s.get("profile_id") == WRITER_PROFILE, s.get("profile_id")
         save(d / "settings.json", settings)
         place = driver.container(sid)
         save(d / "placement.json", place)
@@ -203,22 +227,40 @@ def main():
     p.add_argument("bugs", nargs="+")
     p.add_argument("--concurrency", type=int, default=1)
     p.add_argument("--lint", action="store_true")
+    p.add_argument("--kind", choices=sorted(KINDS), default="blind")
+    p.add_argument("--profile", help="mj profile for the writers (default: load balancing)")
+    p.add_argument("--stop-on-failure", action="store_true",
+                   help="stop admitting new bugs after a failure, held job, or recovery-needed job")
     a = p.parse_args()
+    global KIND, WRITER_MODEL, WRITER_EFFORT, WRITER_PROFILE
+    KIND, WRITER_PROFILE = a.kind, a.profile
+    WRITER_MODEL, WRITER_EFFORT = KINDS[KIND]
     if a.lint:
         for b in a.bugs:
-            d = ROOT / "briefs" / "blind" / b
+            d = ROOT / "briefs" / KIND / b
             text = (d / "brief.md" if (d / "brief.md").exists() else d / "brief-candidate.md").read_text()
             print(json.dumps({"bug": b, "problems": lint(text, driver.CORPUS[b])}))
         return 0
     gate = threading.Semaphore(2)  # serialize session startup as driver.py does
+    admission_lock = threading.Lock()
+    stopped = False
 
     def one(b):
+        nonlocal stopped
+        with admission_lock:
+            if a.stop_on_failure and stopped:
+                return b, "not-started", None
         try:
-            return b, run(b, gate), None
+            state = run(b, gate)
+            error = None
         except Exception as e:  # report every failure with its diff
-            save(ROOT / "briefs" / "blind" / b / "error.json",
+            save(ROOT / "briefs" / KIND / b / "error.json",
                  {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
-            return b, "failed", str(e)
+            state, error = "failed", str(e)
+        if a.stop_on_failure and (state != "done"):
+            with admission_lock:
+                stopped = True
+        return b, state, error
 
     unfinished = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:

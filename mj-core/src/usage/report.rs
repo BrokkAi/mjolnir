@@ -163,8 +163,8 @@ pub struct SessionUsageReport {
     /// configured.
     pub profiles: Vec<String>,
     pub sessions: Vec<SessionUsageEstimate>,
-    /// Filtered model totals grouped by each session's own role. Full Destroy
-    /// can remove a child's kind; its retained usage remains unclassified.
+    /// Filtered model totals grouped by each session's retained role. Children
+    /// destroyed before kind retention was introduced remain unclassified.
     #[serde(default)]
     pub agent_usage: Vec<AgentUsageEstimate>,
     /// Sum of `sessions`; unknown when any session's cost is unknown.

@@ -168,10 +168,12 @@ fn read_only(path: &[String], draft: &Value) -> bool {
         {
             true
         }
-        [section, task, key]
+        [section, .., key]
             if section == "subagents"
                 && matches!(key.as_str(), "model" | "effort")
-                && draft["_subagent_options"][task.as_str()].is_null() =>
+                && schema::subagent_options_key(path)
+                    .and_then(|task| draft["_subagent_options"].get(&task))
+                    .is_none_or(Value::is_null) =>
         {
             true
         }
@@ -276,13 +278,7 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
     let mut groups: Vec<SettingsGroup> = Vec::new();
     if (current.is_object() && !hidden::is_marker(current)) || current.is_array() {
         let paths = page::visible_paths(path, current);
-        for entry in page::page_plan(
-            path,
-            &paths
-                .iter()
-                .map(|p| p.last().cloned().unwrap_or_default())
-                .collect::<Vec<_>>(),
-        ) {
+        for entry in page::page_plan(path, &paths) {
             match entry {
                 PageRow::Heading(heading) => groups.push(SettingsGroup {
                     heading: Some(heading.to_owned()),

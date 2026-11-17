@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
         capture_output=True,
     )
     (p / "config" / "config.toml").write_text(
-        f'version = 22\n[phone]\nbind="{advertised}:0"\ntailscale_detect=false\n'
+        f'version = 23\n[phone]\nbind="{advertised}:0"\ntailscale_detect=false\n'
         + "tls_cert="
         + json.dumps(str(p / "cert.pem"))
         + "\n"

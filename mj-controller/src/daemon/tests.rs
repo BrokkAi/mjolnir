@@ -158,6 +158,29 @@ fn restart_recovery_discards_intents_superseded_by_suspend_or_destroy() {
 async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target() {
     struct StatusExecutor(i32);
     impl CommandExecutor for StatusExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: self.0,
@@ -1200,14 +1223,26 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
         "released work is still named: {released:?}"
     );
 
-    // Four lifecycles hold the handoff; the notice names the oldest three.
+    // Four lifecycles hold the handoff; the notice names the oldest three. A
+    // running Create holds nothing: the handoff stops it and the next daemon
+    // finishes it from its create intent.
+    let create_release = Arc::new(tokio::sync::Notify::new());
+    let create = state
+        .start_or_join_lifecycle("e5dfbd99-create".into(), LifecycleKind::Create, {
+            let create_release = create_release.clone();
+            move |_, _, _| async move {
+                create_release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
     let sessions = ["e5dfbd99-a", "e5dfbd99-b", "e5dfbd99-c", "e5dfbd99-d"];
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let operations = sessions
         .map(|session| {
             let release = release.clone();
             state
-                .start_or_join_lifecycle(session.into(), LifecycleKind::Create, {
+                .start_or_join_lifecycle(session.into(), LifecycleKind::Resume, {
                     move |_, _, _| async move {
                         drop(release.acquire().await.unwrap());
                         Ok(DaemonLifecycleResult::Done)
@@ -1225,8 +1260,8 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
     };
     let blocker = lifecycle_blocker().await;
     assert!(
-        blocker.starts_with("session lifecycle x4: create e5dfbd99 (")
-            && blocker.matches("create e5dfbd99 (").count() == 3
+        blocker.starts_with("session lifecycle x4: resume e5dfbd99 (")
+            && blocker.matches("resume e5dfbd99 (").count() == 3
             && blocker.ends_with("; and 1 more"),
         "{blocker}"
     );
@@ -1244,12 +1279,14 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
     executor.stage_started(ProvisionStage::Syncing);
     let blocker = lifecycle_blocker().await;
     assert!(
-        blocker.starts_with("session lifecycle x4: create e5dfbd99 (Clone + Sync, "),
+        blocker.starts_with("session lifecycle x4: resume e5dfbd99 (Clone + Sync, "),
         "{blocker}"
     );
     executor.stage_finished(ProvisionStage::Cloning);
     executor.stage_finished(ProvisionStage::Syncing);
     release.add_permits(sessions.len());
+    create_release.notify_one();
+    RuntimeState::wait_lifecycle_result(create).await.unwrap();
     for operation in operations {
         RuntimeState::wait_lifecycle_result(operation)
             .await
@@ -1285,7 +1322,7 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
     let shutdown = CancellationToken::new();
     let release = Arc::new(tokio::sync::Notify::new());
     let operation = state
-        .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Create, {
+        .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Resume, {
             let release = release.clone();
             move |_, _, cancelled| async move {
                 release.notified().await;
@@ -4631,6 +4668,29 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
     );
     struct NoEnvironmentMutation;
     impl crate::targets::CommandExecutor for NoEnvironmentMutation {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(
             &self,
             _: &crate::targets::CommandSpec,
@@ -4645,14 +4705,16 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         liveness_probe: crate::targets::CommandSpec::new(
             "must-not-run",
             std::iter::empty::<String>(),
-        ),
+        )
+        .into(),
         exit_record: None,
         binary_refresh: None,
         launch_refresh: None,
         restart: crate::targets::CommandPlan {
             description: "background recovery must stay suppressed".into(),
             commands: Vec::new(),
-        },
+        }
+        .into(),
     };
     assert_eq!(
         crate::session_manager::recover_worker_controlled(
@@ -6195,6 +6257,146 @@ async fn report_candidates_follow_committed_child_lifecycle_without_losing_faile
     child.state = SessionState::Provisioning;
     crate::database::save_session(&child).unwrap();
     assert_eq!(state.subagent_report_parent_ids(), [parent.id]);
+}
+
+/// A create stopped by shutdown before the phone was told it exists is rolled
+/// back and leaves no intent, so the next daemon provisions nothing for it. One
+/// stopped after publication keeps its intent (see the restart end-to-end test).
+#[tokio::test]
+async fn a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resume() {
+    const NAME: &str = "a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resume";
+    const CHILD: &str = "MJ_TEST_CREATE_STOPPED_UNPUBLISHED";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Unpublished").unwrap();
+    let session = runtime_test_session(
+        "unpublished-create",
+        &workspace.id,
+        SessionState::Provisioning,
+    );
+    crate::database::save_new_session(&session, None, false, false).unwrap();
+    assert_eq!(
+        crate::database::load_session_create_intents()
+            .unwrap()
+            .len(),
+        1
+    );
+    let state = test_runtime_state_loading_the_store();
+    let control = LifecycleControl::default();
+    // The phone never publishes: the sender stays alive and silent.
+    let (_publisher, publication) = tokio::sync::oneshot::channel();
+    state
+        .start_create_lifecycle(
+            session.id.clone(),
+            control.clone(),
+            create::CreateInputs::TopLevel {
+                publication: Some(publication),
+                remember_launch_choices: false,
+            },
+            None,
+        )
+        .unwrap();
+    tokio::task::yield_now().await;
+    control.cancel_for_shutdown();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        state.wait_create_outcome(&session.id),
+    )
+    .await
+    .expect("the stopped create ends");
+    drop(outcome);
+    assert!(
+        crate::database::load_session_create_intents()
+            .unwrap()
+            .is_empty(),
+        "an unpublished create must not be left for the next daemon"
+    );
+    let record = crate::database::load_session_record(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, SessionState::Error);
+}
+
+/// A create wait reads durable state alone: with an intent row and no
+/// lifecycle entry (what a new daemon sees before it has re-admitted the
+/// create, and what a waiter on the old daemon sees), it keeps waiting; it
+/// ends when the record leaves the creating states and the intent settles,
+/// with the real failure for `Error`.
+#[tokio::test]
+async fn a_create_wait_is_answered_from_the_intent_row_and_the_record() {
+    const NAME: &str = "a_create_wait_is_answered_from_the_intent_row_and_the_record";
+    const CHILD: &str = "MJ_TEST_WAIT_CREATE_FROM_RECORD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Wait create").unwrap();
+    for id in ["wait-finishes", "wait-fails"] {
+        let creating = runtime_test_session(id, &workspace.id, SessionState::Provisioning);
+        crate::database::save_new_session(&creating, None, false, false).unwrap();
+    }
+    // A finished session whose worker dropped holds no create intent.
+    let dropped = runtime_test_session("wait-dropped", &workspace.id, SessionState::Disconnected);
+    crate::database::save_session(&dropped).unwrap();
+    let state = test_runtime_state_loading_the_store();
+    use create::CreateWait;
+    assert!(matches!(
+        state.wait_create_outcome("wait-dropped").await,
+        CreateWait::Finished
+    ));
+    assert!(matches!(
+        state.wait_create_outcome("no-such-session").await,
+        CreateWait::Failed(_)
+    ));
+    let waiting = |id: &'static str| {
+        let state = state.clone();
+        tokio::spawn(async move { state.wait_create_outcome(id).await })
+    };
+    let finishes = waiting("wait-finishes");
+    let fails = waiting("wait-fails");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !finishes.is_finished() && !fails.is_finished(),
+        "an unfinished create keeps its waiters waiting"
+    );
+    let mut record = runtime_test_session("wait-finishes", &workspace.id, SessionState::Running);
+    crate::database::save_session(&record).unwrap();
+    record = runtime_test_session("wait-fails", &workspace.id, SessionState::Error);
+    record.last_error = Some("clone refused".to_owned());
+    crate::database::save_session(&record).unwrap();
+    state.publish_revision();
+    let finished = tokio::time::timeout(Duration::from_secs(10), finishes)
+        .await
+        .expect("the wait wakes on the daemon's change notification")
+        .unwrap();
+    assert!(matches!(finished, CreateWait::Finished));
+    let CreateWait::Failed(failed) = tokio::time::timeout(Duration::from_secs(10), fails)
+        .await
+        .expect("the wait wakes on the daemon's change notification")
+        .unwrap()
+    else {
+        panic!("a failed create answers with its reason");
+    };
+    assert!(
+        format!("{failed:#}").contains("clone refused"),
+        "{failed:#}"
+    );
 }
 
 #[cfg(unix)]
@@ -9415,7 +9617,10 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     let recovery_attempt = state
         .recovery_observer
         .gate
-        .try_start(WORKING_CHILD)
+        .try_start(
+            WORKING_CHILD,
+            crate::recovery_gate::BackgroundWork::RecoveryCopy,
+        )
         .unwrap();
     let suspend = tokio::spawn({
         let state = state.clone();
@@ -9496,8 +9701,16 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
     let mut state = test_runtime_state_loading_the_store();
     let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
     Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
-    let attempt_a = state.recovery_observer.gate.try_start(child_a).unwrap();
-    let attempt_b = state.recovery_observer.gate.try_start(child_b).unwrap();
+    let attempt_a = state
+        .recovery_observer
+        .gate
+        .try_start(child_a, crate::recovery_gate::BackgroundWork::RecoveryCopy)
+        .unwrap();
+    let attempt_b = state
+        .recovery_observer
+        .gate
+        .try_start(child_b, crate::recovery_gate::BackgroundWork::RecoveryCopy)
+        .unwrap();
 
     let mut suspend = tokio::spawn({
         let state = state.clone();
@@ -10067,6 +10280,7 @@ async fn exercise_child_close_with_a_nested_workspace(
                 task: "review the changes".into(),
                 user_messages: Vec::new(),
                 declined: Vec::new(),
+                brief: None,
             },
             "failed-start".into(),
             std::num::NonZeroUsize::new(1).unwrap(),
@@ -10083,6 +10297,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             parent_id,
             &crate::database::TurnReviewState {
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
+                    brief_writer: None,
                     driver: driver.snapshot(),
                     reviewers: vec![Default::default()],
                     registrations: vec![mj_core::storage::ReviewerRegistration {
@@ -10241,10 +10456,34 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
 
     struct AliveWorker;
     impl CommandExecutor for AliveWorker {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             // The root exists (its journal is there); only the worker is unreachable.
             let stdout = match command.purpose.as_str() {
                 "probe Mjolnir worker root" => b"recoverable\n".to_vec(),
+                "check the control worker" => b"present\n".to_vec(),
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
                 other => panic!("unexpected command: {other}"),
             };

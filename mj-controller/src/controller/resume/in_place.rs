@@ -624,22 +624,18 @@ impl Controller {
                 );
                 let backend =
                     backend_locator(current.target.as_ref().unwrap(), current, &self.config)?;
-                let root = crate::targets::worker_root(&backend, session_id)?;
-                let cleanup = super::super::execute_checked(
-                    &crate::targets::CancellableProcessExecutor::with_timeout(
+                // The plan stages the current worker first, outside the stop's
+                // timeout.
+                let cleanup = crate::targets::stop_worker_plan(
+                    &backend,
+                    session_id,
+                    "stop failed in-place worker while retaining its environment",
+                )
+                .and_then(|plan| {
+                    plan.execute(&crate::targets::CancellableProcessExecutor::with_timeout(
                         std::time::Duration::from_secs(15),
-                    ),
-                    crate::targets::command_on_locator(
-                        &backend,
-                        session_id,
-                        vec![
-                            "sh".into(),
-                            "-c".into(),
-                            crate::targets::stop_worker_daemon_script(&root),
-                        ],
-                        "stop failed in-place worker while retaining its environment",
-                    )?,
-                );
+                    ))
+                });
                 let mut retained = previous.clone();
                 let latest = crate::database::load_session_record(session_id)?
                     .context("retained session disappeared")?;

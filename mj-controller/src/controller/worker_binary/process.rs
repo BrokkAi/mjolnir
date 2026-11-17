@@ -24,8 +24,10 @@ pub(in crate::controller) fn kill_retired_worker(
 ) -> Result<()> {
     run_owned_worker_stop(owner, executor, locator, worker_root, |locator, root| {
         let script = targets::kill_worker_daemon_script(root);
-        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-            .purpose("kill retired Mjolnir worker daemon")
+        script.into_command(|script| {
+            targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+                .purpose("kill retired Mjolnir worker daemon")
+        })
     })
 }
 
@@ -34,14 +36,100 @@ fn run_owned_worker_stop(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
-    command: impl FnOnce(&targets::TargetLocator, &str) -> CommandSpec,
+    command: impl FnOnce(&targets::TargetLocator, &str) -> targets::ControlCommand,
 ) -> Result<()> {
     ensure!(
         targets::worker_root(locator, owner.session_id())? == worker_root,
         "worker owner does not cover the selected root"
     );
-    execute_checked(executor, command(locator, worker_root))?;
+    ensure_control_worker(executor, locator, owner.session_id())?;
+    execute_checked(executor, command(locator, worker_root).unstaged_command())?;
     Ok(())
+}
+
+/// Install this build's control worker in the session's root
+/// ([`targets::control_worker_path`]) when it is not there yet.
+///
+/// Control commands (`hel worker liveness|holder|stop`) never use a root's own
+/// `hel`: a parked sub-agent or a worker not yet upgraded keeps a build that
+/// predates them. The current build judges and stops an older worker correctly,
+/// because the lock and startup record it reads are older than the commands. The
+/// control worker is a hard link to this build's entry in the worker store,
+/// installed by the protocol that installs `<root>/hel`, only under another
+/// name. The worker never executes it, so this is not a worker swap and needs no
+/// swap admission; the root is its one owner. A root with no `hel` never ran a
+/// worker and needs none. When this build's worker cannot be installed for the
+/// target this fails and names it; there is no second way to stop a worker.
+/// Replacing the staged file is safe during daemon handoff: a running command
+/// keeps its inode, and an older daemon reinstalls its file before using it.
+///
+/// Deadlines: the state check (absent, present or missing) runs on the caller's
+/// executor, deadline included. The install, meaning publication of the build
+/// to the store plus the link (and any wait behind another publication of the
+/// same digest), runs without the caller's deadline and keeps its cancellation,
+/// because it is the work a stop's timeout does not name. The untimed scope
+/// pauses that deadline so the following control command retains its budget.
+pub(crate) fn ensure_control_worker(
+    caller: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+) -> Result<()> {
+    let root = targets::worker_root(locator, session_id)?;
+    let state = execute_checked(
+        caller,
+        targets::locator_command(
+            locator,
+            vec![
+                "sh".into(),
+                "-c".into(),
+                targets::control_worker_state_script(&root)
+                    .unstaged_script()
+                    .to_owned(),
+            ],
+        )
+        .purpose("check the control worker"),
+    )?;
+    // Anything but `missing` (`present`, or `absent` for a root that never ran a
+    // worker) needs no install.
+    if String::from_utf8_lossy(&state.stdout).trim() != "missing" {
+        return Ok(());
+    }
+    let untimed = &targets::WithoutDeadline::new(caller);
+    let worker = WorkerInstall::for_target(locator, untimed).with_context(|| {
+        format!(
+            "the current worker cannot be installed for {root}, so its worker cannot be stopped or probed"
+        )
+    })?;
+    let name = Path::new(&targets::control_worker_path(&root))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("the control worker has a file name")?
+        .to_owned();
+    install_worker_binary(untimed, locator, session_id, &worker, &name)
+        .with_context(|| format!("install the current worker for {root}"))?;
+    let current = targets::control_worker_path(&root);
+    let cleanup = format!(
+        "for path in {}'/hel-control-'*; do [ \"$path\" = {} ] || rm -f -- \"$path\"; done",
+        targets::posix_quote(&root),
+        targets::posix_quote(&current),
+    );
+    execute_checked(
+        untimed,
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), cleanup])
+            .purpose("remove superseded control workers"),
+    )?;
+    Ok(())
+}
+
+/// Probe worker liveness through the staged current worker.
+pub(in crate::controller) fn probe_worker_liveness(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_root: &str,
+) -> Result<mj_core::targets::CommandOutput> {
+    ensure_control_worker(executor, locator, session_id)?;
+    executor.execute(&worker_liveness_command(locator, worker_root).unstaged_command())
 }
 
 /// Restore a stopped Podman target before signaling its worker. Checkpoint
@@ -62,19 +150,23 @@ pub(in crate::controller) fn stop_worker_after_target_recovery(
 pub(super) fn stop_worker_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
-) -> CommandSpec {
+) -> targets::ControlCommand {
     let script = targets::stop_worker_daemon_script(worker_root);
-    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .purpose("stop Mjolnir worker daemon")
+    script.into_command(|script| {
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+            .purpose("stop Mjolnir worker daemon")
+    })
 }
 
 pub(in crate::controller) fn worker_liveness_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
-) -> CommandSpec {
+) -> targets::ControlCommand {
     let script = targets::worker_daemon_liveness_script(worker_root);
-    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .purpose("probe Mjolnir worker daemon liveness")
+    script.into_command(|script| {
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+            .purpose("probe Mjolnir worker daemon liveness")
+    })
 }
 
 /// Whether a session's worker root holds anything a worker could recover.
@@ -176,6 +268,7 @@ MJ_ENTRIES
 pub(in crate::controller) fn worker_recovery(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
+    session_id: &str,
     worker_root: &str,
 ) -> WorkerRecovery {
     let answer = |command: CommandSpec| match executor.execute(&command) {
@@ -187,10 +280,28 @@ pub(in crate::controller) fn worker_recovery(
     match answer(worker_recovery_command(locator, worker_root)).as_deref() {
         Some("recoverable" | "partial" | "checkout-partial") => WorkerRecovery::Recoverable,
         Some("nothing" | "absent") => {
-            match answer(worker_liveness_command(locator, worker_root)).as_deref() {
-                Some("dead") => WorkerRecovery::NothingToRecover,
-                Some("alive" | "starting") => WorkerRecovery::Recoverable,
-                _ => WorkerRecovery::Unknown,
+            // Unknown keeps the conservative outcome; the log says why.
+            let liveness = probe_worker_liveness(executor, locator, session_id, worker_root)
+                .and_then(|output| {
+                    ensure!(
+                        output.status == 0,
+                        "worker liveness probe exited with status {}: {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                });
+            match liveness.as_deref() {
+                Ok("dead") => WorkerRecovery::NothingToRecover,
+                Ok("alive" | "starting") => WorkerRecovery::Recoverable,
+                Ok(other) => {
+                    tracing::warn!(%session_id, %worker_root, answer = other, "worker liveness probe gave an unrecognised answer; recovery stays undetermined");
+                    WorkerRecovery::Unknown
+                }
+                Err(error) => {
+                    tracing::warn!(%session_id, %worker_root, error = %format!("{error:#}"), "could not probe worker liveness; recovery stays undetermined");
+                    WorkerRecovery::Unknown
+                }
             }
         }
         _ => WorkerRecovery::Unknown,
@@ -292,7 +403,7 @@ pub(in crate::controller) fn start_worker_durably(
     if let Some(intent) = crate::database::load_worker_restart(id)?
         && intent.operation_id != owner.operation_id()
     {
-        let output = executor.execute(&worker_liveness_command(locator, worker_root))?;
+        let output = probe_worker_liveness(executor, locator, id, worker_root)?;
         ensure!(
             output.status == 0 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
             "another worker replacement is still booting"
@@ -461,7 +572,7 @@ pub(in crate::controller) fn worker_probe_diagnosis(
         Some(failure) => error.context(failure),
         None => error,
     };
-    match probe_worker(executor, locator, worker_root) {
+    match diagnose_worker_read_only(executor, locator, worker_root) {
         Ok(probe) => error.context(probe.to_string()),
         Err(probe_error) => {
             error.context(format!("the worker could not be probed: {probe_error:#}"))
@@ -607,23 +718,65 @@ impl std::fmt::Display for WorkerProbe {
 ///
 /// A target that cannot be asked, or a record that does not parse, is an
 /// error: the caller must not mistake it for a worker with nothing to report.
+///
+/// For decisions (the readiness wait). The probe reads the lock holder through
+/// the control worker, so like every command that embeds it, it is a
+/// [`targets::WorkerControlPlan`] and installs that worker first. A diagnosis
+/// that only reports uses [`diagnose_worker_read_only`].
 pub(in crate::controller) fn probe_worker(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_root: &str,
+) -> Result<WorkerProbe> {
+    let output = targets::WorkerControlPlan::new(
+        "probe worker state",
+        vec![worker_probe_command(locator, worker_root)],
+        locator,
+        session_id,
+    )?
+    .execute(executor)
+    .context("the worker probe failed")?
+    .pop()
+    .context("the worker probe produced no output")?;
+    parse_worker_probe(&output)
+}
+
+/// [`probe_worker`] for a diagnosis that only reports: it never installs and
+/// never waits on the worker store. When this build's control worker is not in
+/// the root, the diagnosis says so as its finding.
+pub(in crate::controller) fn diagnose_worker_read_only(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> Result<WorkerProbe> {
-    let command = targets::locator_command(
-        locator,
-        vec!["sh".into(), "-c".into(), worker_probe_script(worker_root)],
-    )
-    .purpose("probe worker state");
+    let command = worker_probe_command(locator, worker_root).unstaged_command();
     let output = executor.execute(&command)?;
+    ensure!(
+        output.status != targets::WORKER_CONTROL_UNSTAGED_STATUS,
+        "{}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     ensure!(
         output.status == 0,
         "the worker probe exited with status {}: {}",
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
+    parse_worker_probe(&output)
+}
+
+fn worker_probe_command(
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> targets::ControlCommand {
+    worker_probe_script(worker_root).into_command(|script| {
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+            .purpose("probe worker state")
+    })
+}
+
+fn parse_worker_probe(output: &mj_core::targets::CommandOutput) -> Result<WorkerProbe> {
     serde_json::from_slice(&output.stdout).with_context(|| {
         format!(
             "read the worker probe: {}",
@@ -632,13 +785,14 @@ pub(in crate::controller) fn probe_worker(
     })
 }
 
-/// The shell half of [`probe_worker`]. The records are JSON the worker wrote,
+/// The shell half of [`probe_worker`] and [`diagnose_worker_read_only`]. The records are JSON the worker wrote,
 /// so they are inserted as they are; everything else it prints is a number.
 /// The live pid is the holder of the worker lock, the same fact the liveness
 /// probe reports.
-fn worker_probe_script(worker_root: &str) -> String {
-    format!(
-        r#"hel_root={root}
+fn worker_probe_script(worker_root: &str) -> targets::ControlScript {
+    targets::worker_daemon_holder_script(worker_root).map_script(|holder| {
+        format!(
+            r#"hel_root={root}
 hel_record() {{
     if [ -s "$1" ]; then cat "$1"; else printf null; fi
 }}
@@ -650,11 +804,11 @@ printf ',"pids":['
 {holder}
 printf ']}}\n'
 "#,
-        root = targets::posix_quote(worker_root),
-        holder = targets::worker_daemon_holder_script(worker_root),
-        startup_file = mj_core::relay::WORKER_STARTUP_FILE,
-        exit_file = mj_core::relay::WORKER_EXIT_FILE,
-    )
+            root = targets::posix_quote(worker_root),
+            startup_file = mj_core::relay::WORKER_STARTUP_FILE,
+            exit_file = mj_core::relay::WORKER_EXIT_FILE,
+        )
+    })
 }
 
 /// A failure on one line, for a session's error field: the first line of each

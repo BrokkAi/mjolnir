@@ -727,7 +727,8 @@ impl Controller {
         let placement = self.worker_placement(session_id);
         let probe = match placement {
             Ok((backend, worker_root)) => tokio::task::spawn_blocking(move || {
-                super::worker_binary::probe_worker(
+                // A diagnosis reports; it never installs or waits on the store.
+                super::worker_binary::diagnose_worker_read_only(
                     &targets::BoundedProcessExecutor::new(Duration::from_secs(5)),
                     &backend,
                     &worker_root,
