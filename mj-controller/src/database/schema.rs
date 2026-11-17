@@ -2540,6 +2540,37 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
         transaction.commit()?;
     }
+    // Compatible: a standalone table that older readers and writers neither
+    // read nor rewrite. Finished review output belongs to the review, not to
+    // its reviewer child sessions, which are destroyed when their role ends.
+    if version < 134 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS review_reports (
+                 parent_session_id TEXT NOT NULL,
+                 review_id TEXT NOT NULL,
+                 role TEXT NOT NULL,
+                 ordinal INTEGER NOT NULL,
+                 command_id TEXT NOT NULL,
+                 child_session_id TEXT,
+                 profile TEXT NOT NULL DEFAULT '',
+                 model TEXT,
+                 effort TEXT,
+                 handback TEXT,
+                 verdict TEXT,
+                 finished_at_ms INTEGER,
+                 resolution TEXT,
+                 updated_at_ms INTEGER NOT NULL,
+                 PRIMARY KEY(parent_session_id, review_id, role)
+             );
+             CREATE INDEX IF NOT EXISTS review_reports_finished
+                 ON review_reports(parent_session_id, finished_at_ms DESC);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (134, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 134;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4740,6 +4771,11 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 134 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS review_reports;")
+                .unwrap();
+        }
         if version < 133
             && legacy_schema::table_has_column(
                 &connection,
@@ -5389,7 +5425,7 @@ mod reader_tests {
         drop(old);
         let writer = open_writer(&path).unwrap();
         let schema = read_schema_state(&writer).unwrap();
-        assert_eq!(schema.revision, 133);
+        assert_eq!(schema.revision, 134);
         assert_eq!(schema.minimum_compatible, Some(132));
         assert!(schema.ensure_supported_by(132).is_ok());
         let intent = |session: &str| {

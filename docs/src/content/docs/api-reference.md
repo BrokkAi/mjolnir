@@ -899,6 +899,26 @@ cannot start answers `409` with the reason in `error`.
 `GET` answers `200` with the open review, or `"review": null` when none is open.
 A verdict appears when available. An unknown session answers `404`.
 
+### Finished review
+
+```text
+GET /api/v1/sessions/{session_id}/reviews
+GET /api/v1/sessions/{session_id}/reviews?review=<review_id>
+```
+
+A finished review's per-reviewer output, kept after its reviewer sessions are
+destroyed. Without `review`, the newest finished review answers; with it, that
+review does. An unknown review id answers `404`, and an unknown session answers
+`404`.
+
+`review` is null when no finished review is recorded. Otherwise it carries the
+review id, its finish time and resolution (`completed`, `failed`, or
+`cancelled`), and one row per reviewing role. Each row names the role, its
+label, its command id, the reviewer child session id, the reviewer's profile,
+model, and effort, the complete handback text, the role's verdict, and the
+reviewer turn with its token usage. The child session may no longer exist; the
+turn is read from retained accounting.
+
 ### Resume a suspended session
 
 ```text
@@ -1077,6 +1097,7 @@ viewer does not act on these requests.
 | `mj interrupt-turn --session <id>` | `POST /sessions/{id}/interrupt-turn` |
 | `mj review start --session <id>` | `POST /sessions/{id}/review` |
 | `mj review status --session <id>` | `GET /sessions/{id}/review` |
+| `mj review show --session <id> [--review <id>]` | `GET /sessions/{id}/reviews[?review=<id>]` |
 | `mj stop-task --session <id> <task-id>` | `POST /sessions/{id}/background-tasks/stop` |
 | `mj ui pane\|show\|settings …` | `POST /ui/requests` |
 

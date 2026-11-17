@@ -221,6 +221,10 @@ pub(super) async fn finish_push_delivery(
     }
     state.active = None;
     state.active_group = None;
+    let resolution = match &verdict {
+        ReviewVerdict::Failed { .. } => crate::database::FinishedReviewResolution::Failed,
+        _ => crate::database::FinishedReviewResolution::Completed,
+    };
     let result = tokio::task::spawn_blocking(move || {
         let _admission = admission;
         for delta in deltas {
@@ -240,7 +244,7 @@ pub(super) async fn finish_push_delivery(
             };
             environment.enqueue_verdict(&owner, &event)?;
         }
-        environment.save_state(&owner, &state)?;
+        environment.close_review(&owner, &state, resolution)?;
         Ok((Box::new(state), verdict))
     })
     .await

@@ -236,6 +236,19 @@ impl PartialEq<crate::subagent::ReviewOverride> for DeclinedFinding {
     }
 }
 
+/// How a review ended, recorded beside its per-reviewer output so the output
+/// remains readable after the reviewer sessions are destroyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishedReviewResolution {
+    /// Every reviewer settled and the verdict was delivered.
+    Completed,
+    /// The review could not reach a usable verdict.
+    Failed,
+    /// The user stopped the review before it resolved.
+    Cancelled,
+}
+
 /// Durable review work, findings and declined findings for this session.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewState {

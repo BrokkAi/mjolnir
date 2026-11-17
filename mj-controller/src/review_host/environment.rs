@@ -56,6 +56,17 @@ pub trait ReviewEnvironment: Send + Sync {
     /// their partial mailbox messages commit together while peers remain.
     fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String>;
 
+    /// Clears an active review and records its per-role output in one durable
+    /// write. The default keeps a test environment that has no store.
+    fn close_review(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        _resolution: crate::database::FinishedReviewResolution,
+    ) -> Result<(), String> {
+        self.save_state(session_id, state)
+    }
+
     /// Clears the in-flight flag of every review a restart interrupted, and
     /// reports whose they were. Baselines are deliberately left alone: the
     /// interrupted review never advanced one, so the next review covers the
@@ -402,6 +413,16 @@ impl ReviewEnvironment for ControllerEnvironment {
 
     fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String> {
         crate::database::save_turn_review_state(session_id, state)
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn close_review(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        resolution: crate::database::FinishedReviewResolution,
+    ) -> Result<(), String> {
+        crate::database::close_turn_review_state(session_id, state, resolution)
             .map_err(|error| format!("{error:#}"))
     }
 

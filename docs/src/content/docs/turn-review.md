@@ -48,7 +48,7 @@ The pre-push hook accepts trees recorded under either `refs/mj/reviewed/` or `re
 
 The parent conversation and its prompt remain available while reviewers work. A short status appears above the prompt. Open **Reviewers** to inspect reviewer sessions in the virtual workspace; close the workspace or press Escape in the Sessions list to return. The web viewer works the same way: **Reviewers · n**, with the number of reviewers still open, sits beside **Subagents · n** once a session has any reviewer, and opens the same list filtered to reviewers. **Subagents** lists only the other children.
 
-A clean review advances the reviewed boundary automatically. Findings arrive as a message to the primary agent, and a failed review reports its reason. `mj review status` shows the current state and verdict.
+A clean review advances the reviewed boundary automatically. Findings arrive as a message to the primary agent, and a failed review reports its reason. `mj review status` shows the current state and verdict. `mj review show` reads a finished review after it closes, including each reviewer's model, effort, profile, full handback, verdict, and usage. Reviewer sessions are destroyed when their role ends; the review's output does not depend on them and remains readable with `mj review show --session <id> [--review <id>]` and `GET /sessions/{id}/reviews`.
 
 ## Lifecycle behavior
 

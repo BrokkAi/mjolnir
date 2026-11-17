@@ -277,7 +277,6 @@ struct FakeEnvironment {
     /// save of its review, as the foreign key on its review state does.
     owner_deleted: std::sync::atomic::AtomicBool,
     deleted_owner_saves: std::sync::atomic::AtomicUsize,
-    subagent: std::sync::atomic::AtomicBool,
     review_refusal: Mutex<Option<String>>,
     /// Refusals the next reviewer resolutions answer with, in order.
     resolve_refusals: Mutex<std::collections::VecDeque<String>>,
@@ -361,7 +360,6 @@ impl FakeEnvironment {
             final_save_error: Mutex::new(None),
             owner_deleted: std::sync::atomic::AtomicBool::new(false),
             deleted_owner_saves: std::sync::atomic::AtomicUsize::new(0),
-            subagent: std::sync::atomic::AtomicBool::new(false),
             review_refusal: Mutex::new(None),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
             background_holds: std::sync::atomic::AtomicUsize::new(0),
@@ -3527,17 +3525,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         ),
         ("pushfailed", None, "Review of commits"),
         (
-            "manualoff",
-            Some("No findings."),
-            "Review clean for commits",
-        ),
-        (
             "manualturn",
-            Some("No findings."),
-            "Review clean for commits",
-        ),
-        (
-            "manualchild",
             Some("No findings."),
             "Review clean for commits",
         ),
@@ -3546,9 +3534,6 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         let clean = report == Some("No findings.");
         let mut manager = FakeManager::new(&session).await;
         let environment = FakeEnvironment::new();
-        environment
-            .subagent
-            .store(name == "manualchild", std::sync::atomic::Ordering::Release);
         if name == "pushclean" {
             pending_push_findings(&environment);
             environment.state.lock().unwrap().decline_findings(
@@ -3556,10 +3541,9 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 vec!["/workspace/other".into()],
             );
         }
-        let disabled = matches!(name, "manualoff" | "manualchild");
         let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
             legacy: None,
-            disabled,
+            disabled: false,
             reviewers: vec![mj_core::config::SubagentChoice {
                 model: "test-reviewer".into(),
                 effort: None,

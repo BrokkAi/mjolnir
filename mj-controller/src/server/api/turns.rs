@@ -659,6 +659,30 @@ pub(super) async fn review_status(
     }))
 }
 
+/// A finished review's per-reviewer output. `review` selects one by id; without
+/// it the newest finished review answers.
+pub(super) async fn finished_review(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<FinishedReviewQuery>,
+) -> Result<Json<FinishedReviewResponse>, ApiFailure> {
+    {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &session_id)?;
+    }
+    let review = backend(&state)?
+        .finished_review(session_id.clone(), query.review.clone())
+        .await?;
+    if review.is_none()
+        && let Some(review_id) = query.review
+    {
+        return Err(ApiFailure::not_found(format!(
+            "no finished review {review_id} for session {session_id}"
+        )));
+    }
+    Ok(Json(FinishedReviewResponse { session_id, review }))
+}
+
 pub(super) async fn send_action(
     state: &ServerState,
     action: ControllerAction,

@@ -167,7 +167,7 @@ pub(super) enum StandingRead {
 pub(super) enum PersistenceCompletion {
     Open,
     Captured,
-    Close,
+    Close(crate::database::FinishedReviewResolution),
     LaunchChild { role: String },
 }
 
@@ -566,11 +566,17 @@ pub(super) async fn persistence_loop(
             } => {
                 let environment = environment.clone();
                 let owner = session_id.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || environment.save_state(&owner, &state))
-                        .await
-                        .map_err(|error| format!("review state persistence task stopped: {error}"))
-                        .and_then(|result| result);
+                let close = match &completion {
+                    Some(PersistenceCompletion::Close(resolution)) => Some(*resolution),
+                    _ => None,
+                };
+                let result = tokio::task::spawn_blocking(move || match close {
+                    Some(resolution) => environment.close_review(&owner, &state, resolution),
+                    None => environment.save_state(&owner, &state),
+                })
+                .await
+                .map_err(|error| format!("review state persistence task stopped: {error}"))
+                .and_then(|result| result);
                 if let Some(completion) = completion {
                     let _ = events.send(HostEvent::StateSaved {
                         session_id,
