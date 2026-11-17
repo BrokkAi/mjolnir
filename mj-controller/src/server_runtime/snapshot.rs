@@ -295,7 +295,7 @@ pub(super) fn session_capabilities(
 
 /// The ACP content blocks one phone prompt becomes: its text, then each
 /// attached image as the image block the prompt path already carries.
-pub(super) fn phone_prompt_blocks(
+pub(crate) fn phone_prompt_blocks(
     text: String,
     images: Vec<crate::server::ViewerPromptImage>,
 ) -> Vec<agent_client_protocol::v1::schema::ContentBlock> {
