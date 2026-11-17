@@ -882,15 +882,10 @@ fn validate_action_against(
         } => {
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
-            if command.trim().is_empty() {
-                return Err(ApiError::bad_request("shell command is empty"));
-            }
-            if command.len() > MAX_SHELL_COMMAND_BYTES {
-                return Err(ApiError::bad_request(format!(
-                    "shell command is too long ({} bytes; maximum {MAX_SHELL_COMMAND_BYTES}, \
-                     the longest single argument Linux passes to a program)",
-                    command.len()
-                )));
+            if command.trim().is_empty() || command.chars().count() > MAX_SHELL_COMMAND_CHARS {
+                return Err(ApiError::bad_request(
+                    "shell command must contain 1-65536 characters",
+                ));
             }
         }
         ControllerAction::CancelShell {
