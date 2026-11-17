@@ -1,0 +1,138 @@
+[
+  {
+    "bug": "go-nilness-ignores-modeled-nonreturn",
+    "arm": "BT"
+  },
+  {
+    "bug": "cpp-template-inherited-base-signature",
+    "arm": "A"
+  },
+  {
+    "bug": "dependency-failure-drops-independent-model-evidence",
+    "arm": "A"
+  },
+  {
+    "bug": "retained-fill-java-memo-loses-gap",
+    "arm": "A"
+  },
+  {
+    "bug": "go-nilness-ignores-modeled-nonreturn",
+    "arm": "A"
+  },
+  {
+    "bug": "retained-fill-java-memo-loses-gap",
+    "arm": "BT"
+  },
+  {
+    "bug": "java-static-getter-drops-incomplete-route",
+    "arm": "A"
+  },
+  {
+    "bug": "jvm-protected-unindexed-hierarchy-denied",
+    "arm": "BT"
+  },
+  {
+    "bug": "php-indexed-write-reenters-current-rhs",
+    "arm": "BT"
+  },
+  {
+    "bug": "java-static-getter-drops-incomplete-route",
+    "arm": "BT"
+  },
+  {
+    "bug": "cpp-template-inherited-base-signature",
+    "arm": "BT"
+  },
+  {
+    "bug": "js-synthetic-owner-leaks-file-summary",
+    "arm": "A"
+  },
+  {
+    "bug": "kotlin-value-class-this-loses-underlying-projection",
+    "arm": "A"
+  },
+  {
+    "bug": "go-receiver-poisons-package-result-contract-discovery",
+    "arm": "A"
+  },
+  {
+    "bug": "incompatible-semantic-bundle-late-gate",
+    "arm": "A"
+  },
+  {
+    "bug": "mcp-default-advisory-reported-clean",
+    "arm": "A"
+  },
+  {
+    "bug": "jvm-protected-unindexed-hierarchy-denied",
+    "arm": "A"
+  },
+  {
+    "bug": "python-module-binding-representative-after-event",
+    "arm": "BT"
+  },
+  {
+    "bug": "python-filescope-enclosing-tie",
+    "arm": "A"
+  },
+  {
+    "bug": "kotlin-source-constructor-steals-class-header-comment",
+    "arm": "BT"
+  },
+  {
+    "bug": "incompatible-semantic-bundle-late-gate",
+    "arm": "BT"
+  },
+  {
+    "bug": "dependency-failure-drops-independent-model-evidence",
+    "arm": "BT"
+  },
+  {
+    "bug": "kotlin-value-class-this-loses-underlying-projection",
+    "arm": "BT"
+  },
+  {
+    "bug": "python-module-mutation-repeated-scan-budget",
+    "arm": "BT"
+  },
+  {
+    "bug": "js-synthetic-owner-leaks-file-summary",
+    "arm": "BT"
+  },
+  {
+    "bug": "unproven-override-family-certifies-empty",
+    "arm": "BT"
+  },
+  {
+    "bug": "mcp-default-advisory-reported-clean",
+    "arm": "BT"
+  },
+  {
+    "bug": "python-module-binding-representative-after-event",
+    "arm": "A"
+  },
+  {
+    "bug": "php-indexed-write-reenters-current-rhs",
+    "arm": "A"
+  },
+  {
+    "bug": "python-module-mutation-repeated-scan-budget",
+    "arm": "A"
+  },
+  {
+    "bug": "kotlin-source-constructor-steals-class-header-comment",
+    "arm": "A"
+  },
+  {
+    "bug": "python-filescope-enclosing-tie",
+    "arm": "BT"
+  },
+  {
+    "bug": "go-receiver-poisons-package-result-contract-discovery",
+    "arm": "BT"
+  },
+  {
+    "bug": "unproven-override-family-certifies-empty",
+    "arm": "A"
+  }
+]
