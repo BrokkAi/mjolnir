@@ -9617,7 +9617,10 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     let recovery_attempt = state
         .recovery_observer
         .gate
-        .try_start(WORKING_CHILD)
+        .try_start(
+            WORKING_CHILD,
+            crate::recovery_gate::BackgroundWork::RecoveryCopy,
+        )
         .unwrap();
     let suspend = tokio::spawn({
         let state = state.clone();
@@ -9698,8 +9701,16 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
     let mut state = test_runtime_state_loading_the_store();
     let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
     Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
-    let attempt_a = state.recovery_observer.gate.try_start(child_a).unwrap();
-    let attempt_b = state.recovery_observer.gate.try_start(child_b).unwrap();
+    let attempt_a = state
+        .recovery_observer
+        .gate
+        .try_start(child_a, crate::recovery_gate::BackgroundWork::RecoveryCopy)
+        .unwrap();
+    let attempt_b = state
+        .recovery_observer
+        .gate
+        .try_start(child_b, crate::recovery_gate::BackgroundWork::RecoveryCopy)
+        .unwrap();
 
     let mut suspend = tokio::spawn({
         let state = state.clone();
