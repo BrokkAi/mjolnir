@@ -693,6 +693,13 @@ pub fn local_git_ssh_command() -> Option<&'static str> {
 pub fn remote_git_ssh_command() -> anyhow::Result<String> {
     match std::env::var_os("GIT_SSH_COMMAND") {
         None => Ok(NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()),
+        // Git on this computer fails trying to run an empty command. Sent
+        // elsewhere, an empty value would read as "use that machine's own",
+        // so it is refused here to fail the same way.
+        Some(command) if command.is_empty() => Err(anyhow::anyhow!(
+            "GIT_SSH_COMMAND is set but empty, and Git cannot run an empty command; \
+             unset it or set it to an SSH command"
+        )),
         Some(command) => command.into_string().map_err(|_| {
             anyhow::anyhow!(
                 "GIT_SSH_COMMAND is not valid UTF-8, so Mjolnir cannot send it to the machine \
