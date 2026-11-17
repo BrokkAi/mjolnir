@@ -232,7 +232,13 @@ pub(super) async fn notification_message(
             match (expected.message_id, expected.through) {
                 (Some(target), _) => read_notification_item(id, &target),
                 (_, Some(through)) => {
-                    crate::database::load_materialized_agent_message_through(id, through)
+                    let item = crate::database::load_materialized_agent_item_through(id, through)?;
+                    Ok(item.and_then(|item| {
+                        mj_core::transcript::materialized_agent_message_text(
+                            std::iter::once(&item),
+                            &item.stable_id,
+                        )
+                    }))
                 }
                 _ => unreachable!("entry selector is present"),
             }

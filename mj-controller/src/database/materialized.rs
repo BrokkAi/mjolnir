@@ -502,8 +502,30 @@ pub fn load_materialized_agent_item_through(
     session_id: &str,
     through: u64,
 ) -> Result<Option<TranscriptItem>> {
-    let connection = open_reader(&database_path())?;
-    last_materialized_agent_item_in(&connection, session_id, 0, None, Some(through))
+    let mut reader = open_reader(&database_path())?;
+    let connection = reader.transaction()?;
+    let historical_start: Option<u64> = connection
+        .query_row(
+            "SELECT turn_start_position FROM session_turn_usage
+             WHERE session_id = ?1 AND completed_ordinal = ?2",
+            params![session_id, through],
+            |row| row.get::<_, Option<u64>>(0),
+        )
+        .optional()?
+        .flatten();
+    let start = match historical_start {
+        Some(start) => Some(start),
+        // Restoring a canonical snapshot can supply a last outcome without
+        // its historical usage row. Its completion must match exactly too.
+        None => read_materialized_turn_state(&connection, session_id)?
+            .and_then(|(_, _, last)| last)
+            .filter(|turn| turn.completed_ordinal == through)
+            .and_then(|turn| turn.turn_start_position),
+    };
+    let Some(start) = start else {
+        return Ok(None);
+    };
+    last_materialized_agent_item_in(&connection, session_id, start, Some(through), Some(through))
 }
 
 /// Whether the stored projection holds a transcript item with this stable id.

@@ -5673,11 +5673,16 @@ async fn notification_message_for_an_important_card_requires_its_read_through_bo
     }
 }
 
+// Hard-won: 8dd7f6384: a turn without text used a preceding turn's reply.
 #[tokio::test]
 async fn notification_message_reads_only_entries_on_the_current_card() {
     use mj_client::runtime_feed::NotificationCard;
     use mj_core::attention::{EntryMessage, NotificationKind, NotificationStackEntry};
-    use mj_core::state::{MaterializedSession, TranscriptBody, TranscriptItem};
+    use mj_core::state::{
+        MaterializedSession, MaterializedTurnOutcome, TranscriptBody, TranscriptItem,
+        TurnOutcomeKind,
+    };
+    use mj_core::storage::MaterializedSessionMutation;
 
     const NAME: &str = "notification_message_reads_only_entries_on_the_current_card";
     const CHILD: &str = "MJ_TEST_NOTIFICATION_CARD_MESSAGE";
@@ -5695,9 +5700,9 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
     let (_, state) = sample_config_state();
     crate::database::save_session(&state.sessions["session-1"]).unwrap();
     let mut history = MaterializedSession::empty("session-1");
-    history.applied_event_ordinal = 9;
-    history.applied_event_digest = format!("{:064x}", 9);
-    for (ordinal, message) in [(1, "exact"), (4, "bounded"), (8, "unlisted")] {
+    history.applied_event_ordinal = 4;
+    history.applied_event_digest = format!("{:064x}", 4);
+    for (ordinal, message) in [(1, "exact"), (4, "bounded")] {
         history.transcript.push(Arc::new(TranscriptItem {
             stable_id: format!("agent:{ordinal}"),
             position: ordinal,
@@ -5710,6 +5715,46 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
             },
         }));
     }
+    crate::database::save_materialized_session(&history).unwrap();
+    let outcome = |name: &str, start, completed| MaterializedTurnOutcome {
+        command_id: name.into(),
+        accepted_ordinal: Some(start),
+        turn_start_position: Some(start),
+        completed_ordinal: completed,
+        completed_at_ms: completed as i64,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        },
+        answered_through: None,
+        diagnostic: None,
+        usage: None,
+        work_facts: None,
+    };
+    crate::database::apply_projection_event(
+        "session-1",
+        5,
+        "",
+        &format!("{:064x}", 5),
+        &MaterializedSessionMutation {
+            last_turn_outcome: Some(outcome("with-text", 3, 5)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    history.applied_event_ordinal = 9;
+    history.applied_event_digest = format!("{:064x}", 9);
+    history.last_turn_outcome = Some(outcome("without-text", 8, 9));
+    history.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "agent:7".into(),
+        position: 7,
+        latest_content_event_ordinal: Some(7),
+        created_at_ms: 7,
+        last_changed_at_ms: 7,
+        body: TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({"content":{"type":"text","text":"unlisted"}})],
+            streaming: false,
+        },
+    }));
     crate::database::save_materialized_session(&history).unwrap();
     let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
         snapshot.sessions[0].notification_card = Some(NotificationCard {
@@ -5725,6 +5770,11 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,
                 },
+                NotificationStackEntry {
+                    completed_ordinal: 9,
+                    kind: NotificationKind::Important,
+                    message: EntryMessage::None,
+                },
             ],
             dismissal: None,
             holder: None,
@@ -5733,9 +5783,10 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
     });
     let cookie = login_cookie(&app).await;
     for (query, text) in [
-        ("message_id=agent%3A1", Some("exact")),
-        ("through=5", Some("bounded")),
-        ("message_id=agent%3A8", None),
+        ("message_id=agent%3A1", Some(Some("exact"))),
+        ("through=5", Some(Some("bounded"))),
+        ("through=9", Some(None)),
+        ("message_id=agent%3A7", None),
         ("through=2", None),
         ("through=8", None),
     ] {

@@ -15427,6 +15427,20 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
             body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":format!("Question {position}")}})], streaming: false },
         }));
     }
+    history.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        command_id: "first-reply".into(),
+        accepted_ordinal: None,
+        turn_start_position: Some(0),
+        completed_ordinal: 1,
+        completed_at_ms: 1,
+        outcome: mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        },
+        answered_through: None,
+        diagnostic: None,
+        usage: None,
+        work_facts: None,
+    });
     crate::database::save_materialized_session(&history).unwrap();
     let (tail, _) = crate::database::load_materialized_projection_tail("notification-history", 512)
         .unwrap()

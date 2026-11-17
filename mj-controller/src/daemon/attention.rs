@@ -821,9 +821,18 @@ fn notification_card(
                 })
                 .cloned()
                 .collect();
-            let dismissal = (!entries.is_empty()).then_some(NotificationDismissal::Stack {
-                revision: stack.revision,
-            });
+            let dismissal = if entries
+                .iter()
+                .any(|entry| entry.kind == NotificationKind::NeedsInput)
+            {
+                Some(NotificationDismissal::Stack {
+                    revision: stack.revision,
+                })
+            } else {
+                entries
+                    .last()
+                    .map(|entry| NotificationDismissal::ReadThrough(entry.completed_ordinal))
+            };
             (entries, dismissal)
         } else {
             let entry = if let Some(question) = raised_question {
@@ -926,6 +935,7 @@ mod tests {
     use super::*;
     use mj_core::state::{MaterializedSession, ProjectionWindow, SessionState};
 
+    // Hard-won: 8dd7f6384: clearing a visible Important entry dismissed a held question.
     #[test]
     fn open_request_releases_when_only_the_managed_child_changes() {
         use mj_core::assessment::{InferredQuestion, OpenRequest};
@@ -971,11 +981,18 @@ mod tests {
         });
         parent.notification_stack = mj_core::attention::NotificationStack {
             revision: 11,
-            entries: vec![NotificationStackEntry {
-                completed_ordinal: 10,
-                kind: NotificationKind::NeedsInput,
-                message: EntryMessage::None,
-            }],
+            entries: vec![
+                NotificationStackEntry {
+                    completed_ordinal: 7,
+                    kind: NotificationKind::Important,
+                    message: EntryMessage::None,
+                },
+                NotificationStackEntry {
+                    completed_ordinal: 10,
+                    kind: NotificationKind::NeedsInput,
+                    message: EntryMessage::None,
+                },
+            ],
         }
         .into();
         next.sessions.get_mut("parent").unwrap().operational = Some(parent.into());
@@ -1006,6 +1023,19 @@ mod tests {
         child.harness_turn = Some(HarnessTurn { started_at_ms: 1 });
         next.sessions.get_mut("child").unwrap().operational = Some(child.clone().into());
         update(&RuntimeProjection::default(), &mut next);
+        let card = &next.metadata.notification_cards.as_ref().unwrap()["parent"];
+        assert_eq!(card.badge, NotificationKind::Important);
+        assert_eq!(card.entries.len(), 1);
+        let Some(NotificationDismissal::ReadThrough(through)) = card.dismissal else {
+            panic!("Clear must leave the held question intact");
+        };
+        assert_eq!(through, 7);
+        let before_clear = next.clone();
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = through;
+        update(&before_clear, &mut next);
         assert_eq!(
             next.metadata.session_attention["parent"],
             SessionAttention::Working
