@@ -365,7 +365,8 @@ async fn every_prompt_the_relay_takes_reaches_the_validator_and_refusals_name_th
 
     // A control character costs six bytes in both encodings; an emoji costs
     // four as serde_json writes it and twelve from a client that escapes all
-    // non-ASCII, as Python's json module does by default.
+    // non-ASCII, as Python's json module does by default; an ASCII letter
+    // costs one, or six from a client that escapes it.
     let control = largest("\u{1}");
     let body = json("control", &"\u{1}".repeat(control));
     assert!(body.len() > MAX_BODY_BYTES);
@@ -391,7 +392,21 @@ async fn every_prompt_the_relay_takes_reaches_the_validator_and_refusals_name_th
         "{}",
         json_body(response).await
     );
-    assert_eq!(backend.submissions.lock().unwrap().len(), 2);
+    let letters = largest("a");
+    let body = format!(
+        r#"{{"request_id":"letters","text":"{}"}}"#,
+        "\\u0061".repeat(letters)
+    );
+    assert!(body.len() > 6 * RELAY_COMMAND_BYTE_BUDGET - 1024);
+    let response = app.clone().oneshot(send(body)).await.unwrap();
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        json_body(response).await
+    );
+    assert_eq!(backend.submissions.lock().unwrap().len(), 3);
 
     let response = app
         .clone()
@@ -420,6 +435,26 @@ async fn every_prompt_the_relay_takes_reaches_the_validator_and_refusals_name_th
         "{refusal}"
     );
 
+    // A route without a limit of its own refuses under the general one, and
+    // keeps the header a client checks before it reads the refusal.
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b' '; MAX_BODY_BYTES + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(response.headers().contains_key(super::API_VERSION_HEADER));
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(
+        refusal.contains(&format!("({MAX_BODY_BYTES} bytes)")),
+        "{refusal}"
+    );
+
     let response = app
         .oneshot(send(json(&"c".repeat(65), "short")))
         .await
@@ -427,7 +462,7 @@ async fn every_prompt_the_relay_takes_reaches_the_validator_and_refusals_name_th
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let refusal = json_body(response).await["error"].to_string();
     assert!(refusal.contains("use 1-64 ASCII letters"), "{refusal}");
-    assert_eq!(backend.submissions.lock().unwrap().len(), 2);
+    assert_eq!(backend.submissions.lock().unwrap().len(), 3);
 }
 
 /// A message with no sender comes from the user's own shell, so it is the

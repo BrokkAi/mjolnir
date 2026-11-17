@@ -87,13 +87,13 @@ const MAX_TITLE_CHARS: usize = 120;
 /// The largest body of an API request that carries prompt or message text:
 /// the ordinary allowance plus the largest prompt the worker's relay accepts
 /// ([`mj_core::relay::RELAY_COMMAND_BYTE_BUDGET`], measured as serde_json
-/// writes it). A client may escape what serde_json writes raw, and the most
-/// that costs is three times (`\uD83D\uDE00`, twelve bytes, for a four-byte
-/// character), so any prompt the worker could take reaches the validator, and
-/// one it could not is refused with the validator's reason, not a bare 413
-/// (#1556).
+/// writes it). JSON lets a client spell any character as a `\u` escape, six
+/// bytes for a one-byte ASCII character, so a client's body can be six times
+/// what serde_json writes. Any prompt the worker could take therefore reaches
+/// the validator, and one it could not is refused with the validator's
+/// reason rather than a bare 413 (#1556).
 const MAX_PROMPT_TEXT_BODY_BYTES: usize =
-    MAX_BODY_BYTES + 3 * mj_core::relay::RELAY_COMMAND_BYTE_BUDGET;
+    MAX_BODY_BYTES + 6 * mj_core::relay::RELAY_COMMAND_BYTE_BUDGET;
 /// How many repositories one dirty-worktree acknowledgement may name. A bundle
 /// with more repositories than this than has bigger problems than the phone.
 const MAX_DIRTY_ACKNOWLEDGEMENTS: usize = 32;

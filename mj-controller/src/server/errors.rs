@@ -96,11 +96,21 @@ pub(super) fn named_body_limit(
             if response.status() != StatusCode::PAYLOAD_TOO_LARGE || !plain_text {
                 return response;
             }
-            ApiError::new(
+            // Only the body and its type change. Headers the layers inside
+            // added, such as `mj-api-version`, which a client checks before
+            // it reads a refusal, stay.
+            let (mut parts, _) = response.into_parts();
+            let (refusal, body) = ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!("the request body is larger than this request accepts ({limit} bytes)"),
             )
             .into_response()
+            .into_parts();
+            parts.headers.remove(CONTENT_LENGTH);
+            if let Some(content_type) = refusal.headers.get(CONTENT_TYPE) {
+                parts.headers.insert(CONTENT_TYPE, content_type.clone());
+            }
+            Response::from_parts(parts, body)
         })
         .layer(DefaultBodyLimit::max(limit))
 }
