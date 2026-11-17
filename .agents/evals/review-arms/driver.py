@@ -102,7 +102,7 @@ def session(sid):
     return value["sessions"][0] if "sessions" in value else value
 
 
-def quota_hold():
+def quota_hold(scope=None):
     """Why a new job must not start, or None. REVIEW_ARMS_QUOTA_FLOOR="codex4=25,..." names
     shared profiles whose least window must keep that many percent (a coordinator's limit,
     2026-11-16: codex4 is shared with other sessions). Checked once per launch, from the
@@ -115,7 +115,13 @@ def quota_hold():
         profile, _, percent = spec.partition("=")
         rows = mj("quota", "--profile", profile).get("profiles") or []
         report = (rows[0].get("report") or {}) if rows else {}
-        left = [w.get("remaining_percent") for w in report.get("windows") or []]
+        windows = report.get("windows") or []
+        # Antigravity reports separate Gemini and Claude/GPT pools. Unscoped
+        # windows apply to every model; an absent matching pool stays unknown.
+        if scope:
+            windows = [w for w in windows if not w.get("model_scope")
+                       or scope in w["model_scope"].split(",")]
+        left = [w.get("remaining_percent") for w in windows]
         if not left or None in left or report.get("error"):
             return f"{profile}: no usable quota report ({json.dumps(report)[:300]})"
         if min(left) < float(percent):

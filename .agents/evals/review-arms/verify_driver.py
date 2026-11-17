@@ -48,6 +48,7 @@ p.add_argument("--kind", choices=["verify", "judge", "task"], default="verify")
 p.add_argument("--output", help="task: the file each unit's session writes, fetched into the unit directory")
 p.add_argument("--model", default="opus")
 p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
+p.add_argument("--quota-scope", help="model pool for REVIEW_ARMS_QUOTA_FLOOR (for example gemini)")
 # Any mj target: each session gets SPEC.md and its batch uploaded into its workspace (INPUT), so the
 # session reads nothing of this host's filesystem and cannot reach the eval's results.
 p.add_argument("--target", default="localhost")
@@ -215,6 +216,13 @@ def run(batch_path, judge=None):
         sid = rec["session_id"]
     else:
         profile = pick_profile()
+        if os.environ.get("REVIEW_ARMS_QUOTA_FLOOR"):
+            # Share the experiment drivers' floor interpretation. Import only
+            # for guarded runs; older verifier data has no driver workspace.
+            from driver import quota_hold
+            hold = quota_hold(a.quota_scope)
+            if hold:
+                raise RuntimeError("held before verifier session start: " + hold)
         source = ["--bundle", a.bundle] if a.bundle else ["--project-directory", REPO]
         sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", a.target,
                  *source, "--effort", "high", "--review", "off", "--no-project-memory",
