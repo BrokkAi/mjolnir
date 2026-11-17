@@ -1531,6 +1531,12 @@ fn leased_relay_child_serves_stdio() {
                     }
                 }
                 RelayRequest::CompleteSubagentRequest { result } => {
+                    if PathBuf::from(&root)
+                        .join("slow-delegation-delivery")
+                        .exists()
+                    {
+                        std::thread::sleep(Duration::from_secs(6));
+                    }
                     std::fs::write(
                         PathBuf::from(&root).join("subagent-result.json"),
                         serde_json::to_vec(result).unwrap(),
@@ -3284,6 +3290,59 @@ async fn released_connection_can_be_leased_again_immediately() {
 }
 
 #[cfg(unix)]
+// Hard-won: ec2-m8id16-b move stall: abandoned lease requests must not add relay syncs.
+#[tokio::test]
+async fn cancelled_lease_request_is_skipped_before_sync() {
+    if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            DEFERRED_SUBMIT_TEST_CHILD,
+            "cancelled_lease_request_is_skipped_before_sync",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    fail_if_the_actor_stalls("cancelled lease blocked the actor");
+    let (actor, lease_id, connection) = lease_a_live_actor().await;
+    let log = actor._relay_root.path().join(RELAY_REQUEST_LOG);
+    let syncs = || {
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "attach")
+            .count()
+    };
+    let before = syncs();
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: Some(Box::new(connection)),
+        })
+        .unwrap();
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    actor
+        .commands
+        .try_send(ActorCommand::Lease {
+            reply,
+            idle_harness: None,
+        })
+        .unwrap();
+    let (reply, response) = oneshot::channel();
+    actor
+        .commands
+        .try_send(ActorCommand::Sync { reply })
+        .unwrap();
+    response.await.unwrap().unwrap();
+    assert_eq!(
+        syncs(),
+        before + 1,
+        "only the explicit Sync may contact the worker"
+    );
+    actor.retirement.send_replace(true);
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn full_leased_queue_refuses_excess_and_still_processes_release() {
     if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
@@ -3954,6 +4013,7 @@ async fn delegation_coalesces_fairly_and_ignores_replaced_actor_publications() {
 }
 
 #[cfg(unix)]
+// Hard-won: ec2-m8id16-b move stall: slow durable replies must finish once without a delivery deadline.
 #[tokio::test]
 async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     const CHILD: &str = "MJ_TEST_DELEGATION_NO_DASHBOARD";
@@ -3981,7 +4041,7 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     }));
     crate::database::save_session(&parent).unwrap();
     let (feed, observations) = delegation_channel();
-    let manager = spawn_session_manager_observed(Some(feed)).unwrap();
+    let mut manager = spawn_session_manager_observed(Some(feed)).unwrap();
     manager
         .targets
         .send_replace(vec![leased_relay_target(relay_root.path())]);
@@ -4002,7 +4062,7 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     ));
     let stop = tokio_util::sync::CancellationToken::new();
     let (_services, task) = crate::daemon::delegation::spawn(
-        state,
+        state.clone(),
         manager.control.clone(),
         observations,
         stop.clone(),
@@ -4025,6 +4085,7 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
         .unwrap()
         .materialized
         .applied_event_ordinal;
+    std::fs::write(relay_root.path().join("slow-delegation-delivery"), "").unwrap();
     // The worker's request changes without a transcript event. No reader ever
     // consumes manager.updates and no web server or remote facade exists.
     let request = mj_core::subagent::SubagentToolRequest {
@@ -4059,8 +4120,83 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
             .applied_event_ordinal,
         before
     );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while crate::database::load_delegation(LEASED_RELAY_SESSION, &request.request_id)
+            .unwrap()
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("delivery must acknowledge the durable result");
+    let log = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| *line == "complete_subagent_request")
+            .count(),
+        1,
+        "a slow result must have only one delivery attempt"
+    );
+    // A second slow reply is safe to cancel during handoff: the result is
+    // persisted before delivery, and must remain available to the next daemon.
+    let request = mj_core::subagent::SubagentToolRequest {
+        request_id: "slow-reply-at-handoff".into(),
+        ..request
+    };
+    std::fs::write(
+        relay_root.path().join("subagent-request.json"),
+        serde_json::to_vec(&request).unwrap(),
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let log = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+            if log
+                .lines()
+                .filter(|line| *line == "complete_subagent_request")
+                .count()
+                == 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the second reply reaches the slow exchange");
+    // The original check deliberately left dashboard updates unconsumed.
+    // For handoff, consume them as the daemon does: each queued update holds
+    // admission until its reader advances. Delivery itself must hold none.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            while manager.updates.try_recv().is_ok() {}
+            if crate::upgrade::gate().try_close() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "durable delivery blocked handoff: {:?}",
+            crate::upgrade::active_labels()
+        )
+    });
     stop.cancel();
-    task.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("handoff cancels delivery without waiting for the slow relay")
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::database::load_delegation(LEASED_RELAY_SESSION, &request.request_id)
+            .unwrap()
+            .unwrap()
+            .1
+            .is_some()
+    );
     manager.shutdown.shutdown().await.unwrap();
 }
 

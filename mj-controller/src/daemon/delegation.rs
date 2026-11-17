@@ -665,21 +665,11 @@ async fn settle_child(
     }
 }
 
+// Results are durable and request-ID keyed. The dispatch phase owns one attempt
+// until it settles, with backoff on failure. Handoff must not wait for actor
+// queues or relay traffic: coordinator cancellation aborts these jobs and the
+// next daemon rebuilds them from the worker queue and stored results.
 async fn deliver(
-    runtime: &RuntimeState,
-    parent: &str,
-    result: StoredDelegationResult,
-) -> Result<()> {
-    let _work = crate::upgrade::activity_unless_draining("delegation result delivery")?;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        deliver_result(runtime, parent, result),
-    )
-    .await
-    .context("delegation result delivery timed out; durable result retained")?
-}
-
-async fn deliver_result(
     runtime: &RuntimeState,
     parent: &str,
     stored_result: StoredDelegationResult,
