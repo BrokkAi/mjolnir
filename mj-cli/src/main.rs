@@ -404,6 +404,25 @@ struct MoveArgs {
     /// Destination profile. Omit to retain the current profile.
     #[arg(long)]
     profile: Option<String>,
+    /// Container CPU limit for the destination, with --memory-gib. Omit both
+    /// to keep the source size, or to take the destination host's remembered
+    /// size (else 4 CPUs) when the source has none.
+    #[arg(
+        long,
+        requires = "memory_gib",
+        conflicts_with = "clear_resources",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    cpus: Option<u64>,
+    /// Container memory limit in GiB for the destination, with --cpus.
+    #[arg(
+        long = "memory-gib",
+        requires = "cpus",
+        conflicts_with = "clear_resources",
+        value_name = "GIB",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    memory_gib: Option<u64>,
     /// What to do with prompts/configuration commands already queued.
     #[arg(long, value_enum)]
     queue: Option<MoveQueue>,
@@ -413,7 +432,8 @@ struct MoveArgs {
     /// Print exactly one structured outcome to stdout.
     #[arg(long)]
     json: bool,
-    /// Explicitly remove inherited container sizing when moving to a fixed host.
+    /// Remove inherited container sizing: use a fixed host's resources, or
+    /// the destination's default size for a container.
     #[arg(long)]
     clear_resources: bool,
 }
@@ -1343,6 +1363,18 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             return Err(error).context("connect to move daemon");
         }
     };
+    let resource_allocation = match (args.cpus, args.memory_gib) {
+        (Some(cpus), Some(memory_gib)) => {
+            Some(mj_core::state::SessionResourceAllocation::Container {
+                cpus,
+                memory_bytes: memory_gib
+                    .checked_mul(1 << 30)
+                    .context("--memory-gib is too large")?,
+            })
+        }
+        _ => None,
+    };
+    let sized_by_flags = resource_allocation.is_some();
     let selection = MoveSelection {
         subagents,
         oracle: oracle_enabled,
@@ -1369,7 +1401,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         profile_id: args.profile.clone(),
         target_template_id: args.target.clone(),
         additional_mounts: None,
-        resource_allocation: None,
+        resource_allocation,
         clear_resource_allocation: args.clear_resources,
     };
     let preparation = match daemon.prepare_move_session(selection).await {
@@ -1386,7 +1418,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
                     recovery: None,
                 })?;
             }
-            return Err(with_clear_resources_hint(error)).context("prepare move");
+            return Err(with_clear_resources_hint(error, sized_by_flags)).context("prepare move");
         }
     };
     if args.prepare {
@@ -1429,6 +1461,9 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     };
 
     print_move_conversion(&preparation);
+    if !args.json {
+        print_move_destination_size(&preparation);
+    }
     if args.yes {
         // --yes acknowledges interruption, but intentionally does not choose
         // what happens to queued work; that choice was handled above.
@@ -1547,12 +1582,16 @@ fn with_large_transfer_hint(error: anyhow::Error) -> anyhow::Error {
 }
 
 /// The daemon owns the bare-target refusal text; the flag that resolves it is
-/// specific to this command line, so it is added here.
-fn with_clear_resources_hint(error: anyhow::Error) -> anyhow::Error {
-    if format!("{error:#}").contains(mj_core::state::BARE_TARGET_FIXED_RESOURCES) {
-        error.context("add --clear-resources to remove the inherited container sizing when moving to a fixed host")
+/// specific to this command line, so it is added here. A Move that named a
+/// size with flags needs the opposite advice: the fixed host sizes itself.
+fn with_clear_resources_hint(error: anyhow::Error, sized_by_flags: bool) -> anyhow::Error {
+    if !format!("{error:#}").contains(mj_core::state::BARE_TARGET_FIXED_RESOURCES) {
+        return error;
+    }
+    if sized_by_flags {
+        error.context("drop --cpus and --memory-gib: a fixed host uses its own CPU and memory")
     } else {
-        error
+        error.context("add --clear-resources to remove the inherited container sizing when moving to a fixed host")
     }
 }
 
@@ -1680,6 +1719,24 @@ fn print_move_conversion(preparation: &mj_core::state::MovePreparation) {
     for warning in conversion.warning_lines() {
         eprintln!("{warning}");
     }
+}
+
+/// The size the destination container will have. `mj move` shows it for
+/// `--yes` too, because the default a Move picks is not something the person
+/// typed and has to be readable afterwards.
+fn print_move_destination_size(preparation: &mj_core::state::MovePreparation) {
+    if preparation.in_place {
+        return;
+    }
+    let Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes }) =
+        &preparation.selection.resource_allocation
+    else {
+        return;
+    };
+    eprintln!(
+        "Destination container size: {cpus} CPUs, {} GiB.",
+        mj_core::state::floor_gib_tenths(*memory_bytes)
+    );
 }
 
 async fn prompt_move_confirmation(

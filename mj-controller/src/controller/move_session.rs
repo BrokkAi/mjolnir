@@ -1451,16 +1451,30 @@ impl Controller {
             target_id,
         )
         .map_err(anyhow::Error::msg)?;
-        super::backend::validate_resource_allocation(
-            target,
-            move_requested_allocation(source, &selection),
-        )?;
         let in_place = move_in_place_for_record(
             source,
             &selection,
             &self.config.targets,
             self.state.subagents.contains_key(&source.id),
             previous.as_ref(),
+        )?;
+        // A Move that creates an environment keeps the source's size when the
+        // source has one. When it has none -- a bare source moved into a
+        // container, or a Move that clears an inherited size -- the
+        // destination's default size is the answer, decided here so the
+        // preparation, the sealed selection and every admission that follows
+        // read one value. Without it the destination container runs unbounded
+        // and container admission refuses the Move for want of a size (#1585).
+        if !in_place && move_requested_allocation(source, &selection).is_none() {
+            selection.resource_allocation = move_default_allocation(&self.state, target);
+            // The default has replaced what the Move asked to clear, so the
+            // sealed selection carries the size instead of two instructions
+            // that contradict each other.
+            selection.clear_resource_allocation = false;
+        }
+        super::backend::validate_resource_allocation(
+            target,
+            move_requested_allocation(source, &selection),
         )?;
         // Preparation is where a Move is decided, and only an accepted Move
         // logs its decision, so a refused preparation would otherwise say
@@ -3227,6 +3241,23 @@ fn move_requested_allocation<'a>(
             .as_ref()
             .or(source.resource_allocation.as_ref())
     }
+}
+
+/// The size a Move gives a destination that has none of its own: the host's
+/// remembered container size, else the baseline `mj new` starts from. Host
+/// totals are not part of the controller's state, so the size is not clamped
+/// here; capacity admission refuses a size the host cannot hold.
+fn move_default_allocation(
+    state: &mj_core::state::State,
+    target: &mj_core::config::TargetTemplate,
+) -> Option<mj_core::state::SessionResourceAllocation> {
+    let host = mj_core::config::container_size_host(target)?;
+    let size =
+        mj_core::state::default_container_size(state.container_sizes.get(host).copied(), None);
+    Some(mj_core::state::SessionResourceAllocation::Container {
+        cpus: size.cpus,
+        memory_bytes: size.memory_bytes,
+    })
 }
 
 fn move_requested_mounts<'a>(

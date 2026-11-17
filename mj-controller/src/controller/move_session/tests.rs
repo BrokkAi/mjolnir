@@ -2200,7 +2200,7 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
         ..State::default()
     };
     crate::database::save_state(&state).unwrap();
-    let controller = Controller { config, state };
+    let mut controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
         oracle: None,
         oracle_choice: None,
@@ -2266,6 +2266,71 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
         "the preview reports the new file"
     );
     assert_eq!(first.fingerprint, second.fingerprint);
+
+    // The source is bare, so it has no size to keep. The Move gives the
+    // destination the same size `mj new` would: the host's remembered size,
+    // else the baseline. Without it container admission refuses the Move and
+    // an accepted one would run unbounded (#1585).
+    let container_size = |cpus: u64, gib: u64| {
+        Some(SessionResourceAllocation::Container {
+            cpus,
+            memory_bytes: gib << 30,
+        })
+    };
+    assert_eq!(first.selection.resource_allocation, container_size(4, 8));
+    assert!(!first.selection.clear_resource_allocation);
+
+    // A retry carries the size it was sealed with, so the default is only
+    // chosen for a selection that names none.
+    let mut from_scratch = first.selection.clone();
+    from_scratch.resource_allocation = None;
+    controller.state.remember_container_size(
+        "local",
+        mj_core::state::HostContainerSize {
+            cpus: 12,
+            memory_bytes: 24 << 30,
+        },
+    );
+    // Clearing inherited sizing on a container destination means the
+    // destination default, and the sealed selection carries that size rather
+    // than two instructions that contradict each other.
+    let mut cleared = from_scratch.clone();
+    cleared.clear_resource_allocation = true;
+    let cleared = runtime
+        .block_on(controller.prepare_move_session_controlled(
+            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            ),
+            cleared,
+            &executor,
+        ))
+        .unwrap();
+    assert_eq!(
+        cleared.selection.resource_allocation,
+        container_size(12, 24)
+    );
+    assert!(
+        !cleared.selection.clear_resource_allocation,
+        "the sealed selection carries the destination size"
+    );
+
+    // An explicit size is the destination's size, and the default never
+    // replaces it.
+    let mut explicit = from_scratch;
+    explicit.resource_allocation = container_size(6, 16);
+    let explicit = runtime
+        .block_on(controller.prepare_move_session_controlled(
+            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            ),
+            explicit,
+            &executor,
+        ))
+        .unwrap();
+    assert_eq!(
+        explicit.selection.resource_allocation,
+        container_size(6, 16)
+    );
 }
 
 /// Answers for a new Move destination container, recording the restore its
