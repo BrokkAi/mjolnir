@@ -660,8 +660,8 @@ impl RuntimeState {
     /// releases the lifecycle's hold around each resumable workspace copy
     /// (`begin_resumable_work`), so a handoff does not wait for a copy,
     /// the closing daemon cancels it, and the next daemon resumes the Move
-    /// from its durable phase. An in-place Move copies nothing and never
-    /// releases the hold, so a handoff waits for it to finish.
+    /// from its durable phase. An in-place Move also releases the hold while
+    /// draining durable delegation requests before sealing the source.
     ///
     /// The Move's controller future holds a standard mutex guard across an
     /// await, so it is not `Send` and cannot be the lifecycle future itself.
@@ -805,19 +805,25 @@ mod admission_tests {
     /// does for a Move with a workspace transfer.
     // Hard-won: 571e8aa0: a handoff waited through a resumable Move copy because duplicate admission stayed held.
     // Hard-won: 5ca468627: reading the pid before its write finished hung panic cleanup.
+    // Hard-won: #1562: finishing resumable work during draining was recorded as failure.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_handoff_does_not_wait_for_a_slow_path_move_copy() {
         const NAME: &str = "a_handoff_does_not_wait_for_a_slow_path_move_copy";
         const CHILD: &str = "MJ_TEST_SLOW_MOVE_HANDOFF";
         if std::env::var_os(CHILD).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            IsolatedTest::new(test_name(module_path!(), NAME))
-                .env(CHILD, "1")
-                .env("MJ_INSTANCE", "slow-move-handoff")
-                .isolated_store(root.path())
-                .run();
+            for mode in ["copy", "draining-lapse", "draining-close"] {
+                let root = tempfile::tempdir().unwrap();
+                IsolatedTest::new(test_name(module_path!(), NAME))
+                    .env(CHILD, mode)
+                    .env("MJ_INSTANCE", "slow-move-handoff")
+                    .isolated_store(root.path())
+                    .run();
+            }
             return;
         }
+        let mode = std::env::var(CHILD).unwrap();
+        let copy_finished = Arc::new(tokio::sync::Notify::new());
+        let finished = copy_finished.clone();
         let directory = tempfile::tempdir().unwrap();
         let _release = ReleaseOnDrop(directory.path().join("release"));
         let copy = held_command(directory.path(), "copy Move workspace");
@@ -834,6 +840,7 @@ mod admission_tests {
                             |_, executor, _| async move {
                                 executor.begin_resumable_work()?;
                                 let copied = executor.execute(&copy);
+                                finished.notify_one();
                                 let resumed =
                                     executor.end_resumable_work("Move control transition");
                                 if copied.is_ok() && resumed.is_ok() {
@@ -866,6 +873,62 @@ mod admission_tests {
                 .any(|label| label == "session lifecycle" || label == "database operation"),
             "the copy holds handoff admission: {labels:?}"
         );
+        if mode != "copy" {
+            let other = crate::upgrade::activity("other bounded control").unwrap();
+            assert!(matches!(handoff(&state).await, DaemonReply::UpgradePending));
+            assert!(crate::upgrade::gate().is_open());
+            std::fs::write(directory.path().join("release"), b"").unwrap();
+            tokio::time::timeout(BOUND, copy_finished.notified())
+                .await
+                .unwrap();
+            tokio::time::timeout(
+                BOUND,
+                crate::upgrade::gate().wait_for_resumable_waiter_for_test(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                result.borrow().is_none(),
+                "drain refusal must not complete the Move as failure"
+            );
+            assert_eq!(
+                crate::upgrade::active_labels(),
+                vec!["other bounded control"]
+            );
+            if mode == "draining-lapse" {
+                crate::upgrade::gate().expire_drain_for_test();
+                drop(other);
+                match tokio::time::timeout(BOUND, RuntimeState::wait_lifecycle_result(result))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    DaemonLifecycleResult::Move(outcome) => {
+                        assert_eq!(outcome.outcome, "completed")
+                    }
+                    _ => panic!("Move must finish normally after drain lapse"),
+                }
+                assert!(crate::upgrade::gate().is_open());
+            } else {
+                drop(other);
+                assert!(matches!(handoff(&state).await, DaemonReply::Done));
+                match tokio::time::timeout(BOUND, RuntimeState::wait_lifecycle_result(result))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    DaemonLifecycleResult::Move(outcome) => {
+                        assert_eq!(outcome.outcome, "interrupted")
+                    }
+                    _ => panic!("closed gate must hand the durable Move to the next daemon"),
+                }
+            }
+            assert!(
+                !process_is_running(pid),
+                "the completed copy cannot outlive the test"
+            );
+            return;
+        }
         let deadline = std::time::Instant::now() + BOUND;
         while !matches!(handoff(&state).await, DaemonReply::Done) {
             assert!(

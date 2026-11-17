@@ -273,6 +273,7 @@ impl ExportRuntime for RuntimeState {
                 .enter_foreground(
                     &session_id,
                     "workspace file upload",
+                    crate::recovery_gate::LifecycleOrigin::Person,
                     &cancelled,
                     &crate::targets::ProcessExecutor,
                 )

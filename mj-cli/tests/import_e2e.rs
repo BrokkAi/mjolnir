@@ -33,6 +33,7 @@ async fn session_admission(
         gate.enter_foreground(
             session_id,
             "import test close",
+            mj_controller::recovery_gate::LifecycleOrigin::Person,
             &std::sync::atomic::AtomicBool::new(false),
             &mj_controller::targets::ProcessExecutor,
         )

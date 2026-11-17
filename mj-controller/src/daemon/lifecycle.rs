@@ -1,11 +1,7 @@
 use super::*;
 use crate::recovery_gate::SessionAdmission;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum LifecycleOrigin {
-    Person,
-    Automatic,
-}
+pub(super) use crate::recovery_gate::LifecycleOrigin;
 
 pub(super) struct LifecycleStart {
     pub(super) origin: LifecycleOrigin,
@@ -672,7 +668,19 @@ impl RuntimeState {
                         operation_state
                             .recovery_observer
                             .gate
-                            .enter_foreground(&operation_id, kind.label(), &cancelled, &executor)
+                            .enter_foreground(
+                                &operation_id,
+                                if kind == LifecycleKind::Move
+                                    && origin == LifecycleOrigin::Automatic
+                                {
+                                    "automatic Move"
+                                } else {
+                                    kind.label()
+                                },
+                                origin,
+                                &cancelled,
+                                &executor,
+                            )
                             .await
                     }
                     .await;

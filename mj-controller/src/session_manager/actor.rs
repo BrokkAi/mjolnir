@@ -1422,7 +1422,17 @@ impl std::fmt::Display for MailboxAdmissionDeferred {
 
 impl std::error::Error for MailboxAdmissionDeferred {}
 
-pub(super) fn submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFailure {
+pub(super) fn submit_failure(error: &anyhow::Error) -> SubmitFailure {
+    let failure = client_submit_failure(error);
+    SubmitFailure {
+        failure,
+        code: error
+            .downcast_ref::<RelayRejected>()
+            .map(|rejected| rejected.0.code),
+    }
+}
+
+fn client_submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFailure {
     if error.downcast_ref::<NotSent>().is_some()
         || error.downcast_ref::<MailboxAdmissionDeferred>().is_some()
     {

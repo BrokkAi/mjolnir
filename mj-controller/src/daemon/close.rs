@@ -35,6 +35,7 @@ impl RuntimeState {
             .enter_foreground(
                 session_id,
                 "suspend preparation",
+                crate::recovery_gate::LifecycleOrigin::Person,
                 &AtomicBool::new(false),
                 &ProcessExecutor,
             )
