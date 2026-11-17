@@ -465,14 +465,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭│Clear notifications  │──── ▁   ▄   □ ╮│                                                                              │
 │╰─────────────────────╯: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
+│› ? ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
 │  Question  podman  codex-1           ││                                                                              │
-│  │ Waiting on you to choose a target.││                               ✦  M J O L N I R                               │
+│  │ Waiting on you to choose a target.││                  Select a session to open its conversation.                  │
 │  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -495,8 +491,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? ACP pretty name · hel · <age>                                               │
-│                                      ││Waiting on you to choose a target.                                            │
-│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
+│                                      ││                                                                              │
+│                                      ││ Waiting on you to choose a target.                                           │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││Quick reply:                                                             Send │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 workspace clear notifications: DismissNotifications { dismissals: [("session-1", Question(InferredQuestion { turn_id: "prompt-1", completed_ordinal: 3 }))] }
@@ -508,16 +508,12 @@ notice after a refused workspace clear: Some("Could not dismiss 1 notification: 
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
+│› ? ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
 │ ╭Session──────────────────────────╮  ││                                                                              │
-│ │Dismiss notification             │t.││                               ✦  M J O L N I R                               │
+│ │Dismiss notification             │t.││                  Select a session to open its conversation.                  │
 │ │Copy session ID                  │  ││                                                                              │
-│ │New session with these settings  │  ││                  Select a session to open its conversation.                  │
+│ │New session with these settings  │  ││                                                                              │
 │ ╰─────────────────────────────────╯  ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -538,8 +534,12 @@ notice after a refused workspace clear: Some("Could not dismiss 1 notification: 
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? ACP pretty name · hel · <age>                                               │
-│                                      ││Could not clear: daemon refused                                               │
-│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
+│                                      ││                                                                              │
+│                                      ││ Could not clear: daemon refused                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││Quick reply:                                                             Send │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === active prose question (120x40) ===
@@ -559,28 +559,28 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
 │                │› Dismiss notification                                                              │                │
-│                │  Ignore                                                                            │                │
-│                │                                                                                    │                │
+│                │  Ignore                                                                            │  ──────────────╯
+│                │                                                                                    │  ──────────────╮
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │  ──────────────╯
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╮
+│                │  Change Workspace › — There is no other workspace.                                 │  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
-│                │  Container settings                                                                │  ──────────────╯
-│                │  Move…                                                                             │  ─────── ▁   ▄ ╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╯
+│                │  Container settings                                                                │  ─────── ▁   ▄ ╮
+│                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │
-│                │  Restart                                                                           │  ──────────────╯
-│                │  Interrupt all (parent + sub-agents)…                                              │  ─────── ▁   ▄ ╮
-│                │  Destroy…                                                                          │                │
-│                │Dismiss this notification without sending input or granting approval.               │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)…                                              │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Dismiss this notification without sending input or granting approval.               │  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
-│                                                                                                        ──────────────╯
-│                                                                                                        ─────── ▁   ▄ ╮
-│                                      ││? ACP pretty name · hel · <age>                                               │
-│                                      ││Could not clear: daemon refused                                               │
-│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││                                                                              │
+│                                      ││Quick reply:                                                             Send │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 dismiss exact question: DismissNotification { session_id: "session-1", target: Question(InferredQuestion { turn_id: "prompt-1", completed_ordinal: 3 }) }
@@ -675,17 +675,13 @@ unread dismissed: Some("Notification dismissed.")
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› ? ACP pretty name               ◇ ⋯ ││                                                                              │
-│ ╭Session──────────────────────────╮x…││                               ✦  M J O L N I R                               │
+│ ╭Session──────────────────────────╮x…││                  Select a session to open its conversation.                  │
 │ │Open sub-agent question          │  ││                                                                              │
-│ │Copy session ID                  │  ││                  Select a session to open its conversation.                  │
+│ │Copy session ID                  │  ││                                                                              │
 │ │New session with these settings  │  ││                                                                              │
 │ ╰─────────────────────────────────╯  ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -705,9 +701,13 @@ unread dismissed: Some("Notification dismissed.")
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? ACP pretty name · hel · <age>                                               │
-│                                      ││Waiting for your input                                                        │
-│                                      ││Clear unavailable: answer this request in the session.                        │
-│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
+│                                      ││                                                                              │
+│                                      ││ Waiting for your input                                                       │
+│                                      ││ Clear unavailable: answer this request in the session.                       │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││Quick reply:                                                             Send │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === sub-agent question menu (120x40) ===
@@ -726,29 +726,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │› Open sub-agent question                                                           │                │
-│                │  Ignore                                                                            │                │
+│                │› Open sub-agent question                                                           │  ──────────────╯
+│                │  Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
-│                │  Pin…                                                                              │  ──────────────╮
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
-│                │                                                                                    │                │
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╯
-│                │  Container settings                                                                │  ─────── ▁   ▄ ╮
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
+│                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)…                                              │                │
-│                │  Destroy…                                                                          │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)…                                              │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
 │                │Go to the sub-agent whose question or permission request makes this session wait.   │                │
 │                │                                                                                    │                │
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
-│                                                                                                        ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
-│                                      ││Waiting for your input                                                        │
-│                                      ││Clear unavailable: answer this request in the session.                        │
-│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
+│                                                                                                                      │
+│                                      ││                                                                              │
+│                                      ││Quick reply:                                                             Send │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 open sub-agent question action: Open { session_id: "child-session" }

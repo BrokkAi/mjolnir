@@ -63,7 +63,7 @@ fn open_test_chat_with_notices(session_id: &str, notices: Notices) -> ActiveChat
 
 /// A dashboard with profiles and a target, so the adaptive layout draws
 /// its three panes with text in them.
-fn populated_dashboard() -> DashboardState {
+pub(super) fn populated_dashboard() -> DashboardState {
     populated_dashboard_with(|_| {})
 }
 

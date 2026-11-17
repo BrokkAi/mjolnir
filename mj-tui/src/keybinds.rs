@@ -387,6 +387,9 @@ impl DashboardState {
         let mut labels = spec
             .pane_keys
             .iter()
+            .filter(|hint| {
+                self.focus != crate::Focus::Notifications || hint.accepts_focus(self.focus)
+            })
             .map(|hint| hint.label.to_owned())
             .collect::<Vec<_>>();
         if let Some(action) = spec.action {

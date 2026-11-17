@@ -733,6 +733,19 @@ impl StartupPrompts {
             let Some((mut prompt, recalled)) = self.known_prompt(session_id, &command_id) else {
                 continue;
             };
+            let reply_result = match &outcome {
+                mj_client::daemon::StartupPromptOutcome::Accepted => Ok(()),
+                mj_client::daemon::StartupPromptOutcome::Refused { reason, .. } => {
+                    Err(reason.clone())
+                }
+                mj_client::daemon::StartupPromptOutcome::Withdrawn => {
+                    Err("The reply was withdrawn".to_owned())
+                }
+            };
+            if dashboard.notification_reply_finished(session_id, &command_id, reply_result) {
+                self.settle(session_id, &command_id);
+                continue;
+            }
             let active = !dashboard.has_standby_composer(session_id);
             let applied = match outcome {
                 mj_client::daemon::StartupPromptOutcome::Refused {
@@ -1118,6 +1131,86 @@ mod tests {
             "edit me now"
         );
         assert!(pending.is_settled("recalled", &prompt.command_id));
+        // A quick-reply receipt must settle its own line, never restore into
+        // or clear the real conversation's independent composer draft.
+        for refused in [false, true] {
+            use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+            let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+            let mut dashboard = crate::dashboard::tests::populated_dashboard();
+            dashboard.set_session_attention_for(
+                "session-1",
+                mj_core::attention::SessionAttention::Important,
+            );
+            dashboard.set_notification_dismissals(
+                [(
+                    "session-1".into(),
+                    mj_core::attention::NotificationDismissal::ReadThrough(1),
+                )]
+                .into(),
+            );
+            dashboard.seed_standby_prompt("session-1", "Keep the real composer".into());
+            dashboard.focus_sessions();
+            for _ in 0..4 {
+                dashboard.handle_key(key(KeyCode::Tab));
+            }
+            for ch in "Quick response".chars() {
+                dashboard.handle_key(key(KeyCode::Char(ch)));
+            }
+            let DashboardAction::NotificationReply {
+                session_id, prompt, ..
+            } = dashboard.handle_key(key(KeyCode::Enter))
+            else {
+                panic!("quick reply submission");
+            };
+            let mut pending = StartupPrompts::default();
+            pending
+                .pending
+                .entry(session_id.clone())
+                .or_default()
+                .insert(
+                    prompt.command_id.clone(),
+                    TrackedPrompt::Waiting {
+                        prompt: prompt.clone(),
+                        inherited_draft: None,
+                        recalled: false,
+                        admission_error: None,
+                        order: 0,
+                        held: None,
+                        settlement: tokio_util::sync::CancellationToken::new(),
+                    },
+                );
+            let outcome = if refused {
+                StartupPromptOutcome::Refused {
+                    encoded_draft: prompt.payload.encode_draft(),
+                    reason: "reply rejected".into(),
+                }
+            } else {
+                StartupPromptOutcome::Accepted
+            };
+            pending.apply_outcomes(
+                &session_id,
+                [(prompt.command_id.clone(), outcome)].into(),
+                &mut dashboard,
+                &mut BTreeMap::new(),
+            );
+            assert!(pending.is_settled(&session_id, &prompt.command_id));
+            assert_eq!(
+                dashboard.standby_prompt_draft(&session_id).as_deref(),
+                Some("Keep the real composer")
+            );
+            let next = dashboard.handle_key(key(KeyCode::Enter));
+            if refused {
+                let DashboardAction::NotificationReply { prompt, .. } = next else {
+                    panic!("refused reply stays available to retry");
+                };
+                assert_eq!(prompt.payload.text, "Quick response");
+            } else {
+                assert!(
+                    matches!(next, DashboardAction::Open { .. }),
+                    "success cleared the quick-reply line"
+                );
+            }
+        }
     }
     #[tokio::test]
     async fn unadmitted_move_prompts_wait_for_exact_origin_and_return_to_draft_on_cancel() {

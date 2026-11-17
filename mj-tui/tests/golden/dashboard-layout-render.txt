@@ -6,11 +6,11 @@
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │  ! Important update              ◇ ⋯ ││                                                                              │
-│  Idle  podman [1]  codex-1           ││                                                                              │
+│  Idle  podman [1]  codex-1           ││                               ✦  M J O L N I R                               │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
-│  ? Newest question               ◇ ⋯ ││                  Select a session to open its conversation.                  │
+│  ? Newest question               ◇ ⋯ ││                                                                              │
 │  Question  podman [2]  codex-1       ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
@@ -18,11 +18,7 @@
 │  ? Older question                ◇ ⋯ ││                                                                              │
 │  Question  podman [3]  codex-1       ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
@@ -38,11 +34,16 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (3) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? Newest question · hel · age unknown                                         │
-│                                      ││Which approach should we take?                                                │
-│                                      ││The question stays here until you answer or clear it.                         │
-│                                      ││ Clear & Next   Later   Clear all ! (1)                                       │
+│                                      ││                                                                              │
+│                                      ││ Which approach should we take?                                               │
+│                                      ││ The question stays here until you answer or clear it.                        │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││Quick reply: I'll investigate.                                           Send │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (1)                        │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-d clear & next · l later · c clear all ! · ↑ scroll · Tab pane │ ctrl+b then g sessions · o next (?2) · : / ? palette
+Alt+g session · Alt+Enter send · Alt+n next · Alt+s skip · Alt+c all ! · Alt+↑ scroll │ ctrl+b then : / ? palette
+notification header color: Rgb(158, 194, 238)
 open Rename action: None
 === Rename modal over dashboard (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮

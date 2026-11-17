@@ -1,5 +1,6 @@
 //! The in-memory notification stack. Dismissals remain owned by the existing
-//! session dismissal state; this pane owns only deferral order and scrolling.
+//! session dismissal state; this pane owns deferrals, per-session reply editors
+//! and their command-bound submission feedback.
 use mj_chat::{components::ControlKind, theme};
 use mj_core::attention::NotificationDismissal;
 use ratatui::{
@@ -17,11 +18,12 @@ use crate::{AttentionLevel, DashboardAction, DashboardState, Focus, PaneSize, Su
 pub(crate) struct NotificationsPane {
     pub(crate) size: PaneSize,
     pub(crate) maximize_enabled: bool,
-    later: Vec<crate::NotificationCard>,
+    skipped: Vec<crate::NotificationCard>,
     pub(crate) errors: std::collections::BTreeMap<String, String>,
     pub(crate) gesture: Option<NotificationGesture>,
     pub(crate) controls: Vec<NotificationGesture>,
     pub(crate) message_read: Option<NotificationMessageRead>,
+    replies: std::collections::BTreeMap<String, QuickReply>,
     scroll: u16,
     /// The card whose message the scroll offset belongs to. A new question or
     /// reply from the same session is a new card and opens at its beginning.
@@ -33,15 +35,35 @@ impl Default for NotificationsPane {
         Self {
             size: PaneSize::Standard,
             maximize_enabled: true,
-            later: Vec::new(),
+            skipped: Vec::new(),
             errors: Default::default(),
             gesture: None,
             controls: Vec::new(),
             message_read: None,
+            replies: Default::default(),
             scroll: 0,
             scroll_card: None,
         }
     }
+}
+
+struct QuickReply {
+    editor: mj_chat::chat::ChatState,
+    pending: Option<ReplySubmission>,
+    error: Option<String>,
+}
+impl std::fmt::Debug for QuickReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuickReply")
+            .field("pending", &self.pending)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Debug)]
+struct ReplySubmission {
+    card: crate::NotificationCard,
+    command_id: String,
+    text: String,
 }
 
 #[derive(Debug)]
@@ -56,6 +78,8 @@ pub(crate) struct NotificationMessageRead {
 pub(crate) struct NotificationGesture {
     pub(crate) command: CommandId,
     card: crate::NotificationCard,
+    session_id: String,
+    text: String,
 }
 
 pub(crate) struct NotificationEntry {
@@ -68,6 +92,137 @@ pub(crate) struct NotificationEntry {
 }
 
 impl DashboardState {
+    fn quick_reply_mut(&mut self, session_id: &str) -> &mut QuickReply {
+        self.notifications
+            .replies
+            .entry(session_id.to_owned())
+            .or_insert_with(|| QuickReply {
+                editor: mj_chat::chat::ChatState::standby(
+                    session_id,
+                    &self.config,
+                    Default::default(),
+                    Default::default(),
+                ),
+                pending: None,
+                error: None,
+            })
+    }
+
+    pub(crate) fn handle_notification_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> Option<DashboardAction> {
+        if self.focus != Focus::Notifications {
+            return None;
+        }
+        if let Some(command) = crate::actions::pane_command_for_key(key, self.focus) {
+            return Some(self.run_available_command(command));
+        }
+        let session_id = self.displayed_notification_session_id()?;
+        let reply = self.quick_reply_mut(&session_id);
+        if reply.pending.is_none() {
+            match reply
+                .editor
+                .handle_single_line_prompt_key(crate::standby_prompt_key(key))
+            {
+                mj_chat::chat::ChatAction::CycleFocus { reverse } => {
+                    self.cycle_focus(reverse);
+                }
+                mj_chat::chat::ChatAction::PasteFromClipboard => {
+                    return Some(DashboardAction::PasteFromClipboard);
+                }
+                _ => {}
+            }
+        }
+        self.record_event_handled();
+        Some(DashboardAction::None)
+    }
+
+    pub(crate) fn paste_notification_reply(&mut self, text: &str) {
+        if let Some(session_id) = self.displayed_notification_session_id() {
+            let reply = self.quick_reply_mut(&session_id);
+            if reply.pending.is_none() {
+                reply.editor.paste_single_line_prompt(text);
+            }
+        }
+    }
+
+    fn reveal_notification_reply_error(&mut self, session_id: &str) {
+        if self.displayed_notification_session_id().as_deref() == Some(session_id) {
+            self.notifications.scroll = 0;
+        }
+    }
+
+    pub fn notification_reply_unconfirmed(
+        &mut self,
+        session_id: &str,
+        command_id: &str,
+        error: &str,
+    ) -> bool {
+        let Some(reply) = self
+            .notifications
+            .replies
+            .get_mut(session_id)
+            .filter(|reply| {
+                reply
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.command_id == command_id)
+            })
+        else {
+            return false;
+        };
+        reply.error = Some(format!(
+            "Could not confirm the reply: {error}; checking its status."
+        ));
+        self.reveal_notification_reply_error(session_id);
+        true
+    }
+
+    /// A durable prompt outcome belongs to its original session and command,
+    /// even when another notification has replaced the displayed card.
+    pub fn notification_reply_finished(
+        &mut self,
+        session_id: &str,
+        command_id: &str,
+        result: Result<(), String>,
+    ) -> bool {
+        let Some(reply) = self.notifications.replies.get_mut(session_id) else {
+            return false;
+        };
+        let Some(pending) = reply
+            .pending
+            .as_ref()
+            .filter(|pending| pending.command_id == command_id)
+        else {
+            return false;
+        };
+        let failed = result.is_err();
+        match result {
+            Ok(()) => {
+                if reply.editor.single_line_prompt_text() == pending.text {
+                    reply.editor.clear_draft();
+                }
+                reply.error = None;
+            }
+            Err(error) => {
+                reply.error = Some(format!("Reply failed: {error}"));
+            }
+        }
+        reply.pending = None;
+        if failed {
+            self.reveal_notification_reply_error(session_id);
+        }
+        true
+    }
+
+    pub(crate) fn notification_action(&mut self, command: CommandId) -> DashboardAction {
+        self.notification_gesture(command)
+            .map_or(DashboardAction::None, |gesture| {
+                self.activate_notification(gesture)
+            })
+    }
+
     pub(crate) fn notification_entries(&self) -> Vec<NotificationEntry> {
         let mut entries: Vec<_> = self
             .served_attention
@@ -104,7 +259,7 @@ impl DashboardState {
             .collect();
         entries.sort_by(|a, b| {
             let rank = |entry: &NotificationEntry| {
-                self.notifications.later.iter().position(|card| {
+                self.notifications.skipped.iter().position(|card| {
                     card.session_id == entry.session_id && card.target == entry.target
                 })
             };
@@ -258,12 +413,21 @@ impl DashboardState {
         entry: &NotificationEntry,
         command: CommandId,
     ) -> NotificationGesture {
+        let session_id = self.notification_content_session(&entry.session_id, entry.level);
+        let text = self
+            .notifications
+            .replies
+            .get(&session_id)
+            .map(|reply| reply.editor.single_line_prompt_text().to_owned())
+            .unwrap_or_default();
         NotificationGesture {
             command,
             card: crate::NotificationCard {
                 session_id: entry.session_id.clone(),
                 target: entry.target.clone(),
             },
+            session_id,
+            text,
         }
     }
 
@@ -271,8 +435,55 @@ impl DashboardState {
         &mut self,
         gesture: NotificationGesture,
     ) -> DashboardAction {
-        let NotificationGesture { command, card } = gesture;
+        let NotificationGesture {
+            command,
+            card,
+            session_id,
+            text,
+        } = gesture;
         match command {
+            CommandId::NotificationOpen | CommandId::NotificationDefault
+                if command == CommandId::NotificationOpen || text.trim().is_empty() =>
+            {
+                let action = self.focus_session_from_cpu_report(&session_id);
+                self.focus = Focus::Prompt;
+                action
+            }
+            CommandId::NotificationSend | CommandId::NotificationDefault => {
+                if text.trim().is_empty() || self.quick_reply_mut(&session_id).pending.is_some() {
+                    return DashboardAction::None;
+                }
+                let command_id = match mj_client::session::new_command_id("notification-reply") {
+                    Ok(id) => id,
+                    Err(error) => {
+                        self.quick_reply_mut(&session_id).error =
+                            Some(format!("Could not send reply: {error:#}"));
+                        self.reveal_notification_reply_error(&session_id);
+                        return DashboardAction::None;
+                    }
+                };
+                self.quick_reply_mut(&session_id)
+                    .editor
+                    .handle_single_line_prompt_key(crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Enter,
+                        crossterm::event::KeyModifiers::NONE,
+                    ));
+                self.quick_reply_mut(&session_id).pending = Some(ReplySubmission {
+                    card: card.clone(),
+                    command_id: command_id.clone(),
+                    text: text.clone(),
+                });
+                self.quick_reply_mut(&session_id).error = None;
+                DashboardAction::NotificationReply {
+                    card,
+                    session_id,
+                    prompt: mj_chat::chat::StartupPrompt {
+                        command_id,
+                        payload: mj_chat::chat::PromptPayload::text(text),
+                        move_operation_id: None,
+                    },
+                }
+            }
             CommandId::NotificationClear => {
                 let Some(target) = card.target else {
                     return DashboardAction::None;
@@ -286,25 +497,25 @@ impl DashboardState {
                     target,
                 }
             }
-            CommandId::NotificationLater => {
+            CommandId::NotificationSkip => {
                 let entries = self.notification_entries();
-                self.notifications.later.retain(|previous| {
+                self.notifications.skipped.retain(|previous| {
                     previous != &card
                         && entries.iter().any(|entry| {
                             entry.session_id == previous.session_id
                                 && entry.target == previous.target
                         })
                 });
-                self.notifications.later.push(card.clone());
+                self.notifications.skipped.push(card.clone());
                 self.notifications.scroll = 0;
-                DashboardAction::NotificationLater { card }
+                DashboardAction::NotificationSkip { card }
             }
             _ => DashboardAction::None,
         }
     }
 
-    pub(crate) fn notification_later(&mut self) -> DashboardAction {
-        self.notification_gesture(CommandId::NotificationLater)
+    pub(crate) fn notification_skip(&mut self) -> DashboardAction {
+        self.notification_gesture(CommandId::NotificationSkip)
             .map_or(DashboardAction::None, |gesture| {
                 self.activate_notification(gesture)
             })
@@ -418,52 +629,131 @@ pub(crate) fn render(
             "{glyph} {} · {} · {age}",
             entry.title, entry.project
         ))
-        .style(theme::actionable()),
+        .style(
+            ratatui::style::Style::default()
+                .fg(theme::palette().secondary)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     let reason = entry.target.is_none();
-    let body_height = inner.height.saturating_sub(2 + u16::from(reason));
-    let text = match dashboard.notifications.errors.get(&entry.session_id) {
+    let session_id = dashboard.notification_content_session(&entry.session_id, entry.level);
+    let reply_error = dashboard
+        .notifications
+        .replies
+        .get(&session_id)
+        .and_then(|reply| reply.error.as_deref());
+    let mut text = match dashboard.notifications.errors.get(&entry.session_id) {
         Some(error) => format!("Could not clear: {error}\n{text}"),
         None => text,
     };
+    if let Some(error) = reply_error {
+        text = format!("{error}\n{text}");
+    }
+    if reason {
+        text.push_str("\nClear unavailable: answer this request in the session.");
+    }
+    // Header, top text margin, bottom margin, blank separator, reply and buttons.
+    let body = Rect::new(
+        inner.x + 1,
+        inner.y + 2,
+        inner.width.saturating_sub(2),
+        inner.height.saturating_sub(6),
+    );
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
     let max_scroll = paragraph
-        .line_count(inner.width)
-        .saturating_sub(body_height as usize)
+        .line_count(body.width.max(1))
+        .saturating_sub(body.height as usize)
         .min(u16::MAX as usize) as u16;
     dashboard.notifications.scroll = dashboard.notifications.scroll.min(max_scroll);
-    frame.render_widget(
-        paragraph.scroll((dashboard.notifications.scroll, 0)),
-        Rect::new(inner.x, inner.y + 1, inner.width, body_height),
-    );
-    if reason && inner.height > 2 {
-        frame.render_widget(
-            Paragraph::new("Clear unavailable: answer this request in the session.")
-                .style(theme::muted()),
-            Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
-        );
+    if body.height > 0 {
+        frame.render_widget(paragraph.scroll((dashboard.notifications.scroll, 0)), body);
     }
-    if inner.height < 2 {
+    if inner.height < 3 {
         return;
     }
+    let current_card = crate::NotificationCard {
+        session_id: entry.session_id.clone(),
+        target: entry.target.clone(),
+    };
+    let pending = dashboard.quick_reply_mut(&session_id).pending.as_ref();
+    let send_label = match pending {
+        Some(pending) if pending.card != current_card => " Sending earlier reply… ",
+        Some(_) => " Sending… ",
+        None => " Send ",
+    };
+    let pending = pending.is_some();
+    let can_send = !pending
+        && !dashboard
+            .quick_reply_mut(&session_id)
+            .editor
+            .single_line_prompt_text()
+            .trim()
+            .is_empty();
+    let send_width = (Line::raw(send_label).width() as u16).min(inner.width);
+    let reply_y = inner.bottom() - 2;
+    let send_area = Rect::new(
+        inner.right().saturating_sub(send_width),
+        reply_y,
+        send_width.min(inner.width),
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new("Quick reply: ").style(theme::muted()),
+        Rect::new(inner.x, reply_y, 13.min(inner.width), 1),
+    );
+    let input = Rect::new(
+        inner.x.saturating_add(13).min(send_area.x),
+        reply_y,
+        send_area.x.saturating_sub(inner.x.saturating_add(14)),
+        1,
+    );
+    let input_focused = focused && !pending && !dashboard.modal_open();
+    dashboard
+        .quick_reply_mut(&session_id)
+        .editor
+        .draw_single_line_prompt(frame, input, input_focused);
+    dashboard.surface_form.borrow_mut().register(
+        SurfaceControl::Notification(CommandId::NotificationSend),
+        ControlKind::Button,
+        send_area,
+        can_send,
+    );
+    frame.render_widget(
+        Paragraph::new(send_label).style(if can_send {
+            theme::actionable().patch(theme::raised())
+        } else {
+            theme::muted()
+        }),
+        send_area,
+    );
     let important = entries
         .iter()
         .filter(|entry| entry.level == AttentionLevel::Important && entry.target.is_some())
         .count();
-    dashboard.notifications.controls = [CommandId::NotificationClear, CommandId::NotificationLater]
-        .into_iter()
-        .map(|command| dashboard.gesture_for_notification(entry, command))
-        .collect();
+    dashboard.notifications.controls = [
+        CommandId::NotificationOpen,
+        CommandId::NotificationSend,
+        CommandId::NotificationClear,
+        CommandId::NotificationSkip,
+    ]
+    .into_iter()
+    .map(|command| dashboard.gesture_for_notification(entry, command))
+    .collect();
     let mut x = inner.x;
     let mut form = dashboard.surface_form.borrow_mut();
     for (id, label, enabled) in [
+        (
+            CommandId::NotificationOpen,
+            "Go to Session".to_owned(),
+            true,
+        ),
         (
             CommandId::NotificationClear,
             "Clear & Next".to_owned(),
             entry.target.is_some(),
         ),
-        (CommandId::NotificationLater, "Later".to_owned(), true),
+        (CommandId::NotificationSkip, "Skip".to_owned(), true),
         (
             CommandId::NotificationClearImportant,
             format!("Clear all ! ({important})"),
@@ -497,6 +787,10 @@ pub(crate) mod tests {
     use crate::test_support::*;
     use crossterm::event::KeyCode;
     use mj_core::attention::SessionAttention;
+
+    fn alt(code: KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::ALT)
+    }
 
     pub(crate) fn dashboard() -> DashboardState {
         let mut dashboard = dashboard_with_session(running_session());
@@ -551,7 +845,10 @@ pub(crate) mod tests {
     #[test]
     fn a_new_card_from_the_same_session_opens_at_its_beginning() {
         let mut dashboard = dashboard();
-        let long = (0..80).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let long = (0..80)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         for detail in dashboard.session_details.values_mut() {
             detail.last_agent_message = Some(long.as_str().into());
         }
@@ -576,13 +873,13 @@ pub(crate) mod tests {
     fn notifications_keys_rotate_submit_and_restore_failed_dismissals() {
         let mut dashboard = dashboard();
         assert_eq!(dashboard.notification_entries()[0].session_id, "q1");
-        dashboard.handle_key(key(KeyCode::Char('l')));
+        dashboard.handle_key(alt(KeyCode::Char('s')));
         assert_eq!(dashboard.notification_entries()[0].session_id, "q2");
-        dashboard.handle_key(key(KeyCode::Char('l')));
+        dashboard.handle_key(alt(KeyCode::Char('s')));
         assert_eq!(dashboard.notification_entries()[0].session_id, "i1");
-        dashboard.handle_key(key(KeyCode::Char('l')));
+        dashboard.handle_key(alt(KeyCode::Char('s')));
         assert_eq!(dashboard.notification_entries()[0].session_id, "q1");
-        let action = dashboard.handle_key(key(KeyCode::Char('d')));
+        let action = dashboard.handle_key(alt(KeyCode::Char('n')));
         let DashboardAction::DismissNotification { session_id, target } = action else {
             panic!("dismissal action");
         };
@@ -603,7 +900,7 @@ pub(crate) mod tests {
         assert_eq!(dashboard.notifications.errors["q1"], "Worker disconnected");
         assert_eq!(dashboard.attention_level("q1"), AttentionLevel::Waiting);
         let DashboardAction::DismissNotifications { dismissals } =
-            dashboard.handle_key(key(KeyCode::Char('c')))
+            dashboard.handle_key(alt(KeyCode::Char('c')))
         else {
             panic!("batch dismissal");
         };
@@ -645,9 +942,15 @@ pub(crate) mod tests {
         // An update after the press may replace the card or just its target.
         // Release always carries the pressed identity, never a recomputed top.
         use crossterm::event::{MouseButton, MouseEventKind};
-        for label in ["Clear & Next", "Later"] {
+        for label in ["Go to Session", "Clear & Next", "Skip", "Send"] {
             for replace_target in [false, true] {
                 let mut race = self::dashboard();
+                race.quick_reply_mut("q1")
+                    .editor
+                    .set_draft("pressed reply".into());
+                race.quick_reply_mut("q2")
+                    .editor
+                    .set_draft("other reply".into());
                 race.set_question_message("q1", Some("old-question".into()), true);
                 let target = race.notification_dismissal_target("q1");
                 let lines = drawn(&mut race, 140, 50);
@@ -658,7 +961,7 @@ pub(crate) mod tests {
                         .insert("q1".into(), NotificationDismissal::ReadThrough(99));
                     race.set_question_message("q1", Some("new-question".into()), true);
                 } else {
-                    race.notifications.later.push(crate::NotificationCard {
+                    race.notifications.skipped.push(crate::NotificationCard {
                         session_id: "q1".into(),
                         target: target.clone(),
                     });
@@ -667,6 +970,19 @@ pub(crate) mod tests {
                 let action =
                     race.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), button));
                 match action {
+                    DashboardAction::Open { session_id } => {
+                        assert_eq!(session_id, "q1");
+                    }
+                    DashboardAction::NotificationReply {
+                        card,
+                        session_id,
+                        prompt,
+                    } => {
+                        assert_eq!(card.session_id, "q1");
+                        assert_eq!(card.target, target);
+                        assert_eq!(session_id, "q1");
+                        assert_eq!(prompt.payload.text, "pressed reply");
+                    }
                     DashboardAction::DismissNotification {
                         session_id,
                         target: sent,
@@ -680,12 +996,12 @@ pub(crate) mod tests {
                         );
                         assert!(race.notifications.errors["q1"].contains("no longer current"));
                     }
-                    DashboardAction::NotificationLater { card } => {
+                    DashboardAction::NotificationSkip { card } => {
                         assert_eq!(card.session_id, "q1");
                         assert_eq!(card.target, target);
                         assert_eq!(
                             race.notifications
-                                .later
+                                .skipped
                                 .last()
                                 .map(|card| card.session_id.as_str()),
                             Some("q1")
@@ -694,7 +1010,7 @@ pub(crate) mod tests {
                             assert_eq!(
                                 race.notification_entries()[0].session_id,
                                 "q1",
-                                "Later must not defer the replacement question"
+                                "Skip must not defer the replacement question"
                             );
                         }
                     }
@@ -733,7 +1049,7 @@ pub(crate) mod tests {
             old.notification_message("q1", AttentionLevel::Waiting),
             "The buried question"
         );
-        old.notifications.later.push(crate::NotificationCard {
+        old.notifications.skipped.push(crate::NotificationCard {
             session_id: "q1".into(),
             target: old.notification_dismissal_target("q1"),
         });
@@ -773,18 +1089,115 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn notifications_keys_keep_enter_inert_and_sizes_exclusive() {
+    fn notifications_keys_reply_open_skip_and_keep_sizes_exclusive() {
+        let mut replies = dashboard();
+        replies
+            .session_details
+            .get_mut("q1")
+            .unwrap()
+            .last_agent_message = Some(
+            (0..80)
+                .map(|i| format!("question line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        );
+        for ch in "draft /? d".chars() {
+            replies.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(replies.quick_reply_mut("q1").editor.draft(), "draft /? d");
+        replies.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('j'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(replies.quick_reply_mut("q1").editor.draft(), "draft /? d");
+
+        // Use the real Prompt's kill/yank editing, rather than pane shortcuts.
+        for ch in ['a', 'k', 'y'] {
+            replies.handle_key(crossterm::event::KeyEvent::new(
+                KeyCode::Char(ch),
+                crossterm::event::KeyModifiers::CONTROL,
+            ));
+        }
+        assert_eq!(replies.quick_reply_mut("q1").editor.draft(), "draft /? d");
+        replies.handle_key(alt(KeyCode::Char('s')));
+        for ch in "other draft".chars() {
+            replies.handle_key(key(KeyCode::Char(ch)));
+        }
+        replies.handle_key(alt(KeyCode::Char('s')));
+        replies.handle_key(alt(KeyCode::Char('s')));
+        assert_eq!(replies.notification_entries()[0].session_id, "q1");
+        let DashboardAction::NotificationReply {
+            card,
+            session_id,
+            prompt,
+        } = replies.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("Enter sends a nonempty quick reply");
+        };
+        assert_eq!(card.session_id, "q1");
+        assert_eq!(session_id, "q1");
+        assert_eq!(prompt.payload.text, "draft /? d");
+        assert!(replies.quick_reply_mut("q1").pending.is_some());
+        drawn(&mut replies, 140, 50);
+        replies.scroll_notification(5);
+        drawn(&mut replies, 140, 50);
+        assert_eq!(replies.notifications.scroll, 5);
+        assert!(replies.notification_reply_unconfirmed(
+            "q1",
+            &prompt.command_id,
+            "lost acknowledgement"
+        ));
+        let visible = drawn(&mut replies, 140, 50).join("\n");
+        assert!(visible.contains("Could not confirm the reply"), "{visible}");
+        assert!(
+            replies.quick_reply_mut("q1").pending.is_some(),
+            "uncertain admission stays in flight"
+        );
+        assert!(!replies.notification_reply_finished("q2", &prompt.command_id, Ok(())));
+        replies.handle_key(alt(KeyCode::Char('s')));
+        assert_eq!(replies.notification_entries()[0].session_id, "q2");
+        assert!(replies.notification_reply_finished(
+            "q1",
+            &prompt.command_id,
+            Err("refused".into())
+        ));
+        assert_eq!(replies.quick_reply_mut("q1").editor.draft(), "draft /? d");
+        assert!(
+            replies
+                .quick_reply_mut("q1")
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("refused")
+        );
+        assert_eq!(replies.quick_reply_mut("q2").editor.draft(), "other draft");
+        // A later successful receipt clears only its original session's line.
+        replies.handle_key(alt(KeyCode::Char('s')));
+        replies.handle_key(alt(KeyCode::Char('s')));
+        let DashboardAction::NotificationReply {
+            session_id, prompt, ..
+        } = replies.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("retry sends");
+        };
+        assert!(replies.notification_reply_finished(&session_id, &prompt.command_id, Ok(())));
+        assert_eq!(replies.quick_reply_mut("q1").editor.draft(), "");
+        assert_eq!(replies.quick_reply_mut("q2").editor.draft(), "other draft");
+
         let mut dashboard = dashboard();
         dashboard.notification_dismissals.remove("q1");
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('d'))),
+            dashboard.handle_key(alt(KeyCode::Char('n'))),
             DashboardAction::None
         );
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
+            DashboardAction::Open {
+                session_id: "q1".into()
+            }
         );
-        assert_eq!(dashboard.focus, Focus::Notifications);
+        assert_eq!(dashboard.focus, Focus::Prompt);
         assert_eq!(dashboard.notification_entries().len(), 3);
         dashboard.focus = Focus::Quota;
         dashboard.handle_key(key(KeyCode::Tab));
@@ -853,7 +1266,7 @@ pub(crate) mod tests {
             foreign.notification_card_text("q1", AttentionLevel::Waiting),
             "Question from the other workspace"
         );
-        foreign.handle_key(key(KeyCode::Char('l')));
+        foreign.handle_key(alt(KeyCode::Char('s')));
         assert!(foreign.wanted_summary_sessions().contains_key("q2"));
         assert!(!foreign.wanted_summary_sessions().contains_key("q1"));
 
@@ -964,8 +1377,22 @@ pub(crate) mod tests {
         family.focus = Focus::Notifications;
         assert_eq!(
             family.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
+            DashboardAction::Open {
+                session_id: "child-session".into()
+            }
         );
-        assert_eq!(family.focus, Focus::Notifications);
+        assert_eq!(family.focus, Focus::Prompt);
+        family.focus = Focus::Notifications;
+        for ch in "Approved".chars() {
+            family.handle_key(key(KeyCode::Char(ch)));
+        }
+        let DashboardAction::NotificationReply {
+            card, session_id, ..
+        } = family.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("child-held card reply");
+        };
+        assert_eq!(card.session_id, parent);
+        assert_eq!(session_id, "child-session");
     }
 }

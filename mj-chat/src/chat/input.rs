@@ -11,6 +11,68 @@ use crate::text_input::{
 };
 
 impl ChatState {
+    /// A single-line host uses the real Prompt editor; submission belongs to
+    /// the host. Vertical transcript navigation has no meaning in this field.
+    pub fn handle_single_line_prompt_key(&mut self, key: KeyEvent) -> ChatAction {
+        if key.code == KeyCode::Enter && self.history_search.is_some() {
+            self.handle_history_search_key(key.code, key.modifiers);
+            return ChatAction::None;
+        }
+        if matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Char('\n' | '\r')
+        ) || (key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('j' | 'm')))
+        {
+            return ChatAction::None;
+        }
+        self.handle_key(key)
+    }
+
+    /// Plain editor text, without the image-preserving saved-draft envelope.
+    pub fn single_line_prompt_text(&self) -> &str {
+        &self.input
+    }
+
+    pub fn paste_single_line_prompt(&mut self, text: &str) {
+        self.paste(&text.replace(['\r', '\n'], " "));
+    }
+
+    /// Draw the same editor's text/cursor in a horizontally scrolling line.
+    pub fn draw_single_line_prompt(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        focused: bool,
+    ) {
+        use unicode_width::UnicodeWidthStr;
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let (text, cursor) = if let Some(search) = self.history_search.as_ref() {
+            let prefix = "Search (Esc cancels): ";
+            (
+                format!("{prefix}{}", search.query),
+                prefix.width() + search.query.value()[..search.query.cursor()].width(),
+            )
+        } else {
+            (
+                sanitize_terminal_text(&self.input),
+                self.input[..self.input_cursor].width(),
+            )
+        };
+        let scroll = cursor.saturating_add(1).saturating_sub(area.width as usize);
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(text)
+                .style(crate::theme::raised())
+                .scroll((0, scroll.min(u16::MAX as usize) as u16)),
+            area,
+        );
+        if focused {
+            frame.set_cursor_position((area.x + (cursor - scroll) as u16, area.y));
+        }
+    }
+
     pub(super) fn replace_input_range(
         &mut self,
         range: std::ops::Range<usize>,

@@ -5,11 +5,14 @@ This ExecPlan is a living document. The sections `Progress`, `Surprises & Discov
 
 ## Purpose / Big Picture
 
-The Notifications pane shows the question or reply that needs attention without requiring a search through session history. It lists managed parent sessions across workspaces, resolves child-originated requests through the existing form-holder helper, and fetches one buried question by stable id when needed. Text is shared with host notifications and resolved lazily for the displayed card. Clear & Next dismisses the captured daemon target, Later defers that exact card locally, and Clear all ! dismisses only Important entries. The pane does not navigate the transcript; Enter has no action here. Notifications size and Later order are process-local.
+The Notifications pane shows the question or reply that needs attention across workspaces, including requests held by managed children. Go to Session opens the content holder through ordinary navigation with its composer focused; it never targets or loads a historical message. Quick reply is a single-line presentation of the real Prompt editor, with Send and conditional Enter behavior. Drafts and command-bound in-flight feedback belong to their destination session, so card changes cannot retarget a reply. Clear & Next dismisses the captured daemon target, Skip locally defers that exact card, and Clear all ! affects only Important cards.
 
-The user removed Go To Message on 2026-11-17. Earlier navigation and history-merge notes below record superseded implementation history, not the current design.
+Text is shared with host notifications and resolved lazily for the displayed card. A buried question uses the one-item read; no chat-history merge or Go To Message mechanism returns. Notifications size, skipped order and reply editors live in the TUI process. The header uses the existing secondary palette color; text has one-space margins and a blank line before Quick reply.
 
 ## Progress
+
+- [x] User request 2026-11-17: add ordinary Go to Session, single-line Quick reply and Send; rename Later to Skip; use modifier bindings, per-destination drafts and captured sends. Reuse the real ChatState Prompt editor and existing durable asynchronous startup-prompt submission/outcomes.
+- [x] Ten unique affected tests passed across scoped runs/reruns: notification state/scroll/host (4), registry collision (1), prompt receipts (1), and four render goldens. Final dev/all-targets clippy passed for mj-chat, mj-tui and mj-cli with warnings denied. No commit.
 
 - [x] Restore this round's uncommitted Earlier-messages-reader experiment to HEAD 428c8f9f0 before implementing the user's replacement decision.
 - [x] Remove Go To Message, its Enter binding/button/footer, pending navigation state, summary-boundary/locator navigation, stored-range reads, loaded-history merging and omission metadata. Preserve one-item question text reads, legacy count tails and Clear/Later identity.
@@ -69,6 +72,8 @@ The user removed Go To Message on 2026-11-17. Earlier navigation and history-mer
 
 ## Surprises & Discoveries
 
+Quick reply uses a separate real ChatState Prompt editor per destination session, including the existing platform key normalization. Bare global pane hints such as `?` must yield to this text owner; key matching and advertised labels share that eligibility. Send reads plain editor text, not the saved-draft envelope. The existing durable queue owns acceptance/refusal and uncertain-admission retries; matching outcomes settle the Quick reply line before the generic conversation-draft restoration path. Errors reset the visible card's scroll so a failure cannot remain above the viewport. The extended state regression verifies this on a genuinely scrolled long card. The header-color golden locates the metadata header itself, avoiding the identically named session-list row. Reconstructed AFK frames confirm modal content coordinates remain unchanged; diff alignment of repeated blanks can otherwise make the resized background look like dialog movement.
+
 The abandoned reader experiment was fully restored before this removal. Removing Go To also removes the second transcript input: ChatState again derives its entries only from the live projection, with its ordinary asynchronous prefix conversion. No missing-entry reconciliation or extra coverage metadata remains necessary. The card's one-item read remains independent of chat entries and still provides buried question text.
 
 Summary-only navigation previously saved a query for the latest agent message, rather than the displayed reply's boundary. That query could resolve against a later projection. The existing daemon-published ReadThrough ordinal supplies the immutable completion boundary without extending the summary wire shape; the pending position now carries that boundary and the original NotificationCard. When no daemon dismissal target exists, the already-loaded summary frontier supplies the boundary at capture time.
@@ -124,6 +129,9 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Decision Log
+
+- Decision: User request 2026-11-17: Go to Session first, Quick reply above the buttons with Send at right, Later renamed Skip, one-space text margins and a blank separating line, and a distinct header color.
+  Rationale: the user requested ordinary session opening, not message targeting. Use the card text's form holder when applicable. Quick reply uses the real Prompt's key handler in single-line presentation; draft and in-flight request belong to the destination session, with immutable card/command identity. The existing durable prompt queue owns admission, retries and delivery receipts; successful delivery clears the matching line, refusals retain it and show a card error. Use Alt+g session, Alt+n Clear & Next, Alt+s Skip, Alt+c Clear all ! and Alt+Enter Send, plus Enter send/session. Bare letters remain text. Palette secondary already provides a distinct header color.
 
 - Decision: User decision 2026-11-17: drop Go To Message.
   Rationale: reaching old messages needed either a history merge that failed six review rounds or a modal Earlier messages reader the user found not useful ("that's not very useful"). Remove navigation and all machinery that existed only for it. A buried question's full text still shows on the card through the protocol-103 one-item read. Clear and Later keep their captured card identity; legacy count-mode StoredProjectionTail stays unchanged and unchunked.
@@ -218,6 +226,10 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 ## Outcomes & Retrospective
 
+The user request of 2026-11-17 for Go to Session, Quick reply, Send, Skip, text margins and a distinct header is complete in the working tree without committing. Go to Session uses ordinary session navigation and the content holder, with the composer focused. Reply editors/drafts are session-bound and use the real Prompt handler; newline input is suppressed/flattened for the single-line presentation. Pointer gestures capture the card, destination and text; sends retain that identity under a stable prompt command ID. The existing asynchronous durable prompt queue owns submission, retries and receipts. Successful delivery clears only the matching line; refusals retain it, uncertain admission stays in flight, and errors remain visible on the card. The real conversation composer is independent. Alt+g opens, Alt+n clears/next, Alt+s skips, Alt+c clears Important entries, Alt+Enter sends, and plain Enter sends nonempty text or opens on empty. Alt+Up/Down scroll the card. The secondary palette supplies the blue metadata header; the new text margins, separator and reply row have the intended four-row height cost.
+
+Ten unique scoped tests passed, including the extended pointer/input and receipt-owner regressions and four updated render comparisons. Final dev/all-targets clippy passed for brokk-mj-chat, brokk-mj-tui and brokk-mjolnir with warnings denied. Whitespace checks pass. Golden changes are limited to the requested controls/spacing/color sample and consequent pane/background resizing; AFK modal content positions are unchanged. Mechanical iteration fixes: a bool/unit match arm, bare `?` ownership, corrected header-color locator, and a mixed-source compile caused by editing the new editor API during a build (rerun with frozen sources). No daemon API, protocol, schema, persisted-format, history-merge or Go To Message mechanism was added. Evidence and failure-log paths: `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/quick-reply-report.md`; text capture: `quick-reply-pane.txt`.
+
 User decision 2026-11-17 to drop Go To Message is implemented without committing. Removed its Enter action, button/footer, pending CLI navigation, summary-boundary and locator wait, start-position stored reads, history merge, omission metadata, navigation-only chat methods and tests. The rejected reader experiment was first restored to HEAD 428c8f9f0; the existing Earlier messages reader is unchanged. Buried question text still uses the indexed, chunked protocol-103 one-item read, with existing loading/unavailable states; count-mode StoredProjectionTail retains its shipped request shape and unchunked reply. Clear/Later identity, child request text, cross-workspace hydration, recency, shared attention and pane sizing remain. Twenty unique scoped tests passed: notification/host state (3), prefix (10), window (1), read owner (1), daemon/client integration (1) and four goldens. The integration retains found/missing/Unsupported and actual over-8-MiB item transport plus a legacy count single-frame check. Six-crate dev/all-targets clippy and whitespace checks passed. Only four golden files changed: 33 button rows and one footer row; the shorter footer also reveals the existing next shortcut in newly available width. No card text, age, dialog or height differences. Details, resolved expected-comparison failures, logs and a text capture are in `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/drop-goto-report.md` and `drop-goto-pane.txt`. Parent owns boundary-suite validation and committing; no live/default-instance operations or schema/persisted-format changes.
 
 The accepted 11619f2aa issue #2 is fixed without committing. Summary-only Important navigation now captures NotificationCard plus its ReadThrough completion boundary, retaining both in the CLI pending-position path. The shared notification-position owner resolves the newest nonempty agent message at or before that captured boundary after hydration; a newer reply cannot retarget it. The existing CLI regression captures summary A (position 3), then receives reply B (position 4) and its updated dismissal target, and verifies the pending jump anchors A while a fresh card targets B. The focused regression (one test) and dev/all-targets clippy for brokk-mj-tui and brokk-mjolnir passed outside the sandbox; diff whitespace checks passed. No protocol, schema, summary wire shape or persisted format changed. Issue #1 remains deferred and history merge/prefix hydration code is untouched. Evidence: `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/summary-boundary-fix.md`.
@@ -264,30 +276,23 @@ Tests: render tests use Ratatui's `TestBackend` (`mj-tui/src/test_support.rs` 75
 
 ## Plan of Work
 
-The current pane uses one shared notification-text owner, existing cross-workspace background summary hydration, and a one-item stable-id read under SummaryReads when the displayed question is outside the runtime tail. Render and input handling perform no blocking I/O. Keep the four-pane layout, process-local Notifications sizing, shared presentation_attention and captured Clear/Later gestures. Remove the Go To command and all chat-history navigation and merge additions, including start-position wire modes and omission metadata. Keep the existing Earlier messages reader unchanged; it is not part of this feature.
+Retain shared text, cross-workspace hydration, one-item text reads, presentation_attention and pane-size reconciliation. Add Go to Session and Send to the command registry, rename Later to Skip, and replace the pane's letter bindings with Alt modifiers. The Notifications input owner routes unmodified characters to its session's real ChatState Prompt editor before pane shortcuts; paste targets are session-bound and newlines are flattened. Single-line rendering reuses the editor's cursor and readline state.
 
-Extend only existing state and transport tests. Delete navigation-only tests and loaded-history assertions; retain prefix-splicing assertions that apply to the ordinary live chat. Refresh affected render goldens only for the removed button and footer hint, inspecting every diff. Run affected tests and clippy for all touched crates outside the sandbox; the parent owns boundary-suite validation and committing.
+Capture the card, content holder and reply at the gesture/key event. The existing StartupPrompts queue owns background admission, retry and delivery receipts. Route matching receipts back to the Quick reply line; accepted delivery clears the matching draft, refusals preserve it with a card error, and uncertain admission remains in flight with explicit status. The conversation's composer draft remains independent. No new daemon/store contract is required.
+
+Extend the notification state/pointer tests and the existing durable prompt-refusal regression; update the existing layout golden with reply text and actual header color. Inspect the other affected render goldens before refreshing. Run scoped tests and three-crate dev/all-targets clippy outside the sandbox; do not commit.
 
 ## Concrete Steps
 
-From the repository root, run the affected tests outside the sandbox using the dev profile and normal Cargo target directory:
+Run scoped notification input/pointer tests and the command-registry collision test in brokk-mj-tui, the existing durable_refusals_restore_images_once_without_duplicating_recalled_input regression in brokk-mjolnir, and the four existing notification-bearing goldens (layout, attention navigation, session action menu, operator-away dialog). Review actual-versus-expected differences before updating expected output. Run:
 
-    cargo test -p brokk-mj-tui notifications_
-    cargo test -p brokk-mj-tui golden_dashboard_layout_render
-    cargo test -p brokk-mj-tui golden_attention_navigation
-    cargo test -p brokk-mj-tui golden_session_action_menu
-    cargo test -p brokk-mj-tui golden_operator_away_dialog
-    cargo test -p brokk-mj-chat prefix
-    cargo test -p brokk-mj-core projection_window_keeps_whole_turns_and_unsettled_content
-    cargo test -p brokk-mjolnir leaving_a_family_cancels_queued_reads_and_rejects_previous_visits
-    cargo test -p brokk-mj-controller notification_item_read_crosses_the_daemon_client_boundary
-    cargo clippy -p brokk-mj-core -p brokk-mj-client -p brokk-mj-controller -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir --all-targets -- -D warnings
+    cargo clippy -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir --all-targets -- -D warnings
 
-The parent runs boundary suites before committing. No additional live check is required for this removal; preserve the earlier isolated-instance evidence as historical validation.
+Use dev profile, normal Cargo target storage and elevated permissions for validation. Do not commit.
 
 ## Validation and Acceptance
 
-Run the existing notification state tests, SummaryReads cancellation/generation regression, daemon/client item integration (found, missing, Unsupported, item beyond 8 MiB, legacy single-frame count tail), and affected live-chat prefix/window tests. Compare the affected layout, attention, menu and operator-away goldens; update only Go To button/hint removals and associated button spacing. Run dev/all-targets clippy with warnings denied for mj-core, mj-client, mj-controller, mj-chat, mj-tui and mj-cli. Do not run boundary suites or commit; the parent will do both. No live/default-instance access is required for this removal.
+Through handle_key and the existing pointer regression, verify real editor typing/kill/yank, single-line input, captured destination/card/text, session-specific drafts, Skip, empty Enter opening, child form-holder opening/sending, in-flight state and failure/success outcomes. Verify the existing asynchronous prompt owner settles Quick reply independently of the real composer. Check the intended new rows, margins, footer modifiers, button order and header color in the existing render goldens. No message-position, stored-range, omission metadata, daemon/schema change or new test family is part of this request.
 
 ## Idempotence and Recovery
 
@@ -336,3 +341,5 @@ Revision note (2026-11-17): completed the parent-approved indexed read and captu
 Revision note (2026-11-17): fixed 1d2150be0 buried-question Go To by retaining pending navigation until the target is installed and anchored. Existing count-limited tail reads now run under the same generation/cancellation owner. Fifteen focused tests and three-crate clippy pass; no commit.
 
 Revision note (2026-11-17): user removed Go To Message; navigation-only machinery and tests are gone, all 20 scoped tests and six-crate clippy pass, and the pane retains buried question text. No commit.
+
+Revision note (2026-11-17): user-requested ordinary session opening and Quick reply are implemented; ten scoped tests and three-crate clippy pass. No commit.
