@@ -1,0 +1,172 @@
+{
+  "finalized_at": "2026-11-17T10:48:47.089179+00:00",
+  "status": "complete80/80jobs,240originalreviewerhandbacks,80owncarriersAPI-confirmedsuspended",
+  "jobs": 80,
+  "reviewer_outputs": 240,
+  "distinct_reviewer_ids": 240,
+  "unstarted": [],
+  "original_driver_exit": {
+    "exit_code": 1,
+    "finished_at": "2026-11-17T10:14:05.951189+00:00"
+  },
+  "continuation_exit": {
+    "exit_code": 0,
+    "finished_at": "2026-11-17T10:47:48.915542+00:00"
+  },
+  "recovered_readback_transport_failures": 1,
+  "reviewer_role_or_cell_retries": 0,
+  "recovery": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/recovery-validation.json",
+  "reviewer_accounting": {
+    "sessions": 240,
+    "priced_complete_sessions": 240,
+    "known_recorded_cost_usd_api_equivalent": 10.009294,
+    "total_cost_usd_api_equivalent": 10.009294,
+    "missing_price_or_scope_sids": [],
+    "aggregate_usage_coverage": {
+      "recorded_turns": 240,
+      "full_turn_reports": 240,
+      "last_request_reports": 0,
+      "unspecified_reports": 0,
+      "missing_reports": 0,
+      "unfinished_turns": 0,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 240,
+      "missing_cost_turns": 0
+    },
+    "aggregate_root_token_totals": {
+      "cached_read_tokens": 46003840,
+      "cached_write_tokens": 0,
+      "input_tokens": 6711072,
+      "output_tokens": 199606,
+      "thought_tokens": 43042,
+      "total_tokens": 52914518
+    },
+    "source": "one root usage response per SID; no paginated sums",
+    "billing_note": "API-equivalent estimate; not subscription charge; incomplete/missing total stays null"
+  },
+  "carrier_accounting": {
+    "sessions": 80,
+    "priced_complete_sessions": 55,
+    "known_recorded_cost_usd_api_equivalent": 3.813071504,
+    "total_cost_usd_api_equivalent": null,
+    "missing_price_or_scope_sids": [
+      "fae564fd61de045a1536787014f69776",
+      "389c843bbaf9afe0ab2e60747da2e169",
+      "461cc5de48e9445e0cfa48f60bee7f8f",
+      "658ca15351019a55635fe2f44abec759",
+      "17c1cea7a9ee478b97481e6114c29faf",
+      "0c5ee5762a08d110847e5ff979efd8e5",
+      "4356ee33f94f6f627f264397364064d4",
+      "9a33d3c06d86aee15024fb89539799df",
+      "281af6d46c2efba612dd029e87c864e6",
+      "32b12cbe9e65e670265af439091a5234",
+      "96109e16dfed9c4aae96ff4f2f99b59f",
+      "465a2a29122972002fbc9e1ffa185ba7",
+      "e9315c29c2ea9bc7678f766d0c970a53",
+      "dbdd995a11801b1933325bf791514f5d",
+      "f8687a777d22ec8f85833ae0f94e069a",
+      "cd64df8df2420fb5f3719473b77d8e88",
+      "00969b7bdf88ae6164112f644f422408",
+      "676d82ad44dd9ff8fe215add1c3d8ac2",
+      "cffc9bcd56550178afb81e7e257b9f38",
+      "b08f8b7e9ed79a8d1abef20e921a1f4f",
+      "ca0c58d4c2bd78803a46db7a2f2812f9",
+      "e0862fd7baf5d1ddc6c78c5312e54bf3",
+      "1997fd6f8771319f67bc122ae4aa2149",
+      "47827df6fc259aacccff85d66f664d12",
+      "f6476346b0802dea7c3ab0e4e904e710"
+    ],
+    "aggregate_usage_coverage": {
+      "recorded_turns": 220,
+      "full_turn_reports": 206,
+      "last_request_reports": 0,
+      "unspecified_reports": 0,
+      "missing_reports": 14,
+      "unfinished_turns": 23,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 206,
+      "missing_cost_turns": 0
+    },
+    "aggregate_root_token_totals": {
+      "cached_read_tokens": 19115776,
+      "input_tokens": 20462759,
+      "output_tokens": 301505,
+      "total_tokens": 20764264
+    },
+    "source": "one root usage response per SID; no paginated sums",
+    "billing_note": "API-equivalent estimate; not subscription charge; incomplete/missing total stays null"
+  },
+  "total_stage_cost_usd_api_equivalent": null,
+  "known_recorded_cost_sum_usd_api_equivalent": 13.822365504,
+  "preservation": [
+    {
+      "manifest": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/prior-artifact-hashes.json",
+      "files": 3631,
+      "changed_or_missing": []
+    },
+    {
+      "manifest": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/continuation-preserved-hashes.json",
+      "files": 1839,
+      "changed_or_missing": []
+    }
+  ],
+  "source_pin": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+  "runtime_commit": "be74a5cb9",
+  "runtime_and_inputs_unchanged": true,
+  "launch_HEAD": "60b1ac91d3453676709ad6e90e6616d3135d41a2",
+  "final_HEAD": "60b1ac91d3453676709ad6e90e6616d3135d41a2",
+  "image_counts_by_arm": [
+    {
+      "arm": "A",
+      "image": "2cab4a183b905e4498aa2d0b990e7e40a1dead1d71a37dc9d9fa52b1cefdfd92",
+      "jobs": 11
+    },
+    {
+      "arm": "A",
+      "image": "87438d06dc064225e2c54cb4ed1666c8e6c495a664f4504a38f35204c029896f",
+      "jobs": 18
+    },
+    {
+      "arm": "A",
+      "image": "a621bdc4ef83078fc7c85454b75905131b17140e061b17e9c8f6cd49faeebf90",
+      "jobs": 11
+    },
+    {
+      "arm": "BT",
+      "image": "2cab4a183b905e4498aa2d0b990e7e40a1dead1d71a37dc9d9fa52b1cefdfd92",
+      "jobs": 8
+    },
+    {
+      "arm": "BT",
+      "image": "87438d06dc064225e2c54cb4ed1666c8e6c495a664f4504a38f35204c029896f",
+      "jobs": 20
+    },
+    {
+      "arm": "BT",
+      "image": "a621bdc4ef83078fc7c85454b75905131b17140e061b17e9c8f6cd49faeebf90",
+      "jobs": 12
+    }
+  ],
+  "reviewer_tool_audit": "UNAVAILABLE due normal role destruction #1554/#1559; no capture workaround",
+  "reviewer_latency": null,
+  "live_own_carriers": [],
+  "background_operator_remaining": false,
+  "post_quota": {
+    "read_at": "2026-11-17T10:48:09.783062+00:00",
+    "report_error": null,
+    "refreshed_at_epoch_seconds": 1794912172,
+    "age_seconds": 317.7831287384033,
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 40,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "22:42 Nov 23",
+        "resets_at_epoch_seconds": 1795495361
+      }
+    ],
+    "not_isolated_delta": true
+  }
+}

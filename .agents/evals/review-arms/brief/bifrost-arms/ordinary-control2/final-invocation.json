@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "/usr/bin/python3",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/brief_control2.py",
+    "--arm",
+    "BT",
+    "--verify",
+    "bifrost-control2",
+    "--jobs",
+    "stageB-ordinary-jobs.json",
+    "--handmarks",
+    "/mnt/optane/review-arms-bifrost-20261116/arms/control2-handmarks.json"
+  ],
+  "handmarks_sha256": "333246519477c346a52b3aa808863b5f92b3d95416cb94a36f416d611cc18798"
+}

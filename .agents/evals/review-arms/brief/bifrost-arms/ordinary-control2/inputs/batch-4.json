@@ -1,0 +1,70 @@
+[
+ {
+  "intro": "5e17ecf53c3ffc620452b0bee0ab022c6ecd0ac4",
+  "base": "e1acf863667339e25561a93eac5c0203b01efb83",
+  "findings": [
+   {
+    "id": "f-e88f2620",
+    "text": "- [P2] Stop recovery tails at the end of the macro directive \u2014 src/analyzer/usages/get_definition/cpp.rs:3964-3969\n  When a normal function-like macro with a value is immediately followed by a malformed top-level declaration or expression, an identifier inside that wrapper's `ERROR` node is now classified as part of the macro, even though the directive has already ended. The backward walk treats any error-bearing wrapper as a continuation without checking whether it belongs to the directive, so definition lookup returns `no_definition` for unrelated references in incomplete code. The clean-declaration boundary test does not cover this adjacent case."
+   },
+   {
+    "id": "f-7420bbd5",
+    "text": "- [P2] Stop recovery at the end of a completed macro \u2014 src/analyzer/usages/get_definition/cpp.rs:3965-3966\n  When an ordinary function-like macro is followed immediately by an unrelated malformed declaration or expression, an identifier inside that wrapper's `ERROR` node is now treated as part of the macro tail. A `preproc_function_def` with a value does not establish that recovery continued beyond its end, so definition lookup incorrectly reports `declaration_or_import_site` for references in incomplete code; the clean-declaration boundary test does not cover this adjacent case."
+   },
+   {
+    "id": "f-46c5ea6d",
+    "text": "- [P2] Stop recovery at the end of a valid macro definition \u2014 src/analyzer/usages/get_definition/cpp.rs:3963-3968\n  When an ordinary function-like macro is followed immediately by an unrelated malformed declaration or expression containing a reference inside an `ERROR` node, this walk reaches the macro and classifies that reference as part of its replacement text. The macro need only have a value; there is no check that the erroneous wrapper actually continues its source line. Consequently, go-to-definition returns `declaration_or_import_site` for unrelated code while it is being edited, even when the preceding macro is completely valid."
+   },
+   {
+    "id": "f-ebc24ec9",
+    "text": "- [P2] Stop recovery at the actual end of the macro \u2014 src/analyzer/usages/get_definition/cpp.rs:3964-3969\n  When an ordinary function-like macro is immediately followed by a malformed declaration containing a reference inside an `ERROR` node, this scan treats that declaration as a macro recovery tail solely because it has an error and follows a macro. For example, in `int keep;\\n#define F(x) x\\nint later = keep keep;`, the erroneous declaration is independent of the completed macro, but the reference inside its recovery node is reported as a non-reference. The same happens after any sequence of erroneous top-level wrappers, so incomplete code being edited can lose definition navigation even when the preceding macro was parsed correctly."
+   },
+   {
+    "id": "f-dcb5a637",
+    "text": "- [P2] Stop recovery at the end of a normal macro definition \u2014 src/analyzer/usages/get_definition/cpp.rs:3967-3970\n  When a normal function-like macro is immediately followed by an unrelated malformed declaration or expression, an identifier inside that wrapper's `ERROR` node is classified as part of the macro. The loop accepts any preceding `preproc_function_def` with a value, without establishing that its recovery actually extends into the following wrapper. For example, while editing an incomplete declaration immediately after `#define F(x) x`, references in its error node can return `declaration_or_import_site` instead of resolving. A clean intervening declaration avoids the problem, so the new boundary test does not cover this case."
+   },
+   {
+    "id": "f-552a987c",
+    "text": "- [P2] Do not attribute unrelated malformed declarations to a preceding macro \u2014 src/analyzer/usages/get_definition/cpp.rs:3965-3966 \u2014 When a normal function-like macro is immediately followed by a malformed declaration or expression whose identifier is inside an `ERROR` node, the new wrapper traversal reaches the macro and classifies that identifier as part of its body. The macro only needs to have a value; neither a malformed macro nor a continued preprocessor line is required. As a result, go-to-definition incorrectly returns `declaration_or_import_site` for unrelated code being edited after an otherwise valid macro. The clean-declaration boundary test does not cover this case because there is no clean sibling between the macro and the malformed code."
+   }
+  ]
+ },
+ {
+  "intro": "9dad3f2c71bdc0bfea12f55d0ceb5fb7bd2dad97",
+  "base": "87493efcdddc41b2e7e9f9661b0f5a62a31d475b",
+  "findings": [
+   {
+    "id": "f-c52d582d",
+    "text": "- [P2] Expose the accumulated request metrics \u2014 crates/bifrost-analysis/src/analyzer/go/native_points.rs:232. For actual Go point requests, this private field is only initialized and passed for accumulation; no code reads, reports, or returns it before the request is dropped. Consequently the new request-level measurements cannot be observed, while the fixture test measures a separate local metrics value and does not detect this."
+   },
+   {
+    "id": "f-df92633d",
+    "text": "- [P2] Expose the accumulated request metrics to their consumers \u2014 crates/bifrost-analysis/src/analyzer/go/native_points.rs:232. For actual Go point requests, the accumulated metrics are stored in this private field but never read or returned anywhere, so they are discarded when the request ends. The new measurement bypasses `GoNativePointRequest` and supplies its own sink, leaving repeated type and definition lookups through the production request unobservable despite the intended request-level measurement."
+   },
+   {
+    "id": "f-6a7201c0",
+    "text": "- [P1] Release the traced reader before freeing its callback context \u2014 crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs:3741\n  The Go measurement calls `finish_production_selected_sql_trace` while `operation` still owns the traced reader through its mount inventory. The finish helper therefore checks out a different pooled connection, unregisters its callback, and frees the context while the original connection still points to it. When that reader is reused by the next measurement, SQLite invokes the callback with a dangling pointer, causing undefined behavior or a crash."
+   },
+   {
+    "id": "f-2729ae14",
+    "text": "- [P1] Unregister the callback from the reader that owns it crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs:674-675 \u2014 In the new Go measurement, `operation` still holds the traced reader when this function checks out another connection. The callback is therefore removed from the wrong connection and its boxed context is freed while the original connection still points to it. When that reader is reused by the next measurement, SQLite can call through the dangling pointer, causing undefined behavior or a test crash."
+   },
+   {
+    "id": "f-37eeae9e",
+    "text": "- [P2] Expose the accumulated request metrics crates/bifrost-analysis/src/analyzer/go/native_points.rs:232 \u2014 For actual Go point requests, this field is only initialized and mutated; nothing reads or returns it before the request is dropped. Consequently the newly collected request-level work cannot be measured, and the new test does not detect this because it calls the lower-level operation directly with its own metrics value."
+   },
+   {
+    "id": "f-1cb4ce83",
+    "text": "- [P1] Unregister the trace from the reader that owns it \u2014 crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs:593-597\n  When a point measurement finishes, the selected operation still holds the traced reader, so `finish_production_selected_sql_trace` checks out a different reader and unregisters its callback instead. These lines then free the context while the original reader still has its callback installed; SQL executed during its cleanup or a later checkout dereferences freed memory. This affects both the new Go measurement and the existing Rust measurement and can cause undefined behavior or crashes."
+   },
+   {
+    "id": "f-54a44244",
+    "text": "- [P1] Unregister the callback from the reader that owns it \u2014 crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs:672-675. When the pool contains multiple idle readers, resolution can select a reader by its retained selection while this general checkout selects the most recently returned reader. If those differ, this unregisters the wrong connection and frees the trace context while the original connection still holds its pointer; a later SQL operation on that pooled connection can dereference freed memory. The same mismatch can also leave the actual resolution work untraced."
+   },
+   {
+    "id": "f-cab7ba68",
+    "text": "- [P1] Unregister the trace from the reader that owns it \u2014 crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs:3741. When the selected operation has checked out the traced reader, it still owns that reader at this call, so `finish_production_selected_sql_trace` checks out a different connection and frees the callback context without unregistering the original callback. The original reader then returns to the pool with a dangling callback pointer, and a later measurement can invoke it, causing use-after-free or memory corruption."
+   }
+  ]
+ }
+]

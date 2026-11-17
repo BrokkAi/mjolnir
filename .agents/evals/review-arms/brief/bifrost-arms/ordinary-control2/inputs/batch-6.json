@@ -1,0 +1,66 @@
+[
+ {
+  "intro": "4a12c7dafabb99c81e3a6b6c4d97979fc6547f82",
+  "base": "5b031264cf231c614678667d7d67fde05810cca4",
+  "findings": [
+   {
+    "id": "f-360f7057",
+    "text": "- [P2] Include procedure-boundary deletions in the changed scope \u2014 crates/bifrost-policy/src/taint_policy.rs:1525-1528. When an edit deletes a decorator immediately before a Python function, the deletion hunk is zero-width at the start of the remaining function. The strict interior check excludes that function, so its sinks are not evaluated and the run can report a complete empty result even though the function's behavior changed. The head position alone cannot distinguish this from a deletion in the preceding module gap; the base-side range is needed to identify the affected procedure."
+   },
+   {
+    "id": "f-eca110d2",
+    "text": "- [P2] Exclude nested edits from the module initializer's changed range \u2014 crates/bifrost-policy/src/taint_policy.rs:3024-3026. In JavaScript and TypeScript files with executable top-level statements, the synthetic module initializer spans the entire program, including function declarations. Consequently, editing a function or even a module comment marks that initializer as changed and admits every unrelated top-level sink as a root; those sinks can again introduce findings or semantic gaps into a narrowly scoped run. The overlap check needs to account for the initializer's actual owned statements rather than its enclosing program span."
+   },
+   {
+    "id": "f-78d76d68",
+    "text": "- [P2] Exclude nested edits from synthetic module-body scope \u2014 crates/bifrost-policy/src/taint_policy.rs:1529-1530. JavaScript and TypeScript files with top-level statements have a synthetic module-body procedure whose span is the entire program, including function declarations. Consequently, editing a function or even a module comment overlaps that procedure and admits unrelated top-level sinks, recreating the unrelated-sink and inconclusive-result problem this change is intended to prevent."
+   },
+   {
+    "id": "f-d709f6bd",
+    "text": "- [P1] Preserve procedure ownership for trailing deletions \u2014 crates/bifrost-policy/src/taint_policy.rs:1525-1528. When the last statement of a Python function is deleted, the zero-width head hunk falls after the remaining function node's end (at the next line or EOF), so this strict interior test excludes the edited function. Any remaining sinks in it are omitted and the run can report a complete empty result. Resolving deletion ownership requires the base-side procedure range as well as the head position."
+   },
+   {
+    "id": "f-ccf567c4",
+    "text": "- [P2] Include deletions at the start of a surviving procedure \u2014 crates/bifrost-policy/src/taint_policy.rs:1527-1527. When a pure deletion ends exactly where the head procedure begins, the strict interior check excludes the procedure even though its declaration changed. For example, removing a standalone `pub` line immediately before a Rust `fn` places the deletion at the function's start offset, so its sinks are skipped and the run can report a complete empty result."
+   },
+   {
+    "id": "f-87677896",
+    "text": "- [P1] Include deletions at the end of a procedure \u2014 crates/bifrost-policy/src/taint_policy.rs:1525-1528. In a language with indentation-delimited bodies, deleting the last statement of a function places the zero-width head hunk after the end of the remaining function node. The strict interior check therefore excludes the edited function, including any sink still in its body, and the scoped run can incorrectly report a complete result with no findings. The same problem occurs when a deletion lands exactly on a procedure boundary."
+   }
+  ]
+ },
+ {
+  "intro": "2eaec0a7ad9102c79d5bb2b3850f7325cdfaf341",
+  "base": "42a3418a2094b6cda092ba590580b3d1ec2ab1ef",
+  "findings": [
+   {
+    "id": "f-9d9bd027",
+    "text": "- [P2] Keep structural facts aligned with CRLF source \u2014 crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:3383-3385. When Git stores LF text but the working file uses CRLF, this returns the indexed LF text. Previously, `structural_file_state` selected the current CRLF text. Structural fact extraction therefore produces byte offsets that do not match the working file, so consumers can identify the wrong source span."
+   },
+   {
+    "id": "f-df2d1639",
+    "text": "- [P2] Use the same source representation for location ranges and selections \u2014 crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:8292-8294. When the indexed source uses LF and the working file uses CRLF, this returns ranges from the CRLF source, but `resolve_scan_usages_target` computes the selection from `indexed_source`, which now returns the LF source. A location query with a column and an explicit module selector compares those byte offsets directly, so it can miss the selected module or match the wrong span."
+   },
+   {
+    "id": "f-51a6e1b2",
+    "text": "- [P2] Keep location source and ranges in the same byte coordinates \u2014 crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:3383-3385\n\nWhen the indexed source has LF endings and the working file has CRLF endings, this returns the indexed LF source, but `location_ranges` uses the CRLF projection. A location scan computes its byte position from the LF source and compares it with CRLF module ranges, so a column near the start of a module can fail to resolve. Declaration name lookup also applies the CRLF ranges to an LF syntax tree, which can select the wrong node."
+   },
+   {
+    "id": "f-a7e4f063",
+    "text": "- [P2] Use one source representation for location selection \u2014 crates/bifrost-analysis/src/searchtools/scan_usages.rs:1368-1368. When indexed source uses LF and the working file uses CRLF, the selection byte offset comes from `indexed_source`, but the module range comes from the CRLF projection. On later lines, these offsets differ, so a valid column can fall outside the module range and fail to select it."
+   },
+   {
+    "id": "f-5c1a5886",
+    "text": "- [P2] Preserve current line endings for structural facts \u2014 crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:3383-3385. When indexed source uses LF and the working file uses CRLF, this returns the indexed text where the previous code returned the compatible working text. Structural fact extraction uses this source, so its byte ranges after the first line no longer point to the corresponding positions in the working file."
+   },
+   {
+    "id": "f-479d1231",
+    "text": "- [P2] Match module ranges against the same source as the target \u2014 crates/bifrost-analysis/src/searchtools/scan_usages.rs:1367-1368. When the indexed text uses LF and the working file uses CRLF, `indexed_source` supplies LF text for the target byte position, but `location_ranges` supplies CRLF offsets. A point selection for a module after earlier lines can therefore miss the module or match the wrong span."
+   },
+   {
+    "id": "f-50aaa24d",
+    "text": "- [P1] Use the same source for location offsets and ranges \u2014 crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:3382-3385. When the indexed Git blob uses LF and the working file uses CRLF, `indexed_source` now returns the LF text, but `location_ranges` uses the CRLF projection. `scan_usages` computes its byte position and parses declaration names from `indexed_source`, then compares them with those CRLF ranges. Positions after the first line can therefore select the wrong declaration or fail to select one. The same mismatch affects declaration name recovery."
+   }
+  ]
+ }
+]

@@ -1,0 +1,12 @@
+{
+  "observed_at": "2026-11-17T10:14:31.140481+00:00",
+  "driver_exit": {
+    "exit_code": 1,
+    "finished_at": "2026-11-17T10:14:05.951189+00:00"
+  },
+  "done": 60,
+  "launched": 61,
+  "unlaunched": 19,
+  "archive": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/recovery-original",
+  "remaining_unsuspended_accepted_carrier": "0f23bb69a200485d9306560e463ae6a7"
+}

@@ -1,0 +1,77 @@
+{
+  "commits": [
+    {
+      "intro": "d3b55980518b2602e43e61e32226c940b9b69593",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-1bb25f8d",
+            "f-dd58098c",
+            "f-f8a8d6ce",
+            "f-9f5e43ac"
+          ],
+          "summary": "Persisted Rust import routes can suppress unresolved aliases in an edited mounted blob through coinciding blob-local import identities.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "confidence": "high",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation/rust_selected_module_placements.sql:81-107 deliberately aligns mounted module scopes with persisted summary placements: blob_id is the mounted blob, but placement_blob and member_ordinal describe the saved blob. Rust import IDs are assigned from the per-source import vector in crates/bifrost-rust/src/declarations.rs:751-754, so changing the first import can reuse its ID. rust_reverse_gap_candidates.sql:43-73 (same resolution_operation directory) joins the mounted import to summary routes only by summary/member/module/import_id/route_ordinal, omitting the old bound.blob_id=imported.blob_id check. A saved resolved use of a decoy and an edited unresolved use with the same import ID/ordinal therefore satisfy NOT EXISTS incorrectly and remove the edited alias from the closure; candidate sites and their gaps are then sought through that closure at :225-259 and :311-323. The same collision is possible in the non-null-ID unresolved-source arm at :104-127. The two legacy arms require source_import_id IS NULL, so their equality checks cannot match; the findings overgeneralize those arms, but the primary defect is real."
+        }
+      ]
+    },
+    {
+      "intro": "62d65b4fabf50487cdb2ab5a403ed61b4fec3506",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-455b7e4c",
+            "f-40248ab6",
+            "f-d310de63"
+          ],
+          "summary": "Earlier Scala imports in enclosing lexical scopes are not composed into nested import routes.",
+          "verdict": "rejected",
+          "severity": null,
+          "confidence": "high",
+          "evidence": "The limitation exists at intro: crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:559-565 reads only (source_scope_head, name), and :883-884 stores only that exact scope. However, the reported nested XMLUtils import already fails in base f0df9221613f3c6c07d86a9adaa6e40f61e7ec01: the same file at base :520-561 only searches authored alias-owner routes and :575-759 searches package prefixes of the written route; there is no earlier-import composition at all. With no root package named XMLUtils, neither base path can resolve XMLUtils.Escapes through the enclosing import. This diff adds same-scope composition and leaves the existing nested-scope limitation; the described failure is not introduced by this diff."
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-f3cc4cdc",
+            "f-65156025",
+            "f-37220f1b"
+          ],
+          "summary": "Scala relative import resolution can skip unresolved owner segments and bind an unrelated package member.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "confidence": "high",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:2683-2696 prepends the caller package before trying the written route. For package app and import io.k.Widget, :631-648 tries app.io.k, app.io, then app. At :669-699 it asks each discovered package for Widget without consuming the remaining owner segments. If app.Widget exists, :814-816 installs that bridge, :822 prevents owner continuation, and :865-867 stops before trying the correct io.k route. The base did not prepend app, so this concrete wrong-target case is newly exposed. Later 97f6f022cd345f5a4a497069c12774445c1add1c partially restricts shorter prefixes; 85014d56b71098528d84608cf9716407d4ba2af2 removes the remaining Scala enclosing-prefix exception, addressing the app-level case as well."
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-8c99907e"
+          ],
+          "summary": "A successful package-relative Scala import retains an erroneous owner-open completeness gap.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "confidence": "high",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:537 initializes package_prefix_found=false. For package app, import sub.Foo, and a declaration in app.sub, :2683-2694 creates lookup route app.sub and :583 marks it relative. Finding that exact package at :652-653 leaves package_prefix_found false. A direct package bridge is appended at :814-816, skipping member continuation at :822 (the only relative-success update is :861-862), and :865-867 exits before the written route. Consequently :906-925 emits jvm-import-owner-open despite the successful binding. The gap survives :1003-1006 because suppress_if_same_package_candidate is false (:1075-1078). In demanded non-caller file contexts, jvm_demand.rs:352-387 registers it and combines it into matching lookup completion, producing false incompleteness. Relative package bridging is new in this diff."
+        },
+        {
+          "group": "g4",
+          "findings": [
+            "f-9dcabcc3",
+            "f-09b4c460"
+          ],
+          "summary": "The new earlier-import composition consumes Scala imports in candidate order instead of source order.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "confidence": "high",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/resolution/model.rs:130-138 defines token.ordinal() as the mount ordinal. jvm_context.rs:403-418 reads only the caller mount and sorts by that ordinal, so all imports tie. Their incoming order is candidate identity order, explicitly imposed by resolution_lexical.rs:3007-3010 and resolution_stage/lexical_readers.rs:512, and preserved during hydration by resolution/selected_context.rs:500-525. No source-position ordering is applied. The new earlier_scala_imports map is read at jvm_context.rs:559-565 and updated during the same loop at :870-884; thus candidate order can expose a textually later import to an earlier dependent import, or miss the textually preceding import. This order dependence is introduced with that map. Later fix a226968326f2d482f4f9534f8e266f121f1a782e carries the producer activation position through persisted paths and sorts by (mount, activation)."
+        }
+      ]
+    }
+  ]
+}

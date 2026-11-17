@@ -1,0 +1,58 @@
+[
+ {
+  "intro": "0041fe831aa2758c07076386c37401666075717b",
+  "base": "bf099d04d22f79a12585cd5220d6bf9d5ccbe265",
+  "findings": [
+   {
+    "id": "f-dd1d1aa9",
+    "text": "- [P2] Account for retained dispatch sessions in the query memory limit \u2014 crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:615-625. When concurrency summary projection visits calls in many artifacts, this map retains every artifact and its parsed source for the provider's lifetime, but those bytes are never reported to the request's artifact collector or the RQL retained-memory accounting. `concurrent_access_conflicts` passes a lease-window collector to this provider, so a query can exceed its physical retained-byte limit without triggering the window's exhaustion handling; previously each dispatch session was dropped after the call."
+   },
+   {
+    "id": "f-8e5f7492",
+    "text": "- [P2] Revalidate the artifact when reusing its dispatch session \u2014 crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:1377-1384. If a file or overlay changes after the first dispatch while the provider is still in use, a later dispatch for another call in the same artifact reuses the old source without calling `exact_source_for_procedure` again. Previously each direct dispatch checked the current artifact key and rejected a stale handle; the retained session instead combines old call ranges and syntax with current analyzer lookups, which can produce incorrect dispatch results. The same issue affects uncached call transfers through this session."
+   }
+  ]
+ },
+ {
+  "intro": "b607037341ce1af66354cf4d45b02a3c3644d5d3",
+  "base": "e1161ee54c64f255389114aad68842f310c6887c",
+  "findings": [
+   {
+    "id": "f-f2a42546",
+    "text": "- [P2] Resolve overloaded subscripts to their result type crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8014-8018\n  When the subscripted object has an overloaded `operator[]`, its element type need not be the object's own type. For example, if `Container::operator[]` returns `Item&`, `container[0].size()` is now looked up on `Container` and can resolve to `Container::size` instead of `Item::size`. The unconditional unwrapping also affects ordinary containers such as vectors; subscript typing needs to account for the operator's return type before looking up the member."
+   },
+   {
+    "id": "f-1c7553a3",
+    "text": "- [P2] Resolve overloaded subscripts to their element type \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8014-8018\n  When the receiver is a class with an overloaded `operator[]`, such as `container[0].compute()`, this recurses into `container` and uses the container's type instead of the operator's return type. Consequently, navigation either reports the element's member as unresolved or incorrectly resolves a same-named member on the container. This also affects common container types whose subscript returns a different class."
+   },
+   {
+    "id": "f-c5ffe06a",
+    "text": "- [P2] Resolve overloaded subscripts before using the container type \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8014-8018. When the receiver is a class with an overloaded `operator[]`, such as `items[i].compute()`, unwrapping the subscript types the receiver as the container rather than the operator's return type. This can resolve `compute` to an unrelated container member or fail to find the element's member, even though the expression is valid C++."
+   },
+   {
+    "id": "f-020f022e",
+    "text": "- [P2] Resolve overloaded subscripts to their element type \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8014-8019. For a class with an overloaded `operator[]`, unwrapping the subscript types the receiver as the container itself rather than the operator's return type. For example, if `Container::operator[]` returns `Item&`, `items[i].compute()` will resolve to `Container::compute` when that member exists, or remain unresolved when only `Item::compute` exists. The array and pointer shortcut needs to distinguish class subscripts and resolve their operator return type."
+   },
+   {
+    "id": "f-82f4c62f",
+    "text": "- [P2] Resolve overloaded subscripts before using the container type \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8014-8018\n  When the argument is a class with an overloaded `operator[]`, the subscript expression has the operator's return type, not the class's type. For example, if `Container::operator[]` returns `Item&` and both classes define `compute`, `container[i].compute()` now resolves to `Container::compute` instead of `Item::compute`. The new arm applies the array/pointer assumption to every subscript, so it can return an incorrect definition for ordinary C++ container access."
+   },
+   {
+    "id": "f-824b5398",
+    "text": "- [P2] Include pointer indirection when checking declaration agreement \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8048-8051. When visible declarations of a qualified variable disagree between `T` and `T*`, both bindings have the same `unit`, so this comparison treats them as unanimous despite their different `indirection` values. The newly supported qualified receiver can consequently resolve a member using an arbitrarily chosen conflicting declaration instead of failing closed."
+   },
+   {
+    "id": "f-240385f1",
+    "text": "- [P2] Include pointer depth in field type agreement \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8049-8053. When candidate fields have the same underlying class but different pointer depths, such as `T value` and `T* value` inherited from different bases, this comparison treats their types as equal and returns whichever declaration appears first. The resulting `CppType` retains that arbitrary indirection, so it can select an incorrect overload when the field expression is used as a call argument, and it also defeats the intended fail-closed handling of conflicting declarations."
+   },
+   {
+    "id": "f-c2c1b518",
+    "text": "- [P2] Include indirection in field type agreement crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8047-8049\n  When two candidate fields have types such as `Helper` and `Helper*`, both resolve to the same `CodeUnit`, so this comparison treats them as agreeing and returns whichever `CppType` was encountered first. Consequently, an ambiguous inherited field or conflicting qualified declarations can still select an arbitrary receiver or call overload, even though pointer indirection is part of the type used by overload matching."
+   },
+   {
+    "id": "f-bdc191d7",
+    "text": "- [P2] Resolve overloaded subscripts to their element type \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8014-8018. When the receiver is a class with an overloaded `operator[]`, such as `items[i].compute()` where `items` is a container and `operator[]` returns `Element`, this recurses into `items` and looks for `compute` on the container itself. It therefore misses `Element::compute`, or incorrectly resolves a same-named container member. The new arm needs to distinguish built-in array or pointer subscripting from overloaded subscripting and infer the operator's return type."
+   }
+  ]
+ }
+]

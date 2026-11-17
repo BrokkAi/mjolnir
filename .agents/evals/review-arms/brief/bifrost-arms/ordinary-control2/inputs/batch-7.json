@@ -1,0 +1,54 @@
+[
+ {
+  "intro": "c2e0ac626414a90c7907277d9e602abcc45eedd9",
+  "base": "d97b6b0b49de4f91d68452dbcdefead42fa66f88",
+  "findings": [
+   {
+    "id": "f-52a5cf4a",
+    "text": "- [P2] Remove the unmatched brace from the C# fixture \u2014 crates/bifrost-analysis/src/analyzer/usages/get_type/csharp.rs:778: The namespace uses file-scoped syntax, so this extra closing brace has no matching opening brace and makes the fixture invalid C#. The `this` and `base` regression now exercises tree-sitter error recovery instead of an ordinary valid class hierarchy, and changes to that recovery can break the test independently of receiver resolution."
+   },
+   {
+    "id": "f-0ead5452",
+    "text": "- [P2] Remove the unmatched brace from the C# fixture \u2014 crates/bifrost-analysis/src/analyzer/usages/get_type/csharp.rs:778 \u2014 The file-scoped namespace has no opening brace, so this extra closing brace makes the fixture invalid C#. The restored `this`/`base` regression consequently exercises parser error recovery instead of the valid C# program it is intended to cover, and may fail depending on how the recovered tree associates `Child` with the namespace."
+   },
+   {
+    "id": "f-818bcfbe",
+    "text": "- [P2] Remove the stray brace from the C# fixture \u2014 crates/bifrost-analysis/src/analyzer/usages/get_type/csharp.rs:778: The fixture uses a file-scoped namespace, so this extra closing brace makes the source invalid C#. The `this` and `base` regression now exercises tree-sitter error recovery instead of the intended valid inheritance example, and may fail or pass depending on how the malformed tree is recovered."
+   },
+   {
+    "id": "f-84b00748",
+    "text": "- [P2] Remove the unmatched brace from the C# regression fixture \u2014 crates/bifrost-analysis/src/analyzer/usages/get_type/csharp.rs:778\n  The file-scoped `namespace Demo;` does not open a brace, so this extra `}` makes the fixture invalid C#. The restored `this` and `base` regression therefore exercises parser error recovery instead of the intended valid inheritance case, and changes in recovery behavior can make the test fail or mask a regression in ordinary C# code."
+   },
+   {
+    "id": "f-47ed1739",
+    "text": "- [P2] Remove the unmatched brace from the C# fixture \u2014 crates/bifrost-analysis/src/analyzer/usages/get_type/csharp.rs:778. This extra brace makes the source invalid C#: `namespace Demo;` is file-scoped and has no matching opening brace. The `this` and `base` regression therefore runs against a tree with a syntax error and exercises parser recovery instead of verifying receiver resolution in the intended valid program; recovery changes can also make the test fail independently of receiver resolution."
+   },
+   {
+    "id": "f-f6b62b6d",
+    "text": "- [P2] Remove the unmatched brace from the C# fixture \u2014 crates/bifrost-analysis/src/analyzer/usages/get_type/csharp.rs:778\n  The file-scoped `namespace Demo;` has no opening brace, so this extra `}` makes the fixture invalid C#. The restored `this`/`base` regression now exercises tree-sitter error recovery rather than the intended valid inheritance case, and its outcome can change with parser recovery behavior."
+   }
+  ]
+ },
+ {
+  "intro": "a3b59a918343940f3b010783d30146b2766c04f3",
+  "base": "c298eecc5daa799c4ae41a990803514f21a5d3e3",
+  "findings": [
+   {
+    "id": "f-99cb1913",
+    "text": "- [P1] Preserve complete-empty implicit types in hierarchy traversal \u2014 crates/bifrost-analysis/src/analyzer/resolution/selected_context.rs:1569-1570. When an unqualified Java supertype such as `Exception` has a complete-empty scope answer and is registered as an implicit fallback, `cached_hierarchy_reference_parts` now ignores its identity and returns the empty answer as complete. Consequently the superclass and its inherited members disappear from hierarchy traversal, even when a durable external owner and its inventory are available. The fallback needs to remain available to hierarchy lookup after verifying that the selected answer is complete and empty."
+   },
+   {
+    "id": "f-e52d9513",
+    "text": "- [P1] Preserve implicit external supertypes after a complete empty lookup \u2014 crates/bifrost-analysis/src/analyzer/resolution/selected_context.rs:1567-1568\n  When a Java class extends an implicitly imported external type such as `Thread` and structured lookup returns complete with no targets, this now hides its fallback from `cached_hierarchy_reference_parts`, which uses this accessor and consequently returns an empty, complete supertype set. Even when the JDK owner is indexed, inherited members and subtype relationships are lost; the hierarchy lookup needs to consider the fallback after checking the selected answer, just as the type projection does."
+   },
+   {
+    "id": "f-b5f71091",
+    "text": "- [P1] Preserve fallback identities for unresolved Java supertype edges \u2014 crates/bifrost-analysis/src/analyzer/resolution/selected_context.rs:1567-1569. When a Java superclass such as `Exception` has a complete-empty scope answer and is registered as an implicit fallback, hierarchy construction still calls this getter in `cached_hierarchy_reference_parts`. Filtering out the fallback makes that path return the empty scope targets instead of the external owner, so the superclass edge disappears and inherited member lookup and subtype checks miss the external hierarchy. The selected scope answer must still take precedence when it contains a source declaration, but complete-empty hierarchy answers need the fallback identity."
+   },
+   {
+    "id": "f-9c0a449a",
+    "text": "- [P1] Preserve fallback identities for complete-empty supertype answers \u2014 crates/bifrost-analysis/src/analyzer/resolution/selected_context.rs:1568-1570. When a Java class extends an implicitly imported type whose scope answer is complete and empty, such as `extends Thread` with a durable `java.lang.Thread` owner, this filter prevents `cached_hierarchy_reference_parts` from seeing the fallback identity. That path then uses the empty scope answer and builds a hierarchy edge with no target, so inherited members and subtype relationships from the external owner are lost even though the owner is indexed. The hierarchy lookup needs to consult the fallback after checking the selected answer, just as the type projection does."
+   }
+  ]
+ }
+]

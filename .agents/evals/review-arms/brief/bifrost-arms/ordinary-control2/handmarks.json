@@ -1,0 +1,34 @@
+{
+  "f-8e5f7492": {
+    "relies_on_brief": true,
+    "why": "Builds on the brief's explicit artifact-keyed retained session shared across distinct calls, plus retained exact-source lifetime, then alleges missing per-call revalidation. Those are the substantive reuse/source relations in its failure claim; this mark does not accept the rejected stale-handle claim or prove actual reviewer dependence."
+  },
+  "f-5c1a5886": {
+    "relies_on_brief": true,
+    "why": "Builds on the brief's explicit flow from changed file_source into structural_facts_with_outcome/snapshot extraction and its indexed/current CRLF selection relation, then alleges incompatible working-file offsets. This is the stated producer-consumer/source-selection relation, rather than line overlap alone. The verification rejects the consequence, not the relevance of that relation."
+  },
+  "f-9d9bd027": {
+    "relies_on_brief": true,
+    "why": "Same semantic relation as f-5c1a5886: changed file_source feeds structural fact extraction, combined with indexed/current CRLF selection. Its false offset consequence builds on those stated data-flow relations. Counted separately because the registered unit is a finding ID, not a duplicate group."
+  },
+  "f-2ba7ce5c": {
+    "relies_on_brief": false,
+    "why": "The claim concerns the uniqueness key of definition_property_gaps omitting kind/source-site identity. The nearby brief item describes call_obligations JSONB columns, and its general LoweredCoverageGap item concerns a different gaps table/index family. It does not state this property-gap uniqueness/collision relation; shared generated-file anchors and general schema/project callbacks alone are insufficient."
+  },
+  "f-a84760e9": {
+    "relies_on_brief": true,
+    "why": "Builds on the brief's explicit alias-RHS parsing into wrapper head/template arguments, recursive alias-target type resolution, and parameter-order substitution. The finding joins those stated relations to argue that an outer alias loses inner template arguments; its rejection as preexisting does not remove semantic reliance under the original rubric."
+  },
+  "f-7cc662ec": {
+    "relies_on_brief": true,
+    "why": "Builds on the brief's explicit shared builder invoking forward resolution for every analyzed file and its Go callback/forward-cache/provider relation, then alleges quadratic cold lookup relative to the old route. The new-versus-old performance claim is rejected, but it substantively uses the stated eager-builder-to-forward-resolver relation rather than merely sharing a source line."
+  },
+  "f-240385f1": {
+    "relies_on_brief": true,
+    "why": "Builds on the brief's relation from unanimous field typing to call-argument typing and its distinction between declared indirection and logical-symbol agreement. It alleges that this combination ignores pointer depth and chooses an arbitrary overload. Rejection because inherited-field behavior predates the change is separate from reliance on these stated relations."
+  },
+  "f-c2c1b518": {
+    "relies_on_brief": true,
+    "why": "Same semantic relation as f-240385f1: field declarations carry indirection, agreement compares logical symbols, and field expression types feed call arguments. The pointer-agreement/overload allegation builds on those stated relations. This is a separate finding ID even though the verifier grouped the failure together."
+  }
+}
