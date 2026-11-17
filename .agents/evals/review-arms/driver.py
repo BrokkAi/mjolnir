@@ -102,6 +102,27 @@ def session(sid):
     return value["sessions"][0] if "sessions" in value else value
 
 
+def quota_hold():
+    """Why a new job must not start, or None. REVIEW_ARMS_QUOTA_FLOOR="codex4=25,..." names
+    shared profiles whose least window must keep that many percent (a coordinator's limit,
+    2026-11-16: codex4 is shared with other sessions). Checked once per launch, from the
+    daemon's stored report; a missing or unreadable report holds the job, since unknown is
+    not "enough"."""
+    floor = os.environ.get("REVIEW_ARMS_QUOTA_FLOOR")
+    if not floor:
+        return None
+    for spec in floor.split(","):
+        profile, _, percent = spec.partition("=")
+        rows = mj("quota", "--profile", profile).get("profiles") or []
+        report = (rows[0].get("report") or {}) if rows else {}
+        left = [w.get("remaining_percent") for w in report.get("windows") or []]
+        if not left or None in left or report.get("error"):
+            return f"{profile}: no usable quota report ({json.dumps(report)[:300]})"
+        if min(left) < float(percent):
+            return f"{profile}: {min(left)}% left, below the floor of {percent}%"
+    return None
+
+
 def wait_idle(sid, limit=1200):
     end = time.monotonic() + limit
     while time.monotonic() < end:
@@ -301,6 +322,10 @@ def run_job(job, gate):
         return "needs-recovery"
     identity = {"bug": bug["id"], "arm": arm, "reviewers": ARMS[arm], "intro": bug["intro_commit"],
                 "base": bug["base_commit"], "time_ns": time.time_ns()}
+    with gate:
+        hold = quota_hold()
+    if hold:
+        return "held: " + hold  # nothing recorded; the job starts on a later run
     save(d / "launch-intent.json", identity)
     # Neutral title: reviewers must not see the bug id.
     title = "review-arms " + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:8]

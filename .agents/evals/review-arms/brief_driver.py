@@ -34,6 +34,8 @@ from driver import ROOT, SCRIPTS, MJX, mj, save, session
 KINDS = {"blind": ("gpt-6.1-sol", "high"), "blind-terra": ("gpt-6.1-terra", "high")}
 KIND = "blind"
 WRITER_MODEL, WRITER_EFFORT = KINDS[KIND]
+# --profile pins the writer to one mj profile (None: load balancing picks one).
+WRITER_PROFILE = None
 FIX_ROUNDS = 2
 MAX_ITEMS = 25
 # "About 1,500 tokens" (brief/PLAN.md); at about 4 characters a token, with slack.
@@ -132,12 +134,19 @@ def run(bug_id, gate):
     elif (d / "launch-intent.json").exists():
         return "needs-recovery"  # a session may exist without a record; find it before rerunning
     else:
+        with gate:
+            hold = driver.quota_hold()
+        if hold:
+            return "held: " + hold  # nothing recorded; the writer starts on a later run
         save(d / "launch-intent.json", {"bug": bug_id, "model": WRITER_MODEL, "effort": WRITER_EFFORT,
-                                        "time_ns": time.time_ns()})
+                                        "profile": WRITER_PROFILE, "time_ns": time.time_ns()})
         with gate:
             launch = mj("new", "--workspace-id", driver.WORKSPACE, "--target", "podman", "--bundle", "mjolnir",
                         "--at", bug["intro_commit"], "--base", bug["base_commit"], "--no-later-history",
-                        "--model", WRITER_MODEL, "--effort", WRITER_EFFORT, "--review", "off",
+                        # mj new takes a profile or a model, not both; a pinned writer gets its
+                        # model below, before its first prompt, as verify_driver.py does.
+                        *(["--profile", WRITER_PROFILE] if WRITER_PROFILE else ["--model", WRITER_MODEL]),
+                        "--effort", WRITER_EFFORT, "--review", "off",
                         "--no-project-memory", "--no-github-events", "--no-github-credentials",
                         "--subagents", "none", "--title", "brief " + tag[:8], timeout=900)
             save(d / "launch.json", launch)
@@ -149,8 +158,14 @@ def run(bug_id, gate):
         for key in ("web_fetch", "web_search"):
             if any(c["key"] == key for c in s.get("config_options", [])):
                 mj("set-config", "--session", sid, "--key", key, "--value", "disabled")
+        for key, value in (("model", WRITER_MODEL), ("effort", WRITER_EFFORT)):
+            current = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
+            if current.get(key) != value:
+                mj("set-config", "--session", sid, "--key", key, "--value", value)
         settings = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
-        assert settings.get("model") == WRITER_MODEL, settings
+        assert settings.get("model") == WRITER_MODEL and settings.get("effort") == WRITER_EFFORT, settings
+        if WRITER_PROFILE:
+            assert s.get("profile_id") == WRITER_PROFILE, s.get("profile_id")
         save(d / "settings.json", settings)
         place = driver.container(sid)
         save(d / "placement.json", place)
@@ -210,9 +225,10 @@ def main():
     p.add_argument("--concurrency", type=int, default=1)
     p.add_argument("--lint", action="store_true")
     p.add_argument("--kind", choices=sorted(KINDS), default="blind")
+    p.add_argument("--profile", help="mj profile for the writers (default: load balancing)")
     a = p.parse_args()
-    global KIND, WRITER_MODEL, WRITER_EFFORT
-    KIND = a.kind
+    global KIND, WRITER_MODEL, WRITER_EFFORT, WRITER_PROFILE
+    KIND, WRITER_PROFILE = a.kind, a.profile
     WRITER_MODEL, WRITER_EFFORT = KINDS[KIND]
     if a.lint:
         for b in a.bugs:
