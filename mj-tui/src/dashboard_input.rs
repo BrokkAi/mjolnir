@@ -732,6 +732,19 @@ impl DashboardState {
                 });
             return DashboardAction::None;
         }
+        if self.failed_launch_retries.contains(&session.id) {
+            let confirmation = Confirmation::RecoverFailed {
+                session_id: session.id.clone(),
+                error: session.last_error.clone(),
+                recoverable: true,
+                retry_launch: true,
+            };
+            self.mode = Mode::Confirm(
+                ConfirmDialog::new(confirmation)
+                    .naming_session(crate::render::session_name(session)),
+            );
+            return DashboardAction::None;
+        }
         if let Some(transition) = self.transition_kind(&session.id) {
             self.notices.set(format!(
                 "{} is in progress; select another session while it completes.",
@@ -744,6 +757,7 @@ impl DashboardState {
                 session_id: session.id.clone(),
                 error: session.last_error.clone(),
                 recoverable: session.checkpoint.is_some() || session.target.is_some(),
+                retry_launch: false,
             };
             self.mode = Mode::Confirm(
                 ConfirmDialog::new(confirmation)
@@ -778,6 +792,7 @@ impl DashboardState {
                 session_id: session.id.clone(),
                 error: session.last_error.clone(),
                 recoverable: session.checkpoint.is_some() || session.target.is_some(),
+                retry_launch: false,
             };
             self.mode = Mode::Confirm(
                 ConfirmDialog::new(confirmation)

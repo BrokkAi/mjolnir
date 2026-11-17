@@ -531,6 +531,7 @@ impl InstalledEngines {
 pub(super) struct ViewerRecordSelection<'a> {
     pub(super) ids: &'a std::collections::BTreeSet<String>,
     pub(super) children: &'a crate::server::ViewerChildren,
+    pub(super) failed_launch_retries: &'a std::collections::BTreeSet<String>,
 }
 
 pub(super) fn viewer_snapshot_selected(
@@ -568,6 +569,7 @@ pub(super) fn viewer_snapshot_selected(
                 .iter()
                 .filter_map(|id| controller.state.sessions.get(id)),
             selection.children,
+            Some(selection.failed_launch_retries),
         ),
         None => ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision),
     };

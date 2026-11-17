@@ -44,7 +44,7 @@ impl RuntimeState {
         Ok(())
     }
 
-    pub(super) async fn start_resume_session(
+    pub(crate) async fn start_resume_session(
         self: &Arc<Self>,
         request: ResumeSessionRequest,
     ) -> Result<StartedLifecycle> {
@@ -52,6 +52,36 @@ impl RuntimeState {
             .workspace_resume_gate(&request.workspace_id)
             .read_owned()
             .await;
+        let retry = blocking({
+            let id = request.session_id.clone();
+            move || crate::database::read_failed_launch_record(&id)
+        })
+        .await?;
+        if let Some(record) = retry {
+            if request.workspace_id != record.workspace_id
+                || request.profile_id != record.last_profile
+                || request.target_template_id != record.target_template_id
+                || request
+                    .additional_mounts
+                    .as_ref()
+                    .is_some_and(|mounts| *mounts != record.additional_mounts)
+                || request
+                    .resource_allocation
+                    .as_ref()
+                    .is_some_and(|allocation| {
+                        Some(allocation) != record.resource_allocation.as_ref()
+                    })
+                || request.repository_preflight.is_some()
+                || request.discard_queue
+            {
+                return Err(Refusal::precondition(
+                    "Retry launch uses the session's stored launch request. Retry without changing its settings.",
+                ).into());
+            }
+            return self
+                .start_failed_launch_retry(record, serde_json::to_string(&request)?)
+                .await;
+        }
         let session_id = request.session_id.clone();
         let profile_id = request.profile_id.clone();
         let target_template_id = request.target_template_id.clone();

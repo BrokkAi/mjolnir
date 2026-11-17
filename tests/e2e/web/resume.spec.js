@@ -321,6 +321,20 @@ test('golden_viewer_resume', async ({ context }) => {
   selectedState.snapshot.sessions[0].queued_prompts = [{ id: 'prompt-1', text: 'queued later' }];
   await refresh(selectedPage, selectedState);
   await captureResumeState(output, selectedPage, 'selected card after error and queued prompt arrive', selectedState);
+  const failed = selectedState.snapshot.sessions[0];
+  failed.state = 'error';
+  failed.lifecycle = 'failed';
+  failed.failed_launch_retry = true;
+  failed.launch_error = 'Worker bootstrap failed.';
+  failed.queued_prompts = [];
+  await refresh(selectedPage, selectedState);
+  await expect(selectedPage.getByRole('button', { name: 'Retry launch', exact: true })).toBeEnabled();
+  await captureResumeState(output, selectedPage, 'failed first launch uses saved settings', selectedState);
+  await selectedPage.getByRole('button', { name: 'Retry launch', exact: true }).click();
+  await expect.poll(() => selectedState.actions).toEqual([{
+    action: 'resume', session_id: 'mutating', profile_id: 'alpha',
+    target_id: 'local', workspace_id: 'test', queue: 'start',
+  }]);
   await selectedPage.close();
 
   const archivedListPage = await context.newPage();
@@ -335,7 +349,7 @@ test('golden_viewer_resume', async ({ context }) => {
     },
   });
   await expect.poll(() => archivedListState.wikiQueries.at(-1)).toBe('');
-  await archivedListPage.locator('#resume-search').pressSequentially('pomegranate', { delay: 20 });
+  await archivedListPage.locator('#resume-search').fill('pomegranate');
   await expect.poll(() => archivedListState.wikiQueries.at(-1)).toBe('pomegranate');
   await captureResumeState(output, archivedListPage, 'archived index entry and live search hit', archivedListState, {
     archivedIds: await archivedListPage.locator('#resume-archived [data-wiki-id]').evaluateAll(nodes => nodes.map(node => node.dataset.wikiId)),

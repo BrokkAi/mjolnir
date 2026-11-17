@@ -674,12 +674,23 @@ fn validate_action_against(
             validate_public_id(profile_id)?;
             validate_public_id(target_id)?;
             let session = require_session_record(snapshot, session_id)?;
+            if session.failed_launch_retry
+                && (profile_id != &session.profile_id
+                    || target_id != &session.target_id
+                    || workspace_id != &session.workspace_id)
+            {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "Retry launch uses the session's stored launch request. Retry without changing its settings.",
+                ));
+            }
             require_named_profile(snapshot, profile_id)?;
             require_launchable_target(snapshot, target_id)?;
-            if session
-                .incompatible_resume_targets
-                .iter()
-                .any(|incompatible| incompatible.as_ref() == target_id)
+            if !session.failed_launch_retry
+                && session
+                    .incompatible_resume_targets
+                    .iter()
+                    .any(|incompatible| incompatible.as_ref() == target_id)
             {
                 return Err(resume_refusal(session, target_id));
             }
