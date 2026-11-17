@@ -1101,9 +1101,13 @@ impl Controller {
         )];
         if let (Some(engine), Some(image)) = (destination_engine, destination_image) {
             destination_checks.push((
-                at_destination_host(vec!["sh".into(), "-c".into(), "command -v bash".into()])
-                    .purpose("check destination Move shell"),
-                "Move needs bash on the destination host to load its container",
+                at_destination_host(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "command -v bash && command -v tar".into(),
+                ])
+                .purpose("check destination Move shell"),
+                "Move needs bash and tar on the destination host to load its container",
             ));
             destination_checks.push((
                 at_destination_host(vec![
