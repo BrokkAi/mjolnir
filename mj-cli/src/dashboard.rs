@@ -396,6 +396,7 @@ pub(crate) struct DashboardContext {
     /// inherited shared value is retained only as a compare-and-clear baseline
     /// for the detach persistence task.
     composer_drafts: ComposerDraftCache,
+    composer_daemon_requests: BTreeMap<String, mj_chat::chat::ChatDaemonSender>,
     /// Retain save failures so quitting cannot erase their notice before it is read.
     draft_save_failures: BTreeMap<String, String>,
     /// Session-manager attachment is asynchronous: an actor may need to
@@ -2022,6 +2023,7 @@ impl DashboardContext {
             transcript_positions: BTreeMap::new(),
             question_targets_seen: BTreeMap::new(),
             composer_drafts: ComposerDraftCache::default(),
+            composer_daemon_requests: BTreeMap::new(),
             draft_save_failures: BTreeMap::new(),
             opening_chat_sessions: BTreeMap::new(),
             attachments: BTreeMap::new(),

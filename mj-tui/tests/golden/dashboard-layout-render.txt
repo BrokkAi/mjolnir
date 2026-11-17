@@ -42,7 +42,7 @@
 │                                      ││Quick reply: I'll investigate.                                           Send │
 │                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (1)                        │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Alt+g session · Alt+Enter send · Alt+n next · Alt+s skip · Alt+c all ! · Alt+↑ scroll │ ctrl+b then : / ? palette
+Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+c all ! · Alt+↑ scroll │ ctrl+b then : / ? palette
 notification header color: Rgb(158, 194, 238)
 open Rename action: None
 === Rename modal over dashboard (120x30) ===

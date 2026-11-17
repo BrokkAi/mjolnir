@@ -165,10 +165,12 @@ pub struct LiveComposer {
     pending_queue_images: BTreeMap<String, Vec<PromptImage>>,
     history_search: Option<HistorySearch>,
     next_history_search_generation: u64,
-    pending_history_search: Option<HistorySearchRequest>,
+    composer_requests: VecDeque<super::history::ComposerRequest>,
+    session_history: Vec<String>,
+    session_history_error: Option<String>,
+    session_history_generation: u64,
     pending_submissions: Vec<submissions::PendingSubmission>,
     submission_renders: Vec<(String, std::time::Instant)>,
-    pending_abandoned_prompt: Option<active::ChatDaemonRequest>,
     plan_command_pending: bool,
     operation_feedback: BTreeMap<String, String>,
     conversation_notices: Vec<feedback::ConversationNotice>,
@@ -318,10 +320,12 @@ impl ChatState {
             next_history_search_generation: std::mem::take(
                 &mut self.next_history_search_generation,
             ),
-            pending_history_search: std::mem::take(&mut self.pending_history_search),
+            composer_requests: std::mem::take(&mut self.composer_requests),
+            session_history: std::mem::take(&mut self.session_history),
+            session_history_error: std::mem::take(&mut self.session_history_error),
+            session_history_generation: self.session_history_generation,
             pending_submissions: std::mem::take(&mut self.pending_submissions),
             submission_renders: std::mem::take(&mut self.submission_renders),
-            pending_abandoned_prompt: std::mem::take(&mut self.pending_abandoned_prompt),
             plan_command_pending: std::mem::take(&mut self.plan_command_pending),
             operation_feedback: std::mem::take(&mut self.operation_feedback),
             conversation_notices: std::mem::take(&mut self.conversation_notices),
@@ -352,10 +356,12 @@ impl ChatState {
         self.pending_queue_images = composer.pending_queue_images;
         self.history_search = composer.history_search;
         self.next_history_search_generation = composer.next_history_search_generation;
-        self.pending_history_search = composer.pending_history_search;
+        self.composer_requests = composer.composer_requests;
+        self.session_history = composer.session_history;
+        self.session_history_error = composer.session_history_error;
+        self.session_history_generation = composer.session_history_generation;
         self.pending_submissions = composer.pending_submissions;
         self.submission_renders = composer.submission_renders;
-        self.pending_abandoned_prompt = composer.pending_abandoned_prompt;
         self.plan_command_pending = composer.plan_command_pending;
         self.operation_feedback = composer.operation_feedback;
         self.conversation_notices = composer.conversation_notices;

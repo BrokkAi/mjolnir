@@ -1104,7 +1104,7 @@ impl DashboardContext {
                         } else {format!("Could not confirm whether the prompt was queued: {error}; checking its status.")});
                         return;
                     }
-                    if self.dashboard.notification_reply_finished(&session_id, &prompt.command_id, Err(error.clone())) { return; }
+                    if super::startup_prompts::finish_notification_reply(&mut self.dashboard, &mut self.chats, &session_id, &prompt, Err(error.clone())) { return; }
                     let restored = if let Some(chat) = self.chats.get_mut(&session_id).filter(|_| !self.dashboard.has_standby_composer(&session_id)) {
                         chat.restore_startup_prompt(prompt)
                     } else { self.dashboard.restore_startup_prompt(&session_id, prompt) };

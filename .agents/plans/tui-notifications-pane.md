@@ -11,6 +11,11 @@ Text is shared with host notifications and resolved lazily for the displayed car
 
 ## Progress
 
+- [x] (2026-11-17, 066ae3121 review) Replace separate pending fields with one ComposerRequest queue and an exhaustive dispatcher for search, session listings and every ChatDaemonRequest. Attached and detached editors share it and the per-session daemon bridge; queued requests/generation state travel with the live composer.
+- [x] (2026-11-17, 066ae3121 review) Separate NotificationSend and NotificationRestore, with distinct hit areas. Ctrl+Enter/Send always send the current field; Alt+Enter and Restore unsent restore only.
+- [x] (2026-11-17, 066ae3121 review) One CLI reply-outcome helper reports every failure with session/full text and restores it into an empty ordinary composer after the card disappears. Existing drafts remain intact; notices retain copyable text. Unconfirmed admission is also reported without replay.
+- [x] Focused validation passed: 14 queue/control/recovery/history/transfer/registry tests and four affected render goldens (18 unique tests). Final three-crate dev/all-targets clippy passed with warnings denied. Refreshed exactly one golden footer label from Alt+Enter send to Ctrl+Enter send after inspecting the diff; the other three goldens remain unchanged. No commit.
+
 - [x] (2026-11-17, f5b4539b4 review) Retain refused text with its error separately from the draft. Captured Alt+Enter/Send restores recoverable text and preserves displaced drafts; only a successful send removes matching recovery text.
 - [x] (2026-11-17, f5b4539b4 review) Show selected search matches beside query/shared status in one row. Render each recalled newline as ⏎ with matching Unicode cursor mapping; keep payload newlines literal.
 - [x] (2026-11-17, f5b4539b4 review) Share the existing session-prompt listing dispatcher/results with detached editors and record successful replies through Prompt history. Extend existing notification/history tests.
@@ -81,6 +86,10 @@ Text is shared with host notifications and resolved lazily for the displayed car
 
 ## Surprises & Discoveries
 
+- Search, session listing and Ctrl+C formerly had separate pending fields/pumps. A shared enum queue now eliminates that host-maintained subset; its dispatcher exhaustively matches both request categories and nested ChatDaemonRequest variants, with no wildcard arm.
+- The ordinary notice/recovery path was bypassed by both direct admission failures and durable Quick reply refusals. Both now call one outcome helper; checking the composer and restoring only when empty is one synchronous UI transition.
+- mj-tui has Tokio only as a dev dependency. Expose the existing nonblocking ChatDaemonSender alias from mj-chat rather than adding a runtime dependency just to name the bridge.
+
 - A command refusal previously discarded its captured text after removing the pending entry. Recoverable entries now own that text/error independently; unrelated success cannot erase them. Restoring also preserves the displaced draft rather than merely moving the data-loss case.
 - Reverse search stores its selected match in input, independently of its query. The compact host now renders both and uses shared status formatting from history_search_footer. Newline markers and cursor columns use the same sanitized display mapping.
 - Search and Up/Ctrl-P were separate asynchronous owners: session listings formerly returned via ChatIoUpdate while reverse search used composer updates. Session listings now use the existing composer result channel/generation guard for both attached and detached editors, with supervised task cancellation.
@@ -145,6 +154,16 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Decision Log
+
+- Decision: accepted 066ae3121 review: use a single typed composer request queue and exhaustive dispatcher for all attached/detached Prompt requests. Forward daemon mutations through the same host bridge, ordered per session and concurrent across sessions, and carry the queue and history generation with live-composer transfers.
+  Rationale: a new request kind must force a dispatch decision at compilation, rather than relying on each host to remember another pump. Background reads retain their existing generation guards and cancellation.
+  Date/Author: 2026-11-17 / parent review request, implementation worker.
+- Decision: accepted 066ae3121 review: Send has its own command/control bound to Ctrl+Enter and always submits current text. Restore unsent is a separate command/control bound to Alt+Enter; ordinary Enter retains its send/session default.
+  Rationale: a refusal cannot change the meaning or target of a Send gesture.
+  Date/Author: 2026-11-17 / parent review request, implementation worker.
+- Decision: accepted 066ae3121 review: handle direct and durable Quick reply failures through one CLI outcome helper. Always log the session/full unsent text; when no card remains, put it unsent in an empty conversation composer, preserving occupied drafts. Report uncertain admission with full text but do not restore/replay while its status is unknown.
+  Rationale: a detached editor is unreachable after its card disappears, and background failure must remain visible and recoverable without overwriting newer work.
+  Date/Author: 2026-11-17 / parent review request, implementation worker.
 
 - Decision: accepted f5b4539b4 review: keep recoverable reply text/error per session until matching text is sent successfully. Alt+Enter and the clickable Restore unsent button restore the captured candidate; Enter sends the displayed draft. Preserve displaced drafts in the same recovery collection and rotate restored entries to the back so every retained reply remains reachable. Restoring cancels reverse search through the editor owner and preserves its original draft, not its temporary match.
   Rationale: editing and unrelated receipts must never destroy an unsent submission; restoring must preserve newer work too. The gesture captures the restore text and original card/session just as Send captures text.
@@ -259,6 +278,8 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 ## Outcomes & Retrospective
 
+All three accepted 066ae3121 findings are complete without a commit. One typed queue/exhaustive dispatcher services attached and detached editors, with per-session ordered daemon bridges that allow unrelated sessions to proceed independently. Ctrl+C before the first pump retains its captured session/project, even when the project changes before dispatch. Separate Send and Restore gestures preserve current-text submission. A shared CLI outcome helper always logs failures with the session/full text, recovers into an empty ordinary composer after the card disappears, and preserves occupied drafts with copyable notice text. Unconfirmed admission is reported without replay. Eighteen unique affected tests and final dev/all-targets clippy for all three crates passed. Only the intentional footer binding label changed in the existing layout golden. Details: `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/qr-dispatch-report.md`.
+
 The four accepted f5b4539b4 Quick reply findings are complete without a commit. Refused text/error and displaced drafts remain independently recoverable; captured Alt+Enter/Restore unsent gestures restore and cycle them without sending, while Enter sends the displayed draft. Unrelated successful receipts preserve other failures. Selected search matches and shared query/status render together; newline markers and cursor mapping expose multiline recalls without changing the payload. Up/Ctrl-P now receives the destination's stored prompt listing through the existing generation-checked composer path; successful Quick replies update local history and request a fresh listing. Eleven unique scoped tests and affected-crate all-targets clippy passed. The initial Unicode assertion was corrected to use existing wide-cell extraction; the initial clippy replacement lint was fixed mechanically. Evidence is in `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/qr-followup-report.md`.
 
 The mouse-selection follow-up and three accepted Quick reply findings are complete without a commit. Notification text uses the global selection state machine and the transcript wrapper/copy metadata; controls stay outside that surface and an in-flight drag retains the pointer across them. Detached Prompt history now shares the attached composer dispatcher, cancellation, result channel and generation guard, bound to the destination project. Pending sends no longer capture keyboard focus or prevent another draft, and search Enter cannot submit. Thirty unique scoped tests and three-crate all-targets clippy passed. No golden was changed because existing cases have no selection highlight, and all four affected render goldens match exactly. Evidence: `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/selection-review-report.md`.
@@ -320,6 +341,8 @@ Capture the card, content holder and reply at the gesture/key event. The existin
 Extend the notification state/pointer tests and the existing durable prompt-refusal regression; update the existing layout golden with reply text and actual header color. Inspect the other affected render goldens before refreshing. Run scoped tests and three-crate dev/all-targets clippy outside the sandbox; do not commit.
 
 ## Concrete Steps
+
+For the 066ae3121 follow-up, keep package selection fixed with `-p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir`. Run filters `chat::history::tests`, `control_c_queues_abandoned_prompt_persistence_and_keeps_local_history`, `notifications_pane::tests`, `durable_refusals_restore_images_once_without_duplicating_recalled_input`, `pending_image_submission_and_deleted_markers_survive_a_live_composer_transfer`, and `no_two_commands_claim_the_same_key_in_one_pane`, plus the four existing notification-bearing goldens below. Rerun changed conditions only after fixes. Run all-targets clippy for the same three packages with `-D warnings`. All validation ran outside the sandbox, on the dev profile with normal Cargo storage.
 
 For the f5b4539b4 follow-up, keep package selection fixed with `-p brokk-mj-chat -p brokk-mj-tui` and run the filters `chat::history::tests`, `notifications_pane::tests` and `an_accepted_prompt_lists_the_sessions_prompts_again_for_up`. Rerun only failed/changed conditions after fixes. Run `cargo clippy -p brokk-mj-chat -p brokk-mj-tui --all-targets -- -D warnings` outside the sandbox on the dev profile. All checks passed.
 
@@ -388,3 +411,5 @@ Revision note (2026-11-17): user-requested ordinary session opening and Quick re
 Revision note (2026-11-17): completed shared notification selection and the accepted focus/search/history Quick reply review fixes. Thirty scoped tests, four unchanged goldens included, and three-crate dev/all-targets clippy passed; no commit.
 
 Revision note (2026-11-17): completed all four accepted f5b4539b4 Quick reply findings. Eleven unique scoped tests and two-crate dev/all-targets clippy passed; no commit or golden refresh.
+
+Revision note (2026-11-17): completed the three accepted 066ae3121 findings. Eighteen unique focused tests and final three-crate dev/all-targets clippy passed. The existing layout golden changed only its reviewed Send shortcut label; no commit.

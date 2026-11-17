@@ -24,6 +24,7 @@ use crate::{DashboardAction, DashboardState, Focus};
 pub enum CommandId {
     NotificationOpen,
     NotificationSend,
+    NotificationRestore,
     NotificationDefault,
     NotificationClear,
     NotificationSkip,
@@ -618,12 +619,29 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Send",
         description: "Send the quick reply to its session.",
         scope: Scope::Notifications,
-        pane_keys: &[KeyHint::alt(KeyCode::Enter, "Alt+Enter")],
+        pane_keys: &[KeyHint {
+            code: KeyCode::Enter,
+            label: "Ctrl+Enter",
+            modifiers: KeyModifiers::CONTROL,
+            exact: true,
+        }],
         action: None,
         footer: footer_word!("send"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationRestore,
+        label: "Restore unsent",
+        description: "Restore a retained unsent reply without submitting it.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::Enter, "Alt+Enter")],
+        action: None,
+        footer: footer_word!("restore"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_restore_available,
     },
     CommandSpec {
         id: CommandId::NotificationDefault,
@@ -1713,6 +1731,13 @@ fn notification_available(dashboard: &DashboardState) -> Availability {
         Availability::Ready
     }
 }
+fn notification_restore_available(dashboard: &DashboardState) -> Availability {
+    if dashboard.notification_has_recoverable_reply() {
+        Availability::Ready
+    } else {
+        Availability::Hidden
+    }
+}
 fn notification_clear_available(dashboard: &DashboardState) -> Availability {
     match dashboard.notification_entries().first() {
         Some(entry) if entry.target.is_some() => Availability::Ready,
@@ -2063,6 +2088,7 @@ impl DashboardState {
             }
             CommandId::NotificationOpen
             | CommandId::NotificationSend
+            | CommandId::NotificationRestore
             | CommandId::NotificationDefault => self.notification_action(id),
             CommandId::NotificationClear => self.notification_clear(),
             CommandId::NotificationSkip => self.notification_skip(),

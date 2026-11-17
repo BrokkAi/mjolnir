@@ -62,91 +62,102 @@ pub(super) struct HistorySearchRequest {
     limit: usize,
 }
 
+/// Every background request produced by a Prompt editor goes through this
+/// queue. Both attached chats and detached hosts pump the exhaustive dispatcher.
+#[derive(Debug)]
+pub(super) enum ComposerRequest {
+    Search(HistorySearchRequest),
+    SessionHistory(u64),
+    Daemon(ChatDaemonRequest),
+}
+
 impl ChatState {
-    /// Detached Prompt editors bind history to their destination's project.
     pub fn set_prompt_history_project(&mut self, bundle_id: Option<String>) {
         self.bundle_id = bundle_id;
     }
 
-    /// The live chat and detached editors share request dispatch, cancellation
-    /// and generation-checked result application. Acquiring a handle is also
-    /// background work, never part of the terminal event loop.
-    pub fn dispatch_prompt_history(
+    pub fn dispatch_composer_requests<F, Fut>(
         &mut self,
-        session: impl std::future::Future<Output = anyhow::Result<mj_client::session::SessionHandle>>
-        + Send
-        + 'static,
-    ) {
+        session: F,
+        persistence: Option<&tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>>,
+    ) where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<mj_client::session::SessionHandle>>
+            + Send
+            + 'static,
+    {
         if self.history_search.is_none() {
             self.composer_runtime.history_task = None;
-            self.pending_history_search = None;
-            return;
+            self.composer_requests
+                .retain(|request| !matches!(request, ComposerRequest::Search(_)));
         }
-        let Some(mut request) = self.take_history_search_request() else {
-            return;
-        };
-        request.bundle_id = self.bundle_id.clone();
-        let generation = request.generation;
-        let updates = self.composer_runtime.tx.clone();
-        self.composer_runtime.history_task = Some(super::composer::RemoteResultForwarder(Some(
-            tokio::spawn(async move {
-                let result = match session.await {
-                    Ok(session) => Self::resolve_history_search_request(request, &session).await,
-                    Err(error) => Err(format!("{error:#}")),
-                };
-                if let Err(error) =
-                    updates.send(super::composer::ComposerIoUpdate::HistorySearchResults {
-                        generation,
-                        result,
-                    })
-                {
-                    tracing::debug!(%error, "history search result dropped because the editor closed");
+        while let Some(request) = self.composer_requests.pop_front() {
+            match request {
+                ComposerRequest::Search(mut request) => {
+                    request.bundle_id = self.bundle_id.clone();
+                    let generation = request.generation;
+                    let updates = self.composer_runtime.tx.clone();
+                    let session = session();
+                    self.composer_runtime.history_task = Some(super::composer::RemoteResultForwarder(Some(tokio::spawn(async move {
+                        let result = match session.await {
+                            Ok(session) => Self::resolve_history_search_request(request, &session).await,
+                            Err(error) => Err(format!("{error:#}")),
+                        };
+                        if let Err(error) = updates.send(super::composer::ComposerIoUpdate::HistorySearchResults { generation, result }) {
+                            tracing::debug!(%error, "history search result dropped because the editor closed");
+                        }
+                    }))));
                 }
-            }),
-        )));
+                ComposerRequest::SessionHistory(generation) => {
+                    let updates = self.composer_runtime.tx.clone();
+                    let session = session();
+                    self.composer_runtime.session_history_task = Some(super::composer::RemoteResultForwarder(Some(tokio::spawn(async move {
+                        let result = match session.await {
+                            Ok(session) => session.session_prompts().await.map_err(|error| format!("{error:#}")),
+                            Err(error) => Err(format!("{error:#}")),
+                        };
+                        if let Err(error) = updates.send(super::composer::ComposerIoUpdate::SessionHistoryListed { generation, result }) {
+                            tracing::debug!(%error, "session history result dropped because the editor closed");
+                        }
+                    }))));
+                }
+                // Enumerate daemon commands here too: adding one must require
+                // a decision in the common dispatcher, never in a host pump.
+                ComposerRequest::Daemon(request @ ChatDaemonRequest::RecordAbandonedPrompt { .. })
+                | ComposerRequest::Daemon(request @ ChatDaemonRequest::StartTurnReview { .. }) => {
+                    match persistence {
+                        Some(persistence) => if let Err(error) = persistence.send(request) {
+                            tracing::warn!(%error, "composer request could not be queued for the daemon");
+                            self.set_notice("The Mjolnir daemon is not reachable; the text remains in Prompt history");
+                        },
+                        None => self.set_notice("This editor cannot reach the Mjolnir daemon; the text remains in Prompt history"),
+                    }
+                }
+            }
+        }
     }
 
-    /// Attached and detached Prompt editors use one listing dispatcher and
-    /// the same generation-checked composer result path.
-    pub fn dispatch_session_prompt_history(
-        &mut self,
-        session: impl std::future::Future<Output = anyhow::Result<mj_client::session::SessionHandle>>
-        + Send
-        + 'static,
-    ) {
-        let Some(generation) = self.take_session_history_request() else {
-            return;
-        };
-        let updates = self.composer_runtime.tx.clone();
-        self.composer_runtime.session_history_task = Some(super::composer::RemoteResultForwarder(
-            Some(tokio::spawn(async move {
-                let result = match session.await {
-                    Ok(session) => session
-                        .session_prompts()
-                        .await
-                        .map_err(|error| format!("{error:#}")),
-                    Err(error) => Err(format!("{error:#}")),
-                };
-                if let Err(error) =
-                    updates.send(super::composer::ComposerIoUpdate::SessionHistoryListed {
-                        generation,
-                        result,
-                    })
-                {
-                    tracing::debug!(%error, "session history result dropped because the editor closed");
-                }
-            })),
-        ));
-    }
-
-    /// Ask for this session's stored prompts again.
     pub fn request_session_history(&mut self) {
         self.session_history_generation = self.session_history_generation.wrapping_add(1);
-        self.pending_session_history = Some(self.session_history_generation);
+        self.composer_requests
+            .retain(|request| !matches!(request, ComposerRequest::SessionHistory(_)));
+        self.composer_requests
+            .push_back(ComposerRequest::SessionHistory(
+                self.session_history_generation,
+            ));
     }
 
+    #[cfg(test)]
     pub(super) fn take_session_history_request(&mut self) -> Option<u64> {
-        self.pending_session_history.take()
+        let index = self
+            .composer_requests
+            .iter()
+            .position(|request| matches!(request, ComposerRequest::SessionHistory(_)))?;
+        let ComposerRequest::SessionHistory(generation) = self.composer_requests.remove(index)?
+        else {
+            unreachable!()
+        };
+        Some(generation)
     }
 
     /// `entries` are this session's stored prompts, newest first, as listed
@@ -201,7 +212,8 @@ impl ChatState {
             fetching: false,
             unavailable: None,
         });
-        self.pending_history_search = None;
+        self.composer_requests
+            .retain(|request| !matches!(request, ComposerRequest::Search(_)));
     }
 
     /// Start the search again after its query or scope changed.
@@ -216,7 +228,8 @@ impl ChatState {
         search.selected = None;
         search.next = None;
         search.fetching = false;
-        self.pending_history_search = None;
+        self.composer_requests
+            .retain(|request| !matches!(request, ComposerRequest::Search(_)));
         let searchable = search.query.chars().count() >= MIN_HISTORY_QUERY_CHARS;
         let original = PromptPayload {
             text: search.original_input.clone(),
@@ -237,14 +250,15 @@ impl ChatState {
             return;
         };
         search.fetching = true;
-        self.pending_history_search = Some(HistorySearchRequest {
-            generation: search.generation,
-            bundle_id: self.bundle_id.clone(),
-            scope: search.scope,
-            query: search.query.to_string(),
-            after,
-            limit,
-        });
+        self.composer_requests
+            .push_back(ComposerRequest::Search(HistorySearchRequest {
+                generation: search.generation,
+                bundle_id: self.bundle_id.clone(),
+                scope: search.scope,
+                query: search.query.to_string(),
+                after,
+                limit,
+            }));
     }
 
     /// Fetch the next page when fewer than [`HISTORY_LOOKAHEAD`] matches lie
@@ -262,12 +276,16 @@ impl ChatState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn take_history_search_request(&mut self) -> Option<HistorySearchRequest> {
-        self.pending_history_search.take()
-    }
-
-    pub(super) fn take_abandoned_prompt_request(&mut self) -> Option<ChatDaemonRequest> {
-        self.pending_abandoned_prompt.take()
+        let index = self
+            .composer_requests
+            .iter()
+            .position(|request| matches!(request, ComposerRequest::Search(_)))?;
+        let ComposerRequest::Search(request) = self.composer_requests.remove(index)? else {
+            unreachable!()
+        };
+        Some(request)
     }
 
     pub(super) fn apply_history_search_results(

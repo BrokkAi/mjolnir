@@ -134,6 +134,12 @@ impl DashboardState {
                         Default::default(),
                         self.notices.clone(),
                     );
+                    editor.set_prompt_history_project(
+                        self.state
+                            .sessions
+                            .get(session_id)
+                            .map(|session| session.bundle_id.clone()),
+                    );
                     editor.request_session_history();
                     editor
                 },
@@ -193,9 +199,10 @@ impl DashboardState {
     }
 
     /// Pump detached editors through the same history owner as ActiveChat.
-    pub fn service_notification_history(
+    pub fn service_notification_composers(
         &mut self,
         control: mj_client::session::SessionControl,
+        mut persistence: impl FnMut(&str) -> Option<mj_chat::chat::ChatDaemonSender>,
     ) -> bool {
         let mut changed = false;
         for (session_id, reply) in &mut self.notifications.replies {
@@ -207,18 +214,32 @@ impl DashboardState {
                     .get(session_id)
                     .map(|session| session.bundle_id.clone()),
             );
-            let listing_control = control.clone();
-            let listing_session = session_id.clone();
-            reply.editor.dispatch_session_prompt_history(async move {
-                listing_control.session(listing_session).await
-            });
+            let bridge = persistence(session_id);
             let control = control.clone();
             let session_id = session_id.clone();
-            reply
-                .editor
-                .dispatch_prompt_history(async move { control.session(session_id).await });
+            reply.editor.dispatch_composer_requests(
+                move || {
+                    let control = control.clone();
+                    let session_id = session_id.clone();
+                    async move { control.session(session_id).await }
+                },
+                bridge.as_ref(),
+            );
         }
         changed
+    }
+
+    pub fn report_notification_reply_failure(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        error: &str,
+        recovery: &str,
+    ) {
+        self.set_failure_notice(format!(
+            "Quick reply to {}: {error}. {recovery}\nUnsent text:\n{text}",
+            self.session_notice_name(session_id)
+        ));
     }
 
     fn reveal_notification_reply_error(&mut self, session_id: &str) {
@@ -249,7 +270,20 @@ impl DashboardState {
         reply.error = Some(format!(
             "Could not confirm the reply: {error}; checking its status."
         ));
+        let text = reply
+            .pending
+            .iter()
+            .find(|pending| pending.command_id == command_id)
+            .unwrap()
+            .text
+            .clone();
         self.reveal_notification_reply_error(session_id);
+        self.report_notification_reply_failure(
+            session_id,
+            &text,
+            error,
+            "Admission is unconfirmed; checking its status. The text is kept in this notice.",
+        );
         true
     }
 
@@ -500,7 +534,7 @@ impl DashboardState {
             .get(&session_id)
             .map(|reply| reply.editor.single_line_prompt_text().to_owned())
             .unwrap_or_default();
-        let restore_text = (command == CommandId::NotificationSend)
+        let restore_text = (command == CommandId::NotificationRestore)
             .then(|| {
                 self.notifications
                     .replies
@@ -557,6 +591,7 @@ impl DashboardState {
                 self.focus = Focus::Prompt;
                 action
             }
+            CommandId::NotificationRestore => DashboardAction::None,
             CommandId::NotificationSend | CommandId::NotificationDefault => {
                 if text.trim().is_empty()
                     || self
@@ -651,6 +686,18 @@ impl DashboardState {
             })
             .collect();
         DashboardAction::DismissNotifications { dismissals }
+    }
+
+    pub fn notification_has_recoverable_reply(&self) -> bool {
+        self.displayed_notification_session_id()
+            .and_then(|id| self.notifications.replies.get(&id))
+            .is_some_and(|reply| reply.restore_candidate().is_some())
+    }
+
+    pub fn has_notification_for_session(&self, session_id: &str) -> bool {
+        self.notification_entries().iter().any(|entry| {
+            self.notification_content_session(&entry.session_id, entry.level) == session_id
+        })
     }
 
     /// Text copying uses the exact row space registered by the last render.
@@ -857,37 +904,52 @@ pub(crate) fn render(
         .iter()
         .find(|pending| pending.text == reply.editor.single_line_prompt_text());
     let send_label = match pending {
-        _ if restoring => " Restore unsent ",
         Some(pending) if pending.card != current_card => " Sending earlier reply… ",
         Some(_) => " Sending… ",
         None if !reply.pending.is_empty() => " Send (reply in flight) ",
         None => " Send ",
     };
-    let pending = pending.is_some();
-    let can_send = restoring
-        || (!pending
-            && !dashboard
-                .quick_reply_mut(&session_id)
-                .editor
-                .single_line_prompt_text()
-                .trim()
-                .is_empty());
+    let can_send = pending.is_none() && !reply.editor.single_line_prompt_text().trim().is_empty();
     let send_width = (Line::raw(send_label).width() as u16).min(inner.width);
     let reply_y = inner.bottom() - 2;
     let send_area = Rect::new(
         inner.right().saturating_sub(send_width),
         reply_y,
-        send_width.min(inner.width),
+        send_width,
         1,
     );
+    let restore_label = " Restore unsent ";
+    let restore_width = if restoring {
+        (Line::raw(restore_label).width() as u16).min(send_area.x.saturating_sub(inner.x))
+    } else {
+        0
+    };
+    let restore_area = Rect::new(
+        send_area.x.saturating_sub(restore_width),
+        reply_y,
+        restore_width,
+        1,
+    );
+    if restoring && restore_width > 0 {
+        dashboard.surface_form.borrow_mut().register(
+            SurfaceControl::Notification(CommandId::NotificationRestore),
+            ControlKind::Button,
+            restore_area,
+            true,
+        );
+        frame.render_widget(
+            Paragraph::new(restore_label).style(theme::actionable().patch(theme::raised())),
+            restore_area,
+        );
+    }
     frame.render_widget(
         Paragraph::new("Quick reply: ").style(theme::muted()),
         Rect::new(inner.x, reply_y, 13.min(inner.width), 1),
     );
     let input = Rect::new(
-        inner.x.saturating_add(13).min(send_area.x),
+        inner.x.saturating_add(13).min(restore_area.x),
         reply_y,
-        send_area.x.saturating_sub(inner.x.saturating_add(14)),
+        restore_area.x.saturating_sub(inner.x.saturating_add(14)),
         1,
     );
     let input_focused = focused && !dashboard.modal_open();
@@ -916,6 +978,7 @@ pub(crate) fn render(
     dashboard.notifications.controls = [
         CommandId::NotificationOpen,
         CommandId::NotificationSend,
+        CommandId::NotificationRestore,
         CommandId::NotificationClear,
         CommandId::NotificationSkip,
     ]
@@ -1461,6 +1524,16 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn notifications_keys_reply_open_skip_and_keep_sizes_exclusive() {
         let mut replies = dashboard();
+        // Ctrl-C before the first background pump must already know its
+        // destination project, and later project changes cannot retarget it.
+        let abandoned_project = replies.state.sessions["q1"].bundle_id.clone();
+        for ch in "abandoned before first pump".chars() {
+            replies.handle_key(key(KeyCode::Char(ch)));
+        }
+        replies.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
         replies
             .session_details
             .get_mut("q1")
@@ -1584,6 +1657,7 @@ pub(crate) mod tests {
         let fixture = mj_client::session::replacement_session_test_fixture("q1", 1);
         let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
         let (listings, mut listed) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence, mut recorded) = tokio::sync::mpsc::unbounded_channel();
         let history = SessionControl::new(HistoryBackend {
             inner: fixture.stopped,
             requests,
@@ -1597,7 +1671,18 @@ pub(crate) mod tests {
         for ch in "recalled".chars() {
             replies.handle_key(key(KeyCode::Char(ch)));
         }
-        replies.service_notification_history(history.clone());
+        replies.service_notification_composers(history.clone(), |_| Some(persistence.clone()));
+        let mj_chat::chat::ChatDaemonRequest::RecordAbandonedPrompt {
+            session_id,
+            bundle_id,
+            text,
+        } = recorded.try_recv().unwrap()
+        else {
+            panic!("initial Ctrl-C reaches the shared dispatcher");
+        };
+        assert_eq!(session_id, "q1");
+        assert_eq!(bundle_id, abandoned_project);
+        assert_eq!(text, "abandoned before first pump");
         let (project, query, response) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
                 .await
@@ -1622,7 +1707,8 @@ pub(crate) mod tests {
                 .single_line_prompt_text()
                 != "recalled\nanswer"
             {
-                replies.service_notification_history(history.clone());
+                replies
+                    .service_notification_composers(history.clone(), |_| Some(persistence.clone()));
                 tokio::task::yield_now().await;
             }
         })
@@ -1669,7 +1755,7 @@ pub(crate) mod tests {
             "successful reply is immediately in local history"
         );
         replies.quick_reply_mut("q1").editor.clear_draft();
-        replies.service_notification_history(history.clone());
+        replies.service_notification_composers(history.clone(), |_| Some(persistence.clone()));
         // A stored listing is independently dispatched for the destination.
         let mut observed = Vec::new();
         while let Ok(id) = listed.try_recv() {
@@ -1691,7 +1777,8 @@ pub(crate) mod tests {
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                replies.service_notification_history(history.clone());
+                replies
+                    .service_notification_composers(history.clone(), |_| Some(persistence.clone()));
                 replies.handle_key(key(KeyCode::Up));
                 if replies
                     .quick_reply_mut("q2")
@@ -1717,6 +1804,35 @@ pub(crate) mod tests {
                 .editor
                 .single_line_prompt_text(),
             "stored\nprompt 世界"
+        );
+
+        replies.quick_reply_mut("q2").editor.clear_draft();
+        for ch in "abandoned Quick reply".chars() {
+            replies.handle_key(key(KeyCode::Char(ch)));
+        }
+        replies.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        replies.service_notification_composers(history, |_| Some(persistence.clone()));
+        let mj_chat::chat::ChatDaemonRequest::RecordAbandonedPrompt {
+            session_id,
+            bundle_id,
+            text,
+        } = recorded.try_recv().unwrap()
+        else {
+            panic!("Ctrl-C reaches the common daemon dispatcher");
+        };
+        assert_eq!(session_id, "q2");
+        assert_eq!(bundle_id, replies.state.sessions["q2"].bundle_id);
+        assert_eq!(text, "abandoned Quick reply");
+        replies.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            replies
+                .quick_reply_mut("q2")
+                .editor
+                .single_line_prompt_text(),
+            text
         );
 
         // Refusal A must survive edits to B and a later unrelated success.
@@ -1749,6 +1865,26 @@ pub(crate) mod tests {
         assert!(
             refusal.contains("Not sent: refused A") && refusal.contains("denied A"),
             "{refusal}"
+        );
+        // Send and Restore have distinct hit areas. A refused A cannot
+        // retarget a Send gesture over the currently displayed B.
+        let lines = drawn(&mut recovery, 180, 50);
+        let send = point(&lines, " Send ");
+        let restore = point(&lines, "Restore unsent");
+        assert_ne!(send, restore);
+        use crossterm::event::{MouseButton, MouseEventKind};
+        recovery.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), send));
+        let DashboardAction::NotificationReply {
+            prompt: current, ..
+        } = recovery.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), send))
+        else {
+            panic!("Send submits B, not restoration of A");
+        };
+        assert_eq!(current.payload.text, "draft B");
+        recovery.notification_reply_finished(
+            "q1",
+            &current.command_id,
+            Err("B refused too".into()),
         );
         assert_eq!(
             recovery.handle_key(alt(KeyCode::Enter)),
@@ -1787,7 +1923,7 @@ pub(crate) mod tests {
                 .iter()
                 .filter(|draft| draft.error.is_some())
                 .count(),
-            2
+            3
         );
         recovery.handle_key(alt(KeyCode::Enter));
         assert_eq!(

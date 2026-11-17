@@ -142,6 +142,7 @@ impl DashboardState {
             self.notifications.gesture = [
                 CommandId::NotificationOpen,
                 CommandId::NotificationSend,
+                CommandId::NotificationRestore,
                 CommandId::NotificationClear,
                 CommandId::NotificationSkip,
             ]

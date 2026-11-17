@@ -120,14 +120,6 @@ enum ChatIoUpdate {
 /// and one rebuild against the current snapshot normally lands.
 const MAX_PREFIX_CONVERSION_ATTEMPTS: u32 = 3;
 
-fn dispatch_session_history_request(session: ManagedSessionHandle, chat: &mut ChatState) {
-    chat.dispatch_session_prompt_history(std::future::ready(Ok(session)));
-}
-
-fn dispatch_history_search_request(session: ManagedSessionHandle, chat: &mut ChatState) {
-    chat.dispatch_prompt_history(std::future::ready(Ok(session)));
-}
-
 fn dispatch_diffstat_requests(
     chat: &mut ChatState,
     updates: &tokio::sync::mpsc::UnboundedSender<ChatIoUpdate>,
@@ -628,7 +620,10 @@ impl ActiveChat {
         state.notices = notices;
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
         state.request_session_history();
-        dispatch_session_history_request(session.clone(), &mut state);
+        state.dispatch_composer_requests(
+            || std::future::ready(Ok(session.clone())),
+            persistence.as_ref(),
+        );
         if let Some(pending) = pending_prefix {
             spawn_transcript_prefix(pending, 1, chat_io_tx.clone());
         }
