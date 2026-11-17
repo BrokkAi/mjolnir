@@ -70,10 +70,12 @@ function viewerWireSnapshot(value) {
     if (row.detail === false) {
       const promptCount = row.queued_prompts?.length ?? row.queued_prompt_count ?? 0;
       const elicitationCount = row.pending_elicitations?.length ?? row.pending_elicitation_count ?? 0;
+      const elicitationIds = row.pending_elicitations?.map(request => request.id) ?? row.pending_elicitation_ids ?? [];
       for (const key of Object.keys(row)) if (!SUMMARY_FIELDS.has(key)) delete row[key];
       row.detail = false;
       row.queued_prompt_count = promptCount;
       row.pending_elicitation_count = elicitationCount;
+      row.pending_elicitation_ids = elicitationIds;
     }
     if (Array.isArray(row.native_subagents)) {
       row.native_subagents = row.native_subagents.map(({ task, ...agent }) => agent);
@@ -102,6 +104,7 @@ function viewerDetailResponse(snapshot, sessionId) {
   delete row.detail;
   delete row.queued_prompt_count;
   delete row.pending_elicitation_count;
+  delete row.pending_elicitation_ids;
   if (Array.isArray(row.native_subagents)) {
     row.native_subagents = row.native_subagents.map(({ task, ...agent }) => agent);
   }

@@ -132,6 +132,10 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/api/push/status", get(push_device_status))
         .route("/api/snapshot", get(snapshot))
         .route("/api/sessions/{session_id}/row", get(session_row))
+        .route(
+            "/api/sessions/{session_id}/notification-message",
+            get(notification_message),
+        )
         .route("/api/conversations/{session_id}", get(conversation))
         .route(
             "/api/conversations/{session_id}/read",

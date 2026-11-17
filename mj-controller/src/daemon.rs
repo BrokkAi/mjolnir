@@ -922,6 +922,7 @@ mod activity_cleanup;
 pub(crate) mod delegation;
 mod diagnostics;
 mod previous_daemon;
+mod prewarm;
 mod process;
 pub use process::*;
 mod serve;

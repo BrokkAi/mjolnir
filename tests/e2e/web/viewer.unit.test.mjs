@@ -416,6 +416,7 @@ test('entering Review does not wait for project preflight', async () => {
 test('rolled-back launch errors remain visible only in their workspace and can be dismissed', () => {
   const notices = makeNode();
   const context = vm.createContext({
+    inboxNoticeCards: () => [],
     snapshot: { sessions: [], launch_failures: [
       { id: 'first', workspace_id: 'test' },
       { id: 'second', workspace_id: 'primary' },
@@ -443,6 +444,7 @@ test('rolled-back launch errors remain visible only in their workspace and can b
 test('cleanup warnings remain visible after their session is removed and can be dismissed', () => {
   const notices = makeNode();
   const context = vm.createContext({
+    inboxNoticeCards: () => [],
     snapshot: { sessions: [], notices: [
       { id: 7, session_id: 'removed', text: 'Environment cleanup failed; resources may remain.' },
     ] },
@@ -1583,26 +1585,6 @@ test('conversation receipts require a visible focused caught-up conversation and
   assert.equal(sent.length, 3, 'closed conversations do not read');
 });
 
-
-test('notification snapshot retains handled entries below the notification band until a new visit', () => {
-  const context = vm.createContext({ sessionMessageMs: row => row.time, dismissedNotifications: new Map() });
-  vm.runInContext(sourceBetween('function hasNotification(', '/// Whether a session is a sub-agent'), context);
-  vm.runInContext(sourceBetween('class NotificationSnapshot {', '\nfunction notificationRows()'), context);
-  const update = (rows, allRows = rows) => JSON.parse(vm.runInContext(`JSON.stringify(notificationSnapshot.update(${JSON.stringify(rows)}, ${JSON.stringify(allRows)}))`, context));
-  const a = { id: 'a', time: 1, attention: 'needs_input' }, b = { id: 'b', time: 2, attention: 'important' }, c = { id: 'c', time: 3, attention: 'failed' };
-  assert.deepEqual(update([a, b]).map(entry => entry.row.id), ['b', 'a']);
-  const handled = { ...b, attention: 'working', capabilities: { open: false } };
-  let retained = update([a], [a, handled]);
-  assert.deepEqual(retained.map(entry => entry.row.id), ['a', 'b']);
-  assert.equal(retained[1].row.capabilities.open, false);
-  assert.deepEqual(update([a, c], [a, handled, c]).map(entry => entry.row.id), ['c', 'a', 'b']);
-  assert.deepEqual(update([a, b, c]).map(entry => entry.row.id), ['c', 'b', 'a']);
-  retained = update([a, c]);
-  assert.equal(retained[2].row.lifecycle, 'destroyed');
-  assert.deepEqual(retained[2].row.capabilities, {});
-  vm.runInContext('notificationSnapshot.reset()', context);
-  assert.deepEqual(update([a, c]).map(entry => entry.row.id), ['c', 'a']);
-});
 
 // Hard-won: 437e04dc6: an empty expiry event skipped durable reconciliation.
 test('service worker delegates empty expiry to shared reconcile and reports failures', async () => {

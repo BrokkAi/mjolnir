@@ -991,9 +991,10 @@
     "chat_phase": "idle",
     "is_idle": false,
     "activity": "<relative activity clock>",
-    "pending_elicitation_count": 0,
+    "pending_elicitation_ids": [],
     "detail": false,
     "queued_prompt_count": 0,
+    "pending_elicitation_count": 0,
     "capabilities_ref": "bbd99780d6bb7308"
   },
   "interned": {

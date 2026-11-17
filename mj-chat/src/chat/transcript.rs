@@ -1913,7 +1913,7 @@ impl ChatState {
 /// row that wrapping split from the one above joined back onto it rather
 /// than starting a new line. Each row comes with its selected cells, or
 /// `None` for the whole row.
-pub(super) fn copied_rows_text<'row>(
+pub(crate) fn copied_rows_text<'row>(
     rows: impl IntoIterator<Item = (&'row Line<'static>, RowCopy, Option<(u16, u16)>)>,
     width: u16,
 ) -> String {

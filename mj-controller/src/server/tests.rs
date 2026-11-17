@@ -974,6 +974,74 @@ fn pending_elicitation_snapshot(snapshot: &mut ViewerSnapshot) {
 }
 
 #[tokio::test]
+async fn notification_message_serves_the_pending_form_request_and_refuses_unknown_sessions() {
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        pending_elicitation_snapshot(snapshot);
+        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::NeedsInput;
+    });
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(
+                "/api/sessions/session-1/notification-message?holder=session-1&requests=elicitation-1",
+            )
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(
+        body["text"],
+        "Which CI architecture should the workflow use?"
+    );
+
+    // A card that captured another holder or request gets a conflict, never text.
+    for stale in [
+        "holder=other-session&requests=elicitation-1",
+        "holder=session-1&requests=elicitation-0",
+        "holder=session-1&requests=elicitation-1&question=agent:9",
+        "holder=session-1",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{stale}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["code"], "notification_changed");
+    }
+
+    let missing = app
+        .oneshot(
+            Request::get(
+                "/api/sessions/unknown-session/notification-message?holder=unknown-session",
+            )
+            .header(COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn elicitation_answer_is_typed_and_forwarded() {
     let (app, mut actions, _, _, _) = app_with_snapshot(pending_elicitation_snapshot);
     let cookie = login_cookie(&app).await;
@@ -5545,4 +5613,62 @@ async fn github_relevance_daemon_notices_snapshot_golden() {
         "github-relevance-notices",
         &serde_json::to_string_pretty(&snapshot["notices"]).unwrap(),
     );
+}
+
+// A worker without open requests (relay protocol before 64) has no question
+// target, so its question is the last thing the agent wrote.
+#[test]
+fn notification_message_for_a_legacy_worker_falls_back_to_the_last_agent_message() {
+    use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
+    let facts = |supports_open_request| NotificationMessageFacts {
+        pending_request: None,
+        review_activity: None,
+        question_message: None,
+        supports_open_request,
+    };
+    let read = |facts| {
+        super::handlers::notification_message_text(
+            NotificationKind::NeedsInput,
+            &facts,
+            |_| unreachable!("no question target"),
+            || Ok(Some("the agent's last words".to_owned())),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        read(facts(false)).as_deref(),
+        Some("the agent's last words")
+    );
+    assert_eq!(read(facts(true)), None);
+}
+
+// An `!` card names its message by ReadThrough ordinal: a different or missing
+// boundary is a conflict, never the latest reply.
+#[tokio::test]
+async fn notification_message_for_an_important_card_requires_its_read_through_boundary() {
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::Important;
+        snapshot.sessions[0].notification_dismissal =
+            Some(mj_core::attention::NotificationDismissal::ReadThrough(3));
+    });
+    let cookie = login_cookie(&app).await;
+    for stale in [
+        "holder=session-1&through=4",
+        "holder=session-1",
+        "holder=session-1&through=3&requests=x",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{stale}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+    }
 }

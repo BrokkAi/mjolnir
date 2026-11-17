@@ -302,7 +302,7 @@ pub(super) fn last_materialized_agent_message(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<(u64, String)>> {
-    last_materialized_agent_message_in(connection, session_id, 0, None)
+    last_materialized_agent_message_in(connection, session_id, 0, None, None)
 }
 
 /// The newest nonempty agent message inside one turn, flattened to text.
@@ -322,6 +322,7 @@ pub(super) fn last_materialized_agent_message_within(
         session_id,
         after_position,
         Some(through_position),
+        None,
     )?
     .map(|(_, text)| text))
 }
@@ -331,6 +332,7 @@ pub(super) fn last_materialized_agent_message_in(
     session_id: &str,
     after_position: u64,
     through_position: Option<u64>,
+    through_ordinal: Option<u64>,
 ) -> Result<Option<(u64, String)>> {
     let row = connection
         .query_row(
@@ -339,6 +341,7 @@ pub(super) fn last_materialized_agent_message_in(
              WHERE session_id = ?1
                AND position > ?2
                AND (?3 IS NULL OR position <= ?3)
+               AND (?4 IS NULL OR latest_content_event_ordinal <= ?4)
                AND latest_content_event_ordinal IS NOT NULL
                AND EXISTS (
                    SELECT 1 FROM json_each(
@@ -358,7 +361,12 @@ pub(super) fn last_materialized_agent_message_in(
                )
              ORDER BY position DESC, stable_id DESC
              LIMIT 1",
-            params![session_id, after_position, through_position],
+            params![
+                session_id,
+                after_position,
+                through_position,
+                through_ordinal
+            ],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
@@ -431,6 +439,21 @@ pub fn load_prompt_acceptance(session_id: &str, command_id: &str) -> Result<Opti
         "input was delivered but its acceptance ordinal is unavailable; refusing to send it twice"
     );
     Ok(None)
+}
+
+/// The newest agent message whose content was complete at event ordinal
+/// `through`: what a ReadThrough notification dismissal names. One query, so
+/// the bound and the read are one decision and a newer reply cannot answer for
+/// an older card.
+pub fn load_materialized_agent_message_through(
+    session_id: &str,
+    through: u64,
+) -> Result<Option<String>> {
+    let connection = open_reader(&database_path())?;
+    Ok(
+        last_materialized_agent_message_in(&connection, session_id, 0, None, Some(through))?
+            .map(|(_, text)| text),
+    )
 }
 
 /// Whether the stored projection holds a transcript item with this stable id.

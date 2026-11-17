@@ -4,7 +4,7 @@ use crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY;
 use crate::targets::{self, CommandSpec};
 use mj_core::move_workspace::*;
 use mj_core::targets::SshTrafficClass;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn repositories(
     layout: &super::super::checkpoint::SessionExportLayout,
@@ -153,6 +153,212 @@ fn finalize_move_repositories(
     Ok(())
 }
 
+/// Where a Move's copied files wait on the destination host.
+///
+/// The durable Move owns this directory, keyed by its operation id. It sits
+/// beside the worker roots in the host's state directory, not inside the
+/// destination container: a failed attempt removes the container, and the
+/// resumable copy must outlive that. Bare destinations restore from it
+/// directly; container destinations load it into the container afterwards.
+struct DestinationStage {
+    /// The destination's host, addressed as a bare target.
+    host: targets::TargetLocator,
+    stage: PathBuf,
+    /// Names what the stage holds; a stage whose marker differs is discarded.
+    marker: PathBuf,
+    container: Option<ContainerStage>,
+}
+
+struct ContainerStage {
+    engine: &'static str,
+    container_id: String,
+    /// The Move's staging inside the container, the source of the restore.
+    stage: PathBuf,
+}
+
+/// The destination host of a target template, addressed as a bare target.
+fn template_host(template: &mj_core::config::TargetTemplate) -> Option<targets::TargetLocator> {
+    use mj_core::config::TargetTemplate as T;
+    let ssh = |ssh: &mj_core::config::SshConnection| targets::TargetLocator::SshBare {
+        ssh: targets::SshTarget::from(ssh),
+        workspace: String::new(),
+        worker_id: None,
+    };
+    Some(match template {
+        T::SshBare { ssh: target, .. }
+        | T::SshPodman { ssh: target, .. }
+        | T::SshDocker { ssh: target, .. }
+        | T::SshAppleContainer { ssh: target, .. } => ssh(target),
+        T::LocalBare | T::LocalPodman { .. } | T::LocalDocker { .. } | T::AppleContainer { .. } => {
+            targets::TargetLocator::LocalBare {
+                worker_root: String::new(),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Where a host holds a Move's staging and marker: the state directory of
+/// the host's account, or the controller's data directory for a local host.
+fn host_stage_paths(host: &targets::TargetLocator, operation_id: &str) -> (PathBuf, PathBuf) {
+    let root = match host {
+        targets::TargetLocator::LocalBare { .. } => mj_core::config::data_dir().join("move-stage"),
+        _ => PathBuf::from(".local/share/hel/move-stage"),
+    };
+    (
+        root.join(operation_id),
+        root.join(format!("{operation_id}.marker")),
+    )
+}
+
+fn destination_stage(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    operation_id: &str,
+) -> Result<DestinationStage> {
+    use targets::TargetLocator as L;
+    let host = match backend {
+        L::LocalBare { .. } | L::AwsEc2 { .. } | L::SshBare { .. } => backend.clone(),
+        L::LocalPodman { .. } | L::LocalDocker { .. } | L::AppleContainer { .. } => L::LocalBare {
+            worker_root: String::new(),
+        },
+        L::SshPodman { ssh, .. }
+        | L::SshDocker { ssh, .. }
+        | L::SshAppleContainer { ssh, .. }
+        | L::SshNitro { ssh, .. } => L::SshBare {
+            ssh: ssh.clone(),
+            workspace: String::new(),
+            worker_id: None,
+        },
+    };
+    let (stage, marker) = host_stage_paths(&host, operation_id);
+    let container = match (backend.container_engine(), backend) {
+        (
+            Some(engine),
+            L::LocalPodman { container_id, .. }
+            | L::LocalDocker { container_id, .. }
+            | L::AppleContainer { container_id, .. }
+            | L::SshPodman { container_id, .. }
+            | L::SshDocker { container_id, .. }
+            | L::SshAppleContainer { container_id, .. }
+            | L::SshNitro { container_id, .. },
+        ) => Some(ContainerStage {
+            engine,
+            container_id: container_id.clone(),
+            // Where the copy always went inside the container. The session's
+            // worker root does not exist before the worker is installed; the
+            // load creates it, and the restore's helper lands beside it.
+            stage: mj_core::target_path::join(
+                Path::new(&targets::worker_root(backend, session_id)?),
+                Path::new(&format!("move-{operation_id}")),
+            ),
+        }),
+        _ => None,
+    };
+    Ok(DestinationStage {
+        host,
+        stage,
+        marker,
+        container,
+    })
+}
+
+/// What the staged files are: the Move, its sealed checkpoint, and the exact
+/// capture being copied. A retry that sealed again, or captured different
+/// files, gets an empty stage instead of rsync's comparison against another
+/// Move's files.
+fn destination_stage_identity(
+    operation: &MoveOperation,
+    transfer: &WorkspaceTransfer,
+) -> Result<String> {
+    let checkpoint = operation
+        .restore_artifact()
+        .context("Move has no sealed checkpoint")?;
+    let manifest = std::fs::read(transfer.controller_stage.join("move-workspace.json"))
+        .context("read the captured workspace manifest")?;
+    Ok(format!(
+        "{} {} {}",
+        operation.operation_id,
+        checkpoint.sha256,
+        lower_hex(Sha256::digest(manifest))
+    ))
+}
+
+/// Keep the stage when it holds what this Move copies; otherwise empty it.
+fn prepare_destination_stage(
+    executor: &(impl CommandExecutor + Sync),
+    destination: &DestinationStage,
+    identity: &str,
+) -> Result<()> {
+    let script = r#"set -eu
+stage=$1; marker=$2; identity=$3
+if [ "$(cat -- "$marker" 2>/dev/null || true)" != "$identity" ]; then
+    rm -rf -- "$stage" "$marker"
+fi
+# The capture holds private files; rsync restores the source's directory
+# modes inside the stage, so the stage's parent is what keeps others out.
+umask 077
+parent=$(dirname -- "$stage")
+mkdir -p -- "$parent"
+chmod -- 700 "$parent"
+mkdir -p -- "$stage"
+printf '%s' "$identity" > "$marker"
+"#;
+    super::super::execute_checked(
+        executor,
+        targets::locator_command(
+            SshTrafficClass::Control,
+            &destination.host,
+            vec![
+                "sh".into(),
+                "-c".into(),
+                script.into(),
+                "prepare-move-stage".into(),
+                destination.stage.to_string_lossy().into_owned(),
+                destination.marker.to_string_lossy().into_owned(),
+                identity.into(),
+            ],
+        )
+        .purpose("prepare destination Move staging"),
+    )
+    .map(|_| ())
+}
+
+/// Replace the container's staging with the host's complete copy. The
+/// container is disposable and the copy is local to its host.
+fn load_container_stage(
+    executor: &(impl CommandExecutor + Sync),
+    destination: &DestinationStage,
+    container: &ContainerStage,
+) -> Result<()> {
+    let engine = targets::engine_shell_words(container.engine);
+    let script = format!(
+        r#"set -euo pipefail
+{engine} exec "$2" rm -rf -- "$3"
+{engine} exec "$2" mkdir -p -- "$3"
+tar cf - -C "$1" . | {engine} exec -i "$2" tar xpf - --no-same-owner -C "$3"
+"#
+    );
+    super::super::execute_checked(
+        executor,
+        targets::locator_command(
+            SshTrafficClass::Bulk,
+            &destination.host,
+            vec![
+                "bash".into(),
+                "-c".into(),
+                script,
+                "load-move-stage".into(),
+                destination.stage.to_string_lossy().into_owned(),
+                container.container_id.clone(),
+                container.stage.to_string_lossy().into_owned(),
+            ],
+        )
+        .purpose("load destination Move staging into the container"),
+    )
+    .map(|_| ())
+}
+
 fn utility(
     executor: &(impl CommandExecutor + Sync),
     backend: &targets::TargetLocator,
@@ -238,6 +444,9 @@ const RSYNC_TRANSFER_OPTIONS: [&str; 5] = [
 
 const RSYNC_REQUIREMENT: &str = "Move needs rsync with support for recursive transfers, \
 permissions, timestamps and partial files (including --partial-dir); install rsync";
+
+const DESTINATION_HOST_RSYNC_REQUIREMENT: &str = "Move needs rsync with support for recursive transfers, \
+permissions, timestamps and partial files (including --partial-dir) on the destination host; install rsync there";
 
 const CONTAINER_RSYNC_REQUIREMENT: &str = "Move needs rsync with support for recursive transfers, \
 permissions, timestamps and partial files (including --partial-dir); add rsync to the container image";
@@ -845,45 +1054,65 @@ impl Controller {
             mj_core::config::TargetTemplate::SshBare { ssh, .. } => (Some(ssh), None, None),
             _ => (None, None, None),
         };
-        let mut arguments =
-            if let (Some(engine), Some(image)) = (destination_engine, destination_image) {
-                let mut arguments = vec![
+        // The copy lands on the destination host (rsync, and bash for loading
+        // a container from it); a container image only has to carry tar.
+        let at_destination_host = |arguments: Vec<String>| {
+            if let Some(ssh) = destination_ssh {
+                targets::ssh_command_owned(
+                    SshTrafficClass::Control,
+                    &targets::SshTarget::from(ssh),
+                    arguments,
+                )
+            } else {
+                let mut arguments = arguments;
+                let program = arguments.remove(0);
+                CommandSpec::new(program, arguments)
+            }
+        };
+        let mut destination_checks = vec![(
+            at_destination_host(rsync_probe()).purpose("check destination Move transport"),
+            if destination_engine.is_some() {
+                DESTINATION_HOST_RSYNC_REQUIREMENT
+            } else {
+                RSYNC_REQUIREMENT
+            },
+        )];
+        if let (Some(engine), Some(image)) = (destination_engine, destination_image) {
+            destination_checks.push((
+                at_destination_host(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "command -v bash && command -v tar".into(),
+                ])
+                .purpose("check destination Move shell"),
+                "Move needs bash and tar on the destination host to load its container",
+            ));
+            destination_checks.push((
+                at_destination_host(vec![
                     engine.into(),
                     "run".into(),
                     "--rm".into(),
                     "--entrypoint".into(),
-                    "rsync".into(),
+                    "sh".into(),
                     image.into(),
-                ];
-                arguments.extend(rsync_probe_arguments());
-                arguments
-            } else {
-                rsync_probe()
-            };
-        let command = if let Some(ssh) = destination_ssh {
-            targets::ssh_command_owned(
-                SshTrafficClass::Control,
-                &targets::SshTarget::from(ssh),
-                arguments,
-            )
-        } else {
-            let program = arguments.remove(0);
-            CommandSpec::new(program, arguments)
-        };
-        match executor.execute(&command.purpose("check destination Move transport")) {
-            Ok(output) if output.status == 0 => {}
-            Ok(output) => assessment.blockers.push(format!(
-                "Destination: {}. Update the target image or install rsync there: {}",
-                if destination_engine.is_some() {
-                    CONTAINER_RSYNC_REQUIREMENT
-                } else {
-                    RSYNC_REQUIREMENT
-                },
-                String::from_utf8_lossy(&output.stderr)
-            )),
-            Err(error) => assessment
-                .blockers
-                .push(format!("Destination transport check failed: {error:#}")),
+                    "-c".into(),
+                    "command -v tar".into(),
+                ])
+                .purpose("check destination Move container image"),
+                "Move needs tar in the container image; add tar to the image",
+            ));
+        }
+        for (command, requirement) in destination_checks {
+            match executor.execute(&command) {
+                Ok(output) if output.status == 0 => {}
+                Ok(output) => assessment.blockers.push(format!(
+                    "Destination: {requirement}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )),
+                Err(error) => assessment
+                    .blockers
+                    .push(format!("{}: {error:#}", command.purpose)),
+            }
         }
         let destination_ssh = destination_ssh.map(targets::SshTarget::from);
         if let mj_core::config::TargetTemplate::LocalPodman { container }
@@ -933,6 +1162,24 @@ impl Controller {
                     &mut assessment,
                 );
             }
+            // The resumable copy waits on the host's state directory until
+            // the container holds its own.
+            let staging_root = if destination_ssh.is_some() {
+                PathBuf::from(".")
+            } else {
+                mj_core::config::data_dir()
+            };
+            storage_probe(
+                executor,
+                at_host(destination_ssh.as_ref(), storage_arguments(&staging_root))
+                    .purpose("check destination host staging space"),
+                "Destination host staging",
+                // Its own allocation: on a shared filesystem it is a third
+                // simultaneous copy, not the container's two again.
+                "destination-host-staging",
+                1,
+                &mut assessment,
+            );
         } else {
             let path = match target {
                 mj_core::config::TargetTemplate::SshBare {
@@ -1114,10 +1361,20 @@ impl Controller {
             self.state.sessions[id].target != transfer.source.target,
             "Move destination reuses the source environment; refusing to overwrite it"
         );
-        let stage = mj_core::target_path::join(
-            Path::new(&targets::worker_root(&layout.backend, id)?),
-            Path::new(&format!("move-{}", operation.operation_id)),
-        );
+        // The copy waits on the destination host, outside the container that
+        // a failed attempt removes, so a retry or the next daemon resumes it.
+        let destination = destination_stage(&layout.backend, id, &operation.operation_id)?;
+        let identity = destination_stage_identity(&operation, &transfer)?;
+        prepare_destination_stage(executor, &destination, &identity)?;
+        copy_workspace(
+            executor,
+            &destination.host,
+            &destination.stage,
+            &transfer.controller_stage,
+            true,
+        )?;
+        // The restore's helper installs into the session's worker root, which
+        // nothing else creates before the worker is installed.
         super::super::execute_checked(
             executor,
             targets::command_on_locator(
@@ -1127,18 +1384,18 @@ impl Controller {
                 vec![
                     "mkdir".into(),
                     "-p".into(),
-                    stage.to_string_lossy().into_owned(),
+                    targets::worker_root(&layout.backend, id)?,
                 ],
-                "create destination Move staging",
+                "create destination worker root",
             )?,
         )?;
-        copy_workspace(
-            executor,
-            &layout.backend,
-            &stage,
-            &transfer.controller_stage,
-            true,
-        )?;
+        let stage = match &destination.container {
+            Some(container) => {
+                load_container_stage(executor, &destination, container)?;
+                container.stage.clone()
+            }
+            None => destination.stage.clone(),
+        };
         // The transfer names each repository as the source did. A host
         // checkout holds one repository; a bundle workspace was cloned where
         // `move_destination_bundle` said, under the bundle's ids.
@@ -1254,9 +1511,109 @@ impl Controller {
         if transfer.controller_stage.exists() {
             std::fs::remove_dir_all(&transfer.controller_stage)?;
         }
+        self.remove_destination_stage(&operation.operation_id, id, executor);
         operation.workspace_transfer.as_mut().unwrap().phase = WorkspaceTransferPhase::Ready;
         crate::database::save_move_operation(operation)?;
         Ok(())
+    }
+
+    /// The Move finished: its host staging has no further use. A leftover
+    /// does not undo the Move, so the failure is reported, not returned.
+    fn remove_destination_stage(
+        &self,
+        operation_id: &str,
+        id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) {
+        let removed = self.session_export_layout(id, executor).and_then(|layout| {
+            let destination = destination_stage(&layout.backend, id, operation_id)?;
+            // The container's copy is a second full capture; it goes with
+            // the host's once the restored workspace is the only one.
+            if let Some(container) = &destination.container {
+                super::super::execute_checked(
+                    executor,
+                    targets::locator_command(
+                        SshTrafficClass::Control,
+                        &layout.backend,
+                        vec![
+                            "rm".into(),
+                            "-rf".into(),
+                            "--".into(),
+                            container.stage.to_string_lossy().into_owned(),
+                        ],
+                    )
+                    .purpose("remove completed container Move staging"),
+                )?;
+            }
+            super::super::execute_checked(
+                executor,
+                targets::locator_command(
+                    SshTrafficClass::Control,
+                    &destination.host,
+                    vec![
+                        "rm".into(),
+                        "-rf".into(),
+                        "--".into(),
+                        destination.stage.to_string_lossy().into_owned(),
+                        destination.marker.to_string_lossy().into_owned(),
+                    ],
+                )
+                .purpose("remove completed destination Move staging"),
+            )
+        });
+        if let Err(error) = removed {
+            tracing::warn!(session_id = id, operation_id, error = %format!("{error:#}"),
+                "could not remove the completed Move's staging on the destination host");
+            executor.notify_notice("The Move finished, but its temporary staging on the destination host could not be removed");
+        }
+    }
+
+    /// A Move that will never resume (destroyed, or replaced by another):
+    /// remove its host staging. The host is the one the Move's own target
+    /// names, so no record of where it copied is needed. The container copy
+    /// went with its container. Best effort: the host may be gone with the
+    /// environment, and a leftover must not block the destroy or the new Move.
+    pub(in crate::controller) fn remove_abandoned_move_stage(
+        &self,
+        operation: &MoveOperation,
+        executor: &(impl CommandExecutor + Sync),
+    ) {
+        if operation.workspace_transfer.is_none() {
+            return;
+        }
+        let Some(template) = operation
+            .selection
+            .target_template_id
+            .as_deref()
+            .and_then(|target| self.config.targets.get(target))
+        else {
+            return;
+        };
+        let backend = match template_host(template) {
+            Some(backend) => backend,
+            None => return,
+        };
+        let (stage, marker) = host_stage_paths(&backend, &operation.operation_id);
+        let removed = super::super::execute_checked(
+            executor,
+            targets::locator_command(
+                SshTrafficClass::Control,
+                &backend,
+                vec![
+                    "rm".into(),
+                    "-rf".into(),
+                    "--".into(),
+                    stage.to_string_lossy().into_owned(),
+                    marker.to_string_lossy().into_owned(),
+                ],
+            )
+            .purpose("remove abandoned destination Move staging"),
+        );
+        if let Err(error) = removed {
+            tracing::warn!(session_id = %operation.selection.session_id,
+                operation_id = %operation.operation_id, error = %format!("{error:#}"),
+                "could not remove an abandoned Move's staging on its destination host");
+        }
     }
 
     pub(in crate::controller) fn rollback_move_destination(
@@ -1348,6 +1705,169 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1579: a resumed Move re-sent every file because its partial copy lived in the
+    // container that rollback removes; the host stage must keep it, and only for the same capture.
+    // Needs a POSIX shell and rsync.
+    #[cfg(unix)]
+    #[test]
+    fn destination_stage_resumes_the_same_capture_and_discards_a_different_one() {
+        use std::os::unix::fs::MetadataExt;
+        let directory = tempfile::tempdir().unwrap();
+        let capture = directory.path().join("capture");
+        std::fs::create_dir_all(&capture).unwrap();
+        // More than a pipe buffer, so a re-send could not be mistaken for a tiny rewrite.
+        std::fs::write(capture.join("data"), vec![9; 256 * 1024 + 1]).unwrap();
+        let stage = |root: &Path| DestinationStage {
+            host: targets::TargetLocator::LocalBare {
+                worker_root: String::new(),
+            },
+            stage: root.join("stage"),
+            marker: root.join("stage.marker"),
+            container: None,
+        };
+        let first_daemon = stage(directory.path());
+        let executor = &targets::ProcessExecutor;
+        prepare_destination_stage(executor, &first_daemon, "move-1 checkpoint-a manifest-a")
+            .unwrap();
+        copy_workspace(
+            executor,
+            &first_daemon.host,
+            &first_daemon.stage,
+            &capture,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(directory.path()).unwrap().mode() & 0o777,
+            0o700,
+            "the staging parent must keep other host users out of the capture"
+        );
+        let sent = std::fs::metadata(first_daemon.stage.join("data")).unwrap();
+        // The interrupted attempt also left its partial file for rsync to continue.
+        std::fs::create_dir_all(first_daemon.stage.join(".move-partial")).unwrap();
+        std::fs::write(first_daemon.stage.join(".move-partial/half"), b"partial").unwrap();
+        drop(first_daemon);
+
+        // The next daemon derives the same stage from the persisted Move alone.
+        let next_daemon = stage(directory.path());
+        prepare_destination_stage(executor, &next_daemon, "move-1 checkpoint-a manifest-a")
+            .unwrap();
+        assert!(next_daemon.stage.join(".move-partial/half").exists());
+        copy_workspace(
+            executor,
+            &next_daemon.host,
+            &next_daemon.stage,
+            &capture,
+            true,
+        )
+        .unwrap();
+        let resumed = std::fs::metadata(next_daemon.stage.join("data")).unwrap();
+        assert_eq!(
+            sent.ino(),
+            resumed.ino(),
+            "rsync rewrote a file the destination already had"
+        );
+
+        // A Move that sealed a different checkpoint must not reuse these files.
+        prepare_destination_stage(executor, &next_daemon, "move-1 checkpoint-b manifest-a")
+            .unwrap();
+        assert!(!next_daemon.stage.join("data").exists());
+        assert!(!next_daemon.stage.join(".move-partial").exists());
+        assert!(next_daemon.stage.is_dir());
+    }
+
+    // Hard-won: #1579: a destroyed or replaced Move left its host staging, a full workspace copy,
+    // behind, because only a finished Move removed it.
+    // Needs a POSIX shell.
+    #[cfg(unix)]
+    #[test]
+    fn an_abandoned_move_removes_the_staging_it_left_on_the_host() {
+        use crate::controller::test_support::{
+            IsolatedTest, checkpoint_test_session, resume_compatibility_config,
+        };
+        if std::env::var_os("MJ_MOVE_ABANDONED_STAGE_TEST").is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let name = crate::controller::test_support::test_name(
+                module_path!(),
+                "an_abandoned_move_removes_the_staging_it_left_on_the_host",
+            );
+            IsolatedTest::new(name)
+                .isolated_store(directory.path())
+                .env("MJ_MOVE_ABANDONED_STAGE_TEST", "1")
+                .run();
+            return;
+        }
+        let mut session = checkpoint_test_session("abandoned-move");
+        session.target_template_id = "local-bare".into();
+        let mut operation = super::super::tests::source_recovery_operation(&session);
+        operation.selection.target_template_id = Some("local-bare".into());
+        operation.workspace_transfer = Some(WorkspaceTransfer {
+            assessment: Default::default(),
+            source: Box::new(session),
+            source_stage: "unused".into(),
+            controller_stage: "unused".into(),
+            phase: WorkspaceTransferPhase::SourceStopped,
+        });
+        let host = targets::TargetLocator::LocalBare {
+            worker_root: String::new(),
+        };
+        let (stage, marker) = host_stage_paths(&host, &operation.operation_id);
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("copied"), vec![1; 256 * 1024 + 1]).unwrap();
+        std::fs::write(&marker, "identity").unwrap();
+        let other = host_stage_paths(&host, "another-move").0;
+        std::fs::create_dir_all(&other).unwrap();
+
+        let controller = Controller {
+            config: resume_compatibility_config(),
+            state: Default::default(),
+        };
+        controller.remove_abandoned_move_stage(&operation, &targets::ProcessExecutor);
+
+        assert!(!stage.exists() && !marker.exists());
+        assert!(
+            other.exists(),
+            "another Move's staging is not this Move's to remove"
+        );
+    }
+
+    // The stage's location is fixed by the Move's operation id, so a daemon that never saw the
+    // first attempt finds it.
+    #[test]
+    fn destination_stage_is_found_again_from_the_operation_id_alone() {
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: "/destination/workers/s".into(),
+        };
+        let a = destination_stage(&backend, "session", "move-abc").unwrap();
+        let b = destination_stage(&backend, "session", "move-abc").unwrap();
+        assert_eq!(a.stage, b.stage);
+        assert_eq!(a.marker, b.marker);
+        assert_ne!(
+            a.stage,
+            destination_stage(&backend, "session", "move-def")
+                .unwrap()
+                .stage
+        );
+        assert!(a.container.is_none());
+    }
+
+    // Hard-won: #1579: the container staging sat outside the session's worker root, which does not
+    // exist before the worker is installed, so the restore's helper had nowhere to land.
+    #[test]
+    fn container_staging_lives_in_the_session_worker_root_the_load_creates() {
+        let session = "0123456789abcdef0123456789abcdef";
+        let backend = targets::TargetLocator::LocalPodman {
+            container_id: mj_core::targets::move_resource_name(session, "move-abc").unwrap(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let stage = destination_stage(&backend, session, "move-abc").unwrap();
+        assert_eq!(
+            stage.container.unwrap().stage,
+            Path::new(&targets::worker_root(&backend, session).unwrap()).join("move-move-abc")
+        );
+    }
 
     // Hard-won: 049656544: retained-source cleanup deleted a referenced checkout before refusing.
     #[cfg(unix)]
