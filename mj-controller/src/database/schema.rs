@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 132;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 134;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2540,9 +2540,12 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
         transaction.commit()?;
     }
-    // Compatible: a standalone table that older readers and writers neither
-    // read nor rewrite. Finished review output belongs to the review, not to
-    // its reviewer child sessions, which are destroyed when their role ends.
+    // Breaking: finished review output is durable data that a revision-133
+    // daemon cannot preserve. It settles reviewers, clears the active group
+    // and prunes their handbacks without writing `review_reports`, which
+    // would lose a review's output irrecoverably. Refuse its reads and
+    // writes before such a review can be lost. The table itself is
+    // standalone; the floor is raised for this preservation reason only.
     // The trigger removes a session's reports with the session itself, so a
     // destroyed session cannot leave unreachable handbacks behind. A later
     // migration that recreates `sessions` drops this trigger and must create
@@ -2573,6 +2576,7 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
                  AFTER DELETE ON sessions BEGIN
                      DELETE FROM review_reports WHERE parent_session_id = OLD.session_id;
                  END;
+             UPDATE schema_compatibility SET minimum_compatible_version = 134 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (134, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
              PRAGMA user_version = 134;
@@ -4130,7 +4134,16 @@ mod reader_tests {
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(70).is_err());
-        assert!(state.ensure_supported_by(132).is_ok());
+        assert!(
+            state
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+                .is_ok()
+        );
+        assert!(
+            state
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION - 1)
+                .is_err()
+        );
         assert_eq!(upgraded.query_row("SELECT close_requested_operation_id FROM session_moves WHERE session_id='source'", [], |row| row.get::<_, Option<String>>(0)).unwrap(), None);
         let preserved: String = upgraded
             .query_row(
@@ -5389,8 +5402,8 @@ mod reader_tests {
     }
 
     #[test]
-    fn move_close_intent_migration_preserves_revision_132_writers() {
-        const NAME: &str = "move_close_intent_migration_preserves_revision_132_writers";
+    fn move_close_intent_migration_preserves_older_column_writes() {
+        const NAME: &str = "move_close_intent_migration_preserves_older_column_writes";
         const CHILD: &str = "MJ_TEST_MOVE_CLOSE_MIGRATION";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
@@ -5407,8 +5420,9 @@ mod reader_tests {
             save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
         }
         stamp_schema_version(&path, 132);
-        // Exact explicit-column UPSERT used by revision-132 writers. It must
-        // preserve future columns on updates and default them to NULL on insert.
+        // Exact explicit-column UPSERT a revision-132 writer issues. It still
+        // preserves the later column mechanically; revision 134 refuses such
+        // a writer outright because it cannot record finished review output.
         let older_write = |connection: &Connection, session: &str, operation: &str| {
             connection.execute("INSERT INTO session_moves(session_id, operation_id, operation_json,source_environment_id)
                 VALUES (?1,?2,?3,(SELECT environment_id FROM environment_bindings WHERE session_id=?1))
@@ -5437,8 +5451,9 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let schema = read_schema_state(&writer).unwrap();
         assert_eq!(schema.revision, 134);
-        assert_eq!(schema.minimum_compatible, Some(132));
-        assert!(schema.ensure_supported_by(132).is_ok());
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(schema.ensure_supported_by(133).is_err());
+        assert!(schema.ensure_supported_by(134).is_ok());
         let intent = |session: &str| {
             writer
                 .query_row(

@@ -5571,6 +5571,81 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
     assert_eq!(remaining, 0);
 }
 
+/// A reviewer that ended without handing back fails its role. Its child may
+/// still hold a handback from an earlier command, which the review host
+/// rejected as this role's outcome; the finished report must not present that
+/// text as this review's findings.
+#[test]
+fn a_failed_reviewer_keeps_no_handback_from_another_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("failed-reviewer.sqlite3");
+    let owner = "failed-review-owner";
+    let child = "failed-review-child";
+    for id in [owner, child] {
+        save_session_to(&database, &session(id, "project-1")).unwrap();
+    }
+    record_subagent_handback_to(
+        &database,
+        child,
+        &mj_core::subagent::SubagentHandback {
+            command_id: "another-command".into(),
+            message: "Findings from an earlier task.".into(),
+            recorded_at_ms: 100,
+        },
+    )
+    .unwrap();
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+        },
+        "failed-review".into(),
+        std::num::NonZeroUsize::MIN,
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    driver.role_failed(
+        "reviewer-1",
+        Some(child),
+        "the reviewer's session ended before it handed back",
+    );
+    let state = TurnReviewState {
+        active: Some("failed-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![Default::default()],
+            registrations: vec![ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "review-key".into(),
+                child_session_id: Some(child.into()),
+            }],
+        }),
+        ..Default::default()
+    };
+    close_turn_review_state_in(&database, owner, &state, FinishedReviewResolution::Failed).unwrap();
+    let finished = finished_review_in(&database, owner, None)
+        .unwrap()
+        .expect("the failed review is recorded");
+    assert_eq!(finished.resolution, FinishedReviewResolution::Failed);
+    assert_eq!(finished.roles.len(), 1);
+    assert!(matches!(
+        finished.roles[0].verdict,
+        Some(mj_core::review::verdict::ReviewVerdict::Failed { .. })
+    ));
+    assert!(
+        finished.roles[0].handback.is_none(),
+        "a rejected handback is not this review's output"
+    );
+}
+
 // Hard-won: ee65b804b: a follow-up for a never-reviewed session had no row to mark and was never durable.
 
 /// A projection page must carry the whole turn record, not just the transcript

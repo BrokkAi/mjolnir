@@ -201,20 +201,24 @@ fn record_review_reports(
 ) -> Result<()> {
     let current = state.active_group.as_ref();
     match (previous, current) {
-        (Some(previous), Some(current)) if same_review(previous, current) => {
+        // A different review replaced the stored one without a close: the old
+        // one still has a durable outcome, which its own driver answers, and
+        // the new one starts over.
+        (Some(previous), Some(current)) if !same_review(previous, current) => {
+            sync_and_finalize_previous(connection, session_id, previous)?;
             sync_review_report(connection, session_id, current)?;
+        }
+        (Some(previous), None) => {
+            sync_and_finalize_previous(connection, session_id, previous)?;
+        }
+        (_, Some(current)) => {
+            sync_review_report(connection, session_id, current)?;
+            // The close decision, not the presence of an earlier row, decides
+            // that this review is finished: a first save may already be it.
             if let Some(resolution) = close {
                 finalize_review_report(connection, session_id, current, resolution)?;
             }
         }
-        (Some(previous), Some(current)) => {
-            sync_and_finalize_previous(connection, session_id, previous, close)?;
-            sync_review_report(connection, session_id, current)?;
-        }
-        (Some(previous), None) => {
-            sync_and_finalize_previous(connection, session_id, previous, close)?;
-        }
-        (None, Some(current)) => sync_review_report(connection, session_id, current)?,
         (None, None) => {}
     }
     Ok(())
@@ -228,14 +232,13 @@ fn sync_and_finalize_previous(
     connection: &Connection,
     session_id: &str,
     previous: &ActiveReviewGroup,
-    close: Option<FinishedReviewResolution>,
 ) -> Result<()> {
     sync_review_report(connection, session_id, previous)?;
     finalize_review_report(
         connection,
         session_id,
         previous,
-        close.unwrap_or_else(|| inferred_resolution(previous)),
+        inferred_resolution(previous),
     )
 }
 
@@ -281,7 +284,7 @@ fn sync_review_report(
         let profile = reviewer.map_or("", |reviewer| reviewer.profile.as_str());
         let model = reviewer.and_then(|reviewer| reviewer.main.model.as_deref());
         let effort = reviewer.and_then(|reviewer| reviewer.main.effort.as_deref());
-        let handback = stored_handback(connection, child)?;
+        let handback = accepted_handback(connection, child, slot)?;
         let verdict = slot
             .outcome
             .as_ref()
@@ -325,8 +328,25 @@ fn sync_review_report(
     Ok(())
 }
 
-fn stored_handback(connection: &Connection, child: Option<&str>) -> Result<Option<String>> {
-    let Some(child) = child else {
+/// The text a role's own outcome was settled from, if the host accepted a
+/// handback for it. Only Clean and Findings outcomes are accepted reports: a
+/// failed role ended without one, and a pending or cancelled role was never
+/// settled. `subagent_handbacks` keeps the newest handback of a child, which
+/// can belong to another command, so retaining it without that check would
+/// present unrelated findings beside a failed verdict.
+fn accepted_handback(
+    connection: &Connection,
+    child: Option<&str>,
+    slot: &mj_core::review::driver::ReviewerOutcomeSlot,
+) -> Result<Option<String>> {
+    let accepted = matches!(
+        slot.outcome,
+        Some(
+            mj_core::review::verdict::ReviewVerdict::Clean
+                | mj_core::review::verdict::ReviewVerdict::Findings { .. }
+        )
+    );
+    let Some(child) = child.filter(|_| accepted) else {
         return Ok(None);
     };
     Ok(connection

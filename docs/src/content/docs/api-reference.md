@@ -915,9 +915,11 @@ review does. An unknown review id answers `404`, and an unknown session answers
 review id, its finish time and resolution (`completed`, `failed`, or
 `cancelled`), and one row per reviewing role. Each row names the role, its
 label, its command id, the reviewer child session id, the reviewer's profile,
-model, and effort, the complete handback text, the role's verdict, and the
-reviewer turn with its token usage. The child session may no longer exist; the
-turn is read from retained accounting.
+model, and effort, the role's verdict, and the reviewer turn with its token
+usage. `handback` carries the text the role's outcome was settled from, so it is
+present only when that reviewer handed back and the review used its report; a
+failed, pending, or cancelled role has none. The child session may no longer
+exist; the turn is read from retained accounting.
 
 ### Resume a suspended session
 

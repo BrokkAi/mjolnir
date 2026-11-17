@@ -23,6 +23,8 @@ A person can see it work by running a review, letting it finish, and running `mj
 - [x] (2026-11-17T02:31Z) Update the CLI, API, and review documentation.
 - [x] (2026-11-17T02:31Z) Run workspace clippy and the full suites of the touched crates. `brokk-mj-core` (659) and `brokk-mjolnir` (all targets) pass; the full `brokk-mj-controller` suite reports 2675 passed and four failures that reproduce alone on this host and are outside the touched code (a root-readability permission fixture and three quota-based spawn-selection tests).
 - [x] (2026-11-17T04:05Z) Review round 1: reviewers found that destroyed parent sessions left their reports behind. Added the `review_reports_session_destroyed` trigger to migration 134, extended the database test to assert the cleanup, and re-ran the schema reader tests (45), the review-host tests (75), and workspace clippy.
+- [x] (2026-11-17T05:20Z) Review round 2: reviewers found the migration left the compatibility floor unchanged although older writers lose review output, and that a stale handback from another command could be retained for a failed role. Raised the floor to 134 (`MINIMUM_COMPATIBLE_VERSION`, `move_close_intent` assertions, `ec2_move_ownership` assertion), and retained a handback only for Clean/Findings outcomes with a regression.
+- [x] (2026-11-17T05:40Z) Finalization follows the explicit close flag rather than the presence of an earlier row, and a replaced review is finalized from its own driver. Re-ran the database suite (264), the review-host suite (75), and workspace clippy.
 - [ ] Commit and push.
 
 ## Surprises & Discoveries
@@ -44,8 +46,14 @@ A person can see it work by running a review, letting it finish, and running `mj
 - Decision: store finished review output in a new standalone `review_reports` table instead of adding a field to `turn_review_state` or `ReviewDriverSnapshot`.
   Rationale: a new table is compatible with older readers and writers, and handback text can be large. A field in the driver snapshot would be dropped by an older daemon that rewrote the review state during a downgrade, which the store-compatibility rules treat as a breaking change. The review owns its output; the reviewer child is transient.
 
+- Decision: raise the store's compatibility floor to 134.
+  Rationale: a revision-133 daemon can settle reviewers, clear the active group, and prune their handbacks without writing `review_reports`, which loses that review's output irrecoverably. AGENTS.md treats preservation of new data by older updates as part of compatibility, so this is a breaking change even though the table itself is standalone. Round-1 review raised this.
+
 - Decision: snapshot handbacks during normal review-state saves rather than only at close.
   Rationale: the review host destroys each reviewer child as soon as its role settles, and `save_state_to` prunes `subagent_handbacks` whose relation is gone. Reading the handback on every state save copies it while the child is alive. `COALESCE` in the upsert keeps the last non-null text if a later save cannot read it.
+
+- Decision: retain a handback only when the host settled the role from one (Clean or Findings).
+  Rationale: `subagent_handbacks` keeps a child's newest handback, which can belong to another command. The review host rejects such a report when it decides the role, so copying the text regardless would present unrelated findings beside a failed verdict. A failed, pending, or cancelled role keeps no handback. Round-1 review raised this.
 
 - Decision: a trigger removes a session's reports when its `sessions` row is deleted, rather than relying on callers.
   Rationale: review output belongs to the requesting session, so destroying that session must not leave unreachable handbacks behind. Every operational delete goes through `delete_session_from`, which deletes only the `sessions` row and lets triggers do the rest (as `prompt_history_session_destroyed` and `session_rows_deleted` already do). A trigger therefore covers every deletion path, and a reviewer child's deletion cannot remove its parent's report because the key is the parent's id. Round-1 review raised this gap; the trigger was added to revision 134 while the revision was still unreleased, so the shipped migration is complete rather than followed by a repair.
@@ -115,7 +123,8 @@ The JSON must carry a `review.roles` array whose entries keep `handback`, `model
 
 Acceptance is observable in all three paths:
 
-- The database test builds a two-reviewer review, records handbacks, saves the open state, closes it as completed, deletes both child session rows, clears `subagent_sessions` and `subagent_handbacks`, and still reads both handbacks, both verdicts, both profiles/models/efforts, and the first reviewer's usage. It then deletes the requesting session and asserts that no report row remains.
+- The database test builds a two-reviewer review, records handbacks, saves the open state, closes it as completed, deletes both child session rows, clears `subagent_sessions` and `subagent_handbacks`, and still reads both handbacks, both verdicts, both profiles/models/efforts, and the first reviewer's usage. It then deletes the requesting session and asserts that no report row remains. A second regression asserts that a failed reviewer whose child still holds a handback for another command shows no handback.
+- The migration regressions assert that a store upgraded to revision 134 refuses revision-133 readers and writers, because they would lose a finished review's output.
 - The API test performs the same lifecycle through the isolated writer and assert the HTTP response fields, including `404` for an unknown review id.
 - The CLI parser accepts `mj review show --session s1 --review r1 --json` and defaults `--review` to absent.
 
@@ -199,4 +208,4 @@ In `mj-controller/src/server/api/types.rs`:
 
 The HTTP route is `GET /api/v1/sessions/{session_id}/reviews` with an optional `review` query parameter. The CLI command is `mj review show --session <id> [--review <id>] [--json]`.
 
-Revision note (2026-11-17): initial plan written alongside the implementation; all design decisions above are the ones actually used. The stale review-host test cases were found during the plan's validation step and removed there. Round-1 review added the `review_reports_session_destroyed` trigger; the plan's migration, decision log, progress, and acceptance text were updated with it.
+Revision note (2026-11-17): initial plan written alongside the implementation; all design decisions above are the ones actually used. The stale review-host test cases were found during the plan's validation step and removed there. Round-1 review added the `review_reports_session_destroyed` trigger; the plan's migration, decision log, progress, and acceptance text were updated with it. Round-2 review raised the compatibility floor to 134 and restricted retained handbacks to accepted outcomes; the context, decision log, and acceptance text were updated again.
