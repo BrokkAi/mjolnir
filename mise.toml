@@ -12,12 +12,15 @@ uv = "0.12.20"
 rust = { version = "1.99.1", components = "rustfmt,clippy,llvm-tools-preview", targets = "x86_64-unknown-linux-musl,aarch64-unknown-linux-musl" }
 
 [env]
-PLAYWRIGHT_BROWSERS_PATH = "/ms-playwright"
+PLAYWRIGHT_BROWSERS_PATH = "/opt/ms-playwright"
 RUSTUP_HOME = "/opt/rustup"
 CARGO_HOME = "/opt/cargo"
 
 [settings]
 idiomatic_version_file_enable_tools = ["rust", "node", "python", "go"]
+
+[hooks]
+postinstall = "npx --yes playwright@1.62.1 install --with-deps chromium-headless-shell"
 
 [bootstrap.packages]
 "apt:bash" = "*"
