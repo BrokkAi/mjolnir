@@ -236,6 +236,31 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         Ok(())
     }
 
+    fn yield_admission_if_resumable(&self) -> bool {
+        let owner = self.state.owner();
+        let Some(active) = owner.lifecycle.get(&self.session_id) else {
+            return false;
+        };
+        // A sub-agent close is replayed from its durable request by the next
+        // daemon; other stops have no such record before they commit.
+        if self.operation_id.as_ref() != Some(&active.operation_id)
+            || active.kind != LifecycleKind::Suspend
+            || !owner
+                .controller()
+                .state
+                .subagents
+                .contains_key(&self.session_id)
+        {
+            return false;
+        }
+        active
+            .upgrade_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .is_some()
+    }
+
     fn end_resumable_work(&self, label: &'static str) -> Result<()> {
         // Synchronous callers include workspace copies. Hand the wait off
         // async workers, and let the gate wake it on closure or drain lapse.
