@@ -802,6 +802,27 @@ pub(super) fn worker_binary_upload_plan(
     })
 }
 
+/// Run a worker upload plan. The `scp` byte stream takes as long as the link
+/// needs, so it leaves the operation deadline (and pauses its clock, so the
+/// short commands after it keep the remaining budget); a stalled link is the
+/// SSH connection's keepalive to report, and a cancellation still stops it.
+/// Until now the 15-minute upgrade deadline killed a slow upload and the next
+/// session restarted the same transfer from zero (#1577).
+pub(super) fn execute_worker_upload_plan(
+    executor: &impl CommandExecutor,
+    plan: &CommandPlan,
+) -> Result<()> {
+    for command in &plan.commands {
+        let output = if command.program == "scp" {
+            targets::WithoutDeadline::new(executor).execute(command)?
+        } else {
+            executor.execute(command)?
+        };
+        targets::checked_command_output(command, output)?;
+    }
+    Ok(())
+}
+
 pub(super) fn installed_file_digest_command(
     locator: &targets::TargetLocator,
     path: &str,
