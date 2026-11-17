@@ -248,9 +248,15 @@ def gate(study, items, current, wording, key):
     for item in sample[:10]:
         base = groups['baseline'][item]
         diffs.extend(differences(items[item]['logged'], base, item, 'reproduction'))
-        reference = base.get('response', {}).get('answers', {})
-        # Missing baseline vectors fail the gate rather than making an empty comparison pass.
-        reference = {q: reference.get(q, items[item]['logged'][q]) for q in current}
+        measured = base.get('response', {}).get('answers', {})
+        # A question the baseline did not answer was never measured, so it fails
+        # independence and determinism instead of borrowing the logged vector.
+        for q in current:
+            if q not in measured:
+                for comparison in ('independence', 'determinism'):
+                    diffs.append(dict(item=item, comparison=comparison, question=q, option=None,
+                                      logged=None, actual=None, difference=None))
+        reference = {q: measured[q] for q in current if q in measured}
         diffs.extend(differences(reference, groups['plus'][item], item, 'independence'))
         diffs.extend(differences(reference, groups['repeat'][item], item, 'determinism'))
     measures = {}
