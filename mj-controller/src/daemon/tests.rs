@@ -15319,16 +15319,19 @@ esac
         let id = session.id.clone();
         async move {
             state
-                .start_resume_session(ResumeSessionRequest {
-                    session_id: id,
-                    workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
-                    profile_id: "unconfigured-profile".into(),
-                    target_template_id: "unconfigured-target".into(),
-                    additional_mounts: None,
-                    resource_allocation: None,
-                    discard_queue: false,
-                    repository_preflight: None,
-                })
+                .start_resume_session(
+                    ResumeSessionRequest {
+                        session_id: id,
+                        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
+                        profile_id: "unconfigured-profile".into(),
+                        target_template_id: "unconfigured-target".into(),
+                        additional_mounts: None,
+                        resource_allocation: None,
+                        discard_queue: false,
+                        repository_preflight: None,
+                    },
+                    LifecycleControl::default(),
+                )
                 .await
         }
     });
@@ -15765,4 +15768,45 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
     older.status().await.unwrap();
     drop(older);
     server.await.unwrap();
+}
+
+// Hard-won: 41e5b2ddd: a phone Resume could outlive cancellation while queued for workspace admission.
+#[tokio::test]
+async fn cancelling_resume_retires_its_workspace_wait_without_admission() {
+    let state = test_runtime_state();
+    let workspace_id = "resume-cancellation";
+    let _closing = state
+        .workspace_resume_gate(workspace_id)
+        .write_owned()
+        .await;
+    let control = LifecycleControl::default();
+    let resume = state.start_resume_session(
+        ResumeSessionRequest {
+            session_id: "waiting-resume".into(),
+            workspace_id: workspace_id.into(),
+            profile_id: "profile".into(),
+            target_template_id: "target".into(),
+            additional_mounts: None,
+            resource_allocation: None,
+            discard_queue: false,
+            repository_preflight: None,
+        },
+        control.clone(),
+    );
+    tokio::pin!(resume);
+    assert!(futures::poll!(&mut resume).is_pending());
+    assert!(control.request_cancel("phone cancellation"));
+    let Err(error) = tokio::time::timeout(Duration::from_secs(5), resume)
+        .await
+        .unwrap()
+    else {
+        panic!("cancelled Resume admitted a lifecycle");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("cancelled before workspace admission"),
+        "{error:#}"
+    );
+    assert!(state.owner().lifecycle.is_empty());
 }

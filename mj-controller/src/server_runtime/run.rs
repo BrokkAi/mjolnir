@@ -1318,7 +1318,6 @@ pub(crate) async fn run_server(
                                         Some(mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??)
                                     }
                                     ControllerAction::Resume { session_id, workspace_id, profile_id, target_id, queue, additional_mounts, resource_allocation } => {
-                                        anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
                                         Some(mj_core::runtime::block_on(daemon_runtime.start_resume_session(ResumeSessionRequest {
                                             session_id: session_id.clone(),
                                             workspace_id: workspace_id.clone(),
@@ -1328,7 +1327,7 @@ pub(crate) async fn run_server(
                                             resource_allocation: resource_allocation.clone(),
                                             discard_queue: *queue == ResumeQueueDisposition::Discard,
                                             repository_preflight: None,
-                                        }))??)
+                                        }, control.lifecycle.clone().expect("Resume has a lifecycle control")))??)
                                     }
                                     ControllerAction::Suspend { session_id, acknowledge_unpublished_work } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(session_id.clone(), *acknowledge_unpublished_work, false, control.lifecycle.clone().expect("Suspend has a lifecycle control")))??),
                                     _ => None,

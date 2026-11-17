@@ -636,8 +636,8 @@ impl RuntimeState {
         self: &Arc<Self>,
         record: SessionRecord,
         request_key: String,
+        control: LifecycleControl,
     ) -> Result<StartedLifecycle> {
-        let control = LifecycleControl::default();
         let (accepted, acceptance) = tokio::sync::watch::channel(None);
         let scheduled_at = std::time::Instant::now();
         self.admit_prepared_lifecycle(

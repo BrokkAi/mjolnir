@@ -158,14 +158,11 @@ def failed_launch_retry(lab, cli, record, run, command, environment):
     wait_for(lambda: durable_rows(
         lab, "SELECT failure_generation FROM sessions WHERE session_id=? AND state='error' AND failure_generation > ?",
         (doomed, failure_generation)), "the retry to record another launch error")
-    reached.unlink()
-    continuation.unlink()
+    # Leave the hook open so Destroy can cancel a winning retry without
+    # waiting on a fixture that cannot observe provisioning cancellation.
     retry = subprocess.Popen(command("resume", "--session", doomed, "--json"), env=environment(),
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        cli("destroy", "--session", doomed, "--json")
-    finally:
-        continuation.touch()
+    cli("destroy", "--session", doomed, "--json")
     stdout, stderr = retry.communicate(timeout=WAIT)
     if retry.returncode == 0:
         assert json.loads(stdout)["session_id"] == doomed, stdout

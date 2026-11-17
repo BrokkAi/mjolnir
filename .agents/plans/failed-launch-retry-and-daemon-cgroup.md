@@ -18,7 +18,9 @@ Issue #1584 has two parts.
 - [x] Traced startup-step failure settlement. The parent resolved the startup-step policy below.
 - [x] M2 targeted API and wait tests, terminal event test, web golden, and four-crate Clippy.
 - [x] M2 isolated restart lab, including draft retention, settled prompt dismissal, a second failed retry, and Resume racing Destroy.
-- [x] M2 final lab run with the phone action cancellation check.
+- [x] M2 final lab run.
+- [x] M2 review follow-up shares one cancellation control from phone Resume through daemon admission.
+- [x] M2 review follow-up cancellation tests, controller Clippy, and isolated restart lab.
 - [ ] M1 validation and review.
 
 ## Surprises & Discoveries
@@ -28,6 +30,8 @@ Issue #1584 has two parts.
 - Observation: no Mjolnir code changes the cgroup limits of a running container, and the reproduction found no race between exec and `podman update` or sibling container starts.
 - Observation: startup-step rows lack a structured distinction between pre-handoff failure and other settled failures.
   Evidence: `daemon/state.rs::wait_for_ready_session` formats Error and StartupCleanup as ordinary errors. Its drain forwards the formatted text to `database/startup.rs::fail_unavailable_startup_groups`, which only updates pending grouped rows, but stores them as the generic `failed` phase. `fail_startup_group` can write the same phase for pending steps for other reasons. An in-flight step can also end in `failed` through `rejecting` without an acceptance ordinal. The only legacy difference is human-readable error text. The readiness failure can mark pending tail steps even when the group's head was already delivering. The Decision Log records the resulting dismissal policy.
+
+- Observation: the launch hook deliberately blocks even after cancellation. The Resume and Destroy race leaves the hook released so Destroy can observe the real operation stopping.
 
 ## Decision Log
 
@@ -55,6 +59,10 @@ Issue #1584 has two parts.
 - Decision: publish launch-retry eligibility in the existing runtime feed metadata. The field defaults to empty and the metadata accepts additive fields, so it needs no daemon-client or relay protocol bump.
   Rationale: the viewer and terminal consume the same daemon eligibility projection. Admission and its durable compare-and-set use the same classifier.
   Date/Author: 2026-11-17 / M2 implementer.
+
+- Decision: use the initiating phone action's lifecycle control throughout Resume admission. Shutdown marks the shared control as interrupted so an admitted launch retry keeps its durable create intent.
+  Rationale: cancellation accepted while Resume is waiting for its workspace or lifecycle must reach the same operation that later provisions.
+  Date/Author: 2026-11-17 / M2 review follow-up.
 
 ## Outcomes & Retrospective
 

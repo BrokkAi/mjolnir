@@ -39,7 +39,9 @@ impl RuntimeState {
     /// several-hundred-megabyte buffer and then refused to send it. The
     /// projection is already durable; a viewer reads it from the store.
     pub async fn resume_session(self: &Arc<Self>, request: ResumeSessionRequest) -> Result<()> {
-        let started = self.start_resume_session(request).await?;
+        let started = self
+            .start_resume_session(request, LifecycleControl::default())
+            .await?;
         Self::wait_lifecycle_result(started.result).await?;
         Ok(())
     }
@@ -47,11 +49,15 @@ impl RuntimeState {
     pub(crate) async fn start_resume_session(
         self: &Arc<Self>,
         request: ResumeSessionRequest,
+        control: LifecycleControl,
     ) -> Result<StartedLifecycle> {
-        let _admission = self
-            .workspace_resume_gate(&request.workspace_id)
-            .read_owned()
-            .await;
+        let _admission = tokio::select! {
+            biased;
+            () = crate::recovery_gate::wait_until_cancelled(&control.cancelled) => {
+                bail!("Resume cancelled before workspace admission");
+            }
+            guard = self.workspace_resume_gate(&request.workspace_id).read_owned() => guard,
+        };
         let retry = blocking({
             let id = request.session_id.clone();
             move || crate::database::read_failed_launch_record(&id)
@@ -79,7 +85,7 @@ impl RuntimeState {
                 ).into());
             }
             return self
-                .start_failed_launch_retry(record, serde_json::to_string(&request)?)
+                .start_failed_launch_retry(record, serde_json::to_string(&request)?, control)
                 .await;
         }
         let session_id = request.session_id.clone();
@@ -94,7 +100,7 @@ impl RuntimeState {
             .admit_prepared_lifecycle(
                 session_id,
                 LifecycleKind::Resume,
-                super::lifecycle::LifecycleStart::request(key, Some(workspace_id), None),
+                super::lifecycle::LifecycleStart::request(key, Some(workspace_id), Some(control)),
                 Some(acceptance),
                 move |state, session_id, cancelled, _session_admission| async move {
                     let _admission = _admission;
