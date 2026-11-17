@@ -8099,8 +8099,10 @@ esac
             None
         } else {
             Some(
+                // A close supersedes an automatic Move, such as quota
+                // recovery's; it waits for a Move a person asked for.
                 state
-                    .start_or_join_lifecycle(id.into(), LifecycleKind::Move, {
+                    .start_automatic_lifecycle(id.into(), LifecycleKind::Move, {
                         let cloning = cloning.clone();
                         move |_, _, cancelled| async move {
                             // Hold the destination-cloning cut before any worker is installed.
