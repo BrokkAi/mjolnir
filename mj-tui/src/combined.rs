@@ -42,7 +42,7 @@ const EMPTY_PROMPT_HEIGHT: u16 = 4;
 const PANE_MINIMUM: u16 = 3;
 /// The one-row form Targets and Quota collapse to.
 const SUMMARY_ROW: u16 = 1;
-/// Midsize support panes show nine content rows, excluding the border.
+/// Upper bound for midsize support panes: nine content rows and two border rows.
 const STANDARD_SUPPORT_PANE_HEIGHT: u16 = 11;
 
 /// The terminal height at or above which the minimized Sessions list gets its
@@ -663,6 +663,7 @@ fn render_combined_themed(
             .unwrap_or(u16::MAX)
             .saturating_add(8 + u16::from(entry.target.is_none()))
     });
+    let proportional_support_height = area.height / 4;
     let dimensions = [
         (
             SupportPane::Sessions,
@@ -682,7 +683,7 @@ fn render_combined_themed(
             PaneDimensions {
                 minimized: SUMMARY_ROW,
                 full: table_height(capacity_table_lines(dashboard)),
-                standard_cap: STANDARD_SUPPORT_PANE_HEIGHT,
+                standard_cap: proportional_support_height.min(STANDARD_SUPPORT_PANE_HEIGHT),
             },
         ),
         (
@@ -690,7 +691,7 @@ fn render_combined_themed(
             PaneDimensions {
                 minimized: SUMMARY_ROW,
                 full: table_height(dashboard.quota_profile_rows().len()),
-                standard_cap: STANDARD_SUPPORT_PANE_HEIGHT,
+                standard_cap: proportional_support_height.min(STANDARD_SUPPORT_PANE_HEIGHT),
             },
         ),
         (
@@ -698,7 +699,8 @@ fn render_combined_themed(
             PaneDimensions {
                 minimized: SUMMARY_ROW,
                 full: notification_full,
-                standard_cap: STANDARD_SUPPORT_PANE_HEIGHT,
+                // Nine rows fit one line of notification text and the reply controls.
+                standard_cap: proportional_support_height.clamp(9, STANDARD_SUPPORT_PANE_HEIGHT),
             },
         ),
     ];
@@ -2444,15 +2446,14 @@ mod tests {
         ] {
             midsize_support.set_pane_size(pane, PaneSize::Standard);
         }
-        let lines = render_combined_golden(&mut midsize_support, 160, 100);
-        append_combined_golden(
-            &mut output,
-            "midsize support panes show nine content rows",
-            160,
-            100,
-            &lines,
-        );
-        append_pane_geometry(&mut output, &midsize_support);
+        for (label, height) in [
+            ("midsize support panes show nine content rows", 100),
+            ("short frame keeps notification text and reply controls", 31),
+        ] {
+            let lines = render_combined_golden(&mut midsize_support, 160, height);
+            append_combined_golden(&mut output, label, 160, height, &lines);
+            append_pane_geometry(&mut output, &midsize_support);
+        }
 
         let mut standby = dashboard_with_session(running_session());
         standby.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);

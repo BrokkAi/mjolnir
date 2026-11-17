@@ -14,7 +14,7 @@
 │                                      ││Press Tab for Sessions, then Enter on │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ─ Targets ── none configured ─────────────────────────────────────────── ▁   ▄ ─
-─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────────── ▁   ▄ ─
+─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────── ▁   ▄   □ ─
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -59,7 +59,7 @@ action: None; mode: New=true
 │                                      ││Press Tab for Sessions, then Enter on │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ─ Targets ── none configured ─────────────────────────────────────────── ▁   ▄ ─
-─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────────── ▁   ▄ ─
+─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────── ▁   ▄   □ ─
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯

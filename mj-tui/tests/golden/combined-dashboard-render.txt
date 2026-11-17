@@ -101,6 +101,40 @@
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · o next (?1) · b panes · q detach · : / ? palette
 layout: sessions=Rect { x: 0, y: 3, width: 53, height: 96 }; transcript=Rect { x: 53, y: 0, width: 107, height: 62 }; prompt=Rect { x: 53, y: 62, width: 107, height: 4 }; targets=Rect { x: 53, y: 66, width: 107, height: 11 }; quota=Rect { x: 53, y: 77, width: 107, height: 11 }; notifications=Rect { x: 53, y: 88, width: 107, height: 11 }
 
+=== short frame keeps notification text and reply controls (160x31) ===
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default ?1                                      ≡ ││                                                                                                         │
+╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions ────────────────────────────── ▁   ▄   □ ╮╭ No conversation open ───────────────────────────────────────────────────────────────────────────────────╮
+│ Create   Open   Filter: ________________________  ││No conversation open.                                                                                    │
+│hel ───────────────────────────────────────────────││Press Tab for Sessions, then Enter on the one to open.                                                   │
+│› ? ACP pretty name                            ◇ ⋯ │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│  Question  podman  codex-1                        │╭ Targets ▾ ─────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│  │ No messages yet                                ││  Host / fleet  Targets  CPU          RAM                                                                ▐
+│  │                                                ││  host-01       podman   unavailable                                                                     │
+│                                                   ││  host-02       podman   unavailable                                                                     │
+│                                                   ││  host-03       podman   unavailable                                                                     │
+│                                                   ││  host-04       podman   unavailable                                                                     │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                                   ││             Harness      Weekly      Resets  5H Resets                                                  ▐
+│                                                   ││  claude-01  Claude Code  refreshing…                                                                    │
+│                                                   ││  claude-02  Claude Code  refreshing…                                                                    │
+│                                                   ││  claude-03  Claude Code  refreshing…                                                                    │
+│                                                   ││  claude-04  Claude Code  refreshing…                                                                    │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ Notifications (1) ─────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                                   ││? ACP pretty name · hel · <age>                                                                          │
+│                                                   ││                                                                                                         │
+│                                                   ││ Question line 1                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││Quick reply:                                                                                        Send │
+│                                                   ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                                                   │
+╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · o next (?1) · b panes · q detach · : / ? palette
+layout: sessions=Rect { x: 0, y: 3, width: 53, height: 27 }; transcript=Rect { x: 53, y: 0, width: 107, height: 3 }; prompt=Rect { x: 53, y: 3, width: 107, height: 4 }; targets=Rect { x: 53, y: 7, width: 107, height: 7 }; quota=Rect { x: 53, y: 14, width: 107, height: 7 }; notifications=Rect { x: 53, y: 21, width: 107, height: 9 }
+
 === empty standby composer (100x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Transition · Resuming ─── ◇   ⋯ ? ╮
 │ default                            ≡ ││podman · ACP pretty name                                  │
