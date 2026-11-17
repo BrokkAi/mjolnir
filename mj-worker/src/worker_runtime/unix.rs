@@ -1633,16 +1633,20 @@ async fn prepare_project_tools(
     base_environment: &BTreeMap<String, String>,
     status: &watch::Sender<PreparationSnapshot>,
     relay: &Arc<RelayCell>,
-) -> Result<()> {
+) -> Result<bool> {
     let mut environment = base_environment.clone();
     environment.extend(config.environment.clone());
+    let mut applied = false;
     let result = async {
-        super::project_tools::apply_environment(&mut environment, roots, None)?;
-        config.environment = environment.clone();
         let recipes = super::project_tools::recipe_roots(roots).await?;
         if recipes.is_empty() {
+            // Without a recipe the image's own environment (its Rust homes,
+            // PATH and tools) is left exactly as it was.
             return Ok(Vec::new());
         }
+        super::project_tools::apply_environment(&mut environment, roots, None)?;
+        config.environment = environment.clone();
+        applied = true;
         // Toolchains can take minutes to download. The preparation owner
         // cancels this future on close, but imposes no per-step deadline.
         status.send_modify(|snapshot| {
@@ -1691,7 +1695,7 @@ async fn prepare_project_tools(
     for message in notices {
         journal.record_observation(RelayObservation::Notice { message })?;
     }
-    Ok(())
+    Ok(applied)
 }
 
 async fn prepare_and_start_harness(
@@ -2097,9 +2101,13 @@ async fn prepare_and_start_harness(
         .await?;
     }
 
-    if let Some(roots) = &project_tools_roots {
-        prepare_project_tools(root, roots, &mut config, base_environment, status, &relay).await?;
-    }
+    let project_tools_applied = match &project_tools_roots {
+        Some(roots) => {
+            prepare_project_tools(root, roots, &mut config, base_environment, status, &relay)
+                .await?
+        }
+        None => false,
+    };
 
     let harness_budget = preparation_step(
         root,
@@ -2121,7 +2129,10 @@ async fn prepare_and_start_harness(
         Ok(prepared)
     })
     .await?;
-    if let Some(roots) = &project_tools_roots {
+    if let Some(roots) = project_tools_roots
+        .as_ref()
+        .filter(|_| project_tools_applied)
+    {
         if let Err(error) =
             super::project_tools::apply_environment(&mut prepared_harness.environment, roots, None)
         {

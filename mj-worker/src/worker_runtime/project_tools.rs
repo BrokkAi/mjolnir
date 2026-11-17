@@ -34,8 +34,9 @@ pub(super) fn take_roots(
         .transpose()
 }
 
-/// Single owner for both preparation commands and the final harness environment.
-/// Image-provided homes win so prebuilt installs remain reusable.
+/// Single owner for both preparation commands and the final harness environment,
+/// applied only when a checkout has a recipe. Image-provided values win so
+/// prebuilt installs remain reusable.
 pub(super) fn apply_environment(
     environment: &mut BTreeMap<String, String>,
     roots: &[PathBuf],
@@ -47,11 +48,9 @@ pub(super) fn apply_environment(
             .or_insert_with(|| "/var/lib/hel/mise".into())
             .clone(),
     );
-    for (name, directory) in [("RUSTUP_HOME", "rustup"), ("CARGO_HOME", "cargo")] {
-        environment
-            .entry(name.into())
-            .or_insert_with(|| data.join(directory).to_string_lossy().into_owned());
-    }
+    // RUSTUP_HOME and CARGO_HOME are left to the image: unset, rustup uses
+    // $HOME/.rustup and $HOME/.cargo, the same HOME for this step and the
+    // harness, so an image's existing toolchain stays visible.
     let trusted = environment
         .get("MISE_TRUSTED_CONFIG_PATHS")
         .cloned()
