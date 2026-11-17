@@ -14,7 +14,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Default)]
 struct OperationState {
+    /// Log bytes from offset `released` on; earlier bytes were delivered with
+    /// the result and dropped.
     log: Vec<u8>,
+    released: usize,
     result: Option<std::result::Result<ImageResult, String>>,
 }
 
@@ -60,8 +63,6 @@ impl ImageBuilds {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(operation_id.clone(), operation.clone());
-        let operations = self.operations.clone();
-        let id = operation_id.clone();
         self.tasks.spawn(async move {
             let result = std::panic::AssertUnwindSafe(run(request, status, operation.clone()))
                 .catch_unwind()
@@ -76,14 +77,6 @@ impl ImageBuilds {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .result = Some(result);
             operation.changed.notify_waiters();
-            // A cancelled operation's client has gone (Ctrl-C) or is being
-            // replaced with the daemon; nobody will read the rest of its log.
-            if operation.cancel.is_cancelled() {
-                operations
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&id);
-            }
         });
         Ok(ImageStarted { operation_id })
     }
@@ -103,16 +96,21 @@ impl ImageBuilds {
             tokio::pin!(changed);
             changed.as_mut().enable();
             {
-                let state = operation
+                let mut state = operation
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let released = state.released;
                 ensure!(
-                    offset <= state.log.len(),
+                    offset <= released + state.log.len(),
                     "log offset exceeds the operation's log"
                 );
-                let mut end = offset;
-                for chunk in state.log[offset..].utf8_chunks() {
+                // A follower repeating a request whose response was lost may
+                // ask for bytes already released; it gets the rest and the
+                // result.
+                let start = offset.max(released) - released;
+                let mut end = start;
+                for chunk in state.log[start..].utf8_chunks() {
                     end += chunk.valid().len();
                     if state.result.is_none()
                         && !chunk.invalid().is_empty()
@@ -123,23 +121,18 @@ impl ImageBuilds {
                     }
                     end += chunk.invalid().len();
                 }
-                if end > offset || state.result.is_some() {
+                if end > start || state.result.is_some() {
                     let follow = ImageFollow {
-                        log: String::from_utf8_lossy(&state.log[offset..end]).into_owned(),
-                        next_offset: end,
+                        log: String::from_utf8_lossy(&state.log[start..end]).into_owned(),
+                        next_offset: released + end,
                         result: state.result.clone(),
                     };
-                    // The follower now holds the whole log and the result, so
-                    // the daemon releases them. A response lost in transit
-                    // leaves the client with an unknown operation, which it
-                    // resubmits; the build is content-addressed.
-                    let consumed = state.result.is_some() && end == state.log.len();
-                    drop(state);
-                    if consumed {
-                        self.operations
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .remove(id);
+                    // Once the whole log has gone out with the result, the
+                    // daemon drops the log and keeps only the small result, so
+                    // a repeated follow still learns how the build ended.
+                    if state.result.is_some() && end == state.log.len() {
+                        state.released = released + end;
+                        state.log = Vec::new();
                     }
                     return Ok(Some(follow));
                 }
@@ -892,6 +885,14 @@ mod tests {
             .unwrap();
         assert!(last.result.is_some());
         // Hard-won: review of b0f32d6: a finished operation kept its whole engine log until the daemon exited.
-        assert!(builds.follow("unicode", 0).await.unwrap().is_none());
+        assert!(operation.state.lock().unwrap().log.is_empty());
+        // Hard-won: review of aca53d0: releasing the operation lost the result when the final response was lost.
+        let repeated = builds
+            .follow("unicode", rest.next_offset)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(repeated.result.is_some());
+        assert_eq!(repeated.next_offset, message.len());
     }
 }
