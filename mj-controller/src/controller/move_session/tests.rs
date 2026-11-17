@@ -1249,6 +1249,30 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
     assert_ne!(first.fingerprint, second.fingerprint);
 }
 
+// Hard-won: #1579: retrying a Move that was still restoring the session on its destination failed
+// after a guessed 5 s wait for a relay actor that session legitimately does not have.
+#[test]
+fn move_preparation_reports_a_session_without_a_relay_actor_as_unavailable_at_once() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let manager = crate::session_manager::spawn_session_manager().unwrap();
+        let started = tokio::time::Instant::now();
+        let snapshot = super::refresh_move_source(&manager.control, "restoring-on-destination")
+            .await
+            .expect("an absent actor is an unavailable source, not an error");
+        assert!(snapshot.is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the lookup must not wait for an actor that never appears"
+        );
+        manager.shutdown.shutdown().await.unwrap();
+    });
+}
+
 #[cfg(unix)]
 // Hard-won: 6b51b56d6: Move preparation waited for a background checkpoint's mutation permit.
 #[test]

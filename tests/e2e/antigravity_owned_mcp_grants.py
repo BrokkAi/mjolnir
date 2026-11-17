@@ -14,7 +14,8 @@ checks against the real agy that
      server and not the title;
   3. without the grants the owned server asks, so (1) proves the file works;
   4. read_file(<home>/) allows nested reads, but outside-home reads and home
-     writes still ask; commands retain agy's existing Auto-mode policy.
+     writes still ask; commands retain agy's existing Auto-mode policy, and
+     `command(gh)` is staged there as Mjolnir's GitHub CLI approval.
 
 The golden's @USER_HOME@ is replaced with the home agy sees plus a directory
 separator. agy 1.5.8 exposes read_file for viewing files; it has no dedicated

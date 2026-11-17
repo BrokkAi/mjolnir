@@ -9,7 +9,7 @@ until `mj ec2 destroy` terminates it.
 Use the AWS CLI credentials already configured on your controller, plus OpenSSH:
 
 ```console
-mj ec2 create c8id.16xlarge --zone us-east-1a --name builder
+mj ec2 create c8id.4xlarge --zone us-east-1a --name builder
 mj ec2 list
 mj new --workspace work --profile codex --target builder --bundle project
 mj ec2 destroy builder
@@ -46,7 +46,7 @@ AWS validates the requested size/performance combination against its
 For example:
 
 ```console
-mj ec2 create c8id.16xlarge --zone us-east-1a --name builder \
+mj ec2 create c8id.4xlarge --zone us-east-1a --name builder \
   --disk-gib 512 --disk-mbps 500 --disk-iops 12000
 ```
 

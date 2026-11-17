@@ -41,7 +41,7 @@ warning SSH server limits for target remote: Effective SSH server limits on dev@
 warning SSH server limits for target remote: MaxSessions 10, MaxStartups 10:30:100. Mj multiplexes worker relay sessions over shared SSH connections.
   remediation: On the host, put these lines in /etc/ssh/sshd_config.d/60-mj-mux.conf:
 # mj multiplexes worker relay sessions over shared SSH connections.
-# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).
+# OpenSSH defaults (MaxSessions 10, MaxStartups 10:30:100) refuse relay sessions at about 40 containers.
 MaxSessions 200
 MaxStartups 100:30:300
 This works only if sshd_config includes sshd_config.d/*.conf (most Linux distributions do). Otherwise add the settings to sshd_config itself. Run `sudo sshd -t` to validate before reloading. On Linux with systemd, reload with `sudo systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Reconnect existing SSH masters, then rerun `mj doctor` to verify the effective values.
@@ -49,13 +49,13 @@ ready SSH server limits for target remote: MaxSessions 200, MaxStartups 100:30:3
 warning SSH server limits for target remote: MaxSessions 1000, MaxStartups 10:30:100. Mj multiplexes worker relay sessions over shared SSH connections.
   remediation: On the host, put these lines in /etc/ssh/sshd_config.d/60-mj-mux.conf:
 # mj multiplexes worker relay sessions over shared SSH connections.
-# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).
+# OpenSSH defaults (MaxSessions 10, MaxStartups 10:30:100) refuse relay sessions at about 40 containers.
 MaxStartups 100:30:300
 This works only if sshd_config includes sshd_config.d/*.conf (most Linux distributions do). Otherwise add the settings to sshd_config itself. Run `sudo sshd -t` to validate before reloading. On Linux with systemd, reload with `sudo systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Reconnect existing SSH masters, then rerun `mj doctor` to verify the effective values.
 warning SSH server limits for target remote: MaxSessions 10, MaxStartups 500:10:1000. Mj multiplexes worker relay sessions over shared SSH connections.
   remediation: On the host, put these lines in /etc/ssh/sshd_config.d/60-mj-mux.conf:
 # mj multiplexes worker relay sessions over shared SSH connections.
-# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).
+# OpenSSH defaults (MaxSessions 10, MaxStartups 10:30:100) refuse relay sessions at about 40 containers.
 MaxSessions 200
 This works only if sshd_config includes sshd_config.d/*.conf (most Linux distributions do). Otherwise add the settings to sshd_config itself. Run `sudo sshd -t` to validate before reloading. On Linux with systemd, reload with `sudo systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Reconnect existing SSH masters, then rerun `mj doctor` to verify the effective values.
 ready SSH server limits for target remote: MaxSessions 200, MaxStartups 100:30:300. Mj multiplexes worker relay sessions over shared SSH connections.

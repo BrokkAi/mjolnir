@@ -1002,7 +1002,7 @@ are not shared across containers.
 The optional `scheduler` table controls mbx's shared compiler scheduler:
 
 ```toml
-[machines.morannon.build_cache.scheduler]
+[machines.builder.build_cache.scheduler]
 cpus = 8
 memory = "24GiB"
 ```

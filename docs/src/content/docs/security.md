@@ -20,7 +20,7 @@ following.
 
 | Feature | What is sent | Where it goes | How to turn it off |
 | --- | --- | --- | --- |
-| GLiDE classifiers | The completed-turn verdict sends recent user/assistant conversation and live activity facts; the handback check sends handback evidence; the AFK repeated-question check sends the current question and previously declined questions; the question locator sends the latest user message and candidate assistant replies. | The hosted proxy `https://mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards requests to GLiDE (Fastino). | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. |
+| Jev classifier (Fastino's GLiDE) | The completed-turn verdict sends recent user/assistant conversation and live activity facts; the handback check sends handback evidence; the AFK repeated-question check sends the current question and previously declined questions; the question locator sends the latest user message and candidate assistant replies. | The hosted proxy `https://mj-jev-proxy.eng-admin-a63.workers.dev`, a Brokk-run proxy that forwards requests to Fastino's GLiDE classifier. | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. |
 | GitHub relevance | GitHub item text and bounded session conversation history for every item needing classification. Local scoring can reduce these requests when explicitly enabled with `[github.watch] local_inference = true`. | The same proxy (`/v1/github-item-glide`), which forwards it to GLiDE. | `[github.watch] enabled = false` or `[jev] enabled = false`. |
 | Update check | The installed version's channel is asked for the latest release. No session content is sent. | GitHub Releases, the npm registry, or the Homebrew tap on GitHub. | Set `MJOLNIR_NO_UPDATE_CHECK`. |
 
@@ -84,6 +84,33 @@ under configured approvals selects dsh-acp's `permission_mode` `ask`, so every
 write, command, and MCP tool call asks first, but it has no sandbox either:
 commands run directly on the host, and only its file tools are confined to the
 workspace roots.
+
+Under configured approvals Mjolnir also pre-approves the GitHub CLI (`gh`),
+because an agent's issue, pull-request, and review work is ordinary session
+work. Every worker start writes the approval into the configuration the
+harness already reads, so a profile staged by an older release converges too:
+
+| Harness | GitHub CLI approval |
+| --- | --- |
+| Codex | `rules/mj-gh.rules` in its staged home |
+| Claude Code | `Bash(gh:*)` in the `allowedTools` of every new, load and resume request, so the grant is scoped to the session and no settings file is edited |
+| Kimi Code | an allow rule in `permission.rules` in its staged `config.toml` |
+| Grok Build | `Bash(gh *)` and `Bash(gh)` in `permission.allow` in its staged `config.toml` |
+| Muse Code | the `gh` prefix in muse-acp's `MUSE_ACP_ALLOW_COMMAND_PREFIXES` |
+| OpenCode | bash rules in the session's own `OPENCODE_CONFIG_CONTENT` document |
+| Antigravity | `command(gh)` in agy's staged project grants; a person's own `deny` rule still wins |
+| DSH | no configuration of its own: the worker answers its `gh` permission requests |
+
+OpenCode reads its configuration documents in order and takes the last rule
+that matches, and a project's `opencode.json` and a profile's
+`OPENCODE_CONFIG_CONTENT` both follow the staged file. Mjolnir therefore
+asserts OpenCode's approval in the document it supplies last, so a later
+blanket rule cannot shadow it. The staged files are part of the
+[profile staging allowlist](/profiles/#what-a-sessions-staged-home-holds),
+so the setting reaches every session. A harness with neither a configuration
+file for commands (DSH) nor session-scoped tool options keeps its approval on
+the ACP boundary instead.
+
 The dashboard's new-session and resume wizards warn when a harness without
 guardian support is paired with a raw target; `mj new`, the API, and the web
 viewer do not. A warning is not a sandbox either way—choose a container or
