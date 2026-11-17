@@ -496,6 +496,10 @@ pub struct ChatState {
     /// An explicit history jump widened the view. Preserve loaded entries
     /// omitted by later live windows, including holes between retained turns.
     retain_loaded_history: bool,
+    /// Selection authority for the latest live transcript, including trim gaps.
+    projection_window: mj_core::state::ProjectionWindow,
+    /// Canonical identities include entries whose conversion is still pending.
+    projection_items: Vec<std::sync::Arc<mj_core::state::TranscriptItem>>,
     /// The last unconverted transcript item: the projection item a pending
     /// prefix has to end at to be spliced in front of the tail. `None`
     /// whenever the projection is complete.
@@ -728,6 +732,8 @@ impl ChatState {
             scheduled_diffstats: BTreeSet::new(),
             unconverted_prefix: 0,
             retain_loaded_history: false,
+            projection_window: Default::default(),
+            projection_items: Vec::new(),
             prefix_seam: None,
             transcript_loading: false,
             standby: false,
@@ -1012,14 +1018,32 @@ impl ChatState {
         state
     }
 
+    /// Apply a complete projection; bounded live views must carry their window.
     pub fn apply_materialized(
         &mut self,
         session: &MaterializedSession,
         config_options: &[SessionConfigOption],
         available_commands: &[AvailableCommand],
     ) {
+        self.apply_materialized_window(
+            session,
+            &Default::default(),
+            config_options,
+            available_commands,
+        );
+    }
+
+    /// Apply a window with the omission metadata published by its owner.
+    pub fn apply_materialized_window(
+        &mut self,
+        session: &MaterializedSession,
+        window: &mj_core::state::ProjectionWindow,
+        config_options: &[SessionConfigOption],
+        available_commands: &[AvailableCommand],
+    ) {
         self.apply_materialized_with_goal(
             session,
+            window,
             config_options,
             available_commands,
             session
@@ -1033,6 +1057,7 @@ impl ChatState {
     fn apply_materialized_with_goal(
         &mut self,
         session: &MaterializedSession,
+        window: &mj_core::state::ProjectionWindow,
         config_options: &[SessionConfigOption],
         available_commands: &[AvailableCommand],
         goal: &mj_core::goal::GoalState,
@@ -1041,7 +1066,9 @@ impl ChatState {
         let started = std::time::Instant::now();
         self.reconcile_submissions(session);
         self.reconcile_notices(session);
-        let rebuild_projection = session.applied_event_ordinal != self.latest_seq;
+        let rebuild_projection = session.applied_event_ordinal != self.latest_seq
+            || self.projection_window.omitted_ranges != window.omitted_ranges;
+        self.projection_window.clone_from(window);
         let phase = match session.execution {
             MaterializedExecutionState::Idle => WorkerPhase::Idle,
             MaterializedExecutionState::Running { .. } => WorkerPhase::Running,
@@ -1058,6 +1085,7 @@ impl ChatState {
         self.latest_seq = session.applied_event_ordinal;
         self.sync_elicitation(&session.pending_elicitations);
         if rebuild_projection {
+            self.projection_items.clone_from(&session.transcript);
             // Entries can move when the canonical window slides or history is
             // rewritten. Preserve identity, including a deferred restoration.
             // Bottom needs no remapping and keeps its pending opening reveal.
@@ -1076,14 +1104,9 @@ impl ChatState {
             }
             let previous = std::mem::take(&mut self.entries);
             let (history, reusable) = if self.retain_loaded_history {
-                let live: BTreeSet<_> = session
-                    .transcript
-                    .iter()
-                    .map(|item| (item.position, Some(item.stable_id.as_str())))
-                    .collect();
-                previous.into_iter().partition(|entry| {
-                    !live.contains(&transcript::transcript_entry_identity(entry))
-                })
+                previous
+                    .into_iter()
+                    .partition(|entry| self.projection_omits_position(entry.start_seq))
             } else {
                 (Vec::new(), previous)
             };

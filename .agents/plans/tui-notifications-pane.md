@@ -18,6 +18,11 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 ## Progress
 
+- [x] 64316e6d3 review: add normalized omission ranges to ProjectionWindow at the trim, stored-read and feed-selection owners; carry that authority into ChatState initialization and updates.
+- [x] Preserve loaded rows only in explicit omissions (or beyond an older live frontier); absent covered identities are removed. Stale history hydration consults the same authority, including canonical items still awaiting local prefix conversion.
+- [x] Extend the existing gap regression with actual projected interim/real terminal tools: covered fallback removal, retained gap message/anchor, and no resurrection from a stale stored read. CLI's bounded fixture now carries its window.
+- [x] Focused prefix/gap coverage: nine unchanged prefix tests passed; the extended gap test passed after fixture corrections, then CLI navigation passed (eleven unique tests). Requested dev/all-targets clippy for brokk-mj-chat and brokk-mjolnir passed. No commit.
+
 - [x] Parent compatibility follow-up: retain unchunked StoredProjectionTail for legacy count requests; only protocol-103 start-position requests receive the new chunked StoredProjectionRange. The database range owner is unchanged.
 - [x] Extend the daemon/client integration with a pre-103 count action shape and a raw single-frame assertion, retaining the over-8-MiB test on the new range reply.
 - [x] Both requested tests passed (integration 1, CLI navigation 1). Dev/all-targets clippy passed for mj-client, mj-controller and mj-cli with warnings denied. No commit.
@@ -61,6 +66,9 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 
 ## Surprises & Discoveries
+
+The live snapshot already carries ProjectionWindow, but the chat discarded it; the old metadata carried only an omitted-item count and could not distinguish trim gaps from removals. ProjectionWindow now publishes normalized half-open omission intervals, rebuilt at the database actor reader from its selected turn ranges and extended by actual trims/feed clipping. Within covered positions, a missing identity is authoritative removal. The chat also retains its canonical input handles so rows awaiting local prefix conversion are not mistaken for removals while a stored history read completes. The terminal regression drives the existing transcript projector's consumption path; no terminal-content inference or special fallback-tool rule is added to the chat.
+
 
 The first chunking fix classified the legacy StoredProjectionTail reply as chunkable. Older clients can reassemble fragments but then reject that reply kind in their own is_chunked check, so even small count-mode replies broke existing TUIs. Count mode must retain its original unchunked reply. A new StoredProjectionRange reply can safely be chunked because only protocol-103 clients send start_position. The integration now sends the old JSON action shape and decodes exactly one raw ResponseEnvelope, so a ReplyChunk cannot hide behind the modern client's decoder.
 
@@ -110,6 +118,11 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Decision Log
+
+- Decision: extend ProjectionWindow with optional, default-empty omission ranges computed by selection owners. Use those ranges in both live updates and stored-history hydration; keep covered identities only when the canonical live input still contains them. Pass the window through ActiveChat and treat apply_materialized without a window as a complete projection.
+  Rationale: parent accepted the 64316e6d3 finding and explicitly authorized extending metadata at its owner. A missing rendered entry can mean omission, deliberate removal or pending conversion, so the reader must consult published coverage and canonical identity rather than infer meaning from tool content. The field is additive runtime metadata, omitted when empty; no store schema or persisted format changes.
+  Date/Author: 2026-11-17, parent session and implementation worker.
+
 
 - Decision: preserve legacy count-mode StoredProjectionTail replies unchanged and unchunked. Wrap start-position results in the new StoredProjectionRange reply, classified for the existing chunk transport alongside StoredTranscriptItem. Keep the shared database range read and client request owner; only mode-specific reply wrapping/decoding differs. Protocol remains 103.
   Rationale: parent identified that older clients reject chunked StoredProjectionTail after reassembly. Only 103 clients request start_position, so the new reply kind isolates the new large-response behavior without changing existing tail seeding.
@@ -192,6 +205,8 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Outcomes & Retrospective
+
+The accepted 64316e6d3 removal finding is fixed without committing. ProjectionWindow now declares normalized omitted position ranges from the trim, SQL selection and client clipping owners. ActiveChat carries that authority into updates; history merges preserve missing entries only in declared omissions or beyond an older live frontier. Covered missing identities are removed, including when a stale stored-history result arrives. Canonical identities awaiting local prefix conversion still count as present. Restoring a complete projection clears earlier omissions. The existing gap regression drives real fallback-terminal creation and ACP replacement, proving the covered fallback disappears while a middle-gap message and its anchor survive; it also checks stale hydration and full-window restoration. Eleven unique scoped tests passed across the initial prefix run and corrected failing-test reruns, plus CLI navigation. Dev/all-targets clippy passed for brokk-mj-chat and brokk-mjolnir. Mechanical fixes: parent-visible helper scope, fixture streaming reset and canonical tool identity, and single-range iterator lint. Evidence and resolved failure logs are in `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/coverage-removals-fix.md`. No mj-transcript source, schema, persisted format, protocol number, golden, or live instance changed.
 
 The parent compatibility finding is fixed without committing. Count-mode requests retain the exact legacy unchunked StoredProjectionTail reply, including requests using the old JSON action shape. Start-position requests now receive a separate StoredProjectionRange reply that is classified for chunk transport; StoredTranscriptItem remains chunked. The database range owner is unchanged, and the client request helper accepts the corresponding reply kind for each mode. The integration reads a single raw response frame for a legacy count request and asserts StoredProjectionTail before exercising the modern client. The over-8-MiB range test uses StoredProjectionRange and still validates exact reassembly; oversized item transport and older-endpoint Unsupported checks also pass. Both requested focused tests and three-crate dev/all-targets clippy pass. Protocol remains 103, with no schema or persisted-format change.
 

@@ -1031,8 +1031,19 @@ pub(super) fn load_materialized_actor_projection_from(
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let mut omitted_ranges = Vec::new();
+    let mut covered_through = 1;
+    for &(begin, end) in &ranges {
+        if covered_through < begin {
+            omitted_ranges.push(covered_through..begin);
+        }
+        covered_through = covered_through.max(end);
+    }
+    if covered_through < start {
+        omitted_ranges.push(covered_through..start);
+    }
     let mut transcript = Vec::new();
-    for (begin, end) in ranges {
+    for &(begin, end) in &ranges {
         let before = mj_core::storage::TranscriptCursor {
             position: end,
             stable_id: String::new(),
@@ -1061,6 +1072,7 @@ pub(super) fn load_materialized_actor_projection_from(
     let window = ProjectionWindow {
         latest_unread_event_ordinal: read_latest_unread_event_ordinal(&connection, session_id)?,
         omitted_items,
+        omitted_ranges,
         provisional_title: first_materialized_user_message(&connection, session_id)?
             .and_then(|(_, text)| mj_core::state::provisional_session_title(&text)),
         latest_turn_start_position: latest_turn,
@@ -1307,13 +1319,28 @@ fn load_materialized_projection_range_from(
         [session_id],
         |row| row.get::<_, usize>(0),
     )?;
-    let window = ProjectionWindow {
+    let mut window = ProjectionWindow {
         latest_unread_event_ordinal: read_latest_unread_event_ordinal(&connection, session_id)?,
         omitted_items: total_items.saturating_sub(transcript.len()),
+        omitted_ranges: Vec::new(),
         provisional_title: first_materialized_user_message(&connection, session_id)?
             .and_then(|(_, text)| mj_core::state::provisional_session_title(&text)),
         latest_turn_start_position: last_materialized_turn_start(&connection, session_id)?,
     };
+    let excluded_before = match selection {
+        TranscriptSelection::FromPosition(start) if window.omitted_items > 0 => Some(start),
+        TranscriptSelection::Last(_) if window.omitted_items > 0 => Some(
+            transcript
+                .first()
+                .map_or(fields.applied_event_ordinal.saturating_add(1), |item| {
+                    item.position
+                }),
+        ),
+        _ => None,
+    };
+    if let Some(start) = excluded_before {
+        window.omit_ranges(std::iter::once(0..start));
+    }
     let materialized = MaterializedSession {
         session_id: session_id.to_owned(),
         applied_event_ordinal: fields.applied_event_ordinal,

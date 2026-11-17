@@ -525,10 +525,17 @@ impl SessionTail {
         if header_changed {
             self.header = transcript_header(materialized);
         }
-        let window = ProjectionWindow {
+        let mut window = ProjectionWindow {
             omitted_items: window.omitted_items + start,
             ..window.clone()
         };
+        if start > 0 {
+            let retained_start = materialized.transcript.get(start).map_or(
+                materialized.applied_event_ordinal.saturating_add(1),
+                |item| item.position,
+            );
+            window.omit_ranges(std::iter::once(0..retained_start));
+        }
         if self.window != window {
             self.window = window;
         }

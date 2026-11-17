@@ -723,8 +723,44 @@ fn an_update_while_the_prefix_is_pending_keeps_the_tail_and_still_splices() {
     if let TranscriptBody::Agent { streaming, .. } = &mut unsettled.body {
         *streaming = true;
     }
+    // Project the interim terminal through the real transcript owner.
+    let fallback =
+        mj_core::acp::fallback_terminal_tool_call("covered-terminal", "cargo test".into());
+    let project_tool = |projection: &mut MaterializedSession, call: ToolCall| {
+        use mj_core::relay::{RelayEvent, RelayObservation};
+        let mut event = RelayEvent {
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+            ordinal: projection.applied_event_ordinal + 1,
+            previous_digest: projection.applied_event_digest.clone(),
+            digest: String::new(),
+            recorded_at_ms: FIXTURE_MS,
+            command_id: None,
+            observation: RelayObservation::SessionUpdate {
+                update: Box::new(agent_client_protocol::v1::schema::SessionUpdate::ToolCall(
+                    call,
+                )),
+            },
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let mutation = mj_transcript::projection::project_relay_event(projection, &event)
+            .unwrap()
+            .mutation;
+        mj_transcript::projection::apply_committed_projection_event(projection, &event, mutation)
+            .unwrap();
+    };
+    project_tool(&mut complete, fallback);
+    let fallback_id = complete.transcript.last().unwrap().stable_id.clone();
+    // Projecting a new tool normally closes open agent streams. Retain the
+    // intentionally unsettled old turn used by this trim-gap fixture.
+    if let TranscriptBody::Agent { streaming, .. } =
+        &mut Arc::make_mut(&mut complete.transcript[1]).body
+    {
+        *streaming = true;
+    }
+
     let mut gapped = complete.clone();
-    mj_core::state::ProjectionWindow::default().trim(&mut gapped, TAIL_SEED_ITEMS);
+    let mut gap_window = mj_core::state::ProjectionWindow::default();
+    gap_window.trim(&mut gapped, TAIL_SEED_ITEMS);
     assert_eq!(gapped.transcript.first().unwrap().position, 1);
     assert!(
         !gapped
@@ -740,7 +776,7 @@ fn an_update_while_the_prefix_is_pending_keeps_the_tail_and_still_splices() {
         *chunks = vec![serde_json::json!({"content":{"type":"text", "text":"New live content"}})];
     }
     gapped.applied_event_ordinal += 1;
-    gap_chat.apply_materialized(&gapped, &[], &[]);
+    gap_chat.apply_materialized_window(&gapped, &gap_window, &[], &[]);
     gap_chat.hydrate_transcript_history(TranscriptSnapshot::from_materialized(&complete));
     assert!(gap_chat.restore_transcript_message("agent:200"));
     let anchored = gap_chat.transcript_position();
@@ -751,7 +787,7 @@ fn an_update_while_the_prefix_is_pending_keeps_the_tail_and_still_splices() {
             .any(|entry| entry.text == "New live content")
     );
     gapped.applied_event_ordinal += 1;
-    gap_chat.apply_materialized(&gapped, &[], &[]);
+    gap_chat.apply_materialized_window(&gapped, &gap_window, &[], &[]);
     assert_eq!(gap_chat.transcript_position(), anchored);
     assert!(
         gap_chat
@@ -770,6 +806,83 @@ fn an_update_while_the_prefix_is_pending_keeps_the_tail_and_still_splices() {
         complete.transcript.len(),
         "live identities replace history rather than duplicating it"
     );
+
+    assert!(
+        gap_chat
+            .entries
+            .iter()
+            .any(|entry| entry.tool_call_id.as_deref() == Some(fallback_id.as_str()))
+    );
+    let real = ToolCall::new("real-covered-tool", "shell").content(vec![
+        agent_client_protocol::v1::schema::ToolCallContent::Terminal(
+            agent_client_protocol::v1::schema::Terminal::new("covered-terminal"),
+        ),
+    ]);
+    project_tool(&mut gapped, real);
+    let real_id = gapped.transcript.last().unwrap().stable_id.clone();
+    gap_window.trim(&mut gapped, TAIL_SEED_ITEMS);
+    gap_chat.apply_materialized_window(&gapped, &gap_window, &[], &[]);
+    assert!(
+        !gap_chat
+            .entries
+            .iter()
+            .any(|entry| entry.tool_call_id.as_deref() == Some(fallback_id.as_str())),
+        "covered interim tool must disappear when the projection consumes it"
+    );
+    assert!(
+        gap_chat
+            .entries
+            .iter()
+            .any(|entry| entry.tool_call_id.as_deref() == Some(real_id.as_str()))
+    );
+    assert_eq!(
+        gap_chat.transcript_position(),
+        anchored,
+        "the omitted middle message survives a covered removal"
+    );
+    // A stored read begun before consumption must not resurrect that removal.
+    gap_chat.hydrate_transcript_history(TranscriptSnapshot::from_materialized(&complete));
+    assert!(
+        !gap_chat
+            .entries
+            .iter()
+            .any(|entry| entry.tool_call_id.as_deref() == Some(fallback_id.as_str()))
+    );
+    assert!(
+        gap_chat
+            .entries
+            .iter()
+            .any(|entry| entry.message_id.as_deref() == Some("agent:200"))
+    );
+    assert_eq!(gap_chat.transcript_position(), anchored);
+
+    // Once the owner restores the whole projection, former omissions no longer
+    // shelter intentional removals, even if their old intervals are cached.
+    let mut whole = complete.clone();
+    let real = ToolCall::new("real-covered-tool", "shell").content(vec![
+        agent_client_protocol::v1::schema::ToolCallContent::Terminal(
+            agent_client_protocol::v1::schema::Terminal::new("covered-terminal"),
+        ),
+    ]);
+    project_tool(&mut whole, real);
+    whole
+        .transcript
+        .retain(|item| item.stable_id != "thought:201");
+    whole.applied_event_ordinal = gapped.applied_event_ordinal + 1;
+    let mut whole_window = gap_window.clone();
+    whole_window.omitted_items = 0;
+    let full_length = whole.transcript.len();
+    whole_window.trim(&mut whole, full_length);
+    assert!(whole_window.omitted_ranges.is_empty());
+    gap_chat.apply_materialized_window(&whole, &whole_window, &[], &[]);
+    assert!(!gap_chat.entries.iter().any(|entry| {
+        entry
+            .source
+            .0
+            .as_ref()
+            .is_some_and(|item| item.stable_id == "thought:201")
+    }));
+    assert_eq!(gap_chat.transcript_position(), anchored);
 }
 
 #[test]

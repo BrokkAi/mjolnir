@@ -764,15 +764,29 @@ impl ChatState {
             .position(|entry| entry.message_id.as_deref() == Some(stable_id))
     }
 
+    pub(super) fn projection_omits_position(&self, position: u64) -> bool {
+        // An older live frontier cannot remove history not observed yet.
+        position > self.latest_seq || self.projection_window.omits_position(position)
+    }
+
     /// Install history already converted off the event loop. Live identities
     /// win overlaps; keep loaded entries across gaps, without replacing forms
     /// or the composer. Same-frontier reads can widen the loaded history.
     pub fn hydrate_transcript_history(&mut self, snapshot: TranscriptSnapshot) {
         let position = self.transcript_position();
-        self.entries = merge_transcript_history(
-            Arc::unwrap_or_clone(snapshot.entries),
-            std::mem::take(&mut self.entries),
-        );
+        let mut history = Arc::unwrap_or_clone(snapshot.entries);
+        let identities: BTreeSet<_> = self
+            .projection_items
+            .iter()
+            .map(|item| (item.position, Some(item.stable_id.as_str())))
+            .collect();
+        // A canonical item still awaiting local prefix conversion is present,
+        // not removed. Otherwise retain history only in declared omissions.
+        history.retain(|entry| {
+            self.projection_omits_position(entry.start_seq)
+                || identities.contains(&transcript_entry_identity(entry))
+        });
+        self.entries = merge_transcript_history(history, std::mem::take(&mut self.entries));
         self.retain_loaded_history = true;
         self.unconverted_prefix = 0;
         self.prefix_seam = None;

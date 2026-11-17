@@ -1974,10 +1974,15 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
     full.applied_event_ordinal = 600;
     let mut live_tail = full.clone();
     live_tail.transcript = full.transcript[88..].to_vec();
+    let mut live_window = mj_core::state::ProjectionWindow {
+        omitted_items: 88,
+        ..Default::default()
+    };
+    live_window.omit_ranges(std::iter::once(0..89));
     chats
         .get_mut("session-1")
         .unwrap()
-        .apply_materialized(&live_tail, &[], &[]);
+        .apply_materialized_window(&live_tail, &live_window, &[], &[]);
     positions.insert(
         "session-1".into(),
         mj_tui::NotificationPosition::Message("reply-30".into()),
@@ -2046,7 +2051,7 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
     chats
         .get_mut("session-1")
         .unwrap()
-        .apply_materialized(&live_tail, &[], &[]);
+        .apply_materialized_window(&live_tail, &live_window, &[], &[]);
     assert_eq!(chats["session-1"].transcript_position(), anchored);
     assert_eq!(chats["session-1"].draft(), "Keep this unsent answer");
     assert_eq!(
