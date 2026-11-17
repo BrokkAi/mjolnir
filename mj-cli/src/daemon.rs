@@ -576,12 +576,22 @@ pub(crate) fn daemon_runs_this_build(identity: &DaemonIdentity) -> Result<Option
 /// A session is an overlay on the account's login environment. Reconstruct that
 /// base instead of maintaining a second list of target, profile, harness and
 /// shell overrides here. The existing identity also covers older workers.
-fn configure_host_daemon_environment(command: &mut std::process::Command) -> Result<()> {
+fn host_daemon_login_environment() -> Result<Option<mj_core::login_environment::Environment>> {
     if std::env::var_os("MJ_SESSION_ID").is_some()
         || std::env::var_os("MJ_SESSION_BASH_ENV").is_some()
     {
-        let mut environment = mj_core::login_environment::discover()
-            .context("restore account login environment for the daemon")?;
+        return mj_core::login_environment::discover()
+            .map(Some)
+            .context("restore account login environment for the daemon");
+    }
+    Ok(None)
+}
+
+fn configure_host_daemon_environment(
+    command: &mut std::process::Command,
+    login_environment: Option<mj_core::login_environment::Environment>,
+) -> Result<()> {
+    if let Some(mut environment) = login_environment {
         for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
             // Absence is significant too: a login script must not redirect the
             // instance selected by this client.
@@ -645,11 +655,8 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             let log_offset = fs::metadata(&log_path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
-            let executable = daemon_launch_executable()?;
-            let mut command = std::process::Command::new(executable);
-            configure_host_daemon_environment(&mut command)?;
+            let mut command = host_daemon_command()?;
             command
-                .arg("daemon-run")
                 // This switch makes the invoking development client authoritative. It
                 // has no meaning inside the persistent daemon or its child processes.
                 .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
@@ -659,13 +666,6 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             // launcher chooses them.
             command.env_remove("MJ_DAEMON_LISTEN");
             command.env_remove("MJ_DAEMON_TOKEN");
-            // The program runs through `/proc/self/exe` on Linux, which `ps`
-            // would otherwise show as the daemon's name. `mj daemon-run` is
-            // what a person looks for (launch finding R13-9); nothing reads
-            // the daemon's argv[0], and the checks that recognize a daemon
-            // read argv[1].
-            #[cfg(unix)]
-            std::os::unix::process::CommandExt::arg0(&mut command, "mj");
             let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
             Ok(LaunchedDaemon {
                 pid,
@@ -676,6 +676,75 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
     })
     .await
     .context("spawn daemon task failed")?
+}
+
+fn host_daemon_command() -> Result<std::process::Command> {
+    use std::process::Command;
+
+    let login_environment = host_daemon_login_environment()?;
+    #[cfg(target_os = "linux")]
+    if let Some((systemd_run, runtime_dir)) = daemon_scope_launcher(login_environment.as_ref()) {
+        // Resolve PATH before the launcher changes into the daemon data directory.
+        let mut command = Command::new(std::path::absolute(systemd_run)?);
+        let instance = mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned());
+        let client = std::process::id();
+        // systemd-run execs the daemon itself. Refer to the live client inode
+        // explicitly because /proc/self/exe would point to systemd-run there.
+        command
+            .args(["--user", "--scope", "--quiet", "--collect"])
+            .arg(format!("--description=Mjolnir daemon ({instance})"))
+            .args(["--", &format!("/proc/{client}/exe"), "daemon-run"]);
+        configure_host_daemon_environment(&mut command, login_environment)?;
+        command.env("XDG_RUNTIME_DIR", runtime_dir);
+        return Ok(command);
+    }
+
+    let mut command = Command::new(daemon_launch_executable()?);
+    command.arg("daemon-run");
+    // Keep the direct launch recognizable in ps as mj daemon-run (R13-9).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::arg0(&mut command, "mj");
+    configure_host_daemon_environment(&mut command, login_environment)?;
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_scope_launcher(
+    login_environment: Option<&mj_core::login_environment::Environment>,
+) -> Option<(PathBuf, PathBuf)> {
+    // Check the environment systemd-run will receive, including when a session
+    // client restores the account's login environment.
+    let variable = |name| match login_environment {
+        Some(environment) => environment.get(name).map(std::ffi::OsString::from),
+        None => std::env::var_os(name),
+    };
+    // SAFETY: geteuid only reads the caller's effective user ID.
+    let uid = unsafe { libc::geteuid() };
+    // A restored login environment can omit the runtime directory PAM assigns.
+    let runtime_dir = variable("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
+    if !runtime_dir.join("systemd/private").exists() {
+        return None;
+    }
+    let user_service = format!("user@{uid}.service");
+    let cgroups = fs::read_to_string("/proc/self/cgroup").ok()?;
+    if cgroups
+        .lines()
+        .filter_map(|line| line.splitn(3, ':').nth(2))
+        .any(|path| {
+            Path::new(path)
+                .iter()
+                .any(|component| component == user_service.as_str())
+        })
+    {
+        return None;
+    }
+    // #1584: cgroup v2 checks write access at the common ancestor, so
+    // rootless Podman execs need to start inside the delegated user subtree.
+    let systemd_run =
+        mj_core::program_path::find_executable_on_path("systemd-run", variable("PATH").as_deref())?;
+    Some((systemd_run, runtime_dir))
 }
 
 /// Releases 2.66.0 through 2.70.x started an `mj node` beside every host
@@ -2392,7 +2461,11 @@ mod tests {
             "daemon::tests::host_daemon_environment_restores_login_and_preserves_instance";
         if let Ok(mode) = std::env::var(CHILD) {
             let mut command = std::process::Command::new("/usr/bin/env");
-            configure_host_daemon_environment(&mut command).unwrap();
+            configure_host_daemon_environment(
+                &mut command,
+                host_daemon_login_environment().unwrap(),
+            )
+            .unwrap();
             let output = mj_core::subprocess::run_with_input(&mut command, b"").unwrap();
             assert!(output.status.success());
             let output = String::from_utf8(output.stdout).unwrap();

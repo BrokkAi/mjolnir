@@ -390,7 +390,11 @@ fn assert_upgraded(path: &std::path::Path) {
 #[test]
 fn the_daemon_is_listed_as_mj_daemon_run() {
     let storage = upgrade_storage();
-    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    let output = mj_core::subprocess::run_with_input(
+        upgrade_command(&storage).env("XDG_RUNTIME_DIR", storage.path()),
+        &[],
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -406,6 +410,76 @@ fn the_daemon_is_listed_as_mj_daemon_run() {
         .map(|argument| String::from_utf8_lossy(argument).into_owned())
         .collect::<Vec<_>>();
     assert_eq!(arguments, ["mj", "daemon-run"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_daemon_launch_moves_from_the_login_cgroup_to_the_systemd_user_manager() {
+    let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        eprintln!("skipping systemd user scope test without XDG_RUNTIME_DIR");
+        return;
+    };
+    // SAFETY: geteuid only reads the caller's effective user ID.
+    let user_subtree = format!("/user@{}.service/", unsafe { libc::geteuid() });
+    let parent_cgroups = fs::read_to_string("/proc/self/cgroup").unwrap();
+    if parent_cgroups.contains(&user_subtree) {
+        eprintln!("skipping systemd user scope test inside the user manager");
+        return;
+    }
+    let mut probe = Command::new("systemd-run");
+    probe.args([
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--",
+        "/bin/true",
+    ]);
+    if !std::path::Path::new(&runtime_dir)
+        .join("systemd/private")
+        .exists()
+        || !mj_core::subprocess::run_with_input(&mut probe, &[])
+            .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping systemd user scope test without a reachable user manager");
+        return;
+    }
+
+    let storage = upgrade_storage();
+    fs::write(
+        storage.path().join("config/config.toml"),
+        r#"version = 18
+[phone]
+enabled = false
+[targets.podman]
+kind = "podman"
+pull_policy = "never"
+[targets.docker]
+kind = "docker"
+pull_policy = "never"
+"#,
+    )
+    .unwrap();
+    let mut command = upgrade_command(&storage);
+    common::AgentIsolation::under(storage.path()).apply(&mut command);
+    let output =
+        mj_core::subprocess::run_with_input(command.args(["daemon", "endpoint", "--json"]), &[])
+            .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
+            .unwrap();
+    let cgroups = fs::read_to_string(format!("/proc/{}/cgroup", metadata.pid)).unwrap();
+    assert!(cgroups.contains(&user_subtree), "{cgroups}");
+    let command_line = fs::read(format!("/proc/{}/cmdline", metadata.pid)).unwrap();
+    assert_eq!(
+        command_line.split(|byte| *byte == 0).nth(1),
+        Some(b"daemon-run".as_slice())
+    );
 }
 
 /// A replacement daemon is a new start, and a client proves that from the
