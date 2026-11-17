@@ -20,7 +20,7 @@ struct ManifestEntry {
 }
 
 /// Content inventory for a staged profile snapshot. Keep the staging tree
-/// alive until transfer completes; only claimed object bodies are opened.
+/// alive until transfer completes so claimed bodies match the recorded digest.
 pub(in crate::controller) struct ProfileContentManifest {
     source: PathBuf,
     entries: Vec<ManifestEntry>,
@@ -62,8 +62,15 @@ impl ProfileContentManifest {
                     .or_insert_with(|| (path.clone(), metadata.len()));
                 Some(digest)
             };
+            // Normalize separators at the wire boundary. A literal backslash
+            // in a Unix filename remains part of that filename.
+            let wire_path = path
+                .components()
+                .map(|component| component.as_os_str().as_encoded_bytes())
+                .collect::<Vec<_>>()
+                .join(&b'/');
             manifest.entries.push(ManifestEntry {
-                path: mj_core::hex::lower_hex(path.as_os_str().as_encoded_bytes()),
+                path: mj_core::hex::lower_hex(wire_path),
                 directory: entry.directory,
                 mode: header.mode()? & 0o777,
                 size: metadata.len(),
@@ -94,10 +101,11 @@ impl ProfileContentManifest {
         ssh: &SshTarget,
         destination: Option<&str>,
     ) -> Result<bool> {
-        if !supported(executor, ssh)? {
+        let executor = targets::WithoutDeadline::new(executor);
+        if !supported(&executor, ssh)? {
             return Ok(false);
         }
-        transfer(executor, ssh, self, destination)?;
+        transfer(&executor, ssh, self, destination)?;
         Ok(true)
     }
 
@@ -358,7 +366,6 @@ fn transfer(
     manifest: &ProfileContentManifest,
     destination: Option<&str>,
 ) -> Result<()> {
-    let executor = targets::WithoutDeadline::new(executor);
     let offered: u64 = manifest.objects.values().map(|(_, size)| size).sum();
     let mut offer = String::new();
     for (key, (_, size)) in &manifest.objects {
@@ -411,8 +418,7 @@ fn transfer(
         }
         let start = Instant::now();
         {
-            let _queued =
-                ProvisionStageGuard::new(&executor, ProvisionStage::WaitingForWorkerStore);
+            let _queued = ProvisionStageGuard::new(executor, ProvisionStage::WaitingForWorkerStore);
             ensure!(
                 targets::sleep_unless_cancelled(Duration::from_millis(250), &|| executor
                     .cancellation_requested()),
