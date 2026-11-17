@@ -334,7 +334,10 @@ def run_job(job, gate):
         sid = json.loads((d / "launch.json").read_text())["session_id"]
         return collect(d, bug, identity, sid, json.loads((d / "placement.json").read_text()),
                        json.loads((d / "pre-inventory.json").read_text()))
-    if (d / "launch-intent.json").exists():
+    recorded = (d / "launch.json").exists()
+    intended = (d / "launch-intent.json").exists()
+    if recorded != intended or any((d / name).exists() for name in
+                                  ("historical-context.txt", "carrier-request.json", "review-start-intent.json")):
         return "needs-recovery"
     identity = {"bug": bug["id"], "arm": arm, "reviewers": ARMS[arm], "intro": bug["intro_commit"],
                 "base": bug["base_commit"], "time_ns": time.time_ns()}
@@ -343,23 +346,46 @@ def run_job(job, gate):
     if hold:
         return "held: " + hold  # nothing recorded; the job starts on a later run
     workspace = workspace_id()
-    save(d / "launch-intent.json", identity)
-    # Neutral title: reviewers must not see the bug id.
-    title = "review-arms " + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:8]
-    with gate:
-        launch = mj("new", "--workspace-id", workspace, "--profile", "carrier", "--target", "podman",
-                    "--bundle", "mjolnir", "--at", bug["intro_commit"], "--base", bug["base_commit"],
-                    "--no-later-history", *[v for r in ARMS[arm] for v in ["--reviewer", r]],
-                    "--no-project-memory", "--no-github-events", "--no-github-credentials",
-                    "--subagents", "none", "--title", title, timeout=900)
-        save(d / "launch.json", launch)
+    if recorded:
+        launch = json.loads((d / "launch.json").read_text())
+        saved = json.loads((d / "launch-intent.json").read_text())
+        if not (d / "pre-inventory.json").exists() or not (d / "placement.json").exists():
+            return "needs-recovery"
+        if any(saved.get(k) != identity[k] for k in ("bug", "arm", "reviewers", "intro", "base")):
+            return "needs-recovery"
+        identity = saved
         sid = launch["session_id"]
         s = wait_idle(sid)
+        if (s.get("id") != sid or s.get("profile_id") != "carrier"
+                or s.get("workspace_id", workspace) != workspace or s.get("last_turn_outcome")):
+            return "needs-recovery"
+    else:
+        save(d / "launch-intent.json", identity)
+        # Neutral title: reviewers must not see the bug id.
+        title = "review-arms " + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:8]
+        with gate:
+            launch = mj("new", "--workspace-id", workspace, "--profile", "carrier", "--target", "podman",
+                        "--bundle", "mjolnir", "--at", bug["intro_commit"], "--base", bug["base_commit"],
+                        "--no-later-history", *[v for r in ARMS[arm] for v in ["--reviewer", r]],
+                        "--no-project-memory", "--no-github-events", "--no-github-credentials",
+                        "--subagents", "none", "--title", title, timeout=900)
+            save(d / "launch.json", launch)
+            sid = launch["session_id"]
+            s = wait_idle(sid)
     assert s["no_later_history"] and s["at"] == bug["intro_commit"] and s["base"] == bug["base_commit"], s
     place = container(sid)
-    save(d / "placement.json", place)
-    before = inventory(place, "pin", bug["base_commit"])
-    save(d / "pre-inventory.json", before)
+    if recorded:
+        if place != json.loads((d / "placement.json").read_text()):
+            return "needs-recovery"
+        before = json.loads((d / "pre-inventory.json").read_text())
+        fresh = inventory(place, "audit", bug["base_commit"])
+        problems, _ = compare_inventories(before, fresh)
+        if problems:
+            return "needs-recovery"
+    else:
+        save(d / "placement.json", place)
+        before = inventory(place, "pin", bug["base_commit"])
+        save(d / "pre-inventory.json", before)
     assert list(before["session_start"].values()) == [bug["base_commit"]], before["session_start"]
     assert not before["remotes"] and not before["alternates"] and not before["status"], before
     assert before["base_tree"] != before["head_tree"]
@@ -368,7 +394,9 @@ def run_job(job, gate):
     # while other reviewers still run: make the carrier unable to edit or browse
     # before it sees anything.
     for key, value in [("mode", "plan"), ("web_fetch", "disabled")]:
-        mj("set-config", "--session", sid, "--key", key, "--value", value)
+        current = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
+        if current.get(key) != value:
+            mj("set-config", "--session", sid, "--key", key, "--value", value)
     settings = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
     assert settings.get("mode") == "plan" and settings.get("web_fetch") == "disabled", settings
     save(d / "carrier-settings.json", settings)
