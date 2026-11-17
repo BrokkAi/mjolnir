@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 135;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 136;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2560,16 +2560,48 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Compatible: old writers name columns; triggers retain their launch kinds too.
+    // Leave kinds unknown when the authoritative launch record is gone.
+    if version < 135 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        if !legacy_schema::table_has_column(&transaction, "subagent_accounting", "kind")? {
+            transaction.execute_batch("ALTER TABLE subagent_accounting ADD COLUMN kind TEXT;")?;
+        }
+        transaction.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS subagent_accounting_kind_insert
+             AFTER INSERT ON subagent_sessions BEGIN
+                 UPDATE subagent_accounting
+                 SET kind=COALESCE(json_extract(NEW.record_json, '$.kind'), 'worker')
+                 WHERE child_session_id=NEW.child_session_id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS subagent_accounting_kind_update
+             AFTER UPDATE OF record_json ON subagent_sessions BEGIN
+                 UPDATE subagent_accounting
+                 SET kind=COALESCE(json_extract(NEW.record_json, '$.kind'), 'worker')
+                 WHERE child_session_id=NEW.child_session_id;
+             END;
+             UPDATE subagent_accounting SET kind=(
+                 SELECT COALESCE(json_extract(s.record_json, '$.kind'), 'worker')
+                 FROM subagent_sessions s
+                 WHERE s.child_session_id=subagent_accounting.child_session_id)
+             WHERE kind IS NULL;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (135, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=135;",
+        )?;
+        transaction.commit()?;
+    }
     // Breaking: older daemons cannot decode the writing_brief review phase, a seed's
     // brief, or a brief-writer registration in a stored active review group.
     // Refuse their reads and writes before any can be stored.
-    if version < 135 {
+    if version < 136 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
-             UPDATE schema_compatibility SET minimum_compatible_version = 135 WHERE singleton = 1;
+             UPDATE schema_compatibility SET minimum_compatible_version = 136 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (135, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-             PRAGMA user_version = 135;
+                 VALUES (136, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 136;
              COMMIT;",
         )?;
     }
@@ -3319,7 +3351,9 @@ pub(super) fn drop_session_row_triggers(connection: &Connection) {
     drop_environment_schema(connection);
     connection
         .execute_batch(
-            "DROP TRIGGER IF EXISTS session_rows_deleted;
+            "DROP TRIGGER IF EXISTS subagent_accounting_kind_insert;
+             DROP TRIGGER IF EXISTS subagent_accounting_kind_update;
+             DROP TRIGGER IF EXISTS session_rows_deleted;
              DROP TRIGGER IF EXISTS session_rows_destroyed;
              DROP TRIGGER IF EXISTS mailbox_outbox_live_target;
              DROP TRIGGER IF EXISTS github_watch_items_live_creator;
@@ -4773,6 +4807,15 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 135 {
+            connection.execute_batch("DROP TRIGGER IF EXISTS subagent_accounting_kind_insert; DROP TRIGGER IF EXISTS subagent_accounting_kind_update;").unwrap();
+            if legacy_schema::table_has_column(&connection, "subagent_accounting", "kind").unwrap()
+            {
+                connection
+                    .execute_batch("ALTER TABLE subagent_accounting DROP COLUMN kind;")
+                    .unwrap();
+            }
+        }
         if version < 134 {
             connection
                 .execute_batch("DROP TABLE IF EXISTS session_create_intents;")
@@ -4942,8 +4985,8 @@ mod reader_tests {
             connection.execute("UPDATE schema_compatibility SET minimum_compatible_version=min(minimum_compatible_version, ?1)", [version]).unwrap();
         }
         // Rewinding before the brief-writer fence restores the historical
-        // floor, including compatible revisions 133 and 134.
-        if (132..135).contains(&version) {
+        // floor, including compatible revisions 133 through 135.
+        if (132..136).contains(&version) {
             connection.execute("UPDATE schema_compatibility SET minimum_compatible_version=132 WHERE singleton=1", []).unwrap();
         }
         if version == 30 {
