@@ -188,9 +188,7 @@ pub(super) async fn prepare(
     // A copy already running is waited for, not preempted.
     let background = {
         let _stage = stages.enter(session_id, "waiting for background work on the session");
-        tokio::time::timeout_at(deadline, environment.hold_background_work(session_id, deadline))
-            .await
-            .map_err(|_| StartRefusal(format!("waiting for background work on session {session_id} exceeded the review preparation deadline")))?
+        hold_background_work(environment, session_id, deadline).await?
     };
     // Capture committed work before choosing reviewers. Matching trees need
     // no reviewer, and capture refusals go straight back to the caller.
@@ -296,6 +294,21 @@ pub(super) async fn prepare(
 /// How long a review waits for other work holding its session, such as the
 /// automatic recovery copy the same finished turn starts, before it gives up.
 pub(super) const BACKGROUND_WORK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Hold the session's background work off its worker until the returned hold
+/// is dropped, waiting until `deadline` for work already running. Everything
+/// in the review host that sends reviewer work to the worker takes this first:
+/// the worker refuses that work while a recovery copy holds its checkpoint
+/// barrier, and only the gate behind this hold knows whether one is running.
+pub(super) async fn hold_background_work(
+    environment: &Arc<dyn ReviewEnvironment>,
+    session_id: &str,
+    deadline: tokio::time::Instant,
+) -> Result<Option<BackgroundHold>, StartRefusal> {
+    tokio::time::timeout_at(deadline, environment.hold_background_work(session_id, deadline))
+        .await
+        .map_err(|_| StartRefusal(format!("waiting for background work on session {session_id} exceeded the review preparation deadline")))
+}
 
 /// Pause between attempts when the session's lease was taken by something the
 /// recovery gate does not coordinate, so a retry does not spin.
