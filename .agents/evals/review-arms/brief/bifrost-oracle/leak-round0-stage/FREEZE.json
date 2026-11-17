@@ -1,0 +1,41 @@
+{
+  "recorded_at": "2026-11-17T19:28:43.939070+00:00",
+  "stage": "Oracle paired leak round 0 before wording edits are accepted",
+  "files": {
+    "corrected-invocation.json": "7b2f425c3675d09dd72d7d01bc2288fc3fac4d4f7ccf3079c41663abdda53e17",
+    "editor-accounting.json": "56676885677bdaa218e7e209a136f131f1f6bd45a29e5330616650a58e965a04",
+    "editor-audit.md": "cc8ab2f1fafa2ca3a315746f861839a8d7f7e3cde2cb6c476326a833d1353664",
+    "editor-bootstrap-recovery.json": "6f6c75ddca954cf1b39ee434494293d2e1f9a9755fad9d3cc5054633da4222cd",
+    "failed-invocation.json": "793f50f2ed8dc3690bb6b922a83646f9320002b2fe92ed10ac89312bd6ac1f17",
+    "failed-leak-build.log": "148284d97e0b0e01721a748a447eff61a219b0eb2338e4a53d59856793092ae5",
+    "paired-validation.json": "0dd09c214b5f9db1be6633f13a02fb4df9cbb52375a15b6accba74eb6c710fe8",
+    "workflow-out.json": "d2162eddfe406a0770918a0ff294b65c48566831d42cb896afc28c4e8faa103f"
+  },
+  "labels": {
+    "partial": 5,
+    "caught": 10,
+    "missed": 2
+  },
+  "flagged": [
+    "python-filescope-enclosing-tie",
+    "cpp-template-inherited-base-signature",
+    "incompatible-semantic-bundle-late-gate",
+    "retained-fill-java-memo-loses-gap",
+    "kotlin-source-constructor-steals-class-header-comment",
+    "mcp-default-advisory-reported-clean",
+    "go-receiver-poisons-package-result-contract-discovery",
+    "python-module-binding-representative-after-event",
+    "jvm-protected-unindexed-hierarchy-denied",
+    "php-indexed-write-reenters-current-rhs",
+    "kotlin-value-class-this-loses-underlying-projection",
+    "go-nilness-ignores-modeled-nonreturn",
+    "java-static-getter-drops-incomplete-route",
+    "unproven-override-family-certifies-empty",
+    "js-synthetic-owner-leaks-file-summary"
+  ],
+  "raw_judges": 2,
+  "candidate_briefs": 17,
+  "published_oracle_briefs": 0,
+  "estimated_api_equivalent_usd": 0.3831644,
+  "editor_accounting_correction": "The raw transcript records one failed python invocation at seq 153, followed by an allowed successful retry. The editor audit note attributed the failed command to git show. This correction changes no audit decision."
+}

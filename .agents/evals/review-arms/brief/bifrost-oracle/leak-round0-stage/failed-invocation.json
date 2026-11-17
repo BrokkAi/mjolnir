@@ -1,0 +1,71 @@
+{
+  "stage": "paired oracle leak round 0",
+  "argv": {
+    "leak_build": [
+      "python3",
+      "/home/jonathan/Projects/mjolnir/.agents/evals/review-arms/brief_writer_terra.py",
+      "leak-build",
+      "--kind",
+      "oracle",
+      "--brief-root",
+      "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-work/candidates",
+      "--bugs-from",
+      "/mnt/optane/review-arms-bifrost-20261116/oracle-arm/jobs-ot.json",
+      "--name",
+      "bifrost-oracle",
+      "--round",
+      "0"
+    ],
+    "verify_driver": [
+      "python3",
+      "/home/jonathan/Projects/mjolnir/.agents/evals/review-arms/verify_driver.py",
+      "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "--kind",
+      "judge",
+      "--profiles",
+      "codex4",
+      "--model",
+      "gpt-6.1-sol",
+      "--target",
+      "podman",
+      "--bundle",
+      "bifrost-dev",
+      "--repo-commit",
+      "35933693612806a7ab6446bdcf52cfc579eebf9d",
+      "--concurrency",
+      "2"
+    ],
+    "leak_collect": [
+      "python3",
+      "/home/jonathan/Projects/mjolnir/.agents/evals/review-arms/brief_writer_terra.py",
+      "leak-collect",
+      "--kind",
+      "oracle",
+      "--brief-root",
+      "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-work/candidates",
+      "--bugs-from",
+      "/mnt/optane/review-arms-bifrost-20261116/oracle-arm/jobs-ot.json",
+      "--name",
+      "bifrost-oracle",
+      "--round",
+      "0"
+    ]
+  },
+  "environment": {
+    "REVIEW_ARMS_DIR": "/mnt/optane/review-arms-bifrost-20261116",
+    "REVIEW_ARMS_INSTANCE": "default",
+    "REVIEW_ARMS_REPO": "/mnt/optane/tmp/d2fa-bifrost/bifrost-dev",
+    "REVIEW_ARMS_CORPUS": "/mnt/optane/review-arms-bifrost-20261116/corpus/corpus.jsonl",
+    "REVIEW_ARMS_DIFFS": "/mnt/optane/review-arms-bifrost-20261116/corpus/diffs.jsonl",
+    "REVIEW_ARMS_BUNDLE": "bifrost-dev",
+    "REVIEW_ARMS_REPO_DIR": "bifrost-dev",
+    "REVIEW_ARMS_SETS": "/mnt/optane/review-arms-bifrost-20261116/arms/sets.json",
+    "REVIEW_ARMS_QUOTA_FLOOR": "codex4=25"
+  },
+  "environment_sha256": "0645458150e4b6bd0a423f1904355e2bb90784d479896551d51402af3b5c29b5",
+  "runtime_hash_manifest_sha256": "e33e64de6ba3eafdf216accc102aeb61e18086542ab08a44f3f32f5755943ea7",
+  "editor_freeze_sha256": "d3913356bd2b58840f7e4b4c9951a8bc5997b044745ae78167f8e6ec8f6959c4",
+  "corrected_checkout": "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/",
+  "failed_attempt_preserved": "leak-build.log; initial invocation path used shared main checkout and admitted no sessions",
+  "status": "failed before admissions: wrong shared main checkout; parser rejected --kind oracle"
+}
