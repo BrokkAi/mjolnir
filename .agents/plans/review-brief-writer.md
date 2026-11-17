@@ -179,6 +179,13 @@ Milestone 5 gives the writer Bifrost tools. Today reviewer children get no MCP s
 - error propagation.
 Each template is added only when its steps answer completely and quickly on real code. Its effect is measured as the share of census decisive facts the writer's brief states, against the grep-only writer, plus the reviewers' catch rate. Bifrost's prerequisites are tracked in bifrost-dev (#13921, #13211 slices, #13871, #13616, #13401, #13612/#13728, #13216 S2) and are not part of this plan's code.
 
+Why milestone 5 matters more after milestone 0's bifrost-dev check: there, the grep-only Sol writer stated the decisive fact in only 3 of 17 relation briefs, and its briefs lowered Terra's catch rate (17.6% → 7.8%). 13 of the 15 template-applicable bifrost-dev relation facts are value flow (census template T8a), which grep finds poorly. The T8a engine audit (2026-11-17, helper 9b8ed7dc, bifrost-dev `.agents/plans/rql-value-flow-census-audit.md`) ranked exact source endpoints first. That's bifrost-dev #13639 (AST identity on Rust calls, arguments, bindings, returns and fields, plus the result-phase and operand contract), now in progress. Existing primitives already compose a local def-use chain (`state_events_of` → `binding_initializer_calls_of` → `flow_relations_of`), which a template can use before `flow_query` reaches every endpoint.
+
+Integration constraints, from the review-writer cost measurement (helper 8714bc9f, 2026-11-17) and the engine coordinator's overlap ruling:
+- Writer and reviewers borrow the requester's session root (`delta.root`; `review_host/reviewer_child.rs`, `controller/subagents.rs`). Session roots are independent `git clone --local --dissociate` copies, so stores don't carry across sessions, and a new writer process loses Bifrost's resident graphs. On mjolnir master, a cold index takes about 579 s (5.9 GiB peak, controlled profile), and reopening the same path takes about 20 s before any query time.
+- Store sharing across sessions extends bifrost's existing shared-cache mechanism (explicit CACHE_DIR with its build lock, #13147 lineage, owner 0275a8b5), not a second path in bifrost or in mj. Any mj-side change, such as giving the writer a CACHE_DIR or staging linked worktrees, goes through the engine coordinator to the mj side as a short note.
+- Commit-correct analysis comes from the frozen diff object IDs through bifrost's request source pinning (#10979, owner b2826633), not from a checkout or verification layer of our own. The borrowed root is live and can advance during a review.
+
 
 ## Concrete Steps
 
