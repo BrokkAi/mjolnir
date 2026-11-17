@@ -661,6 +661,16 @@ impl RuntimeState {
                     .await;
                     let mut foreground_hold = None;
                     let mut result = match foreground {
+                        // A Move cancelled before it owned the session did no
+                        // source work. It ends as it does when the cancel
+                        // lands in the startup delivery wait below: cancelled,
+                        // not failed.
+                        Err(_)
+                            if kind == LifecycleKind::Move
+                                && cancelled.load(Ordering::Acquire) =>
+                        {
+                            Ok(DaemonLifecycleResult::Done)
+                        }
                         Err(error) => Err(LifecycleFailure::of(&error)),
                         Ok(admission) => {
                             foreground_hold = Some(admission);
