@@ -23,8 +23,13 @@ Round L judges OT together with the stored bifrost-dev no-brief (A) and Sol-brie
 
 Terra/high, mean catch rate over the 17 diffs, with paired 95% bootstrap intervals over diffs.
 
-- **Facts carry:** OT − A ≥ 17 points with the interval above 0. Better facts are the lever on bifrost-dev too, and milestone 5's engine path is justified for the writer.
-- **Facts don't carry:** OT − A ≤ +10 points, or its interval includes 0. Supplying the fact doesn't lift reviewers there, and milestone 5's premise fails on bifrost-dev.
-- **Partly:** otherwise.
+Outcomes, judged on OT − A and its interval:
+
+- **Facts carry:** the estimate is at least 17 points and the interval's lower bound is above 0.
+- **Partly:** the lower bound is above 0 but the estimate is below 17.
+- **Facts don't carry:** the interval's upper bound is below +10, so a useful lift is ruled out.
+- **Inconclusive:** anything else, which includes any interval that spans 0 while reaching +10 or more. With 17 diffs this is a real possibility; it's reported with the estimate and doesn't count as evidence against the premise.
+
+What a result does and doesn't establish: "Facts carry" shows only that reviewers benefit when the decisive fact is supplied, a necessary condition for milestone 5. It doesn't show that Bifrost's value-flow queries can find that fact for a blind writer. Query reach is unmeasured, and milestone 5 measures it separately. "Facts don't carry" would mean that supplying the fact isn't enough on bifrost-dev, so milestone 5 would not help there through this path.
 
 Also reported: OT − BT; per-diff rates; the diffs where the leak check left the fact caught or partial; and builder, leak and reviewer cost.
