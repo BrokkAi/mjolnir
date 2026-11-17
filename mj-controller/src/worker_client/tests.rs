@@ -3648,7 +3648,10 @@ async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
                 expected_scope: None,
             }));
         let hold = credential_sync::JobHold::new(
-            gate.try_start(&session),
+            gate.try_start(
+                &session,
+                crate::recovery_gate::BackgroundWork::CredentialSync,
+            ),
             Some(steps.enter(&session).await),
             None,
             None,
@@ -3713,8 +3716,14 @@ async fn a_deferred_renewal_cycle_leaves_the_wake_for_the_next_one() {
     let target = aws_sync_session_named(home.path(), &root, &token, &cli, "deferred", None);
     super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
     let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    // Another holder (a recovery copy, say) has the session: cycles defer.
-    let held = gate.try_start("deferred").unwrap();
+    // A holder a sync cannot run beside (a worker replacement) has the
+    // session: cycles defer.
+    let held = gate
+        .try_start(
+            "deferred",
+            crate::recovery_gate::BackgroundWork::WorkerReplacement,
+        )
+        .unwrap();
     let (results, mut results_rx) = mpsc::unbounded_channel();
     let env = credential_sync::RenewalEnv {
         relays: SessionRelays::Direct,
@@ -4340,7 +4349,12 @@ async fn a_cycle_that_cannot_reach_the_session_is_deferred_and_changes_nothing()
     let target = aws_sync_session_named(home.path(), &root, &token, &cli, "busy", None);
     super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
     let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    let _held = gate.try_start("busy").unwrap();
+    let _held = gate
+        .try_start(
+            "busy",
+            crate::recovery_gate::BackgroundWork::WorkerReplacement,
+        )
+        .unwrap();
 
     let (_, result) = credential_sync::aws_cycle(
         &access!(Some(&gate), &Default::default()),
@@ -4533,7 +4547,10 @@ async fn a_running_credential_job_stops_when_its_admission_is_cancelled() {
                 expected_scope: None,
             }));
         let hold = credential_sync::JobHold::new(
-            gate.try_start(&session),
+            gate.try_start(
+                &session,
+                crate::recovery_gate::BackgroundWork::CredentialSync,
+            ),
             Some(steps.enter(&session).await),
             None,
             None,
@@ -5020,6 +5037,67 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         result.is_empty(),
         "deferral must not report an unchanged or failed login"
     );
+}
+
+/// A renewal revokes the old token at once, so the new login must reach a
+/// session even while a recovery copy, which can run for minutes and start
+/// again right after, holds it. A worker replacement still keeps it out.
+// Hard-won: #1564: back-to-back recovery copies held the session's only background slot, so a renewed login never reached it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_login_reaches_a_session_while_its_recovery_copy_runs() {
+    use crate::recovery_gate::BackgroundWork;
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let received = scratch.path().join("received");
+    let target = codex_sync_target(
+        home.path(),
+        SESSION_ID,
+        "2026-09-25T20:00:00.000Z",
+        &received,
+    );
+    let login = codex_login("2026-09-25T22:49:05.000Z");
+    std::fs::write(home.path().join("auth.json"), &login).unwrap();
+    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let steps = credential_sync::SessionSteps::default();
+    let access = access!(Some(&gate), &steps);
+    let sync = || {
+        credential_sync::reconcile_profile_guarded(
+            &access,
+            std::slice::from_ref(&target),
+            None,
+            credential_sync::unknown_slopcop_login,
+        )
+    };
+
+    let replacement = gate
+        .try_start(SESSION_ID, BackgroundWork::WorkerReplacement)
+        .unwrap();
+    assert!(sync().await.is_empty(), "the sync ran beside a replacement");
+    assert!(!received.exists());
+    drop(replacement);
+
+    let copy = gate
+        .try_start(SESSION_ID, BackgroundWork::RecoveryCopy)
+        .unwrap();
+    let outcomes = sync().await;
+    assert_eq!(
+        outcomes
+            .iter()
+            .map(|outcome| outcome.outcome.clone())
+            .collect::<Vec<_>>(),
+        [Ok(vec![CredentialSyncAction::Pushed])],
+        "{outcomes:?}"
+    );
+    assert_eq!(std::fs::read(&received).unwrap(), login);
+    assert!(!copy.load(Ordering::Acquire), "the sync cancelled the copy");
+    assert!(
+        gate.is_busy(SESSION_ID),
+        "the sync released the copy's hold"
+    );
+    drop(copy);
+    assert!(!gate.is_busy(SESSION_ID));
 }
 
 #[cfg(unix)]

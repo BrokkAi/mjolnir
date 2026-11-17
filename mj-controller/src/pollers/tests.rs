@@ -3140,7 +3140,13 @@ fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
         observations,
         gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
     };
-    let copy = observer.gate.try_start("session").unwrap();
+    let copy = observer
+        .gate
+        .try_start(
+            "session",
+            crate::recovery_gate::BackgroundWork::RecoveryCopy,
+        )
+        .unwrap();
 
     let cancelled = AtomicBool::new(true);
     let error = reserve_recovery_or_cancel(&observer, "session", &cancelled)
@@ -3151,10 +3157,24 @@ fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
     assert!(!copy.load(Ordering::Acquire));
     // The failed call also left no reservation behind.
     drop(copy);
-    assert!(observer.gate.try_start("session").is_some());
+    assert!(
+        observer
+            .gate
+            .try_start(
+                "session",
+                crate::recovery_gate::BackgroundWork::RecoveryCopy
+            )
+            .is_some()
+    );
 
     // An operation cancelled while it waits still preempts the copy first.
-    let copy = observer.gate.try_start("session").unwrap();
+    let copy = observer
+        .gate
+        .try_start(
+            "session",
+            crate::recovery_gate::BackgroundWork::RecoveryCopy,
+        )
+        .unwrap();
     let cancelled = AtomicBool::new(false);
     let reservation = std::thread::scope(|scope| {
         let waiting = scope.spawn(|| reserve_recovery_or_cancel(&observer, "session", &cancelled));
