@@ -3646,7 +3646,11 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 103: configuration carries the top-level `[images]` section (project
 // images built by `mj image build`), which older clients' strict config reader
 // rejects.
-pub const PROTOCOL_VERSION: u32 = 103;
+// Version 104: clients read configuration keys they have no field for, so a
+// configuration key added later needs no protocol version of its own; only
+// the configuration file refuses a key no field reads. `SubagentChoice` is
+// the exception and still refuses unknown keys everywhere.
+pub const PROTOCOL_VERSION: u32 = 104;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

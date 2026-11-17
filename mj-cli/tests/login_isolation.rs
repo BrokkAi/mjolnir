@@ -138,6 +138,12 @@ fn cli_login_targets_only_the_selected_profile_home_for_every_harness() {
     );
 
     for kind in HarnessKind::ALL {
+        // A harness that keeps its login outside its home has no login per
+        // home to isolate: on a Mac every Claude profile signs in to the one
+        // Keychain item, with its home variable unset (#1491).
+        if !kind.keeps_login_in_home(mj_core::config::HarnessHost::current()) {
+            continue;
+        }
         let profile_id = format!("p-{}", kind.id());
         let output = isolated_login_command(root.path(), &config_dir, &data_dir, &tools)
             .args([

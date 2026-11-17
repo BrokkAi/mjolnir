@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// `image` and `mounts` apply only to a container runtime. A container
 /// otherwise has no host filesystem access; its data lives in a named volume.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct DaemonConfig {
     #[serde(skip_serializing_if = "DaemonRuntime::is_default")]
     pub runtime: DaemonRuntime,
@@ -60,9 +60,19 @@ impl DaemonConfig {
                 return Err(error).with_context(|| format!("read placement {}", path.display()));
             }
         };
-        toml::from_str::<Placement>(&contents)
-            .map(|placement| placement.daemon)
-            .with_context(|| format!("parse placement {}", path.display()))
+        // The other tables belong to the daemon, so only `[daemon]` keys are
+        // this reader's to refuse; an SSH client reads `[daemon]` nowhere else.
+        let mut unread = Vec::new();
+        let placement: Placement =
+            serde_ignored::deserialize(toml::Deserializer::new(&contents), |key| {
+                let key = super::setting_path(&key);
+                if key.len() > 1 && key[0] == "daemon" {
+                    unread.push(key.join("."));
+                }
+            })
+            .with_context(|| format!("parse placement {}", path.display()))?;
+        super::refuse_unread_keys(path, &unread)?;
+        Ok(placement.daemon)
     }
 
     pub fn remote_command(&self) -> &str {
@@ -131,5 +141,26 @@ ssh_args = ["-p", "2222"]
         assert_eq!(placement.runtime, super::DaemonRuntime::Ssh);
         assert_eq!(placement.host.as_deref(), Some("test-box"));
         assert_eq!(placement.ssh_args, ["-p", "2222"]);
+    }
+
+    /// An SSH client reads `[daemon]` only here, so a misspelled key would
+    /// otherwise attach it to another instance without a word. Keys outside
+    /// `[daemon]` belong to the daemon and are not this reader's to judge.
+    // Hard-won: #1557: once configuration types read past unknown keys, a `[daemon]` typo went unrefused
+    #[test]
+    fn placement_refuses_a_daemon_key_it_does_not_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "a_later_section = 1\n[daemon]\nruntime = \"ssh\"\nhost = \"box\"\nisntance = \"work\"\n",
+        )
+        .unwrap();
+        let refusal = format!(
+            "{:#}",
+            super::DaemonConfig::load_placement(&path).unwrap_err()
+        );
+        assert!(refusal.contains("`daemon.isntance`"), "{refusal}");
+        assert!(!refusal.contains("a_later_section"), "{refusal}");
     }
 }
