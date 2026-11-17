@@ -30,6 +30,11 @@ enum ChildCompletion {
     Held {
         give_up_at_ms: i64,
     },
+    /// The reviewer's turn ended while its worker still holds a handback the
+    /// daemon has not executed. The worker's queue owns that request, so the
+    /// child is not yet missing a handback. Judged again when the handback
+    /// executes or the child's next observation retires the request.
+    AwaitingHandback,
     /// A hold follow-up was sent or is queued. Judged again at the child's
     /// next observation, which is how a follow-up the queue dropped is seen.
     FollowUpSent,
@@ -208,6 +213,10 @@ async fn run(
     let mut identities = BTreeMap::<tokio::task::Id, Identity>::new();
     let mut observations = BTreeMap::<String, DelegationObservation>::new();
     let mut completions = tokio::task::JoinSet::new();
+    // A request's durable execution, told before its delivery starts: a
+    // reviewer's ended turn waits for the execution of its handback, never for
+    // the delivery of the result.
+    let (executed_tx, mut executed_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     // Each completion carries the observation versions it judged, so a change
     // that arrives while it runs is never lost behind the wait it ends in.
     let mut completion_ids = BTreeMap::<tokio::task::Id, (String, u64, ObservationVersions)>::new();
@@ -239,6 +248,7 @@ async fn run(
                 let backend = backend.clone();
                 let runtime = state.clone();
                 let parent = id.0.clone();
+                let executed_tx = executed_tx.clone();
                 let deferral = dispatch.deferral(&id);
                 tracing::debug!(parent_session_id = %parent, request_id = %id.1, "delegation dispatch");
                 let task = jobs.spawn(async move {
@@ -271,6 +281,9 @@ async fn run(
                             let result = backend
                                 .execute_subagent_tool_durable(parent.clone(), request)
                                 .await?;
+                            // The requester is the session whose ended turn may
+                            // be waiting on this request.
+                            let _ = executed_tx.send(parent.clone());
                             // Durable results can wait for the replacement daemon.
                             drop(_admission);
                             let delivered =
@@ -354,6 +367,13 @@ async fn run(
                     }
                 }
             }
+            Some(requester) = executed_rx.recv() => {
+                // The execution is a version of what the requester's pending
+                // completion judges: one still running sees it changed and
+                // judges again, and one already waiting is woken.
+                versions.bump(&requester);
+                retry.remove(&requester);
+            }
             completed = jobs.join_next_with_id(), if !jobs.is_empty() => {
                 let Some(completed) = completed else { continue };
                 let (task_id, result) = match completed {
@@ -435,9 +455,9 @@ async fn run(
                         // A wait ends at the next observation. One that arrived
                         // while this completion ran has already been seen, so
                         // the child is judged again at once instead of waiting.
-                        Ok(ChildCompletion::FollowUpSent | ChildCompletion::Held { .. }) if versions.changed_since(&judged, &id, None) => {}
+                        Ok(ChildCompletion::AwaitingHandback | ChildCompletion::FollowUpSent | ChildCompletion::Held { .. }) if versions.changed_since(&judged, &id, None) => {}
                         Ok(ChildCompletion::ParkAfterParentTurn { ref parent }) if versions.changed_since(&judged, &id, Some(parent)) => {}
-                        Ok(ChildCompletion::FollowUpSent) => {
+                        Ok(ChildCompletion::AwaitingHandback | ChildCompletion::FollowUpSent) => {
                             retry.insert(id, CompletionRetry::waiting(ordinal, None));
                         }
                         Ok(ChildCompletion::Held { give_up_at_ms }) => {
@@ -528,6 +548,23 @@ async fn complete_child(
     // handoff admission: during startup the host defers the answer until its
     // interrupted-review sweep ends, and a handoff must not wait on reviews.
     let review_open = state.child_awaits_review(&child_id).await;
+    // A handback the daemon already executed is no longer the queue's: its
+    // durable result says what happened (a rejected one recorded no report),
+    // even while the worker still lists it until the result is delivered.
+    let handback_queued = {
+        let child = child_id.clone();
+        let queued = observation.queued_handbacks();
+        tokio::task::spawn_blocking(move || -> Result<bool> {
+            for request in queued {
+                match crate::database::load_delegation(&child, &request)? {
+                    Some((_, Some(_))) => {}
+                    _ => return Ok(true),
+                }
+            }
+            Ok(false)
+        })
+        .await??
+    };
     let Ok(work) = crate::upgrade::activity_unless_draining("delegation child completion") else {
         return Ok(ChildCompletion::Draining);
     };
@@ -537,6 +574,7 @@ async fn complete_child(
         work,
         relation,
         ChildSeen {
+            handback_queued,
             in_flight: observation.in_flight,
             liveness: observation.work_liveness,
         },
@@ -548,6 +586,9 @@ async fn complete_child(
 
 /// What the worker published beside a child's ended turn.
 struct ChildSeen {
+    /// The worker's queue still holds a handback request from this child that
+    /// has no completion yet: the request, not the turn, decides its report.
+    handback_queued: bool,
     /// Commands queued or running on the child.
     in_flight: Vec<String>,
     /// Whether the processes the turn left running are still alive.
@@ -564,6 +605,7 @@ async fn settle_child(
     review_open: bool,
 ) -> Result<ChildCompletion> {
     let ChildSeen {
+        handback_queued,
         in_flight,
         liveness,
     } = seen;
@@ -577,11 +619,35 @@ async fn settle_child(
                 .handback
                 .filter(|handback| handback.answers(&command_id))
                 .map(|handback| handback.message);
-        state
-            .review_host()
-            .reviewer_finished(relation.parent_session_id, child_id.clone(), answer)
-            .await
-            .map_err(anyhow::Error::msg)?;
+        // The worker's queue owns a handback until the daemon has executed
+        // it. A turn can end first, when the worker answered its caller after
+        // its reply budget with the request still unexecuted (#1580), so a
+        // turn end alone never decides that a reviewer did not hand back.
+        if answer.is_none() && handback_queued {
+            return Ok(ChildCompletion::AwaitingHandback);
+        }
+        match answer {
+            Some(answer) => {
+                state
+                    .review_host()
+                    .reviewer_finished(relation.parent_session_id, child_id.clone(), Some(answer))
+                    .await
+            }
+            None => {
+                state
+                    .review_host()
+                    .reviewer_ended_without_handback(
+                        relation.parent_session_id,
+                        child_id.clone(),
+                        format!(
+                            "the reviewer's turn ended ({}) without a handback",
+                            outcome.outcome
+                        ),
+                    )
+                    .await
+            }
+        }
+        .map_err(anyhow::Error::msg)?;
         // The review host owns reviewer closes and retries a failing one with
         // backoff; closing here as well resubmitted it every second (#1456).
         state.review_host().close_child(child_id);
@@ -1120,6 +1186,72 @@ mod tests {
         );
     }
 
+    // Hard-won: #1580: a reviewer's turn ended while its worker still held the unexecuted handback, and the missing row failed the whole review group.
+    #[tokio::test]
+    async fn a_reviewer_whose_handback_is_still_queued_is_not_scored_as_missing_one() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_QUEUED_HANDBACK";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_reviewer_whose_handback_is_still_queued_is_not_scored_as_missing_one",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-queued-handback")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("queued handback").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        let child = crate::daemon::tests::runtime_test_session(
+            "child",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        crate::database::save_session(&parent).unwrap();
+        let mut relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
+        relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+        relation.handback_tool = true;
+        crate::database::save_subagent_session(&child, &relation).unwrap();
+        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
+        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
+        let backend = Arc::new(ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            Arc::new(BusyThenParked(AtomicUsize::new(0))),
+        ));
+        state.install_report_backend(&backend);
+        let outcome = store_finished_turn("child", "turn", 10);
+        let stored = crate::database::load_subagent("child").unwrap().unwrap();
+        // The turn ended, the worker answered its caller after its reply
+        // budget, and the daemon has not executed the handback it holds. The
+        // review host is never asked: nothing says the reviewer failed.
+        assert!(matches!(
+            settle_child(
+                &state,
+                &backend,
+                crate::upgrade::activity_unless_draining("test completion").unwrap(),
+                stored,
+                ChildSeen {
+                    handback_queued: true,
+                    in_flight: Vec::new(),
+                    liveness: None,
+                },
+                outcome,
+                false,
+            )
+            .await
+            .unwrap(),
+            ChildCompletion::AwaitingHandback
+        ));
+    }
+
     // A child that asked for review and ended its turn is waiting for the
     // verdict. The completion loop must not treat that as a missing handback:
     // no reminder, no notice, no park, until the review is gone.
@@ -1173,6 +1305,7 @@ mod tests {
                 crate::upgrade::activity_unless_draining("test completion").unwrap(),
                 stored.clone(),
                 ChildSeen {
+                    handback_queued: false,
                     in_flight: Vec::new(),
                     liveness: None,
                 },
@@ -1635,6 +1768,7 @@ mod tests {
                     crate::upgrade::activity_unless_draining("test completion").unwrap(),
                     stored,
                     ChildSeen {
+                        handback_queued: false,
                         in_flight: Vec::new(),
                         liveness,
                     },
@@ -1873,6 +2007,7 @@ mod tests {
                 ChildCompletion::FollowUpSent => "FollowUpSent",
                 ChildCompletion::ParkAfterParentTurn { .. } => "ParkAfterParentTurn",
                 ChildCompletion::AwaitingReview => "AwaitingReview",
+                ChildCompletion::AwaitingHandback => "AwaitingHandback",
                 ChildCompletion::Draining => "Draining",
                 ChildCompletion::Settled => "Settled",
             }
