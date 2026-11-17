@@ -377,7 +377,7 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
     ];
     let cleanup = retire_move_target_plan(&locator, smoke_id)?;
     let mut script = String::from("set -eu\n");
-    for command in cleanup.commands {
+    for command in cleanup.commands_without_staging()?.to_vec() {
         let argv: Vec<_> = std::iter::once(command.program)
             .chain(command.args)
             .collect();
@@ -507,7 +507,7 @@ pub(super) fn run_ssh_docker_overlay_smoke_test(
             },
             smoke_id,
         )?;
-        for command in &plan.commands {
+        for command in plan.commands_without_staging()? {
             execute_checked(executor, command)?;
         }
         // Never remove a lower directory until its container and volumes are gone.
@@ -596,9 +596,9 @@ pub(super) fn run_docker_overlay_smoke_test(
         },
         smoke_id,
     )?
-    .commands
-    .into_iter()
-    .next()
+    .commands_without_staging()?
+    .first()
+    .cloned()
     .context("Docker OverlayFS smoke cleanup plan is empty")?;
 
     let smoke_result =

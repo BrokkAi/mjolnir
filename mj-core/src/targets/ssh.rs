@@ -2690,6 +2690,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.seen.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -3612,6 +3635,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for JoinsNewMaster {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let output = ProcessExecutor.execute(command)?;
             if command.args.contains(&"ControlMaster=yes".to_owned())
@@ -3847,6 +3893,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for FakeMasters {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.seen.borrow_mut().push(command.clone());
             assert_eq!(command.program, "ssh");
@@ -4282,6 +4351,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for RacingMasters {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let socket = FakeMasters::socket(command);
             let status = if command.args.windows(2).any(|pair| pair == ["-O", "check"]) {
@@ -4568,6 +4660,29 @@ mod tests {
     struct NoMaster;
 
     impl CommandExecutor for NoMaster {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             panic!(
                 "an unshared lease ran {} {:?}",

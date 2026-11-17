@@ -388,8 +388,11 @@ mod tests {
             "DROP TRIGGER subagent_accounting_kind_insert;
              DROP TRIGGER subagent_accounting_kind_update;
              ALTER TABLE subagent_accounting DROP COLUMN kind;
-             DELETE FROM schema_migrations WHERE version=135;
+             DELETE FROM schema_migrations WHERE version>134;
+             UPDATE schema_compatibility SET minimum_compatible_version=132 WHERE singleton=1;
              PRAGMA user_version=134;
+             CREATE TRIGGER stop_before_brief_fence BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version=136 BEGIN SELECT RAISE(ABORT,'fixture boundary before brief fence'); END;
              INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
                  VALUES ('reviewer','root','review'),('worker','root','work'),
                      ('oracle','root','consult'),('destroyed','root','old');
@@ -399,12 +402,19 @@ mod tests {
                      ('oracle','root','consult','{\"kind\":\"oracle\"}');",
         )?;
         let floor = schema::read_schema_state(&connection)?.minimum_compatible;
-        schema::migrate_schema(&connection)?;
-        assert_eq!(
-            schema::read_schema_state(&connection)?.minimum_compatible,
-            floor
+        // Test revision 135's compatibility before the separate brief fence.
+        let error = schema::migrate_schema(&connection).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fixture boundary before brief fence"),
+            "{error:#}"
         );
-        schema::read_schema_state(&connection)?.ensure_supported_by(134)?;
+        connection.execute_batch("ROLLBACK;")?;
+        let at_135 = schema::read_schema_state(&connection)?;
+        assert_eq!(at_135.revision, 135);
+        assert_eq!(at_135.minimum_compatible, floor);
+        at_135.ensure_supported_by(134)?;
         // An old daemon's conflict path must not erase the new accounting fact.
         connection.execute_batch(
             "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
@@ -417,10 +427,18 @@ mod tests {
                  SET record_json=json_set(record_json, '$.noticed_turn', 3)
                  WHERE child_session_id='reviewer';",
         )?;
+        connection.execute_batch("DROP TRIGGER stop_before_brief_fence;")?;
         drop(connection);
         delete_session_from(&path, "reviewer")?;
         delete_session_from(&path, "legacy")?;
         let connection = open(&path)?;
+        let latest = schema::read_schema_state(&connection)?;
+        assert_eq!(latest.revision, super::super::SCHEMA_VERSION);
+        assert_eq!(
+            latest.minimum_compatible,
+            Some(schema::MINIMUM_COMPATIBLE_VERSION)
+        );
+        assert!(latest.ensure_supported_by(135).is_err());
         let retained: Vec<(String, Option<String>)> = connection
             .prepare(
                 "SELECT child_session_id,kind FROM subagent_accounting ORDER BY child_session_id",

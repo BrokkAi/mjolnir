@@ -698,6 +698,29 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
 struct NoticeExecutor(std::sync::Mutex<Vec<String>>);
 
 impl CommandExecutor for NoticeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         panic!("the Move unexpectedly ran {}", command.program);
     }
@@ -1933,6 +1956,29 @@ fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_it
         calls: std::sync::atomic::AtomicUsize,
     }
     impl CommandExecutor for StopFails {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             anyhow::bail!("source process group is still running")
@@ -2034,6 +2080,29 @@ struct GitWithPodmanPreflightExecutor {
 }
 
 impl CommandExecutor for GitWithPodmanPreflightExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute_with_stdin(
         &self,
         command: &CommandSpec,
@@ -2182,6 +2251,29 @@ struct RecordedMoveRestore {
 
 #[cfg(unix)]
 impl CommandExecutor for RecordedMoveRestore {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if command.program == "git" {
             return crate::controller::test_support::FixtureRemoteExecutor {
@@ -2394,6 +2486,29 @@ struct LocalMoveRestore {
 
 #[cfg(unix)]
 impl CommandExecutor for LocalMoveRestore {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if command.program == "git" {
             return crate::controller::test_support::FixtureRemoteExecutor {
@@ -2549,6 +2664,29 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
 struct RsyncWithoutPartialDir(GitWithPodmanPreflightExecutor);
 
 impl CommandExecutor for RsyncWithoutPartialDir {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute_with_stdin(
         &self,
         command: &CommandSpec,
@@ -2742,6 +2880,29 @@ impl RecordingProcessExecutor {
 
 #[cfg(unix)]
 impl CommandExecutor for RecordingProcessExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.record(command);
         if let Some(failing) = self.fail_purpose
@@ -5682,8 +5843,15 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
         operation.cancellation_requested = false;
         operation.error = None;
         operation.selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+        // What the dashboard seals: no attached directories, and an explicitly
+        // cleared resource allocation.
+        operation.selection.additional_mounts = Some(Vec::new());
+        operation.selection.clear_resource_allocation = true;
         crate::database::save_move_operation(&operation).unwrap();
         let mut requested = operation.selection.clone();
+        // Hard-won: move-f309ba7ac67ad183c55de12d66239891: the CLI could not retry a Move the dashboard sealed, because it cannot send attached directories or a cleared allocation.
+        requested.additional_mounts = None;
+        requested.clear_resource_allocation = false;
         // Hard-won: 5390a50d: omitted retry fields used source settings and stranded a sealed Move.
         requested.profile_id = None;
         requested.target_template_id = None;
@@ -6167,6 +6335,29 @@ struct Ec2PreviewExecutor(GitWithPodmanPreflightExecutor);
 
 #[cfg(unix)]
 impl CommandExecutor for Ec2PreviewExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if command.program == "aws" {
             assert!(

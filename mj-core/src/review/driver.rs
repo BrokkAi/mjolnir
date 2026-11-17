@@ -16,8 +16,16 @@ pub enum ReviewRequest {
         command_id: String,
         prompt: String,
     },
+    /// Register the brief writer's child with this initial prompt. Its role is
+    /// [`BRIEF_WRITER_ROLE`], not a reviewer slot, and no reviewer starts until
+    /// it hands back or fails.
+    StartBriefWriter { command_id: String, prompt: String },
     /// Close the reviewer child.
     CloseReviewer { role: String },
+    /// Close the brief writer's child.
+    CloseBriefWriter,
+    /// Tell the requester the reviewers started without a brief, and why.
+    NoteBriefSkipped { reason: String },
     /// The review is over; close its pane.
     Close,
 }
@@ -78,6 +86,9 @@ pub enum TurnReviewPhase {
     CapturingDelta,
     /// Staging and starting the first reviewing agent.
     LaunchingReviewer,
+    /// A writer is reading the change to hand the reviewers a relation brief.
+    /// No reviewer has started.
+    WritingBrief,
     /// One or more reviewing agents are working.
     Running {
         roles: Vec<RoleStatus>,
@@ -85,6 +96,17 @@ pub enum TurnReviewPhase {
     /// The verdict is being delivered to the agent.
     Verdict(ReviewVerdict),
     Resolved(Resolution),
+}
+
+/// The role key of the brief writer's child. It is a registration of the
+/// review group but never a reviewer slot, so it has no verdict of its own.
+pub const BRIEF_WRITER_ROLE: &str = "brief-writer";
+
+/// Driver-local key for the brief stage. The daemon owns the child's
+/// startup prompt ID separately, through its registration request key.
+#[must_use]
+pub fn brief_writer_command_id(review_id: &str) -> String {
+    format!("{COMMAND_ID_PREFIX}{review_id}-{BRIEF_WRITER_ROLE}")
 }
 
 /// The legacy sole-reviewer role, retained for old review records.
@@ -105,6 +127,10 @@ pub struct TurnReviewSeed {
     /// snapshot has none.
     #[serde(default)]
     pub declined: Vec<ReviewOverride>,
+    /// Relations a brief writer computed for the reviewers, rendered into the
+    /// reviewer prompt. An older snapshot has none, and none renders nothing.
+    #[serde(default)]
+    pub brief: Option<String>,
 }
 
 /// One frozen reviewer slot. Its verdict is the only terminal-state fact.
@@ -125,6 +151,11 @@ pub struct ReviewDriverSnapshot {
     pub deltas: Vec<RepoDelta>,
     pub roles: Vec<ReviewerOutcomeSlot>,
     pub sequence: u64,
+    /// The brief writer's row state: running while it writes, then clean once
+    /// its brief is in the prompts or failed when the reviewers went without.
+    /// None for a review with no writer.
+    #[serde(default)]
+    pub brief_writer: Option<RoleState>,
     /// Exact requests emitted by the current stage, before any side effect.
     #[serde(default, deserialize_with = "deserialize_replay_requests")]
     pub replay_requests: Vec<ReviewRequest>,
@@ -143,7 +174,15 @@ fn deserialize_replay_requests<'de, D: serde::Deserializer<'de>>(
             });
             matches!(
                 kind,
-                Some("CaptureDelta" | "StartReviewer" | "CloseReviewer" | "Close")
+                Some(
+                    "CaptureDelta"
+                        | "StartReviewer"
+                        | "StartBriefWriter"
+                        | "CloseReviewer"
+                        | "CloseBriefWriter"
+                        | "NoteBriefSkipped"
+                        | "Close"
+                )
             )
         })
         .map(|v| {
@@ -160,7 +199,8 @@ fn deserialize_replay_requests<'de, D: serde::Deserializer<'de>>(
 impl serde::Serialize for TurnReviewSeed {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut value = serializer.serialize_struct("TurnReviewSeed", 5)?;
+        let mut value =
+            serializer.serialize_struct("TurnReviewSeed", 5 + usize::from(self.brief.is_some()))?;
         value.serialize_field("task", &self.task)?;
         value.serialize_field("user_messages", &self.user_messages)?;
         value.serialize_field("declined", &self.declined)?;
@@ -169,13 +209,19 @@ impl serde::Serialize for TurnReviewSeed {
             &std::collections::BTreeMap::<String, String>::new(),
         )?;
         value.serialize_field("through_ordinal", &0_u64)?;
+        if let Some(brief) = &self.brief {
+            value.serialize_field("brief", brief)?;
+        }
         value.end()
     }
 }
 impl serde::Serialize for ReviewDriverSnapshot {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut value = serializer.serialize_struct("ReviewDriverSnapshot", 9)?;
+        let mut value = serializer.serialize_struct(
+            "ReviewDriverSnapshot",
+            9 + usize::from(self.brief_writer.is_some()),
+        )?;
         value.serialize_field("review_id", &self.review_id)?;
         value.serialize_field("seed", &self.seed)?;
         value.serialize_field("phase", &self.phase)?;
@@ -193,6 +239,9 @@ impl serde::Serialize for ReviewDriverSnapshot {
             })
             .collect();
         value.serialize_field("replay_requests", &requests)?;
+        if let Some(state) = &self.brief_writer {
+            value.serialize_field("brief_writer", state)?;
+        }
         value.end()
     }
 }
@@ -200,6 +249,15 @@ impl serde::Serialize for ReviewDriverSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decoded_with_brief(mut snapshot: serde_json::Value) -> ReviewDriverSnapshot {
+        snapshot["seed"]["brief"] = serde_json::json!("relations");
+        let decoded: ReviewDriverSnapshot = serde_json::from_value(snapshot).unwrap();
+        let again: ReviewDriverSnapshot =
+            serde_json::from_value(serde_json::to_value(&decoded).unwrap()).unwrap();
+        assert_eq!(decoded, again, "a brief survives a save and restore");
+        decoded
+    }
 
     #[test]
     fn old_push_snapshots_skip_retired_replay_and_keep_live_requests_strict() {
@@ -210,6 +268,7 @@ mod tests {
             "replay_requests":[{"CaptureDelta":{"baselines":{}}},{"AdvanceBaseline":{"trees":{},"reviewed_through_ordinal":12}},"ClearPriorReview",{"PromptPrimary":{"command_id":"old","prompt":"old"}},"Close"]
         });
         let decoded: ReviewDriverSnapshot = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(decoded.seed.brief, None, "an older snapshot has no brief");
         assert_eq!(
             decoded.replay_requests,
             vec![ReviewRequest::CaptureDelta, ReviewRequest::Close]
@@ -218,6 +277,10 @@ mod tests {
         assert_eq!(saved["seed"]["baselines"], serde_json::json!({}));
         assert_eq!(saved["seed"]["through_ordinal"], 0);
         assert_eq!(saved["provenance"], "independent_reviewers");
+        assert!(saved["seed"].get("brief").is_none());
+        let mut briefed = decoded_with_brief(saved.clone());
+        assert_eq!(briefed.seed.brief.as_deref(), Some("relations"));
+        briefed.seed.brief = None;
         assert_eq!(
             saved["replay_requests"][0],
             serde_json::json!({"CaptureDelta":{"baselines":{}}})

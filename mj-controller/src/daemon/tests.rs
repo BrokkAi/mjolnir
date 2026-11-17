@@ -158,6 +158,29 @@ fn restart_recovery_discards_intents_superseded_by_suspend_or_destroy() {
 async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target() {
     struct StatusExecutor(i32);
     impl CommandExecutor for StatusExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: self.0,
@@ -4645,6 +4668,29 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
     );
     struct NoEnvironmentMutation;
     impl crate::targets::CommandExecutor for NoEnvironmentMutation {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(
             &self,
             _: &crate::targets::CommandSpec,
@@ -4659,14 +4705,16 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         liveness_probe: crate::targets::CommandSpec::new(
             "must-not-run",
             std::iter::empty::<String>(),
-        ),
+        )
+        .into(),
         exit_record: None,
         binary_refresh: None,
         launch_refresh: None,
         restart: crate::targets::CommandPlan {
             description: "background recovery must stay suppressed".into(),
             commands: Vec::new(),
-        },
+        }
+        .into(),
     };
     assert_eq!(
         crate::session_manager::recover_worker_controlled(
@@ -9569,7 +9617,10 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     let recovery_attempt = state
         .recovery_observer
         .gate
-        .try_start(WORKING_CHILD)
+        .try_start(
+            WORKING_CHILD,
+            crate::recovery_gate::BackgroundWork::RecoveryCopy,
+        )
         .unwrap();
     let suspend = tokio::spawn({
         let state = state.clone();
@@ -9650,8 +9701,16 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
     let mut state = test_runtime_state_loading_the_store();
     let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
     Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
-    let attempt_a = state.recovery_observer.gate.try_start(child_a).unwrap();
-    let attempt_b = state.recovery_observer.gate.try_start(child_b).unwrap();
+    let attempt_a = state
+        .recovery_observer
+        .gate
+        .try_start(child_a, crate::recovery_gate::BackgroundWork::RecoveryCopy)
+        .unwrap();
+    let attempt_b = state
+        .recovery_observer
+        .gate
+        .try_start(child_b, crate::recovery_gate::BackgroundWork::RecoveryCopy)
+        .unwrap();
 
     let mut suspend = tokio::spawn({
         let state = state.clone();
@@ -10221,6 +10280,7 @@ async fn exercise_child_close_with_a_nested_workspace(
                 task: "review the changes".into(),
                 user_messages: Vec::new(),
                 declined: Vec::new(),
+                brief: None,
             },
             "failed-start".into(),
             std::num::NonZeroUsize::new(1).unwrap(),
@@ -10237,6 +10297,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             parent_id,
             &crate::database::TurnReviewState {
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
+                    brief_writer: None,
                     driver: driver.snapshot(),
                     reviewers: vec![Default::default()],
                     registrations: vec![mj_core::storage::ReviewerRegistration {
@@ -10395,10 +10456,34 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
 
     struct AliveWorker;
     impl CommandExecutor for AliveWorker {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             // The root exists (its journal is there); only the worker is unreachable.
             let stdout = match command.purpose.as_str() {
                 "probe Mjolnir worker root" => b"recoverable\n".to_vec(),
+                "check the control worker" => b"present\n".to_vec(),
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
                 other => panic!("unexpected command: {other}"),
             };

@@ -1332,6 +1332,25 @@ impl Controller {
             if retained.in_place {
                 selection.workspace = retained.selection.workspace.clone();
             }
+            // A field the request omits means the one the Move was sealed
+            // with, so a surface that cannot express it (the CLI has no flag
+            // for attached directories) can still retry a Move another
+            // surface sealed. An explicit value that differs still refuses.
+            let sealed = &retained.selection;
+            if selection.additional_mounts.is_none() {
+                selection.additional_mounts = sealed.additional_mounts.clone();
+            }
+            if selection.resource_allocation.is_none() && !selection.clear_resource_allocation {
+                selection.resource_allocation = sealed.resource_allocation.clone();
+                selection.clear_resource_allocation = sealed.clear_resource_allocation;
+            }
+            if selection.subagents.is_none() {
+                selection.subagents = sealed.subagents.clone();
+            }
+            if selection.oracle.is_none() && selection.oracle_choice.is_none() {
+                selection.oracle = sealed.oracle;
+                selection.oracle_choice = sealed.oracle_choice.clone();
+            }
             ensure!(
                 retained.selection == selection,
                 "{}",

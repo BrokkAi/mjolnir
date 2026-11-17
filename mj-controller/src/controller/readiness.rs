@@ -422,10 +422,13 @@ impl StartingWorkerProbe for StartingWorkerConnection<'_> {
         let executor = CancellableProcessExecutor::new(cancelled);
         let locator = self.locator.clone();
         let worker_root = self.worker_root.to_owned();
+        let session_id = self.session_id.to_owned();
         async move {
-            tokio::task::spawn_blocking(move || probe_worker(&executor, &locator, &worker_root))
-                .await
-                .context("worker probe task failed")?
+            tokio::task::spawn_blocking(move || {
+                probe_worker(&executor, &locator, &session_id, &worker_root)
+            })
+            .await
+            .context("worker probe task failed")?
         }
     }
 }
@@ -839,6 +842,29 @@ mod tests {
         }
 
         impl CommandExecutor for RecordingExecutor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 panic!("readiness must not execute {}", command.program)
             }
