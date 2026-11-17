@@ -2888,8 +2888,10 @@ const QUOTA_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(1
 /// Pump runtime deltas until `done` holds or the deadline passes; returns the
 /// latest cursor and metadata seen. One waiter feeds `--refresh` (a new
 /// cycle) and `--with-disabled` (a report for every profile just probed).
+/// Own a dedicated connection: a deadline abandons its in-flight exchange,
+/// while quota control requests continue on their original connection.
 async fn pump_quota_feed(
-    daemon: &mut mj_client::daemon::DaemonClient,
+    mut daemon: mj_client::daemon::DaemonClient,
     mut cursor: Option<mj_client::runtime_feed::RuntimeCursor>,
     mut metadata: mj_client::runtime_feed::RuntimeMetadata,
     deadline: std::time::Instant,
@@ -2950,9 +2952,13 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
         let pending = metadata.quotas.cycles;
         daemon.refresh_quota().await?;
         let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
-        let pumped = pump_quota_feed(&mut daemon, cursor, metadata, deadline, |metadata| {
-            metadata.quotas.cycles > pending
-        })
+        let pumped = pump_quota_feed(
+            mj_client::daemon::connect_existing().await?,
+            cursor,
+            metadata,
+            deadline,
+            |metadata| metadata.quotas.cycles > pending,
+        )
         .await?;
         cursor = pumped.0;
         metadata = pumped.1;
@@ -2974,11 +2980,17 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
         if !probe.is_empty() {
             daemon.probe_quota_profiles(probe.clone(), false).await?;
             let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
-            let pumped = pump_quota_feed(&mut daemon, cursor, metadata, deadline, |metadata| {
-                probe
-                    .iter()
-                    .all(|id| metadata.quotas.reports.contains_key(id))
-            })
+            let pumped = pump_quota_feed(
+                mj_client::daemon::connect_existing().await?,
+                cursor,
+                metadata,
+                deadline,
+                |metadata| {
+                    probe
+                        .iter()
+                        .all(|id| metadata.quotas.reports.contains_key(id))
+                },
+            )
             .await?;
             metadata = pumped.1;
         }
@@ -4991,6 +5003,80 @@ mod tests {
         output.push_str("\n=== mj models, nothing offered ===\n");
         output.push_str(&render_models_aggregate(&[], false).unwrap());
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-models-aggregate", &output);
+    }
+
+    // Hard-won: #1566: a timed-out quota feed left the control client unusable for disabled-profile probes.
+    #[tokio::test]
+    async fn quota_feed_timeout_preserves_the_control_connection() {
+        use mj_client::daemon::{
+            DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply,
+            PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
+        };
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "quota-feed-timeout".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let (received, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut control, _) = listener.accept().await.unwrap();
+            let (mut feed, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = read_frame(&mut feed).await.unwrap();
+            assert!(matches!(
+                request.action,
+                DaemonAction::RuntimeChanges { .. }
+            ));
+            received.send(()).unwrap();
+            let mut byte = [0];
+            assert_eq!(feed.read(&mut byte).await.unwrap(), 0);
+            let request: RequestEnvelope = read_frame(&mut control).await.unwrap();
+            assert!(matches!(
+                request.action,
+                DaemonAction::ProbeQuotaProfiles { .. }
+            ));
+            write_frame(
+                &mut control,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::Done),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let mut control = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let feed = DaemonClient::connect(metadata).await.unwrap();
+        let observed = mj_client::runtime_feed::RuntimeMetadata::default();
+        let pump = pump_quota_feed(
+            feed,
+            None,
+            observed.clone(),
+            std::time::Instant::now() + QUOTA_REFRESH_WAIT,
+            |_| false,
+        );
+        tokio::pin!(pump);
+        tokio::select! {
+            result = &mut pump => panic!("feed reply remains pending: {result:?}"),
+            result = waiting => result.unwrap(),
+        }
+        tokio::time::pause();
+        tokio::time::advance(QUOTA_REFRESH_WAIT + std::time::Duration::from_secs(1)).await;
+        let (_, latest) = pump.await.unwrap();
+        assert_eq!(latest, observed);
+        control
+            .probe_quota_profiles(vec!["disabled".into()], false)
+            .await
+            .unwrap();
+        server.await.unwrap();
     }
 
     #[test]
