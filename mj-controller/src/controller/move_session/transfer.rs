@@ -293,7 +293,7 @@ fi
 umask 077
 parent=$(dirname -- "$stage")
 mkdir -p -- "$parent"
-chmod 700 -- "$parent"
+chmod -- 700 "$parent"
 mkdir -p -- "$stage"
 printf '%s' "$identity" > "$marker"
 "#;
