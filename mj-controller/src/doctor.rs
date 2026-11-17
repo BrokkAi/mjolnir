@@ -3443,34 +3443,28 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     }
     containers
         .into_iter()
-        .map(|(id, container, remote_kind, known_arch)| {
+        .flat_map(|(id, container, remote_kind, known_arch)| {
             if let Some(remote_kind) = remote_kind
                 && container.platform.is_none()
             {
-                // The remote CPU architecture is only observable once the host
-                // is reachable, so an explicit `platform` is required here.
-                return DoctorCheck::unsupported(
+                return vec![DoctorCheck::unsupported(
                     format!("worker.{id}"),
                     format!("Container worker binary for target {id}"),
-                    format!(
-                        "Set `platform` on this {remote_kind} target to check its worker binary; the remote architecture is unknown until provisioning."
-                    ),
-                );
+                    format!("Set `platform` on this {remote_kind} target to check its worker binary; the remote architecture is unknown until provisioning."),
+                )];
             }
-            worker_binary_check_on(id, container, known_arch)
+            let mut checks = vec![worker_binary_check_on(id, container, known_arch)];
+            let Ok(architecture) = known_arch.map_or_else(|| container_architecture(container.platform.as_deref()), Ok) else { return checks; };
+            let platform = mj_core::config::canonical_image_platform(architecture);
+            for (bundle_id, images) in &config.images.bundles {
+                if !config.bundles.contains_key(bundle_id) || !images.contains_key(platform) { continue; }
+                let mut effective = container.clone();
+                effective.image = config.session_image(Some(bundle_id), id, platform).expect("container target exists").to_owned();
+                effective.platform = Some(platform.to_owned());
+                checks.push(worker_binary_check_on(&format!("{id}.{bundle_id}.{platform}"), &effective, known_arch));
+            }
+            checks
         })
-        .chain(config.targets.iter().flat_map(|(id, target)| {
-            config.bundles.iter().flat_map(move |(bundle_id, bundle)| {
-                bundle.images.keys().filter_map(move |platform| {
-                    let container = target.container()?;
-                    if container.platform.as_deref().is_some_and(|selected| selected != platform) { return None; }
-                    let mut effective = container.clone();
-                    effective.image = config.session_image(Some(bundle_id), id, platform)?.to_owned();
-                    effective.platform = Some(platform.clone());
-                    Some(worker_binary_check_on(&format!("{id}.{bundle_id}.{platform}"), &effective, None))
-                })
-            })
-        }))
         .collect()
 }
 

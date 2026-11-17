@@ -182,7 +182,6 @@ mod tests {
         config.bundles.insert(
             "bundle-1".into(),
             mj_core::config::ProjectBundle {
-                images: Default::default(),
                 primary_repo: "project".into(),
                 repositories: vec![mj_core::config::ProjectRepository {
                     id: "project".into(),

@@ -73,6 +73,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         .env("CLAUDE_CONFIG_DIR", &claude_home))?;
 
     let mut config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -119,7 +120,6 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
     config.bundles.insert(
         "scratch".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "scratch".into(),
             repositories: vec![ProjectRepository {
                 id: "scratch".into(),
@@ -198,6 +198,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     let repository = std::env::var("MJ_IMPORT_E2E_KIMI_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -227,7 +228,6 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         bundles: BTreeMap::from([(
             "kimi-source".into(),
             ProjectBundle {
-                images: Default::default(),
                 primary_repo: "kimi-source".into(),
                 repositories: vec![ProjectRepository {
                     id: "kimi-source".into(),
@@ -330,6 +330,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     let repository = std::env::var("MJ_IMPORT_E2E_GROK_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -359,7 +360,6 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         bundles: BTreeMap::from([(
             "grok-source".into(),
             ProjectBundle {
-                images: Default::default(),
                 primary_repo: "grok-source".into(),
                 repositories: vec![ProjectRepository {
                     id: "grok-source".into(),
@@ -569,6 +569,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     let repository = std::env::var("MJ_IMPORT_E2E_CODEX_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -598,7 +599,6 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         bundles: BTreeMap::from([(
             "codex-source".into(),
             ProjectBundle {
-                images: Default::default(),
                 primary_repo: "codex-source".into(),
                 repositories: vec![ProjectRepository {
                     id: "codex-source".into(),

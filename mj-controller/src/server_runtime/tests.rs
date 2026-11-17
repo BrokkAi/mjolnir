@@ -472,7 +472,6 @@ fn golden_phone_new_session_preflight() {
     config.bundles.insert(
         "hel".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "hel".into(),
             repositories: vec![ProjectRepository {
                 id: "hel".into(),

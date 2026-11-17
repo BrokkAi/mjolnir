@@ -28,7 +28,6 @@ fn registration_config() -> Config {
     config.bundles.insert(
         "project".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "project".into(),
             repositories: vec![ProjectRepository {
                 id: "project".into(),
@@ -650,7 +649,6 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
     config.bundles.insert(
         "all".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "app".into(),
             repositories: vec![
                 ProjectRepository {
@@ -715,7 +713,6 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
     config.bundles.insert(
         "a-stale".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "stale".into(),
             repositories: vec![ProjectRepository {
                 id: "stale".into(),
@@ -729,7 +726,6 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
     config.bundles.insert(
         "z-existing".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "existing".into(),
             repositories: vec![ProjectRepository {
                 id: "existing".into(),

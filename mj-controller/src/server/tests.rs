@@ -101,7 +101,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         bundles: BTreeMap::from([(
             "hel".into(),
             ProjectBundle {
-                images: Default::default(),
                 primary_repo: "hel".into(),
                 repositories: vec![ProjectRepository {
                     id: "hel".into(),

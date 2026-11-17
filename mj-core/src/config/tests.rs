@@ -849,7 +849,6 @@ fn sample_config() -> Config {
         bundles: BTreeMap::from([(
             "hel".into(),
             ProjectBundle {
-                images: Default::default(),
                 primary_repo: "app".into(),
                 repositories: vec![ProjectRepository {
                     id: "app".into(),
@@ -1282,12 +1281,29 @@ fn config_toml_round_trip_is_atomic() {
     let mut config = sample_config();
     config.sidebar_size = crate::workspace::PaneSize::Minimized;
     config.images.repository = Some("localhost:5000/projects".into());
-    config.bundles.get_mut("hel").unwrap().images.insert(
-        "linux/amd64".into(),
-        "localhost:5000/projects/hel:recipe".into(),
+    config
+        .images
+        .bundles
+        .entry("hel".into())
+        .or_default()
+        .insert(
+            "linux/amd64".into(),
+            "localhost:5000/projects/hel:recipe".into(),
+        );
+    config.images.bundles.insert(
+        "retired".into(),
+        BTreeMap::from([(
+            "linux/amd64".into(),
+            "localhost:5000/projects/retired:recipe".into(),
+        )]),
     );
     config.save_to(&path).unwrap();
     let loaded = Config::load_from(&path).unwrap();
+    assert_eq!(
+        loaded.session_image(Some("retired"), "podman-default", "linux/amd64"),
+        Some("ubuntu:24.04")
+    );
+    assert!(loaded.images.bundles.contains_key("retired"));
     assert_eq!(
         loaded.session_image(Some("hel"), "podman-default", "linux/amd64"),
         Some("localhost:5000/projects/hel:recipe")

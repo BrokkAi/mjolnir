@@ -73,7 +73,6 @@ fn cli_import_uploads_client_history_to_separate_daemon_store() {
     config.bundles.insert(
         "existing".into(),
         mj_core::config::ProjectBundle {
-            images: Default::default(),
             primary_repo: "repo".into(),
             repositories: vec![mj_core::config::ProjectRepository {
                 id: "repo".into(),

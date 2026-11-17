@@ -782,14 +782,31 @@ pub(crate) fn session_image_platform(
     ) {
         "aarch64"
     } else {
-        let output = super::execute_checked(
-            executor,
-            host.command(
-                vec!["uname".into(), "-sm".into()],
-                "detect image platform".into(),
-            ),
-        )?;
-        targets::TargetPlatform::parse(std::str::from_utf8(&output.stdout)?)?.architecture
+        // The engine owns its native architecture, including Docker Desktop
+        // on a Windows daemon host where uname is not available.
+        let args = match host.engine() {
+            "podman" => vec![
+                "podman".into(),
+                "info".into(),
+                "--format".into(),
+                "{{.Host.Arch}}".into(),
+            ],
+            "docker" => vec![
+                "docker".into(),
+                "info".into(),
+                "--format".into(),
+                "{{.Architecture}}".into(),
+            ],
+            _ => vec!["uname".into(), "-sm".into()], // Nitro hosts run Linux.
+        };
+        let output =
+            super::execute_checked(executor, host.command(args, "detect image platform".into()))?;
+        let output = std::str::from_utf8(&output.stdout)?;
+        if matches!(host, targets::ImageHost::SshNitro(_)) {
+            targets::TargetPlatform::parse(output)?.architecture
+        } else {
+            targets::normalize_architecture(output.trim())?
+        }
     };
     Ok(format!(
         "linux/{}",
@@ -815,9 +832,10 @@ pub(crate) fn session_target(
         .context("session target configuration is missing")?;
     if template.container().is_none()
         || config
+            .images
             .bundles
             .get(bundle_id)
-            .is_none_or(|bundle| bundle.images.is_empty())
+            .is_none_or(BTreeMap::is_empty)
     {
         return Ok(template.clone());
     }

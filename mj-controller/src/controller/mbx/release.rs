@@ -1131,7 +1131,6 @@ mod tests {
         config.bundles.insert(
             "project".into(),
             mj_core::config::ProjectBundle {
-                images: Default::default(),
                 primary_repo: "app".into(),
                 repositories: destinations
                     .iter()

@@ -46,7 +46,7 @@ use std::fs::{self, OpenOptions};
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
@@ -1175,15 +1175,84 @@ fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
     serde::de::IgnoredAny::deserialize(deserializer).map(|_| ())
 }
 
+/// OCI spelling for the architecture aliases accepted by container engines.
+/// Variant suffixes share the project's architecture-specific assignment.
+pub fn canonical_image_platform(platform: &str) -> &str {
+    match platform
+        .strip_prefix("linux/")
+        .unwrap_or(platform)
+        .split('/')
+        .next()
+    {
+        Some("x86_64" | "amd64") => "linux/amd64",
+        Some("aarch64" | "arm64") => "linux/arm64",
+        _ => platform,
+    }
+}
+
 /// Registry namespace used for published project session images.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImagesConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bundles: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl ImagesConfig {
+    /// Transfer assignments when project discovery consolidates two aliases.
+    /// Existing canonical assignments decide each platform.
+    pub fn consolidate_bundle(&mut self, alias: &str, canonical: &str) {
+        if alias == canonical {
+            return;
+        }
+        if let Some(images) = self.bundles.remove(alias) {
+            let canonical = self.bundles.entry(canonical.to_owned()).or_default();
+            for (platform, image) in images {
+                canonical.entry(platform).or_insert(image);
+            }
+        }
+    }
+
+    fn validate(&self, bundles: &BTreeMap<String, ProjectBundle>) -> Result<()> {
+        static REPORTED: std::sync::Mutex<BTreeSet<String>> =
+            std::sync::Mutex::new(BTreeSet::new());
+        for (bundle_id, images) in &self.bundles {
+            if !bundles.contains_key(bundle_id) {
+                if REPORTED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(bundle_id.clone())
+                {
+                    tracing::warn!(
+                        bundle = bundle_id,
+                        "image assignments for unknown bundle {bundle_id:?} are ignored; the entry is retained in config.toml"
+                    );
+                }
+                continue;
+            }
+            for (platform, image) in images {
+                let Some(architecture) = platform.strip_prefix("linux/") else {
+                    bail!("bundle {bundle_id:?} image platform {platform:?} must be linux/<arch>");
+                };
+                ensure!(
+                    !architecture.is_empty()
+                        && !architecture.contains('/')
+                        && architecture
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+                    "bundle {bundle_id:?} image platform {platform:?} must be linux/<arch>"
+                );
+                ensure!(
+                    !image.trim().is_empty() && !image.chars().any(char::is_whitespace),
+                    "bundle {bundle_id:?} image for {platform:?} must be a non-empty image reference without whitespace"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -1675,10 +1744,12 @@ impl Config {
         platform: &str,
     ) -> Option<&str> {
         let container = self.targets.get(target_id)?.container()?;
+        let platform = canonical_image_platform(platform);
         Some(
             bundle_id
-                .and_then(|id| self.bundles.get(id))
-                .and_then(|bundle| bundle.images.get(platform))
+                .filter(|id| self.bundles.contains_key(*id))
+                .and_then(|id| self.images.bundles.get(id))
+                .and_then(|images| images.get(platform))
                 .map_or(container.image.as_str(), String::as_str),
         )
     }
@@ -1931,6 +2002,7 @@ impl Config {
         for (id, bundle) in &self.bundles {
             bundle.validate(id)?;
         }
+        self.images.validate(&self.bundles)?;
         machines::validate_machines(&self.machines)?;
         for (id, target) in &self.targets {
             target.validate(id)?;

@@ -1677,7 +1677,6 @@ pub(super) fn runtime_test_config() -> Config {
     config.bundles.insert(
         "project".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "main".into(),
             repositories: vec![ProjectRepository {
                 id: "main".into(),
@@ -2436,7 +2435,6 @@ async fn remove_project_rpc_removes_missing_directory_from_config_and_runtime_fe
     assert!(!missing.exists());
     let bundle_id = "missingpath";
     let bundle = mj_core::config::ProjectBundle {
-        images: Default::default(),
         primary_repo: bundle_id.into(),
         repositories: vec![mj_core::config::ProjectRepository {
             id: bundle_id.into(),

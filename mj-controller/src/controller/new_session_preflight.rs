@@ -206,7 +206,6 @@ mod tests {
         config.bundles.insert(
             "project".into(),
             ProjectBundle {
-                images: Default::default(),
                 primary_repo: "one".into(),
                 repositories: ["one", "two"]
                     .into_iter()

@@ -57,7 +57,6 @@ fn provisioning_uses_accepted_fetch_and_push_settings_after_the_catalog_changes(
     session.project = Some(
         mj_core::repository::ProjectBundleSnapshot {
             bundle: ProjectBundle {
-                images: Default::default(),
                 primary_repo: "original-repository-id".into(),
                 repositories: vec![ProjectRepository {
                     id: "original-repository-id".into(),

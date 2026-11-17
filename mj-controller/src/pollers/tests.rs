@@ -93,7 +93,6 @@ fn podman_controller(state: SessionState) -> Controller {
     config.bundles.insert(
         "project".into(),
         mj_core::config::ProjectBundle {
-            images: Default::default(),
             primary_repo: "project".into(),
             repositories: vec![mj_core::config::ProjectRepository {
                 id: "project".into(),

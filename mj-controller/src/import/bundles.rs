@@ -126,7 +126,6 @@ pub fn resolve_bundle(
     Ok(BundleResolution::Synthesized {
         id: bundle_id,
         bundle: ProjectBundle {
-            images: Default::default(),
             primary_repo: primary_repo.context("detected roots omitted the cwd repository")?,
             repositories,
         },

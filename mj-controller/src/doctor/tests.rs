@@ -459,6 +459,39 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         checks.push(sshd::check("remote", &ssh, &FakeExecutor::new([response])));
     }
 
+    let foreign = if std::env::consts::ARCH == "aarch64" {
+        "linux/amd64"
+    } else {
+        "linux/arm64"
+    };
+    let config_path = home.path().join("project-images.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"version = {version}
+[bundles.assigned]
+primary_repo = "app"
+[[bundles.assigned.repositories]]
+id = "app"
+github = "BrokkAi/mjolnir"
+destination = "app"
+[images.bundles.assigned]
+"{foreign}" = "registry.example.test/project:foreign"
+[targets.native]
+kind = "podman"
+"#,
+            version = mj_core::config::CONFIG_VERSION
+        ),
+    )
+    .unwrap();
+    let assigned = Config::load_from(&config_path).unwrap();
+    // Hard-won: 536fd7df7: doctor warned about foreign-platform images on a native target with no platform key.
+    checks.extend(
+        worker_binary_checks(Ok(&assigned))
+            .into_iter()
+            .filter(|check| check.id.starts_with("worker.native.assigned.")),
+    );
+
     for check in &mut checks {
         check.detail = check
             .detail

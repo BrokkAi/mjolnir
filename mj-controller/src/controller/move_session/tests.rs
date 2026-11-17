@@ -1719,7 +1719,6 @@ pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord)
 fn move_raw_checkout_uses_the_same_accepted_bundle_transition_plan() {
     let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
     let bundle = ProjectBundle {
-        images: Default::default(),
         primary_repo: "bifrost-source".into(),
         repositories: vec![ProjectRepository {
             id: "bifrost-source".into(),

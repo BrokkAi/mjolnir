@@ -91,7 +91,6 @@ pub(crate) fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleS
     let id = crate::import::setup_style_id(&resolved.identity.name());
     ProjectBundleSnapshot {
         bundle: ProjectBundle {
-            images: Default::default(),
             primary_repo: id.clone(),
             repositories: vec![ProjectRepository {
                 id: id.clone(),
@@ -237,6 +236,7 @@ fn reconcile_config(
                         .insert(canonical.clone(), saved.project.bundle);
                 }
                 fresh.bundles.remove(&id);
+                fresh.images.consolidate_bundle(&id, &canonical);
             }
             Ok(())
         })?;
@@ -636,7 +636,6 @@ mod tests {
             assert_eq!(ProcessExecutor.execute(&command).unwrap().status, 0);
         }
         let legacy_bundle = ProjectBundle {
-            images: Default::default(),
             primary_repo: "old-id".into(),
             repositories: vec![ProjectRepository {
                 id: "old-id".into(),

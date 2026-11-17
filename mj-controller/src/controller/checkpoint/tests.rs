@@ -2818,7 +2818,6 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     config.bundles.insert(
         "project".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "project".into(),
             repositories: vec![ProjectRepository {
                 id: "project".into(),
@@ -3168,7 +3167,6 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     config.bundles.insert(
         "project".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "project".into(),
             repositories: vec![ProjectRepository {
                 id: "project".into(),
@@ -3610,7 +3608,6 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         config.bundles.insert(
             "project".into(),
             ProjectBundle {
-                images: Default::default(),
                 primary_repo: "project".into(),
                 repositories: vec![ProjectRepository {
                     id: "project".into(),
@@ -4033,7 +4030,6 @@ async fn close_cut_controller_with(
     config.bundles.insert(
         "project".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "project".into(),
             repositories: vec![ProjectRepository {
                 id: "project".into(),

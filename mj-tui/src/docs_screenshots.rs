@@ -99,7 +99,6 @@ fn documentation_dashboard() -> DashboardState {
     config.bundles = BTreeMap::from([(
         "mjolnir".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "mjolnir".into(),
             repositories: vec![ProjectRepository {
                 id: "mjolnir".into(),

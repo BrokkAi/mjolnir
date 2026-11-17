@@ -705,7 +705,6 @@ pub fn build_config(homes: &[DiscoveredHome], repository: Option<&GithubReposito
         config.bundles.insert(
             "current-repository".to_owned(),
             ProjectBundle {
-                images: Default::default(),
                 primary_repo: repository_id.clone(),
                 repositories: vec![ProjectRepository {
                     id: repository_id.clone(),

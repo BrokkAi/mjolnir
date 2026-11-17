@@ -2333,7 +2333,6 @@ fn two_repository_bundle() -> mj_core::config::ProjectBundle {
         ..Default::default()
     };
     mj_core::config::ProjectBundle {
-        images: Default::default(),
         primary_repo: "app".into(),
         repositories: vec![repository("app"), repository("lib")],
     }

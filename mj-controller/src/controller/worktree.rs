@@ -1138,7 +1138,6 @@ pub(super) fn plan_raw_to_workspace(
         );
         crate::project_catalog::snapshot(
             &mj_core::config::ProjectBundle {
-                images: Default::default(),
                 primary_repo: "project".to_owned(),
                 repositories: vec![ProjectRepository {
                     id: "project".to_owned(),

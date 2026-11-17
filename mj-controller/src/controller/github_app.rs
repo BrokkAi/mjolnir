@@ -1684,7 +1684,6 @@ mod tests {
         config.bundles.insert(
             "multi".into(),
             ProjectBundle {
-                images: Default::default(),
                 primary_repo: "app".into(),
                 repositories: vec![
                     ProjectRepository {

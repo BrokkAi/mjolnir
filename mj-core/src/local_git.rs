@@ -1007,7 +1007,6 @@ mod tests {
 
     fn repair_bundle(path: &Path) -> ProjectBundle {
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "repo".into(),
             repositories: vec![crate::config::ProjectRepository {
                 id: "repo".into(),

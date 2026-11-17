@@ -139,7 +139,6 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
         crate::controller::test_support::write_network_checkpoint_archive(directory.path(), id, 0),
     ));
     let bundle = ProjectBundle {
-        images: Default::default(),
         primary_repo: "project".into(),
         repositories: vec![ProjectRepository {
             id: "project".into(),
@@ -653,7 +652,6 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             bundles: BTreeMap::from([(
                 session.bundle_id.clone(),
                 ProjectBundle {
-                    images: Default::default(),
                     primary_repo: "one".into(),
                     repositories: repositories.clone(),
                 },
@@ -1633,7 +1631,6 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     config.bundles.insert(
         "project".into(),
         ProjectBundle {
-            images: Default::default(),
             primary_repo: "project".into(),
             repositories: vec![ProjectRepository {
                 id: "project".into(),
@@ -2042,7 +2039,6 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     let (_remote_parent, _remote) = network_remote_for(repository.path());
     let mut session = managed_worktree_session(repository.path(), session_id);
     let bundle = ProjectBundle {
-        images: Default::default(),
         primary_repo: "bifrost-source".into(),
         repositories: vec![ProjectRepository {
             id: "bifrost-source".into(),
