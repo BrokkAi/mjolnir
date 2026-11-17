@@ -209,12 +209,15 @@ pub(super) async fn prepare(
         .context("invalid completion timestamp")?
         .with_timezone(&chrono::Local)
         .fixed_offset();
-    let explicit = turn
+    let stated = turn
         .diagnostic
         .as_ref()
         .and_then(|d| d.reset_at.as_deref())
         .and_then(|text| crate::quota::normalize_reset_at(text, now))
-        .map(|t| t.timestamp())
+        .map(|t| crate::quota::StatedReset {
+            at: t.timestamp(),
+            relative: false,
+        })
         .or_else(|| {
             message(snapshot)
                 .and_then(|text| crate::quota::message_reset(&text, turn.completed_at_ms))
@@ -240,7 +243,14 @@ pub(super) async fn prepare(
         })
         .collect();
     let now_ms = mj_core::clock::epoch_millis();
-    let reset = crate::quota::recovery_reset(&windows, explicit, now_ms / 1000, consumed);
+    let measured = crate::quota::recovery_reset(
+        &windows,
+        stated.map(|stated| stated.at),
+        now_ms / 1000,
+        consumed,
+    );
+    let retried = consumed.is_some();
+    let reset = crate::quota::retry_reset(stated, measured, now_ms / 1000, retried);
     if reset.is_none()
         && let Some(wait) = wait
     {
@@ -264,10 +274,22 @@ pub(super) async fn prepare(
         notice,
         submitted: false,
     };
+    // A relative statement was read against the retry that followed it and
+    // refused again, so this wait rests on the measured windows.
+    if retried
+        && stated.is_some_and(|stated| {
+            stated.relative && measured.is_none_or(|measured| stated.at < measured)
+        })
+    {
+        append_bounded(
+            &mut fallback.notice,
+            " A retry after an earlier stated reset was already refused; this wait uses the reset time in the provider's quota report.",
+        );
+    }
     if crate::quota::long_window_stop(
         &windows,
         model.as_deref().unwrap_or(""),
-        explicit,
+        stated.map(|stated| stated.at),
         reset,
         now_ms / 1000,
     ) {

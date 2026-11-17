@@ -153,6 +153,7 @@ impl ProfileHealth {
                     .then(|| {
                         let now_ms = DateTime::<chrono::Utc>::from(now).timestamp_millis();
                         crate::quota::message_reset(&diagnostic.message, now_ms)
+                            .map(|stated| stated.at)
                     })
                     .flatten()
             });
@@ -594,7 +595,8 @@ mod tests {
             "You've hit your quota; resets at 6:20pm (America/Chicago)",
             now,
         )
-        .unwrap();
+        .unwrap()
+        .at;
         let mut health = ProfileHealth::default();
         health.record(
             "codex2",

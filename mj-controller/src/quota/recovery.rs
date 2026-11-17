@@ -68,7 +68,17 @@ pub(crate) fn merge_reset_windows(windows: &mut Vec<QuotaWindow>, cached: &[Quot
     restored
 }
 
-pub(crate) fn message_reset(message: &str, observed_ms: i64) -> Option<i64> {
+/// A reset deadline a provider stated in its own message, and whether it was
+/// stated as a duration from the refusal (Antigravity: "Resets in 40s").
+/// A relative statement is only true of the moment it was read: repeating it
+/// after a retry says nothing new about the deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StatedReset {
+    pub at: i64,
+    pub relative: bool,
+}
+
+pub(crate) fn message_reset(message: &str, observed_ms: i64) -> Option<StatedReset> {
     let now = DateTime::from_timestamp_millis(observed_ms)?
         .with_timezone(&Local)
         .fixed_offset();
@@ -80,8 +90,70 @@ pub(crate) fn message_reset(message: &str, observed_ms: i64) -> Option<i64> {
         .unwrap_or(value)
         .trim_start_matches(':')
         .trim();
-    normalize_reset_at(value.lines().next()?.trim().trim_end_matches('.'), now)
-        .map(|t| t.timestamp())
+    let value = value.lines().next()?.trim().trim_end_matches('.');
+    // Some providers name the wait as a duration from the refusal
+    // (Antigravity: "Resets in 40s") rather than a wall-clock time.
+    if let Some(seconds) = duration_seconds(value) {
+        return Some(StatedReset {
+            at: now.timestamp().checked_add(seconds)?,
+            relative: true,
+        });
+    }
+    normalize_reset_at(value, now).map(|at| StatedReset {
+        at: at.timestamp(),
+        relative: false,
+    })
+}
+
+/// Seconds in a duration stated in words, as in Antigravity's "Resets in 40s"
+/// or "Resets in 102h19m11s". Anything else (`at 14:00`, `Aug 14 at 4am`,
+/// `2026-11-12T19:52:53Z`) is not a duration and the caller keeps its
+/// wall-clock parsing.
+fn duration_seconds(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("in ")
+        .map(str::trim_start)
+        .unwrap_or(value);
+    let mut chars = value.chars().peekable();
+    let mut total: i64 = 0;
+    let mut stated = false;
+    loop {
+        while chars
+            .peek()
+            .is_some_and(|ch| ch.is_whitespace() || *ch == ',')
+        {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut amount = String::new();
+        while chars.peek().is_some_and(char::is_ascii_digit) {
+            amount.push(chars.next()?);
+        }
+        while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+            chars.next();
+        }
+        let mut unit = String::new();
+        while chars.peek().is_some_and(char::is_ascii_alphabetic) {
+            unit.push(chars.next()?);
+        }
+        if amount.is_empty() || unit.is_empty() {
+            return None;
+        }
+        let unit_seconds = match unit.to_ascii_lowercase().as_str() {
+            "s" | "sec" | "secs" | "second" | "seconds" => 1,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 60 * 60,
+            "d" | "day" | "days" => 24 * 60 * 60,
+            "w" | "wk" | "wks" | "week" | "weeks" => 7 * 24 * 60 * 60,
+            _ => return None,
+        };
+        total = total.checked_add(amount.parse::<i64>().ok()?.checked_mul(unit_seconds)?)?;
+        stated = true;
+    }
+    stated.then_some(total)
 }
 
 /// Whether `window` shows no quota left and has not reset by `now_seconds`.
@@ -149,6 +221,29 @@ pub(crate) fn recovery_reset(
             .filter(|t| usable(*t))
             .min()
     })
+}
+
+/// The deadline for the next attempt after a refusal. The provider's own
+/// message names the limit that just refused the turn, while `measured` comes
+/// from quota windows that can be minutes older and cannot say which limit
+/// refused it, so a stated deadline wins while it is sooner. That only ever
+/// brings a retry forward: a long measured wait is not replaced by a stale
+/// statement. A duration has to be read against the refusal that stated it, so
+/// once a retry made from one is refused again, the measured windows decide.
+pub(crate) fn retry_reset(
+    stated: Option<StatedReset>,
+    measured: Option<i64>,
+    now_seconds: i64,
+    retried: bool,
+) -> Option<i64> {
+    let stated = stated
+        .filter(|stated| stated.at > now_seconds)
+        .filter(|stated| !(retried && stated.relative))
+        .map(|stated| stated.at);
+    match stated {
+        Some(stated) if measured.is_none_or(|measured| stated < measured) => Some(stated),
+        _ => measured,
+    }
 }
 
 #[cfg(test)]
@@ -297,11 +392,12 @@ mod tests {
                 "You've hit your session limit · resets 1:20pm (America/Chicago)",
                 observed
             ),
-            Some(
-                DateTime::parse_from_rfc3339("2026-09-21T18:20:00Z")
+            Some(StatedReset {
+                at: DateTime::parse_from_rfc3339("2026-09-21T18:20:00Z")
                     .unwrap()
-                    .timestamp()
-            )
+                    .timestamp(),
+                relative: false,
+            })
         );
         let fall = DateTime::parse_from_rfc3339("2026-11-01T04:00:00Z")
             .unwrap()
@@ -315,5 +411,88 @@ mod tests {
             None
         );
         assert_eq!(message_reset("resets 1pm (Invalid/Zone)", observed), None);
+    }
+
+    // Hard-won: #1555: Antigravity states a quota reset as a duration from the
+    // refusal, which was unreadable, so its five-hour reset was overlooked and
+    // the weekly window's days-away reset was the wait recorded for the session.
+    #[test]
+    fn antigravity_duration_reset_becomes_the_retry_instead_of_the_weekly_window() {
+        let observed = DateTime::parse_from_rfc3339("2026-11-16T23:32:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let now = observed / 1000;
+        let refusal = "⚠ Individual quota reached. Please upgrade your subscription to \
+                        increase your limits. Resets in 40s.";
+        let stated = message_reset(refusal, observed);
+        assert_eq!(
+            stated.map(|stated| stated.at - now),
+            Some(40),
+            "the short limit's reset is a duration from the refusal"
+        );
+        // The same harness states a long allowance with compound units, and a
+        // line without a reset says nothing about a deadline.
+        assert_eq!(
+            message_reset(
+                "⚠ Individual quota reached. Resets in 102h19m11s.",
+                observed
+            )
+            .map(|stated| stated.at - now),
+            Some(102 * 3_600 + 19 * 60 + 11)
+        );
+        assert_eq!(
+            message_reset("You have used some of your 5-hour limit", observed),
+            None
+        );
+        // A wall-clock reset is not a duration, so nothing here is relative.
+        assert_eq!(
+            message_reset("Quota reached; resets at 2026-11-17T02:00:00Z", observed),
+            Some(StatedReset {
+                at: DateTime::parse_from_rfc3339("2026-11-17T02:00:00Z")
+                    .unwrap()
+                    .timestamp(),
+                relative: false,
+            })
+        );
+        // A poller reading from minutes ago can only say the weekly window is
+        // exhausted; the message names the five-hour one, so its 40 seconds are
+        // the retry. Once such a retry is refused, repeating the duration says
+        // nothing new and the measured windows decide.
+        let weekly = Some(now + 6 * 86_400);
+        assert_eq!(
+            retry_reset(stated, weekly, now, false),
+            Some(now + 40),
+            "a short stated reset must not be replaced by the weekly window"
+        );
+        assert_eq!(retry_reset(stated, weekly, now, true), weekly);
+        // A statement later than the measured wait never lengthens it, and an
+        // elapsed one is no deadline at all.
+        assert_eq!(
+            retry_reset(
+                Some(StatedReset {
+                    at: now + 3_600,
+                    relative: false
+                }),
+                Some(now + 600),
+                now,
+                false
+            ),
+            Some(now + 600)
+        );
+        assert_eq!(
+            retry_reset(
+                Some(StatedReset {
+                    at: now,
+                    relative: true
+                }),
+                weekly,
+                now,
+                false
+            ),
+            weekly
+        );
+        // With no measured windows, one statement still schedules the retry.
+        assert_eq!(retry_reset(stated, None, now, false), Some(now + 40));
+        assert_eq!(retry_reset(None, None, now, false), None);
     }
 }
