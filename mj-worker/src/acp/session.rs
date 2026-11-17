@@ -76,7 +76,11 @@ async fn load_at_replay_boundary(
             let _ = result_tx.send(result);
             Ok(())
         })?;
-    result_rx.await.map_err(|_| relay_event_channel_error())?
+    result_rx.await.map_err(|_| {
+        agent_client_protocol::Error::internal_error().data(serde_json::Value::String(
+            "ACP connection ended before the session/load response was delivered".into(),
+        ))
+    })?
 }
 
 /// How long after a session opens OpenCode needs before its tool registry has

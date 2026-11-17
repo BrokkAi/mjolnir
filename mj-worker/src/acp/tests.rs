@@ -6,7 +6,7 @@ use super::*;
 use agent_client_protocol::v1::schema::ToolCallUpdate;
 use mj_core::subagent::SubagentMcpRole;
 
-// Hard-won: acp-load-boundary: updates sent right behind the `session/load` response were judged by a flag the session task flipped later, so a live turn start and reply were dropped as replay.
+// Hard-won: 3f3f3927b: updates sent right behind the `session/load` response were judged by a flag the session task flipped later, so a live turn start and reply were dropped as replay.
 #[cfg(unix)]
 #[tokio::test]
 async fn updates_right_behind_the_load_response_are_live_and_those_before_it_are_replay() {
