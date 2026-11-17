@@ -1382,11 +1382,11 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::OpenAtMessage {
             session_id,
-            message_id,
+            position,
         } => {
             context
                 .notification_positions
-                .insert(session_id.clone(), message_id);
+                .insert(session_id.clone(), position);
             if let Some(workspace_id) = context
                 .dashboard
                 .session_record(&session_id)

@@ -1766,10 +1766,14 @@ async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft(
 #[tokio::test]
 async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_chat() {
     use mj_core::state::{TranscriptBody, TranscriptItem};
-    let mut positions = BTreeMap::from([("session-1".into(), Some("reply-2".into()))]);
+    let mut dashboard = populated_dashboard();
+    let mut positions = BTreeMap::from([(
+        "session-1".into(),
+        mj_tui::NotificationPosition::Message("reply-2".into()),
+    )]);
     let mut chats = BTreeMap::new();
     assert_eq!(
-        drafts::apply_notification_position(&mut positions, &mut chats, "session-1"),
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
         None
     );
     assert!(positions.contains_key("session-1"));
@@ -1791,17 +1795,81 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
     let previous = chat.transcript_position();
     chats.insert("session-1".into(), chat);
     assert_eq!(
-        drafts::apply_notification_position(&mut positions, &mut chats, "session-1"),
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
         Some(true)
     );
     let requested = chats["session-1"].transcript_position();
     assert_ne!(requested, previous);
     assert_eq!(chats["session-1"].draft(), "Keep this unsent answer");
     assert_eq!(
-        drafts::apply_notification_position(&mut positions, &mut chats, "session-1"),
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
         None
     );
     assert_eq!(chats["session-1"].transcript_position(), requested);
+    // The ! text is available from a startup summary, but only the full
+    // projection owns the stable identity. A warm chat must retain its
+    // current viewport until that identity arrives.
+    dashboard.apply_prepared_materialized_session_summary(
+        mj_tui::PreparedMaterializedSessionSummary::from_materialized(
+            mj_core::state::MaterializedSessionSummary {
+                session_id: "session-1".into(),
+                applied_event_ordinal: 3,
+                last_activity_at_ms: None,
+                execution: mj_core::state::MaterializedExecutionState::Idle,
+                session_title: None,
+                last_agent_message: Some("Message 3".into()),
+                last_user_message: None,
+                last_agent_message_follows_last_user: true,
+                agent_message_latest_content_ordinals: vec![1, 2, 3],
+                interruption_event_ordinals: vec![],
+            },
+            0,
+        ),
+    );
+    dashboard
+        .set_session_attention_for("session-1", mj_core::attention::SessionAttention::Important);
+    dashboard.focus_sessions();
+    for _ in 0..4 {
+        dashboard.handle_key(plain_key(KeyCode::Tab));
+    }
+    let DashboardAction::OpenAtMessage {
+        session_id,
+        position,
+    } = dashboard.handle_key(plain_key(KeyCode::Enter))
+    else {
+        panic!("summary-only important card opens at its pending message");
+    };
+    assert_eq!(position, mj_tui::NotificationPosition::LatestAgentMessage);
+    positions.insert(session_id, position);
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
+        None
+    );
+    assert_eq!(chats["session-1"].transcript_position(), requested);
+    assert!(positions.contains_key("session-1"));
+    dashboard.apply_prepared_materialized_session(
+        mj_tui::PreparedMaterializedSessionDetail::from_materialized(
+            materialized.clone(),
+            0,
+            Default::default(),
+        ),
+    );
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
+        Some(true)
+    );
+    assert!(!positions.contains_key("session-1"));
+    assert_eq!(
+        dashboard.notification_position("session-1", mj_tui::AttentionLevel::Important),
+        mj_tui::NotificationPosition::Message("reply-3".into())
+    );
+    // Saved agent-message anchors use their durable transcript ordinal.
+    assert_eq!(
+        serde_json::to_value(chats["session-1"].transcript_position())
+            .unwrap()
+            .pointer("/Entry/start_seq"),
+        Some(&serde_json::json!(3))
+    );
     materialized.applied_event_ordinal = 4;
     materialized.pending_elicitations.push(
         mj_core::elicitation::ElicitationRequest::from_acp_params(
@@ -1831,9 +1899,9 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
         chat.transcript_position(),
         mj_chat::chat::TranscriptPosition::bottom()
     );
-    positions.insert("session-1".into(), None);
+    positions.insert("session-1".into(), mj_tui::NotificationPosition::End);
     assert_eq!(
-        drafts::apply_notification_position(&mut positions, &mut chats, "session-1"),
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
         Some(false)
     );
     assert_eq!(

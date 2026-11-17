@@ -200,6 +200,68 @@ impl DashboardState {
         due
     }
 
+    pub(crate) fn notification_content_session(
+        &self,
+        session_id: &str,
+        level: AttentionLevel,
+    ) -> String {
+        if level == AttentionLevel::Waiting {
+            self.waiting_child_of(session_id)
+                .unwrap_or_else(|| session_id.to_owned())
+        } else {
+            session_id.to_owned()
+        }
+    }
+
+    /// The message identity used by both the card and delayed host navigation.
+    pub fn notification_position(
+        &self,
+        session_id: &str,
+        level: AttentionLevel,
+    ) -> crate::NotificationPosition {
+        use crate::NotificationPosition;
+        let holder = self.notification_content_session(session_id, level);
+        let detail = self.session_details.get(&holder);
+        let message_id = match level {
+            AttentionLevel::Waiting => detail
+                .filter(|detail| detail.pending_elicitations.is_empty())
+                .and_then(|detail| detail.question_message.clone()),
+            AttentionLevel::Important => {
+                let Some(detail) = detail.filter(|detail| {
+                    detail.transcript_hydration == crate::ingest::TranscriptHydration::Ready
+                }) else {
+                    return NotificationPosition::LatestAgentMessage;
+                };
+                detail
+                    .projection
+                    .last_agent_message
+                    .as_ref()
+                    .and_then(|(index, _)| detail.projection.transcript.get(*index))
+                    .map(|item| item.stable_id.clone())
+            }
+            _ => None,
+        };
+        message_id.map_or(NotificationPosition::End, NotificationPosition::Message)
+    }
+
+    pub(crate) fn notification_card_text(&self, session_id: &str, level: AttentionLevel) -> String {
+        let holder = self.notification_content_session(session_id, level);
+        let detail = self.session_details.get(&holder);
+        let loading = detail.is_some_and(|detail| {
+            detail.transcript_hydration == crate::ingest::TranscriptHydration::Loading
+        });
+        let missing_content = detail.is_none_or(|detail| {
+            detail.last_agent_message.is_none()
+                && detail.pending_elicitations.is_empty()
+                && detail.question_message.is_none()
+        });
+        if loading && missing_content {
+            "loading…".to_owned()
+        } else {
+            self.notification_message(session_id, level).0
+        }
+    }
+
     /// What to say about a session at `level`: the question's own message,
     /// the recorded error, or the last line the agent wrote.
     pub(crate) fn notification_message(
@@ -207,6 +269,8 @@ impl DashboardState {
         session_id: &str,
         level: AttentionLevel,
     ) -> (String, Option<String>) {
+        let holder = self.notification_content_session(session_id, level);
+        let session_id = holder.as_str();
         let detail = self.session_details.get(session_id);
         let text = match level {
             AttentionLevel::Waiting => detail
@@ -252,18 +316,10 @@ impl DashboardState {
                 .map(str::to_owned)
                 .unwrap_or_else(|| "Finished".to_owned()),
         };
-        let message_id = detail.and_then(|detail| match level {
-            AttentionLevel::Waiting if detail.pending_elicitations.is_empty() => {
-                detail.question_message.clone()
-            }
-            AttentionLevel::Important => detail
-                .projection
-                .last_agent_message
-                .as_ref()
-                .and_then(|(index, _)| detail.projection.transcript.get(*index))
-                .map(|item| item.stable_id.clone()),
+        let message_id = match self.notification_position(session_id, level) {
+            crate::NotificationPosition::Message(id) => Some(id),
             _ => None,
-        });
+        };
         (text, message_id)
     }
 

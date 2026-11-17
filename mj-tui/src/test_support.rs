@@ -89,13 +89,8 @@ pub(crate) fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> 
 /// Notification ages use the wall clock in production. Goldens retain the
 /// header and its spacing while replacing just that changing value.
 pub(crate) fn pin_notification_ages(lines: &mut [String]) {
-    for index in 1..lines.len() {
-        // Other panes and overlapping dialogs have their own clocks. Only
-        // the card header immediately below this pane's title belongs here.
-        if !lines[index - 1].contains(" Notifications (") {
-            continue;
-        }
-        let line = &mut lines[index];
+    for line in lines {
+        // A menu can cover the title; recognize the card header itself.
         let Some(end) = line.find("s ago") else {
             continue;
         };
@@ -103,7 +98,7 @@ pub(crate) fn pin_notification_ages(lines: &mut [String]) {
             .trim_end_matches(|ch: char| ch.is_ascii_digit())
             .len();
         if start == end
-            || !line[..start].contains(" · ")
+            || line[..start].matches(" · ").count() < 2
             || !["│? ", "│! ", "|? ", "|! "]
                 .iter()
                 .any(|header| line[..start].contains(header))

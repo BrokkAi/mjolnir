@@ -651,9 +651,7 @@ fn render_combined_themed(
     let notification_text = notification_entries
         .first()
         .map_or_else(String::new, |entry| {
-            dashboard
-                .notification_message(&entry.session_id, entry.level)
-                .0
+            dashboard.notification_card_text(&entry.session_id, entry.level)
         });
     let notification_full = notification_entries.first().map_or(PANE_MINIMUM, |entry| {
         let lines = Paragraph::new(notification_text.as_str())

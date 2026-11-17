@@ -68,6 +68,9 @@ impl DashboardState {
                         .session_details
                         .get(id)
                         .and_then(|detail| detail.last_activity_at_ms)
+                        // Preserve stored millisecond precision for ordering;
+                        // only zero itself is an unknown activity timestamp.
+                        .filter(|millis| *millis > 0)
                         .or_else(|| {
                             crate::render::session_updated_at_epoch_seconds(session)
                                 .map(|seconds| seconds.saturating_mul(1000))
@@ -97,6 +100,59 @@ impl DashboardState {
                 .then_with(|| a.session_id.cmp(&b.session_id))
         });
         entries
+    }
+
+    /// The session whose content the displayed card needs, including a child
+    /// form promoted to its parent's row.
+    pub fn displayed_notification_session_id(&self) -> Option<String> {
+        self.notification_entries()
+            .first()
+            .map(|entry| self.notification_content_session(&entry.session_id, entry.level))
+    }
+
+    /// Keep the existing child-family runtime subscription while its approval
+    /// is displayed, even when the family is outside the active workspace.
+    pub fn displayed_notification_parent_id(&self) -> Option<String> {
+        self.notification_entries()
+            .first()
+            .filter(|entry| {
+                entry.level == AttentionLevel::Waiting
+                    && self.waiting_child_of(&entry.session_id).is_some()
+            })
+            .map(|entry| entry.session_id.clone())
+    }
+
+    /// One owner for the existing background summary-hydration selection.
+    pub fn wanted_summary_sessions(&self) -> std::collections::BTreeMap<String, u64> {
+        let panes: std::collections::BTreeSet<_> = self
+            .pane_sessions()
+            .into_iter()
+            .map(|(_, session)| session)
+            .collect();
+        let mut wanted: std::collections::BTreeMap<_, _> = self
+            .state
+            .sessions
+            .values()
+            .filter(|session| {
+                !self.is_native_agent(&session.id)
+                    && (panes.contains(&session.id)
+                        || (Some(session.workspace_id.as_str()) == self.active_workspace_id()
+                            && session.state.is_active())
+                        || self.state.subagents.get(&session.id).is_some_and(|child| {
+                            Some(child.parent_session_id.as_str()) == self.subagent_parent_id()
+                        }))
+            })
+            .map(|session| (session.id.clone(), session.viewed_through_event_ordinal))
+            .collect();
+        if let Some(session) = self.displayed_notification_session_id() {
+            let viewed = self
+                .state
+                .sessions
+                .get(&session)
+                .map_or(0, |session| session.viewed_through_event_ordinal);
+            wanted.insert(session, viewed);
+        }
+        wanted
     }
 
     pub(crate) fn notification_later(&mut self) -> DashboardAction {
@@ -135,14 +191,15 @@ impl DashboardState {
         let Some(entry) = self.notification_entries().into_iter().next() else {
             return DashboardAction::None;
         };
-        let (_, message_id) = self.notification_message(&entry.session_id, entry.level);
+        let position = self.notification_position(&entry.session_id, entry.level);
+        let session_id = self.notification_content_session(&entry.session_id, entry.level);
         // The pane spans workspaces; use the normal workspace navigation owner
         // before the host starts the asynchronous attach.
-        self.focus_session_from_cpu_report(&entry.session_id);
+        self.focus_session_from_cpu_report(&session_id);
         self.focus = Focus::Prompt;
         DashboardAction::OpenAtMessage {
-            session_id: entry.session_id,
-            message_id,
+            session_id,
+            position,
         }
     }
 
@@ -213,10 +270,11 @@ pub(crate) fn render(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let age = if entry.recency == 0 {
+    let recency_seconds = entry.recency / 1_000;
+    let age = if recency_seconds == 0 {
         "age unknown".to_owned()
     } else {
-        format!("{}s ago", now.saturating_sub(entry.recency / 1000))
+        format!("{}s ago", now.saturating_sub(recency_seconds))
     };
     let glyph = if entry.level == AttentionLevel::Waiting {
         '?'
@@ -423,6 +481,33 @@ pub(crate) mod tests {
                 .iter()
                 .all(|entry| entry.level == AttentionLevel::Waiting)
         );
+
+        // Millisecond ordering must survive age formatting's coarser clock;
+        // an unknown activity must never outrank a real stored timestamp.
+        let mut recency = self::dashboard();
+        recency
+            .session_details
+            .get_mut("q1")
+            .unwrap()
+            .last_activity_at_ms = Some(10);
+        recency
+            .session_details
+            .get_mut("q2")
+            .unwrap()
+            .last_activity_at_ms = Some(30);
+        assert_eq!(recency.notification_entries()[0].session_id, "q2");
+        recency
+            .session_details
+            .get_mut("q1")
+            .unwrap()
+            .last_activity_at_ms = None;
+        assert_eq!(recency.notification_entries()[0].session_id, "q2");
+        recency
+            .session_details
+            .get_mut("q1")
+            .unwrap()
+            .last_activity_at_ms = Some(0);
+        assert_eq!(recency.notification_entries()[0].session_id, "q2");
     }
 
     #[test]
@@ -443,7 +528,7 @@ pub(crate) mod tests {
             action,
             DashboardAction::OpenAtMessage {
                 session_id: "q1".into(),
-                message_id: Some("agent:question".into())
+                position: crate::NotificationPosition::Message("agent:question".into())
             }
         );
         assert_eq!(dashboard.focus, Focus::Prompt);
@@ -474,5 +559,165 @@ pub(crate) mod tests {
             dashboard.pane_size(SupportPane::Notifications),
             PaneSize::Standard
         );
+
+        // The visible foreign card participates in the existing summary
+        // selection; Later transfers that demand to the next card.
+        let mut foreign = self::dashboard();
+        for id in foreign.state.sessions.keys().cloned().collect::<Vec<_>>() {
+            foreign.state.sessions.get_mut(&id).unwrap().workspace_id = "foreign".into();
+        }
+        foreign.session_details.remove("q1");
+        foreign.session_details.remove("q2");
+        assert!(foreign.wanted_summary_sessions().contains_key("q1"));
+        assert!(!foreign.wanted_summary_sessions().contains_key("q2"));
+        assert_eq!(
+            foreign.notification_card_text("q1", AttentionLevel::Waiting),
+            "Waiting for your input"
+        );
+        foreign.sync_transcript_hydration(&["q1".into()].into_iter().collect());
+        assert_eq!(
+            foreign.notification_card_text("q1", AttentionLevel::Waiting),
+            "loading…"
+        );
+        foreign.apply_prepared_materialized_session_summary(
+            crate::PreparedMaterializedSessionSummary::from_materialized(
+                mj_core::state::MaterializedSessionSummary {
+                    session_id: "q1".into(),
+                    applied_event_ordinal: 4,
+                    last_activity_at_ms: Some(50),
+                    execution: mj_core::state::MaterializedExecutionState::Idle,
+                    session_title: None,
+                    last_agent_message: Some("Question from the other workspace".into()),
+                    last_user_message: None,
+                    last_agent_message_follows_last_user: true,
+                    agent_message_latest_content_ordinals: vec![4],
+                    interruption_event_ordinals: vec![],
+                },
+                0,
+            ),
+        );
+        assert_eq!(
+            foreign.notification_card_text("q1", AttentionLevel::Waiting),
+            "Question from the other workspace"
+        );
+        foreign.handle_key(key(KeyCode::Char('l')));
+        assert!(foreign.wanted_summary_sessions().contains_key("q2"));
+        assert!(!foreign.wanted_summary_sessions().contains_key("q1"));
+
+        // A promoted parent card retains its daemon target but displays and
+        // opens the child's approval through the existing family navigation.
+        let (mut family, parent) = dashboard_with_one_subagent();
+        serve_attention(
+            &mut family,
+            &[&parent, "child-session"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        family.set_form_holders(
+            [(parent.clone(), "child-session".into())]
+                .into_iter()
+                .collect(),
+        );
+        family
+            .session_details
+            .get_mut(&parent)
+            .unwrap()
+            .last_agent_message = Some("Unrelated parent output".into());
+        assert_eq!(
+            family.displayed_notification_session_id().as_deref(),
+            Some("child-session")
+        );
+        assert_eq!(
+            family.displayed_notification_parent_id().as_deref(),
+            Some(parent.as_str())
+        );
+        assert!(
+            family
+                .wanted_summary_sessions()
+                .contains_key("child-session")
+        );
+        assert_eq!(
+            family.notification_card_text(&parent, AttentionLevel::Waiting),
+            "Waiting for your input"
+        );
+        family.sync_transcript_hydration(&["child-session".into()].into_iter().collect());
+        assert_eq!(
+            family.notification_card_text(&parent, AttentionLevel::Waiting),
+            "loading…"
+        );
+        // Cancellation/failure ends loading even if no message ever arrived.
+        family.sync_transcript_hydration(&Default::default());
+        assert_eq!(
+            family.notification_card_text(&parent, AttentionLevel::Waiting),
+            "Waiting for your input"
+        );
+        family.apply_prepared_materialized_session_summary(
+            crate::PreparedMaterializedSessionSummary::from_materialized(
+                mj_core::state::MaterializedSessionSummary {
+                    session_id: "child-session".into(),
+                    applied_event_ordinal: 1,
+                    last_activity_at_ms: Some(0),
+                    execution: mj_core::state::MaterializedExecutionState::Idle,
+                    session_title: None,
+                    last_agent_message: None,
+                    last_user_message: None,
+                    last_agent_message_follows_last_user: false,
+                    agent_message_latest_content_ordinals: vec![],
+                    interruption_event_ordinals: vec![],
+                },
+                0,
+            ),
+        );
+        assert_eq!(
+            family.session_details["child-session"].last_activity_at_ms,
+            None
+        );
+        assert_eq!(
+            family.notification_card_text(&parent, AttentionLevel::Waiting),
+            "Waiting for your input"
+        );
+        family
+            .session_details
+            .get_mut(&parent)
+            .unwrap()
+            .last_activity_at_ms = Some(0);
+        family
+            .state
+            .sessions
+            .get_mut(&parent)
+            .unwrap()
+            .updated_at
+            .clear();
+        let lines = drawn(&mut family, 120, 40);
+        assert!(lines.iter().any(|line| line.contains("age unknown")));
+
+        let mut approval = question("child-session");
+        approval.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        family
+            .session_details
+            .get_mut("child-session")
+            .unwrap()
+            .pending_elicitations = vec![approval.clone()];
+        assert_eq!(
+            family
+                .notification_message(&parent, AttentionLevel::Waiting)
+                .0,
+            approval.message
+        );
+        let entries = family.notification_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id, parent);
+        assert_eq!(
+            entries[0].target,
+            family.notification_dismissal_target(&parent)
+        );
+        family.focus = Focus::Notifications;
+        assert_eq!(
+            family.handle_key(key(KeyCode::Enter)),
+            DashboardAction::OpenAtMessage {
+                session_id: "child-session".into(),
+                position: crate::NotificationPosition::End
+            }
+        );
+        assert_eq!(family.subagent_parent_id(), Some(parent.as_str()));
     }
 }

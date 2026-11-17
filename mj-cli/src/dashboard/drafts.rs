@@ -37,18 +37,27 @@ pub(super) fn capture_editor_draft(
 /// Explicit notification navigation survives an asynchronous attach, but is
 /// consumed once a chat exists, even when that conversation was already warm.
 pub(super) fn apply_notification_position(
-    positions: &mut BTreeMap<String, Option<String>>,
+    positions: &mut BTreeMap<String, mj_tui::NotificationPosition>,
     chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    dashboard: &DashboardState,
     session_id: &str,
 ) -> Option<bool> {
+    use mj_tui::NotificationPosition;
     let chat = chats.get_mut(session_id)?;
-    let target = positions.remove(session_id)?;
-    let located = target.is_some();
-    if let Some(id) = target {
-        chat.restore_transcript_position(mj_chat::chat::TranscriptPosition::at_stable_id(id));
+    let target = positions.get(session_id)?;
+    let target = if *target == NotificationPosition::LatestAgentMessage {
+        dashboard.notification_position(session_id, mj_tui::AttentionLevel::Important)
     } else {
-        chat.restore_transcript_position(mj_chat::chat::TranscriptPosition::bottom());
-    }
+        target.clone()
+    };
+    let located = target != NotificationPosition::End;
+    let position = match target {
+        NotificationPosition::Message(id) => mj_chat::chat::TranscriptPosition::at_stable_id(id),
+        NotificationPosition::End => mj_chat::chat::TranscriptPosition::bottom(),
+        NotificationPosition::LatestAgentMessage => return None,
+    };
+    positions.remove(session_id);
+    chat.restore_transcript_position(position);
     Some(located)
 }
 
@@ -137,10 +146,17 @@ impl DashboardContext {
         if apply_notification_position(
             &mut self.notification_positions,
             &mut self.chats,
+            &self.dashboard,
             session_id,
         ) == Some(false)
         {
             self.dashboard.set_notice("The notification message could not be located; showing the end of the conversation.");
+        } else if self.notification_positions.get(session_id)
+            == Some(&mj_tui::NotificationPosition::LatestAgentMessage)
+        {
+            self.dashboard.set_notice("Loading notification message…");
+        } else if self.dashboard.notice().as_deref() == Some("Loading notification message…") {
+            self.dashboard.clear_notice();
         }
     }
 

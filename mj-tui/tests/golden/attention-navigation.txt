@@ -337,7 +337,7 @@ workspace summary: None; badge: absent
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (2) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││? ACP pretty name · asks · <age>                                                            │
+│                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
 │                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
@@ -380,7 +380,7 @@ action: Open { session_id: "asks" }; selected: Some("asks"); prompt focused: tru
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (2) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││? ACP pretty name · asks · <age>                                                            │
+│                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
 │                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
@@ -423,7 +423,7 @@ action: SelectWorkspace { workspace_id: "other" }
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (2) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││? ACP pretty name · asks · <age>                                                            │
+│                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
 │                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
@@ -466,7 +466,7 @@ selected: Some("remote")
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (2) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││? ACP pretty name · asks · <age>                                                            │
+│                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
 │                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
@@ -509,7 +509,7 @@ action: SelectWorkspace { workspace_id: "default" }
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (2) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││? ACP pretty name · asks · <age>                                                            │
+│                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
 │                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
@@ -552,7 +552,7 @@ selected: Some("asks")
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (2) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││? ACP pretty name · asks · <age>                                                            │
+│                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
 │                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
@@ -595,7 +595,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (3) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││? ACP pretty name · remote · <age>                                                          │
+│                                            ││? ACP pretty name · remote · age unknown                                                    │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
 │                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │

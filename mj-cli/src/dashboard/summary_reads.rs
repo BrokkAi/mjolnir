@@ -62,6 +62,13 @@ impl SummaryReads {
         removed
     }
 
+    pub(super) fn loading_sessions(&self) -> impl Iterator<Item = &String> {
+        self.reads
+            .iter()
+            .filter(|(_, read)| read.task.is_some())
+            .map(|(id, _)| id)
+    }
+
     pub(super) fn finish(&mut self, id: &str, generation: u64) -> bool {
         let Some(read) = self.reads.get_mut(id) else {
             return false;

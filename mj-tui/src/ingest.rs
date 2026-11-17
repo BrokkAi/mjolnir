@@ -310,7 +310,8 @@ impl PreparedMaterializedSessionSummary {
             current_turn_started_at,
             last_activity_at_ms: summary
                 .last_activity_at_ms
-                .and_then(|value| u64::try_from(value).ok()),
+                .and_then(|value| u64::try_from(value).ok())
+                .filter(|value| *value > 0),
             last_agent_message: summary.last_agent_message.map(Arc::from),
             last_user_message: summary.last_user_message.and_then(|message| {
                 let visible = mj_core::relay::strip_hidden_prompt_context(&message);
@@ -459,7 +460,8 @@ impl PreparedMaterializedSessionDetail {
         let applied_event_ordinal = session.applied_event_ordinal;
         let last_activity_at_ms = session
             .last_activity_at_ms()
-            .and_then(|value| u64::try_from(value).ok());
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0);
         let transcript = TranscriptSnapshot::from_materialized_reusing(
             &session,
             &current_tool_diffstats,
@@ -502,9 +504,11 @@ impl PreparedMaterializedSessionDetail {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TranscriptHydration {
-    #[default]
     Loading,
+    /// Summary content has arrived, but carries no stable message identity.
+    Summary,
     Ready,
+    #[default]
     Unavailable,
 }
 
@@ -1197,7 +1201,10 @@ impl DashboardState {
     pub fn take_projection_cache(&mut self, session_id: &str) -> MaterializedProjectionCache {
         self.session_details
             .get_mut(session_id)
-            .map(|detail| std::mem::take(&mut detail.projection))
+            .map(|detail| {
+                detail.transcript_hydration = TranscriptHydration::Loading;
+                std::mem::take(&mut detail.projection)
+            })
             .unwrap_or_default()
     }
 
@@ -1273,6 +1280,9 @@ impl DashboardState {
         {
             return false;
         }
+        // Summary text has no stable identity; an older cached projection
+        // cannot name this newer message until full hydration catches up.
+        detail.transcript_hydration = TranscriptHydration::Summary;
         detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
         detail.current_turn_started_at = prepared.current_turn_started_at;
         detail.last_activity_at_ms = prepared.last_activity_at_ms;
@@ -1581,6 +1591,33 @@ impl DashboardState {
         session_id: &str,
     ) -> Option<&mj_client::review::RuntimeReviewView> {
         self.session_reviews.get(session_id)
+    }
+
+    /// Project the existing summary/projection task owners into hydration
+    /// status. Missing content alone never means a request is running.
+    pub fn sync_transcript_hydration(&mut self, pending: &std::collections::BTreeSet<String>) {
+        let mut changes = Vec::new();
+        for id in pending {
+            if !self.session_details.contains_key(id) {
+                changes.push((id.clone(), TranscriptHydration::Loading));
+            }
+        }
+        for (id, detail) in self.session_details.iter() {
+            let next = match (detail.transcript_hydration, pending.contains(id)) {
+                (TranscriptHydration::Unavailable, true) => Some(TranscriptHydration::Loading),
+                (TranscriptHydration::Loading, false) => Some(TranscriptHydration::Unavailable),
+                _ => None,
+            };
+            if let Some(next) = next {
+                changes.push((id.clone(), next));
+            }
+        }
+        for (id, next) in changes {
+            self.session_details
+                .entry(id)
+                .or_default()
+                .transcript_hydration = next;
+        }
     }
 
     pub fn mark_transcript_unavailable(&mut self, session_id: &str) {

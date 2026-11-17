@@ -261,6 +261,15 @@ impl DashboardAction {
 }
 
 /// A side effect requested by the dashboard.
+/// A local notification navigation request; never persisted or sent to the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationPosition {
+    Message(String),
+    End,
+    /// Resolve through the message owner after the full projection arrives.
+    LatestAgentMessage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
     SetOperatorAway {
@@ -287,7 +296,7 @@ pub enum DashboardAction {
     },
     OpenAtMessage {
         session_id: String,
-        message_id: Option<String>,
+        position: NotificationPosition,
     },
     /// Open a session in a new conversation pane beside or under the focused
     /// one. `Horizontal` puts the new pane to the right, `Vertical` below.
