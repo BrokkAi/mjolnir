@@ -410,6 +410,11 @@ pub(super) fn install_control_worker(
     let untimed = &targets::WithoutDeadline::new(caller);
     let WorkerInstall::Host(source) = worker else {
         let destination = format!("{slot}/hel");
+        // The slot directory and the link in it are created under the store
+        // gate, so a collection cannot remove the empty slot in between.
+        let store = mj_core::target_path::text(&store_root(locator, session_id)?);
+        let gate = store_gate(locator, &store);
+        let _held = lock_gate(untimed, &gate, session_id, "stage the control worker")?;
         execute_checked(
             caller,
             targets::locator_command(locator, vec!["mkdir".into(), "-p".into(), slot.into()])

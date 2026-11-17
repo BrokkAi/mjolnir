@@ -263,6 +263,64 @@ fn staging_a_control_worker_uploads_without_the_callers_deadline_but_links_withi
     );
 }
 
+// A gate wait inside `WithoutDeadline` must not end at the wrapped executor's
+// deadline: queueing behind another upload does not count against a timeout.
+// A real cancellation still ends it.
+#[test]
+fn a_gate_wait_without_deadline_outlasts_the_callers_deadline_but_not_a_cancel() {
+    let temp = tempfile::tempdir().unwrap();
+    let id = "66666666666666666666666666666666";
+    let locator = target(temp.path(), id);
+    let store = store_root(&locator, id).unwrap();
+    let gate = store_gate(&locator, store.to_str().unwrap());
+    let held = gate.try_lock("holder", "test hold").expect("a free gate");
+    let expired = targets::CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
+    let waiter_done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            let result = lock_gate(
+                &targets::WithoutDeadline::new(&expired),
+                &gate,
+                id,
+                "wait behind the holder",
+            )
+            .map(|_| ());
+            waiter_done.store(true, Ordering::SeqCst);
+            result
+        });
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            !waiter_done.load(Ordering::SeqCst),
+            "the wait ended at the caller's deadline"
+        );
+        drop(held);
+        waiter
+            .join()
+            .unwrap()
+            .expect("the wait proceeds once the gate frees");
+    });
+
+    // A real cancellation ends the wait.
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let canceller = targets::CancellableProcessExecutor::new(cancelled.clone());
+    let held = gate.try_lock("holder", "test hold").expect("a free gate");
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            lock_gate(
+                &targets::WithoutDeadline::new(&canceller),
+                &gate,
+                id,
+                "wait behind the holder",
+            )
+            .map(|_| ())
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        cancelled.store(true, Ordering::SeqCst);
+        assert!(waiter.join().unwrap().is_err());
+    });
+    drop(held);
+}
+
 #[cfg(unix)]
 #[test]
 fn store_collection_reclaims_only_old_unlinked_entries_and_corruption_is_replaced_privately() {

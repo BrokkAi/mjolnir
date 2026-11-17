@@ -965,8 +965,10 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
         self.0.execute_cleanup_with_timeout(command, timeout)
     }
 
+    // The wrapper's whole purpose is to ignore the wrapped deadline, so a
+    // passed deadline must not read as a cancellation here either.
     fn cancellation_requested(&self) -> bool {
-        self.0.cancellation_requested()
+        self.0.cancellation_requested_without_deadline()
     }
 
     fn stage_started(&self, stage: ProvisionStage) {
