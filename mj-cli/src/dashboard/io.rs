@@ -2175,6 +2175,7 @@ mod tests {
             result: Box::new(Ok(CreatedBundleUpdate {
                 bundle_id: "created".into(),
                 bundle: ProjectBundle {
+                    images: Default::default(),
                     primary_repo: "created".into(),
                     repositories: vec![],
                 },
@@ -2189,6 +2190,7 @@ mod tests {
         controller.config.bundles.insert(
             "created".into(),
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "created".into(),
                 repositories: vec![],
             },
@@ -2219,6 +2221,7 @@ mod tests {
                 native_session_id: "native".into(),
                 session: session.clone(),
                 bundle: ProjectBundle {
+                    images: Default::default(),
                     primary_repo: "project".into(),
                     repositories: vec![],
                 },
@@ -2236,6 +2239,7 @@ mod tests {
         controller.config.bundles.insert(
             session.bundle_id,
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "project".into(),
                 repositories: vec![],
             },
@@ -2842,6 +2846,7 @@ mod tests {
         config.bundles.insert(
             "app".into(),
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "app".into(),
                 repositories: vec![ProjectRepository {
                     id: "app".into(),

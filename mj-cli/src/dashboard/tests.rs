@@ -114,6 +114,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
     config.bundles.insert(
         "hel".into(),
         mj_core::config::ProjectBundle {
+            images: Default::default(),
             primary_repo: "project".into(),
             repositories: vec![mj_core::config::ProjectRepository {
                 id: "project".into(),

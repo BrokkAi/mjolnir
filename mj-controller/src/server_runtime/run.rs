@@ -190,10 +190,16 @@ pub(crate) async fn run_server(
     options.set_subagent_backend(api_backend.clone());
     // A launch onto a target the daemon has no worker binary for is refused at
     // admission, from the configuration as it is on disk right now.
-    options.set_worker_source_check(std::sync::Arc::new(|target_id| {
+    options.set_worker_source_check(std::sync::Arc::new(|target_id, bundle_id| {
         let controller = Controller::load().ok()?;
-        let template = controller.config.targets.get(target_id)?;
-        crate::controller::worker_source_problem(template, &crate::targets::ProcessExecutor)
+        let template = crate::controller::backend::session_target(
+            &controller.config,
+            bundle_id.unwrap_or_default(),
+            target_id,
+            &crate::targets::ProcessExecutor,
+        )
+        .ok()?;
+        crate::controller::worker_source_problem(&template, &crate::targets::ProcessExecutor)
     }));
     startup.finished("configure API and source checks");
     let renewal_cancellation = termination.child_token();

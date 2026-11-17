@@ -7376,6 +7376,7 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
     record.project = Some(std::sync::Arc::new(
         mj_core::repository::ProjectBundleSnapshot {
             bundle: mj_core::config::ProjectBundle {
+                images: Default::default(),
                 primary_repo: "source".into(),
                 repositories: vec![mj_core::config::ProjectRepository {
                     id: "source".into(),

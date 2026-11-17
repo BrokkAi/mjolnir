@@ -250,7 +250,7 @@ pub const UPGRADE_HEADER: &str = "x-mj-upgrade";
 /// Answers, for a target id, why no worker binary could serve a session there.
 /// It blocks (a bare SSH host is asked its platform), so callers run it off
 /// the async runtime.
-pub type WorkerSourceCheck = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub type WorkerSourceCheck = Arc<dyn Fn(&str, Option<&str>) -> Option<String> + Send + Sync>;
 
 /// Typed request channels served by the authenticated HTTP surface.
 pub struct ServerRequests {

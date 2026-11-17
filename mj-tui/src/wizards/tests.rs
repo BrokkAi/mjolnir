@@ -490,6 +490,7 @@ fn two_project_config() -> mj_core::config::Config {
     configuration.bundles.insert(
         "bifrost2".into(),
         mj_core::config::ProjectBundle {
+            images: Default::default(),
             primary_repo: "bifrost-dev".into(),
             repositories: vec![
                 mj_core::config::ProjectRepository {
@@ -543,6 +544,7 @@ fn a_saved_project_with_a_missing_directory_is_marked_unavailable() {
     configuration.bundles.insert(
         "missingpath".into(),
         mj_core::config::ProjectBundle {
+            images: Default::default(),
             primary_repo: "missingpath".into(),
             repositories: vec![mj_core::config::ProjectRepository {
                 id: "missingpath".into(),
@@ -649,6 +651,7 @@ fn refusal_to_remove_unavailable_project_is_visible_inside_picker() {
     configuration.bundles.insert(
         "missingpath".into(),
         mj_core::config::ProjectBundle {
+            images: Default::default(),
             primary_repo: "missingpath".into(),
             repositories: vec![mj_core::config::ProjectRepository {
                 id: "missingpath".into(),

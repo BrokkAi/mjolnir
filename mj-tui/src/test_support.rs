@@ -289,6 +289,7 @@ pub(crate) fn config() -> Config {
         bundles: BTreeMap::from([(
             "hel".into(),
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "hel".into(),
                 repositories: vec![ProjectRepository {
                     id: "hel".into(),

@@ -1887,7 +1887,8 @@ impl Controller {
         // requests, including probing the platform of an existing SSH host. A resume
         // that could never install a worker fails here rather than after all
         // that work has been thrown away.
-        super::worker_binary::preflight_worker_binary(&target_template, executor)?;
+        let worker_target = super::backend::session_target(&self.config, &previous.bundle_id, target_id, executor)?;
+        super::worker_binary::preflight_worker_binary(&worker_target, executor)?;
         let native_continuity = self.config.native_continuity(
             archive_manifest.session.harness_kind,
             &archive_manifest.session.profile_id,

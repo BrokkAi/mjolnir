@@ -818,6 +818,7 @@ fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
 
 fn sample_config() -> Config {
     Config {
+        images: ImagesConfig::default(),
         version: CONFIG_VERSION,
         keys: Default::default(),
         sessions_side: Default::default(),
@@ -848,6 +849,7 @@ fn sample_config() -> Config {
         bundles: BTreeMap::from([(
             "hel".into(),
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "app".into(),
                 repositories: vec![ProjectRepository {
                     id: "app".into(),
@@ -1279,7 +1281,25 @@ fn config_toml_round_trip_is_atomic() {
     let path = directory.path().join("nested/config.toml");
     let mut config = sample_config();
     config.sidebar_size = crate::workspace::PaneSize::Minimized;
+    config.images.repository = Some("localhost:5000/projects".into());
+    config.bundles.get_mut("hel").unwrap().images.insert(
+        "linux/amd64".into(),
+        "localhost:5000/projects/hel:recipe".into(),
+    );
     config.save_to(&path).unwrap();
+    let loaded = Config::load_from(&path).unwrap();
+    assert_eq!(
+        loaded.session_image(Some("hel"), "podman-default", "linux/amd64"),
+        Some("localhost:5000/projects/hel:recipe")
+    );
+    assert_eq!(
+        loaded.session_image(Some("hel"), "podman-default", "linux/arm64"),
+        Some("ubuntu:24.04")
+    );
+    assert_eq!(
+        loaded.session_image(None, "podman-default", "linux/amd64"),
+        Some("ubuntu:24.04")
+    );
     assert_eq!(Config::load_from(&path).unwrap(), config);
     assert!(!fs::read_to_string(&path).unwrap().contains("pull_policy"));
     assert_eq!(

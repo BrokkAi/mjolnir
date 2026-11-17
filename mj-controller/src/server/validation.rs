@@ -423,8 +423,26 @@ async fn require_worker_source(
         return Ok(());
     };
     let target_id = target_id.to_owned();
+    let bundle_id = match action {
+        ControllerAction::New { bundle_id, .. } => Some(bundle_id.clone()),
+        ControllerAction::Resume { session_id, .. } => state
+            .snapshot_rx
+            .borrow()
+            .sessions
+            .iter()
+            .find(|session| session.id == *session_id)
+            .map(|session| session.bundle_id.clone()),
+        ControllerAction::Move { request } => state
+            .snapshot_rx
+            .borrow()
+            .sessions
+            .iter()
+            .find(|session| session.id == request.preparation.selection.session_id)
+            .map(|session| session.bundle_id.clone()),
+        _ => None,
+    };
     let checked = target_id.clone();
-    let problem = tokio::task::spawn_blocking(move || check(&checked))
+    let problem = tokio::task::spawn_blocking(move || check(&checked, bundle_id.as_deref()))
         .await
         .map_err(|_| ApiError::controller_unavailable())?;
     match problem {

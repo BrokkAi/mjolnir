@@ -329,6 +329,7 @@ pub(super) fn ssh_worktree_target() -> ManagedWorktreeTarget {
 
 pub(super) fn local_bundle(repository: &Path) -> ProjectBundle {
     ProjectBundle {
+        images: Default::default(),
         primary_repo: "project".into(),
         repositories: vec![ProjectRepository {
             id: "project".into(),

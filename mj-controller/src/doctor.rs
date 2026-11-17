@@ -3459,6 +3459,18 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
             }
             worker_binary_check_on(id, container, known_arch)
         })
+        .chain(config.targets.iter().flat_map(|(id, target)| {
+            config.bundles.iter().flat_map(move |(bundle_id, bundle)| {
+                bundle.images.keys().filter_map(move |platform| {
+                    let container = target.container()?;
+                    if container.platform.as_deref().is_some_and(|selected| selected != platform) { return None; }
+                    let mut effective = container.clone();
+                    effective.image = config.session_image(Some(bundle_id), id, platform)?.to_owned();
+                    effective.platform = Some(platform.clone());
+                    Some(worker_binary_check_on(&format!("{id}.{bundle_id}.{platform}"), &effective, None))
+                })
+            })
+        }))
         .collect()
 }
 

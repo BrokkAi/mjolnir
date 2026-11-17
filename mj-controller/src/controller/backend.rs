@@ -763,6 +763,68 @@ impl ContainerOverrides {
     }
 }
 
+/// OCI platform of a container target, before its container exists.
+pub(crate) fn session_image_platform(
+    template: &TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<String> {
+    let (host, container) = template
+        .image_host()
+        .context("image operation requires a container target")?;
+    let architecture = if let Some(platform) = &container.platform {
+        platform
+            .split('/')
+            .find_map(|part| targets::normalize_architecture(part).ok())
+            .context("unsupported container platform")?
+    } else if matches!(
+        host,
+        targets::ImageHost::AppleContainer | targets::ImageHost::SshAppleContainer(_)
+    ) {
+        "aarch64"
+    } else {
+        let output = super::execute_checked(
+            executor,
+            host.command(
+                vec!["uname".into(), "-sm".into()],
+                "detect image platform".into(),
+            ),
+        )?;
+        targets::TargetPlatform::parse(std::str::from_utf8(&output.stdout)?)?.architecture
+    };
+    Ok(format!(
+        "linux/{}",
+        match architecture {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            _ => unreachable!(),
+        }
+    ))
+}
+
+/// Resolve the project assignment before preflight, creation, or recreation.
+/// A target without project images does not require an additional host probe.
+pub(crate) fn session_target(
+    config: &Config,
+    bundle_id: &str,
+    target_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<TargetTemplate> {
+    let template = config
+        .targets
+        .get(target_id)
+        .context("session target configuration is missing")?;
+    if template.container().is_none()
+        || config
+            .bundles
+            .get(bundle_id)
+            .is_none_or(|bundle| bundle.images.is_empty())
+    {
+        return Ok(template.clone());
+    }
+    let platform = session_image_platform(template, executor)?;
+    config.session_target(Some(bundle_id), target_id, &platform)
+}
+
 pub(super) fn backend_target(
     template: &TargetTemplate,
     allocation: Option<&SessionResourceAllocation>,
@@ -828,29 +890,37 @@ pub(super) fn backend_target(
 /// entry takes the more eager of the two.
 pub fn image_refresh_plan(config: &Config) -> Vec<ImageRefresh> {
     let mut plan: Vec<ImageRefresh> = Vec::new();
-    for target in config.targets.values() {
+    for (target_id, target) in &config.targets {
         let Some((host, container)) = target.image_host() else {
             continue;
         };
-        let Some(refresh) = targets::image_refresh(
-            host,
-            &container.image,
-            container.platform.as_deref(),
-            container.pull_policy,
-        ) else {
-            continue;
-        };
-        // Commands are decided by the host, the image, and the platform alone,
-        // so those three identify the duplicates worth collapsing.
-        if let Some(existing) = plan.iter_mut().find(|entry| {
-            entry.host == refresh.host
-                && entry.image == refresh.image
-                && entry.platform == refresh.platform
-        }) {
-            existing.when = existing.when.max(refresh.when);
-            continue;
+        let mut images = vec![container.image.as_str()];
+        if let Some(platform) = container.platform.as_deref() {
+            for bundle_id in config.bundles.keys() {
+                if let Some(image) = config.session_image(Some(bundle_id), target_id, platform) {
+                    images.push(image);
+                }
+            }
         }
-        plan.push(refresh);
+        for image in images {
+            let Some(refresh) = targets::image_refresh(
+                host.clone(),
+                image,
+                container.platform.as_deref(),
+                container.pull_policy,
+            ) else {
+                continue;
+            };
+            if let Some(existing) = plan.iter_mut().find(|entry| {
+                entry.host == refresh.host
+                    && entry.image == refresh.image
+                    && entry.platform == refresh.platform
+            }) {
+                existing.when = existing.when.max(refresh.when);
+            } else {
+                plan.push(refresh);
+            }
+        }
     }
     plan
 }

@@ -1,6 +1,6 @@
 //! Controller-side lifecycle transitions and canonical-to-backend conversion.
 
-mod backend;
+pub(crate) mod backend;
 mod cache_host;
 pub(crate) mod checkpoint;
 mod container_upgrade;
@@ -414,6 +414,7 @@ pub fn create_bundle_from_sources_in_config(
     updated.bundles.insert(
         bundle_id.clone(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo,
             repositories,
         },

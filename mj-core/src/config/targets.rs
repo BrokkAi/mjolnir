@@ -1,6 +1,6 @@
 //! Projects, containers and the target templates a session runs on.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -32,6 +32,9 @@ pub struct ProjectRepository {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectBundle {
+    /// Published session images, indexed by OCI platform.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub images: BTreeMap<String, String>,
     /// Repository id used as the ACP session cwd.
     pub primary_repo: String,
     pub repositories: Vec<ProjectRepository>,
@@ -40,6 +43,24 @@ pub struct ProjectBundle {
 impl ProjectBundle {
     pub(super) fn validate(&self, bundle_id: &str) -> Result<()> {
         validate_id("bundle", bundle_id)?;
+        for (platform, image) in &self.images {
+            let Some(architecture) = platform.strip_prefix("linux/") else {
+                bail!("bundle {bundle_id:?} image platform {platform:?} must be linux/<arch>");
+            };
+            if architecture.is_empty()
+                || architecture.contains('/')
+                || !architecture
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            {
+                bail!("bundle {bundle_id:?} image platform {platform:?} must be linux/<arch>");
+            }
+            if image.trim().is_empty() || image.chars().any(char::is_whitespace) {
+                bail!(
+                    "bundle {bundle_id:?} image for {platform:?} must be a non-empty image reference without whitespace"
+                );
+            }
+        }
         if self.repositories.is_empty() {
             bail!("bundle {bundle_id:?} must contain at least one repository");
         }

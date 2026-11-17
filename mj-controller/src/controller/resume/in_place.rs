@@ -504,7 +504,13 @@ impl Controller {
             && previous.state == SessionState::Closing
             && super::super::local_profile_homes::session_has_a_staged_home_of_its_own(previous);
         if !retain_native {
-            crate::controller::worker_binary::preflight_worker_binary(&target_template, executor)?;
+            let worker_target = crate::controller::backend::session_target(
+                &self.config,
+                &previous.bundle_id,
+                target_template_id,
+                executor,
+            )?;
+            crate::controller::worker_binary::preflight_worker_binary(&worker_target, executor)?;
         }
         // The directory the *source* profile owns inside the target. It is
         // read from the record's own profile, before the record names the

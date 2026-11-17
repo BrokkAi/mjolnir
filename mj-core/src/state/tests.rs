@@ -529,6 +529,7 @@ fn capacity_gib_text_never_rounds_a_limit_up() {
 
 fn sample_config() -> Config {
     Config {
+        images: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
         keys: Default::default(),
@@ -558,6 +559,7 @@ fn sample_config() -> Config {
         bundles: BTreeMap::from([(
             "hel".into(),
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "hel".into(),
                 repositories: vec![ProjectRepository {
                     id: "hel".into(),
@@ -1080,6 +1082,7 @@ fn multi_repository_bundles_include_all_repositories_in_sorted_identity_order() 
     config.bundles.insert(
         "with-docs".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: primary.id.clone(),
             repositories: vec![primary.clone(), secondary.clone()],
         },
@@ -1102,6 +1105,7 @@ fn multi_repository_bundles_include_all_repositories_in_sorted_identity_order() 
     config.bundles.insert(
         "with-other-docs".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: primary.id.clone(),
             repositories: vec![primary, other_secondary],
         },
@@ -1128,6 +1132,7 @@ fn multi_repository_bundle_identity_ignores_repository_order_and_primary_selecti
     config.bundles.insert(
         "first-order".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: primary.id.clone(),
             repositories: vec![primary.clone(), secondary.clone()],
         },
@@ -1135,6 +1140,7 @@ fn multi_repository_bundle_identity_ignores_repository_order_and_primary_selecti
     config.bundles.insert(
         "second-order".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: secondary.id.clone(),
             repositories: vec![secondary, primary],
         },
@@ -1337,6 +1343,7 @@ fn duplicate_repository_sources_collapse_to_the_single_repository_identity() {
     config.bundles.insert(
         "duplicate".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: primary.id.clone(),
             repositories: vec![primary, duplicate],
         },

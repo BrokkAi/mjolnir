@@ -2016,6 +2016,7 @@ fn a_managed_conversion_carries_the_session_worktree_not_the_primary_checkout() 
 fn raw_to_workspace_keeps_the_accepted_bundle_and_adds_its_source() {
     let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
     let bundle = ProjectBundle {
+        images: Default::default(),
         primary_repo: "bifrost-source".into(),
         repositories: vec![ProjectRepository {
             id: "bifrost-source".into(),
@@ -2064,6 +2065,7 @@ fn raw_to_workspace_keeps_the_accepted_bundle_and_adds_its_source() {
 fn raw_to_workspace_uses_the_configured_github_source() {
     let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
     let bundle = ProjectBundle {
+        images: Default::default(),
         primary_repo: "bifrost-source".into(),
         repositories: vec![ProjectRepository {
             id: "bifrost-source".into(),

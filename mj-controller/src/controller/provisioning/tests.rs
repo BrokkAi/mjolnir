@@ -124,6 +124,7 @@ fn ssh_docker_registration_config() -> Config {
     config.bundles.insert(
         "project".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: "project".into(),
             repositories: vec![ProjectRepository {
                 id: "project".into(),

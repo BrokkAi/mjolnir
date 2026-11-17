@@ -202,11 +202,13 @@ impl Controller {
                 "The retained workspace was kept but no recovery copy holds the missing parent history. Supply a recovery archive and retry Resume."
             );
         }
-        let configured = self
-            .config
-            .targets
-            .get(&record.target_template_id)
-            .context("legacy target configuration missing")?;
+        let resolved = backend::session_target(
+            &self.config,
+            &record.bundle_id,
+            &record.target_template_id,
+            executor,
+        )?;
+        let configured = &resolved;
         let mut target = backend::backend_target(
             configured,
             mj_core::state::applied_container_settings(&record).resource_allocation,
@@ -352,11 +354,13 @@ impl Controller {
             .as_ref()
             .context("session has no retained container")?;
         let backend = backend_locator(locator, session, &self.config)?;
-        let template = self
-            .config
-            .targets
-            .get(&session.target_template_id)
-            .context("session target configuration is missing")?;
+        let resolved = backend::session_target(
+            &self.config,
+            &session.bundle_id,
+            &session.target_template_id,
+            executor,
+        )?;
+        let template = &resolved;
         let container = match template {
             TargetTemplate::LocalPodman { container }
             | TargetTemplate::LocalDocker { container }

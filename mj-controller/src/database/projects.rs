@@ -492,6 +492,7 @@ mod tests {
         let path = directory.path().join("projects.sqlite");
         let old = ProjectBundleSnapshot {
             bundle: ProjectBundle {
+                images: Default::default(),
                 primary_repo: "app".into(),
                 repositories: vec![ProjectRepository {
                     id: "app".into(),
@@ -573,6 +574,7 @@ mod tests {
         let path = directory.path().join("projects.sqlite");
         let make = |id: &str| ProjectBundleSnapshot {
             bundle: ProjectBundle {
+                images: Default::default(),
                 primary_repo: id.into(),
                 repositories: vec![ProjectRepository {
                     id: id.into(),
@@ -661,6 +663,7 @@ mod tests {
         let path = directory.path().join("projects.sqlite");
         let make = |id: &str| ProjectBundleSnapshot {
             bundle: ProjectBundle {
+                images: Default::default(),
                 primary_repo: id.into(),
                 repositories: vec![ProjectRepository {
                     id: id.into(),

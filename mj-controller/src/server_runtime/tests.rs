@@ -472,6 +472,7 @@ fn golden_phone_new_session_preflight() {
     config.bundles.insert(
         "hel".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: "hel".into(),
             repositories: vec![ProjectRepository {
                 id: "hel".into(),
@@ -1586,6 +1587,7 @@ fn golden_phone_session_snapshot() {
 fn controller_with_profiles(ids: &[&str]) -> Controller {
     Controller {
         config: Config {
+            images: Default::default(),
             keys: Default::default(),
             jev: Default::default(),
             quota: Default::default(),

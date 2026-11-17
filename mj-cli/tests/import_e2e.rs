@@ -119,6 +119,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
     config.bundles.insert(
         "scratch".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: "scratch".into(),
             repositories: vec![ProjectRepository {
                 id: "scratch".into(),
@@ -226,6 +227,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         bundles: BTreeMap::from([(
             "kimi-source".into(),
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "kimi-source".into(),
                 repositories: vec![ProjectRepository {
                     id: "kimi-source".into(),
@@ -357,6 +359,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         bundles: BTreeMap::from([(
             "grok-source".into(),
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "grok-source".into(),
                 repositories: vec![ProjectRepository {
                     id: "grok-source".into(),
@@ -595,6 +598,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         bundles: BTreeMap::from([(
             "codex-source".into(),
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "codex-source".into(),
                 repositories: vec![ProjectRepository {
                     id: "codex-source".into(),

@@ -1175,6 +1175,20 @@ fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
     serde::de::IgnoredAny::deserialize(deserializer).map(|_| ())
 }
 
+/// Registry namespace used for published project session images.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImagesConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+}
+
+impl ImagesConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// The resolved configuration every part of Mjolnir works with.
 ///
 /// Each entry of `targets` is a [`TargetTemplate`]: a host and a runtime
@@ -1207,6 +1221,7 @@ pub struct Config {
     pub legacy_startup: (),
     pub profiles: BTreeMap<String, HarnessProfile>,
     pub bundles: BTreeMap<String, ProjectBundle>,
+    pub images: ImagesConfig,
     /// The hosts runtimes run on. `local` is implied even when it is absent.
     pub machines: BTreeMap<String, Machine>,
     pub targets: BTreeMap<String, TargetTemplate>,
@@ -1284,6 +1299,8 @@ struct StoredConfig {
     profiles: BTreeMap<String, HarnessProfile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     bundles: BTreeMap<String, ProjectBundle>,
+    #[serde(default, skip_serializing_if = "ImagesConfig::is_default")]
+    images: ImagesConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     machines: BTreeMap<String, Machine>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1457,6 +1474,7 @@ impl TryFrom<StoredConfig> for Config {
             legacy_startup,
             mut profiles,
             bundles,
+            images,
             mut machines,
             targets,
         } = stored;
@@ -1555,6 +1573,7 @@ impl TryFrom<StoredConfig> for Config {
             legacy_startup,
             profiles,
             bundles,
+            images,
             machines,
             targets: resolved,
             default_targets: BTreeSet::new(),
@@ -1608,6 +1627,7 @@ impl From<Config> for StoredConfig {
             legacy_startup: config.legacy_startup,
             profiles: config.profiles,
             bundles: config.bundles,
+            images: config.images,
             machines,
             targets,
         }
@@ -1636,6 +1656,7 @@ impl Default for Config {
             legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
+            images: ImagesConfig::default(),
             machines: BTreeMap::new(),
             targets: BTreeMap::new(),
             default_targets: BTreeSet::new(),
@@ -1645,6 +1666,44 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The image for a session on a container target. Bundle assignments take
+    /// precedence only for the target's platform; bare targets have no image.
+    pub fn session_image(
+        &self,
+        bundle_id: Option<&str>,
+        target_id: &str,
+        platform: &str,
+    ) -> Option<&str> {
+        let container = self.targets.get(target_id)?.container()?;
+        Some(
+            bundle_id
+                .and_then(|id| self.bundles.get(id))
+                .and_then(|bundle| bundle.images.get(platform))
+                .map_or(container.image.as_str(), String::as_str),
+        )
+    }
+
+    /// Apply the same resolution to a configured target without changing it.
+    pub fn session_target(
+        &self,
+        bundle_id: Option<&str>,
+        target_id: &str,
+        platform: &str,
+    ) -> Result<TargetTemplate> {
+        let mut target = self
+            .targets
+            .get(target_id)
+            .with_context(|| format!("unknown target {target_id:?}"))?
+            .clone();
+        if let Some(image) = self.session_image(bundle_id, target_id, platform) {
+            target
+                .container_mut()
+                .expect("session image requires a container")
+                .image = image.to_owned();
+        }
+        Ok(target)
+    }
+
     /// Suggest additions for setup without replacing existing entries. Both
     /// setup surfaces use the same identities and collision-free names.
     pub fn setup_additions(&self, discovered: &Self) -> Self {

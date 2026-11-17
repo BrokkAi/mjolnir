@@ -318,6 +318,7 @@ fn resolve_bundle_matches_an_existing_bundle_from_a_linked_worktree() {
     config.bundles.insert(
         "app".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: "app".into(),
             repositories: vec![ProjectRepository {
                 id: "app".into(),
@@ -581,6 +582,7 @@ fn local_repository_collection_preserves_bundle_order() {
     initialize_repository(&app, "app");
     initialize_repository(&workspace.join("worker"), "worker");
     let bundle = ProjectBundle {
+        images: Default::default(),
         primary_repo: "app".into(),
         repositories: vec![
             ProjectRepository {
@@ -627,6 +629,7 @@ fn local_source_repository_import_carries_no_committed_bundle() {
     assert!(output.status.success());
     fs::write(app.join("dirty.txt"), "dirty").unwrap();
     let bundle = ProjectBundle {
+        images: Default::default(),
         primary_repo: "app".into(),
         repositories: vec![ProjectRepository {
             id: "app".into(),
@@ -675,6 +678,7 @@ fn isolated_repository_import_records_network_provenance_and_delta() {
     run_git(&app, &["add", "session.txt"]);
     run_git(&app, &["commit", "-qm", "session work"]);
     let bundle = ProjectBundle {
+        images: Default::default(),
         primary_repo: "app".into(),
         repositories: vec![ProjectRepository {
             id: "app".into(),
@@ -707,6 +711,7 @@ fn isolated_local_source_import_resolves_the_checkout_network_remote() {
     let app = directory.path().join("app");
     initialize_repository(&app, "app");
     let bundle = ProjectBundle {
+        images: Default::default(),
         primary_repo: "app".into(),
         repositories: vec![ProjectRepository {
             id: "app".into(),
@@ -873,6 +878,7 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
     config.bundles.insert(
         "app".into(),
         ProjectBundle {
+            images: Default::default(),
             primary_repo: "app".into(),
             repositories: vec![ProjectRepository {
                 id: "app".into(),
@@ -984,6 +990,7 @@ const IMPORT_FIXTURE_SESSION: &str = "019feb6c-5ffc-7c12-ad99-bdeaeb6be79d";
 
 fn github_bundle(ids: &[&str]) -> ProjectBundle {
     ProjectBundle {
+        images: Default::default(),
         primary_repo: ids[0].to_owned(),
         repositories: ids
             .iter()

@@ -57,6 +57,7 @@ fn provisioning_uses_accepted_fetch_and_push_settings_after_the_catalog_changes(
     session.project = Some(
         mj_core::repository::ProjectBundleSnapshot {
             bundle: ProjectBundle {
+                images: Default::default(),
                 primary_repo: "original-repository-id".into(),
                 repositories: vec![ProjectRepository {
                     id: "original-repository-id".into(),
@@ -645,6 +646,7 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
         extra_args: Vec::new(),
     };
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),

@@ -31,6 +31,7 @@ fn test_config() -> Config {
         bundles: BTreeMap::from([(
             "app".to_owned(),
             ProjectBundle {
+                images: Default::default(),
                 primary_repo: "app".to_owned(),
                 repositories: vec![ProjectRepository {
                     id: "app".to_owned(),
