@@ -650,7 +650,7 @@ impl Controller {
         )
         .await
         .map_err(|error| {
-            worker_probe_diagnosis(executor, backend, worker_root, error)
+            worker_probe_diagnosis(executor, backend, session_id, worker_root, error)
                 .context(messages.connect)
                 .context(WorkerRestartLeftNoWorker)
         })?;
@@ -764,6 +764,21 @@ mod tests {
             yielded: AtomicBool,
         }
         impl CommandExecutor for LaunchThenHandoff {
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 if !self.yielded.load(Ordering::SeqCst) {
                     assert!(
@@ -875,6 +890,21 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for StopSucceedsThenFails {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let mut executed = self.executed.lock().expect("executed commands");
             executed.push(command.program.clone());
@@ -899,6 +929,21 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for FailingStop {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 1,
@@ -985,6 +1030,21 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct FailingCommands(AtomicUsize);
         impl CommandExecutor for FailingCommands {
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(CommandOutput {

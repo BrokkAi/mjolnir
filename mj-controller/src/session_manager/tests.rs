@@ -2219,6 +2219,21 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
     #[derive(Default)]
     struct RecordingExecutor(Mutex<Vec<String>>);
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
             self.0.lock().unwrap().push(command.program.clone());
             Ok(crate::targets::CommandOutput {
@@ -4170,6 +4185,21 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for ProbeExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
             self.commands.lock().unwrap().push(command.program.clone());
             Ok(crate::targets::CommandOutput {

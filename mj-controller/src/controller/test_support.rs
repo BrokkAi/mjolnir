@@ -417,6 +417,21 @@ pub(super) struct FixtureRemoteExecutor {
 }
 
 impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,
@@ -462,6 +477,21 @@ impl Git231Executor {
 }
 
 impl crate::targets::CommandExecutor for Git231Executor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,
@@ -539,6 +569,21 @@ fn managed_checkout_session(
 pub(crate) struct RefusingExecutor(pub(crate) &'static str);
 
 impl crate::targets::CommandExecutor for RefusingExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,

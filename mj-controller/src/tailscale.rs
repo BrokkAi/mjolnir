@@ -262,6 +262,21 @@ mod tests {
     }
 
     impl CommandExecutor for FakeExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.clone());
             if self.issue_files && command.args.first().map(String::as_str) == Some("cert") {

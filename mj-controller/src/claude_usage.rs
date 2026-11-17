@@ -1512,6 +1512,21 @@ Last 7d · 5966 requests · 78 sessions
     }
 
     impl CommandExecutor for RefreshExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
             assert_eq!(command.args, ["auth", "login"]);
             assert_eq!(
@@ -1821,6 +1836,21 @@ Last 7d · 5966 requests · 78 sessions
     }
 
     impl CommandExecutor for BlockedRefreshExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
             if let Some(started) = self.started.lock().unwrap().take() {
                 let _ = started.send(());
@@ -2186,6 +2216,21 @@ Last 7d · 5966 requests · 78 sessions
     }
 
     impl CommandExecutor for FakeMac {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
             if command.program == "security" {
                 assert_eq!(command.args[0], "find-generic-password");

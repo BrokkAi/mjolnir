@@ -89,23 +89,17 @@ pub(crate) fn ensure_control_worker(
             "the current worker cannot be staged for {root}, so its worker cannot be stopped or probed"
         )
     })?;
-    let directory = Path::new(&control)
+    let slot = Path::new(&control)
         .parent()
         .context("the control worker has a directory")?;
-    execute_checked(
+    install_control_worker(
         executor,
-        targets::locator_command(
-            locator,
-            vec![
-                "mkdir".into(),
-                "-p".into(),
-                mj_core::target_path::text(directory),
-            ],
-        )
-        .purpose("create the control worker directory"),
-    )?;
-    install_worker_binary_at(executor, locator, session_id, &worker, &control, None)
-        .with_context(|| format!("stage the current worker for {root}"))
+        locator,
+        session_id,
+        &worker,
+        &mj_core::target_path::text(slot),
+    )
+    .with_context(|| format!("stage the current worker for {root}"))
 }
 
 /// Probe worker liveness through the staged current worker.
@@ -548,6 +542,7 @@ pub(super) fn start_worker_command(
 pub(in crate::controller) fn worker_probe_diagnosis(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
+    session_id: &str,
     worker_root: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
@@ -555,7 +550,7 @@ pub(in crate::controller) fn worker_probe_diagnosis(
         Some(failure) => error.context(failure),
         None => error,
     };
-    match probe_worker(executor, locator, worker_root) {
+    match probe_worker(executor, locator, session_id, worker_root) {
         Ok(probe) => error.context(probe.to_string()),
         Err(probe_error) => {
             error.context(format!("the worker could not be probed: {probe_error:#}"))
@@ -701,9 +696,14 @@ impl std::fmt::Display for WorkerProbe {
 ///
 /// A target that cannot be asked, or a record that does not parse, is an
 /// error: the caller must not mistake it for a worker with nothing to report.
+///
+/// The probe reads the lock holder through the staged control worker, so like
+/// every command that embeds it, it is a [`targets::WorkerControlPlan`] and
+/// stages that worker first. Staging changes no root.
 pub(in crate::controller) fn probe_worker(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
+    session_id: &str,
     worker_root: &str,
 ) -> Result<WorkerProbe> {
     let command = targets::locator_command(
@@ -711,13 +711,18 @@ pub(in crate::controller) fn probe_worker(
         vec!["sh".into(), "-c".into(), worker_probe_script(worker_root)],
     )
     .purpose("probe worker state");
-    let output = executor.execute(&command)?;
-    ensure!(
-        output.status == 0,
-        "the worker probe exited with status {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
+    let output = targets::WorkerControlPlan::declare(
+        CommandPlan {
+            description: "probe worker state".into(),
+            commands: vec![command],
+        },
+        locator,
+        session_id,
+    )?
+    .execute(executor)
+    .context("the worker probe failed")?
+    .pop()
+    .context("the worker probe produced no output")?;
     serde_json::from_slice(&output.stdout).with_context(|| {
         format!(
             "read the worker probe: {}",

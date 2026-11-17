@@ -726,12 +726,16 @@ impl Controller {
     async fn diagnose_suspension_worker(&self, session_id: &str, phase: &str) {
         let placement = self.worker_placement(session_id);
         let probe = match placement {
-            Ok((backend, worker_root)) => tokio::task::spawn_blocking(move || {
-                super::worker_binary::probe_worker(
-                    &targets::BoundedProcessExecutor::new(Duration::from_secs(5)),
-                    &backend,
-                    &worker_root,
-                )
+            Ok((backend, worker_root)) => tokio::task::spawn_blocking({
+                let session_id = session_id.to_owned();
+                move || {
+                    super::worker_binary::probe_worker(
+                        &targets::BoundedProcessExecutor::new(Duration::from_secs(5)),
+                        &backend,
+                        &session_id,
+                        &worker_root,
+                    )
+                }
             })
             .await
             .context("join the suspension worker diagnostic probe")

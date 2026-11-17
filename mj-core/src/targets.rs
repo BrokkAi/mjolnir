@@ -900,19 +900,17 @@ pub trait CommandExecutor {
 
     /// Run `command` with this executor's cancellation but without its
     /// deadline, for work a timeout named for another step must not cover.
-    /// Executors without deadlines run it as usual.
-    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        self.execute(command)
-    }
+    /// An executor without a deadline runs it as `execute` does; one with a
+    /// deadline drops it and keeps its cancellation. Required, so every
+    /// executor states which it is.
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput>;
 
     /// [`Self::execute_without_deadline`] for a command that reads `input`.
     fn execute_with_stdin_without_deadline(
         &self,
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
-    ) -> Result<CommandOutput> {
-        self.execute_with_stdin(command, input)
-    }
+    ) -> Result<CommandOutput>;
 }
 
 /// An executor whose commands run without the wrapped executor's deadline but
@@ -928,6 +926,21 @@ impl<'a, E: CommandExecutor + ?Sized> WithoutDeadline<'a, E> {
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.0.execute_without_deadline(command)
     }
@@ -1152,6 +1165,21 @@ impl ProcessExecutor {
 // must not hold one of the runtime's async worker threads for the length of a
 // target command.
 impl CommandExecutor for ProcessExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
@@ -1985,6 +2013,23 @@ impl BoundedProcessExecutor {
 }
 
 impl CommandExecutor for BoundedProcessExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        // This executor's only bound is its deadline and it has no
+        // cancellation, so without the deadline it is a plain process.
+        ProcessExecutor.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        ProcessExecutor.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let executor = CancellableProcessExecutor::with_timeout(self.timeout);
         executor.execute(command).map_err(|error| {
@@ -3749,6 +3794,21 @@ mod executor_tests {
     }
 
     impl CommandExecutor for MasterKilledOnce {
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let reply = |status: i32, stderr: &str| CommandOutput {
                 status,

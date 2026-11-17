@@ -99,6 +99,21 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
     }
     struct SourceExists;
     impl CommandExecutor for SourceExists {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 0,
@@ -375,6 +390,21 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     // Hard-won: 055d8a772 review: a stale locator hid source confirmation.
     struct MissingTarget;
     impl CommandExecutor for MissingTarget {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.purpose == "check for Mjolnir session container" {
                 return Ok(CommandOutput {
@@ -552,6 +582,21 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
     }
 
     impl CommandExecutor for ConcurrentSourceExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.purpose == "check checkpoint base commit" {
                 self.source_checks.wait();
@@ -661,6 +706,21 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.clone());
             Ok(CommandOutput {
@@ -929,6 +989,21 @@ struct BarrierExecutor {
 }
 
 impl CommandExecutor for BarrierExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.seen.lock().unwrap().push(command.purpose.clone());
         self.barrier.wait();
@@ -1213,6 +1288,21 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.purpose.clone());
             Ok(CommandOutput {
@@ -1386,6 +1476,21 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     }
 
     impl CommandExecutor for FailingPreflightExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             // Provisioning probes the mount source's filesystem before it
             // builds the run arguments; a local disk keeps the overlay.
@@ -1609,6 +1714,21 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     struct FailAfterWorktreeRestore;
 
     impl CommandExecutor for FailAfterWorktreeRestore {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if matches!(command.program.as_str(), "git" | "mkdir") {
                 return ProcessExecutor.execute(command);
@@ -1807,6 +1927,21 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     struct GitWithoutPodmanExecutor;
 
     impl CommandExecutor for GitWithoutPodmanExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.program == "git" {
                 return ProcessExecutor.execute(command);
@@ -2448,6 +2583,21 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for Engine {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.purpose.clone());
             let (status, stdout) = match command.purpose.as_str() {
@@ -2622,6 +2772,21 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for AppleEngine {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(command.program == "ssh", self.remote);
             self.commands.lock().unwrap().push(command.purpose.clone());
@@ -2782,6 +2947,21 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         home: PathBuf,
     }
     impl CommandExecutor for HostShell {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert!(matches!(
                 command.purpose.as_str(),

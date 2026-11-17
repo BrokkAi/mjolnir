@@ -72,6 +72,21 @@ struct DeferredCleanupExecutor {
 }
 
 impl CommandExecutor for DeferredCleanupExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         let status = self.statuses.lock().unwrap().pop().unwrap_or(0);
         Ok(CommandOutput {
@@ -226,6 +241,21 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.clone());
             Ok(CommandOutput {
@@ -337,6 +367,21 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
         restarted: Mutex<bool>,
     }
     impl CommandExecutor for PausedRecovery {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.program == "probe" {
                 self.entered.send(()).unwrap();
@@ -462,6 +507,21 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.clone());
             Ok(CommandOutput {
@@ -935,6 +995,21 @@ struct RootProbeExecutor {
 }
 
 impl CommandExecutor for RootProbeExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.purposes.lock().unwrap().push(command.purpose.clone());
         match command.purpose.as_str() {
@@ -1342,6 +1417,21 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             *self.calls.lock().unwrap() += 1;
             Ok(CommandOutput {
@@ -1405,6 +1495,21 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             *self.calls.lock().unwrap() += 1;
             Ok(CommandOutput {
@@ -1474,6 +1579,21 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
     }
 
     impl CommandExecutor for AlreadyRemovedExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.clone());
             if command.program == "sh"
@@ -1586,6 +1706,21 @@ fn interrupted_close_error_preserves_destroying_phase() {
 struct FailingExecutor;
 
 impl CommandExecutor for FailingExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         Ok(CommandOutput {
             status: 1,
@@ -1991,6 +2126,21 @@ struct RealTargetsRecordedRelease {
 
 #[cfg(unix)]
 impl CommandExecutor for RealTargetsRecordedRelease {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if !is_release(command) {
             return ProcessExecutor.execute(command);
@@ -2046,6 +2196,21 @@ impl RecordingTargets {
 }
 
 impl CommandExecutor for RecordingTargets {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.lock().unwrap().push(command.clone());
         Ok(CommandOutput {
@@ -2604,6 +2769,21 @@ fn report_removal_failure_does_not_fail_child_destroy() {
     }
     struct ReportFailureExecutor;
     impl CommandExecutor for ReportFailureExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.purpose == "remove sub-agent report directories" {
                 anyhow::bail!("report directory is read-only");

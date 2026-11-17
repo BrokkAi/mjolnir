@@ -240,6 +240,15 @@ for file in "$store"/*/hel; do
         rm -f -- "$retired/hel"
     fi
     rmdir -- "$retired"
+done
+# A staged control worker is a symlink into this store, so it pins nothing. One
+# whose entry was retired points nowhere; the next control command stages it
+# again, so the dead link is only removed.
+for slot in "$store"/control-*; do
+    [ -L "$slot/hel" ] || continue
+    [ ! -e "$slot/hel" ] || continue
+    rm -f -- "$slot/hel"
+    rmdir -- "$slot" 2>/dev/null || true
 done"#;
 
 fn collect(
@@ -364,6 +373,59 @@ pub(super) fn install_worker_binary(
 const LINK_MISSING: i32 = 75;
 const LINK_NO_HARD_LINKS: i32 = 76;
 const LINK_DIGEST_MISMATCH: i32 = 77;
+
+/// Stage the worker as the control worker in `slot` (a directory in the store):
+/// `slot/hel` becomes a symlink to the store's digest entry, relative so it
+/// survives the store moving as a unit and works in containers and on macOS.
+/// A symlink adds no link count, so it never keeps the collector from retiring
+/// an entry no root uses; a link left pointing at a retired entry fails the
+/// control worker's build check and is staged again. An image's own worker is
+/// linked by the usual upload plan instead.
+pub(super) fn install_control_worker(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker: &WorkerInstall,
+    slot: &str,
+) -> Result<()> {
+    let WorkerInstall::Host(source) = worker else {
+        let destination = format!("{slot}/hel");
+        execute_checked(
+            executor,
+            targets::locator_command(locator, vec!["mkdir".into(), "-p".into(), slot.into()])
+                .purpose("create the control worker directory"),
+        )?;
+        return super::upgrade::worker_binary_upload_plan(
+            locator,
+            session_id,
+            worker,
+            &destination,
+            None,
+        )?
+        .execute(executor)
+        .map(|_| ());
+    };
+    verify_worker_build(source)?;
+    let digest = mj_core::worker_launch::worker_executable_digest(source)?;
+    let store = mj_core::target_path::text(&store_root(locator, session_id)?);
+    ensure_published(
+        executor, locator, session_id, worker, source, &store, &digest,
+    )?;
+    execute_checked(
+        executor,
+        script(
+            locator,
+            r#"set -eu
+slot=$1; target=$2
+mkdir -p -- "$slot"
+ln -sfn "$target" "$slot/hel.new-$$"
+mv -f -- "$slot/hel.new-$$" "$slot/hel""#,
+            &[slot, &format!("../{digest}/hel")],
+            "stage the control Mjolnir worker",
+        ),
+    )?;
+    Ok(())
+}
 
 pub(super) fn install_worker_binary_at(
     executor: &impl CommandExecutor,

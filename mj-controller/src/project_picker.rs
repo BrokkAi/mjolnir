@@ -372,6 +372,21 @@ mod tests {
     }
 
     impl CommandExecutor for FakeGh {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.command.replace(Some(command.clone()));
             self.output.borrow_mut().take().expect("one GitHub request")
@@ -380,6 +395,21 @@ mod tests {
 
     struct NoCommands;
     impl CommandExecutor for NoCommands {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             panic!("directory discovery must not spawn a command")
         }
@@ -486,6 +516,21 @@ mod tests {
     fn directory_scan_observes_the_callers_cancellation() {
         struct CancelDuringScan(Cell<usize>);
         impl CommandExecutor for CancelDuringScan {
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
                 unreachable!()
             }

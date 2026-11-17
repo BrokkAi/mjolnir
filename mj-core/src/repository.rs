@@ -485,6 +485,21 @@ mod tests {
         // error: a repository that cannot be read is not a plain folder.
         struct RefusedGit;
         impl CommandExecutor for RefusedGit {
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
                 Ok(CommandOutput {
                     status: 128,
@@ -560,6 +575,21 @@ mod tests {
         // A plain local session must not require the Git executable itself.
         struct MissingGit;
         impl CommandExecutor for MissingGit {
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
                 Err(std::io::Error::new(ErrorKind::NotFound, "git is not installed").into())
             }
@@ -582,6 +612,21 @@ mod tests {
         // sessions, so a plain folder is refused there.
         struct PlainRemoteFolder;
         impl CommandExecutor for PlainRemoteFolder {
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
                 Ok(CommandOutput {
                     status: 128,
@@ -609,6 +654,21 @@ mod tests {
 
         struct RefusedGit;
         impl CommandExecutor for RefusedGit {
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 assert_eq!(command.env.get("LC_ALL").map(String::as_str), Some("C"));
                 Ok(CommandOutput {
@@ -643,6 +703,21 @@ mod tests {
             diagnostic: &'static str,
         }
         impl CommandExecutor for FailedGit {
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
                 assert_eq!(command.env.get("LC_ALL").map(String::as_str), Some("C"));
                 Ok(crate::targets::CommandOutput {
@@ -708,6 +783,21 @@ mod tests {
     }
 
     impl CommandExecutor for GitRootsExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
             let stdout = if command.args.iter().any(|argument| argument == "rev-parse") {
                 self.roots.to_owned()

@@ -165,6 +165,21 @@ mod tests {
     }
 
     impl CommandExecutor for FailSecondDirectory {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &targets::CommandSpec) -> Result<targets::CommandOutput> {
             let (status, stdout, stderr) = match command.program.as_str() {
                 "uname" => (0, "Linux x86_64\n", ""),
@@ -201,6 +216,21 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for MacHost {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &targets::CommandSpec) -> Result<targets::CommandOutput> {
             self.ran.lock().unwrap().push(command.program.clone());
             let stdout = match command.program.as_str() {

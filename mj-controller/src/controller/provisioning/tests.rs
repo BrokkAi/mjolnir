@@ -39,6 +39,21 @@ impl ProbeExecutor {
 }
 
 impl CommandExecutor for ProbeExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         assert_eq!(
             command.purpose, "probe mount source filesystem",
@@ -140,6 +155,21 @@ fn ssh_docker_registration_config() -> Config {
 struct DockerDesktopExecutor;
 
 impl CommandExecutor for DockerDesktopExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = match command.program.as_str() {
             "docker" => "Docker Desktop 4.40.0 (187762)\n",
@@ -692,6 +722,21 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
 
 struct CancelledLaunch;
 impl CommandExecutor for CancelledLaunch {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         bail!("operation cancelled")
     }
@@ -1000,6 +1045,21 @@ struct DurableStateAtCleanup {
 }
 
 impl CommandExecutor for DurableStateAtCleanup {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         let stored = crate::database::load_state()?
             .sessions
@@ -1140,6 +1200,21 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
 
     struct RefuseStop(Mutex<usize>);
     impl CommandExecutor for RefuseStop {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             *self.0.lock().unwrap() += 1;
             bail!("target stop failed");
@@ -1551,6 +1626,21 @@ impl RecordingExecutor {
 }
 
 impl CommandExecutor for RecordingExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let mut argv = vec![command.program.clone()];
         argv.extend(command.args.clone());
@@ -1766,6 +1856,21 @@ fn only_a_worker_that_never_started_is_retried() {
 
 struct RawRegistrationExecutor;
 impl CommandExecutor for RawRegistrationExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = match command.purpose.as_str() {
             "resolve project repository and checkout" => "/srv/project\n/srv/project/.git\n",
@@ -1791,6 +1896,21 @@ async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
     }
 
     impl CommandExecutor for StageRecorder {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             unreachable!("waiting for a start slot runs no commands: {command:?}");
         }
@@ -1846,6 +1966,21 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
     }
 
     impl CommandExecutor for StageRecorder {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             unreachable!("waiting for an image runs no commands: {command:?}");
         }
@@ -1941,6 +2076,21 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
 struct CgroupExecutor(serde_json::Value);
 
 impl CommandExecutor for CgroupExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         assert_eq!(command.purpose, "check Podman cgroup controllers");
         Ok(CommandOutput {
@@ -2069,6 +2219,21 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         checkout: PathBuf,
     }
     impl CommandExecutor for OverlapExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let bound = std::time::Duration::from_secs(20);
             match command.purpose.as_str() {

@@ -93,6 +93,21 @@ pub(in crate::controller) fn destroy_prepared_environment(
 struct MoveCleanupExecutor<'a, E>(&'a E);
 
 impl<E: CommandExecutor> CommandExecutor for MoveCleanupExecutor<'_, E> {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.0.execute_without_deadline(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.0.execute_with_stdin_without_deadline(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         self.0.execute_cleanup(command)
     }

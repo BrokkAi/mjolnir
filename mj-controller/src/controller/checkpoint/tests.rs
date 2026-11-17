@@ -502,6 +502,21 @@ impl ExportExecutor {
     }
 }
 impl CommandExecutor for ExportExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.purposes.borrow_mut().push(command.purpose.clone());
         Ok(CommandOutput {
@@ -2675,6 +2690,21 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.refused(command)
         }
@@ -3034,6 +3064,21 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     }
 
     impl CommandExecutor for StagingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             ProcessExecutor.execute(command)
@@ -3619,6 +3664,21 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         purposes: std::sync::Mutex<Vec<String>>,
     }
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             ProcessExecutor.execute(command)
@@ -3731,6 +3791,21 @@ struct SucceedingExecutor;
 
 #[cfg(unix)]
 impl CommandExecutor for SucceedingExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         Ok(CommandOutput {
             status: 0,
@@ -3763,6 +3838,21 @@ impl RestartCheckpointExecutor {
 
 #[cfg(unix)]
 impl CommandExecutor for RestartCheckpointExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.purposes.lock().unwrap().push(command.purpose.clone());
         targets::ProcessExecutor.execute(command)
@@ -3994,6 +4084,21 @@ async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardow
     #[derive(Default)]
     struct RefuseExport(std::sync::Mutex<Option<bool>>);
     impl CommandExecutor for RefuseExport {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             SucceedingExecutor.execute(command)
         }
@@ -4136,6 +4241,21 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
         name: String,
     }
     impl CommandExecutor for BusyEngine {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.purpose.clone());
             let stdout = match command.purpose.as_str() {

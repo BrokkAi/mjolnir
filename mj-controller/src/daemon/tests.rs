@@ -158,6 +158,21 @@ fn restart_recovery_discards_intents_superseded_by_suspend_or_destroy() {
 async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target() {
     struct StatusExecutor(i32);
     impl CommandExecutor for StatusExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: self.0,
@@ -4631,6 +4646,21 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
     );
     struct NoEnvironmentMutation;
     impl crate::targets::CommandExecutor for NoEnvironmentMutation {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(
             &self,
             _: &crate::targets::CommandSpec,
@@ -10243,6 +10273,21 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
 
     struct AliveWorker;
     impl CommandExecutor for AliveWorker {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             // The root exists (its journal is there); only the worker is unreachable.
             let stdout = match command.purpose.as_str() {

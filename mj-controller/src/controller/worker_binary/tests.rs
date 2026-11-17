@@ -180,7 +180,15 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current
     let liveness = probe_worker_liveness(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
     assert_eq!(liveness.status, 0);
     assert_eq!(String::from_utf8_lossy(&liveness.stdout).trim(), "dead");
-    assert!(std::path::Path::new(&targets::control_worker_path(&root_text)).exists());
+    let control = targets::control_worker_path(&root_text);
+    assert!(std::path::Path::new(&control).exists());
+    assert!(
+        std::fs::symlink_metadata(&control)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the staged worker links into the store"
+    );
     unchanged();
 
     let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(SESSION, "test stop")
@@ -262,6 +270,52 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
         std::fs::read_to_string(&other).unwrap(),
         "another build's worker"
     );
+}
+
+// The diagnostic probe reads the lock holder through the staged control
+// worker, so it stages it like every command that embeds it: a startup
+// readiness wait on a store with nothing staged must not fail with exit 78.
+#[cfg(unix)]
+#[test]
+fn probing_a_worker_stages_the_control_worker_itself() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_PROBE_STAGES_CHILD";
+    const SESSION: &str = "19191919191919191919191919191919";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "probing_a_worker_stages_the_control_worker_itself",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-816ca1d77-probe-stages")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert!(!control.exists(), "nothing is staged yet");
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let probe = probe_worker(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
+    assert!(control.exists());
+    assert!(probe.pids.is_empty(), "{probe:?}");
 }
 
 #[test]
@@ -573,6 +627,21 @@ fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
         fail: std::cell::Cell<bool>,
     }
     impl CommandExecutor for FullDiskUpload {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if self.fail.get() && command.purpose == "stage replacement Mjolnir worker" {
                 std::fs::write(&command.args[1], vec![0; 32 * 1024]).unwrap();
@@ -1220,8 +1289,12 @@ fn a_present_controller_still_looks_beside_itself() {
 #[test]
 #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
 fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("Application Support").join("hel worker");
+    let root = temp
+        .path()
+        .join("Application Support")
+        .join("0123456789abcdef0123456789abcdef");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join(mj_core::relay::WORKER_STARTUP_FILE),
@@ -1245,7 +1318,7 @@ fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
         worker_root: root.into(),
     };
 
-    let probe = probe_worker(&ProcessExecutor, &locator, root).unwrap();
+    let probe = probe_worker(&ProcessExecutor, &locator, SESSION, root).unwrap();
 
     assert_eq!(probe.step(), Some("harness-resolve"));
     assert_eq!(
@@ -1261,8 +1334,24 @@ fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
 /// nothing to report.
 #[test]
 fn a_probe_that_prints_something_else_is_an_error() {
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
     struct GarbageExecutor;
     impl CommandExecutor for GarbageExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 0,
@@ -1271,11 +1360,12 @@ fn a_probe_that_prints_something_else_is_an_error() {
             })
         }
     }
+    let root = format!("/nonexistent/{SESSION}");
     let locator = targets::TargetLocator::LocalBare {
-        worker_root: "/nonexistent".into(),
+        worker_root: root.clone(),
     };
 
-    let error = probe_worker(&GarbageExecutor, &locator, "/nonexistent").unwrap_err();
+    let error = probe_worker(&GarbageExecutor, &locator, SESSION, &root).unwrap_err();
 
     assert!(
         format!("{error:#}").contains("read the worker probe"),
@@ -1314,6 +1404,21 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -1427,6 +1532,21 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -1492,6 +1612,21 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(self.outputs.borrow_mut().remove(0))
@@ -1626,6 +1761,21 @@ struct SshHostExecutor {
     host_files: RefCell<HashSet<String>>,
 }
 impl CommandExecutor for SshHostExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         let mut status = 0;
@@ -2215,6 +2365,21 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         commands: RefCell<Vec<CommandSpec>>,
     }
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -3844,6 +4009,21 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(format!(
                 "{} {}",
@@ -3908,6 +4088,21 @@ fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
     }
 
     impl CommandExecutor for VersionExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(format!(
                 "{} {}",
@@ -4705,6 +4900,21 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
 fn container_attachment_guidance_matches_engine_permissions_and_harness_instruction_files() {
     struct MountExecutor;
     impl CommandExecutor for MountExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(command.purpose, "inspect session container storage");
             assert!(command.args.iter().any(|arg| arg == "{{json .Mounts}}"));
@@ -4821,6 +5031,21 @@ struct DigestExecutor {
 }
 
 impl CommandExecutor for DigestExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         Ok(CommandOutput {
@@ -4952,6 +5177,21 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
     }
 
     impl CommandExecutor for CacheLinkExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             let mut args = command.args[3..].to_vec();
@@ -5081,6 +5321,21 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     }
 
     impl CommandExecutor for ConfigRecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let config_path = command
                 .args
@@ -5101,6 +5356,21 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     }
 
     impl CommandExecutor for FailingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.borrow_mut().push(command.purpose.clone());
             Err(anyhow::anyhow!("managed harness installation failed"))
@@ -6188,6 +6458,21 @@ mod container_runtime {
             fail_prepare: bool,
         }
         impl CommandExecutor for PreparationExecutor {
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 self.commands.borrow_mut().push(command.clone());
                 if self.fail_prepare

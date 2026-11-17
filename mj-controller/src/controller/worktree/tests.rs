@@ -33,6 +33,21 @@ use super::*;
 fn managed_clone_copies_large_origin_ref_sets_in_one_command() {
     struct RecordingExecutor(RefCell<Vec<String>>);
     impl CommandExecutor for RecordingExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.0.borrow_mut().push(command.purpose.clone());
             Git231Executor.execute(command)
@@ -609,6 +624,21 @@ fn concurrent_session_starts_fetch_one_repository_one_at_a_time() {
         fetches: AtomicUsize,
     }
     impl CommandExecutor for OverlapRecorder {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.args.iter().any(|arg| arg == "fetch") {
                 let now = self.fetching.fetch_add(1, Ordering::SeqCst) + 1;
@@ -645,6 +675,21 @@ fn a_github_ssh_origin_without_a_key_is_fetched_over_https() {
         fetches: std::sync::Mutex<Vec<Vec<String>>>,
     }
     impl CommandExecutor for Origin {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if !command.args.iter().any(|arg| arg == "fetch") {
                 return Ok(CommandOutput {
@@ -838,6 +883,21 @@ fn a_plain_local_directory_cannot_convert_into_a_bundle_workspace() {
 fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
     struct OriginExecutor;
     impl CommandExecutor for OriginExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(
                 command.args,
@@ -881,6 +941,21 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
         common: String,
     }
     impl CommandExecutor for NoOriginExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.args.iter().any(|argument| argument == "config") {
                 return Ok(CommandOutput {
@@ -952,6 +1027,21 @@ fn raw_non_git_directory_keeps_its_local_path_source() {
         commands: RefCell<Vec<CommandSpec>>,
     }
     impl CommandExecutor for NonGitExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             let status = if command.args.iter().any(|argument| argument == "config") {
@@ -1003,6 +1093,21 @@ fn raw_non_git_directory_keeps_its_local_path_source() {
 fn project_root_lookup_reports_git_failures_instead_of_treating_them_as_non_git() {
     struct FailedGit;
     impl CommandExecutor for FailedGit {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 128,
@@ -1026,6 +1131,21 @@ struct CheckoutPositionExecutor {
     branch: Option<String>,
 }
 impl CommandExecutor for CheckoutPositionExecutor {
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = if command.args.iter().any(|argument| argument == "rev-parse") {
             self.head_commit.clone()
@@ -1724,6 +1844,21 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
     }
 
     impl CommandExecutor for RemoteExecutor {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             let status = if command.purpose == "check managed worktree path" {
@@ -2502,6 +2637,21 @@ fn archiving_keeps_a_branch_only_another_session_branch_contains() {
 fn raw_checkout_inspection_uses_recorded_access_after_template_removal() {
     struct RecordedHost;
     impl CommandExecutor for RecordedHost {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(command.program, "ssh");
             assert!(command.args.contains(&"builder@original.test".to_owned()));

@@ -1046,8 +1046,9 @@ impl Controller {
                 Ok::<_, anyhow::Error>((relay, native_session_id))
             }
             .await;
-            let (mut relay, native_session_id) = readiness
-                .map_err(|error| worker_probe_diagnosis(executor, &backend, &worker_root, error))?;
+            let (mut relay, native_session_id) = readiness.map_err(|error| {
+                worker_probe_diagnosis(executor, &backend, session_id, &worker_root, error)
+            })?;
             if native_continuity {
                 if !restored_native_session_accepted(
                     &archive_manifest.session.native_session_id,

@@ -1455,6 +1455,21 @@ mod tests {
     fn shared_filesystem_capacity_counts_allocations_once_and_changes_with_selection() {
         struct Disk;
         impl CommandExecutor for Disk {
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _: &CommandSpec) -> Result<targets::CommandOutput> {
                 Ok(targets::CommandOutput {
                     status: 0,
@@ -1524,6 +1539,21 @@ mod tests {
         }
         #[cfg(unix)]
         impl CommandExecutor for RemoteGit {
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
                 ensure!(
                     command.program == "ssh",
@@ -1994,6 +2024,21 @@ mod tests {
         let _writer = crate::database::install_isolated_test_writer();
         struct Executor(std::sync::atomic::AtomicBool);
         impl CommandExecutor for Executor {
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
                 if command.purpose == "transfer Move workspace with resumable files"
                     && self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
