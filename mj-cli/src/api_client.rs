@@ -893,6 +893,23 @@ impl ApiClient {
             .await
     }
 
+    /// A finished review's per-reviewer output, or the latest when `review_id`
+    /// is `None`.
+    pub(crate) async fn finished_review(
+        &self,
+        session_id: &str,
+        review_id: Option<&str>,
+    ) -> Result<mj_controller::server::api::FinishedReviewResponse> {
+        let mut request = self
+            .http
+            .get(self.url(&format!("/sessions/{session_id}/reviews")));
+        if let Some(review_id) = review_id {
+            request = request.query(&[("review", review_id)]);
+        }
+        let response = self.send(request).await?;
+        decode(response).await
+    }
+
     pub(crate) async fn stop_background_task(&self, session_id: &str, task_id: &str) -> Result<()> {
         self.send(
             self.http

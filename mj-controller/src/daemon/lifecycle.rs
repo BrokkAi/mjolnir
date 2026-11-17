@@ -20,11 +20,23 @@ pub(super) struct LifecycleStart {
     /// Work nobody asked for, which the next daemon starts again, uses it;
     /// anything a person asked for holds the handoff instead.
     pub(super) deferrable_admission: Option<&'static str>,
+    /// The requester was already answered "accepted" and holds handoff
+    /// admission for this operation, as an accepted destroy does (#1191). A
+    /// draining daemon answers a queued request "not started" so its client
+    /// retries; it must not say that to this one. It queues and preempts
+    /// through the drain, and the stop or handoff waits for it under the
+    /// bound of the admission it holds.
+    pub(super) holds_through_drain: bool,
 }
 
 impl LifecycleStart {
     pub(super) fn automatic(mut self) -> Self {
         self.origin = LifecycleOrigin::Automatic;
+        self
+    }
+
+    pub(super) fn holding_through_drain(mut self) -> Self {
+        self.holds_through_drain = true;
         self
     }
 
@@ -41,6 +53,7 @@ impl LifecycleStart {
             phase: LifecyclePhase::Executing,
             move_operation_id: None,
             deferrable_admission: None,
+            holds_through_drain: false,
         }
     }
 }
@@ -163,6 +176,7 @@ impl RuntimeState {
                 phase: LifecyclePhase::Executing,
                 move_operation_id: None,
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             work,
         )
@@ -256,6 +270,7 @@ impl RuntimeState {
                     queue.push_back(ticket.clone());
                 }
             }
+            let yields_to_drain = !start.holds_through_drain;
             let mut previous = String::new();
             let mut waited = false;
             loop {
@@ -296,7 +311,7 @@ impl RuntimeState {
                                 kind,
                                 start,
                                 LifecycleAdmissionOptions {
-                                    queued: waited,
+                                    queued: waited && yields_to_drain,
                                     mode,
                                     acceptance,
                                 },
@@ -339,7 +354,7 @@ impl RuntimeState {
                             kind,
                             start,
                             LifecycleAdmissionOptions {
-                                queued: waited,
+                                queued: waited && yields_to_drain,
                                 mode,
                                 acceptance,
                             },
@@ -354,7 +369,7 @@ impl RuntimeState {
                     waited = true;
                     tokio::select! {
                         biased;
-                        () = crate::upgrade::gate().wait_until_draining() => {
+                        () = crate::upgrade::gate().wait_until_draining(), if yields_to_drain => {
                             return Err(Refusal::precondition("daemon upgrade handoff is waiting; the queued lifecycle request was not started")
                                 .with_code(crate::upgrade::HANDOFF_REFUSAL_CODE).into());
                         }
@@ -395,7 +410,7 @@ impl RuntimeState {
                 };
                 tokio::select! {
                     biased;
-                    () = crate::upgrade::gate().wait_until_draining() => {
+                    () = crate::upgrade::gate().wait_until_draining(), if yields_to_drain => {
                         return Err(Refusal::precondition("daemon upgrade handoff is waiting; the queued lifecycle request was not started")
                             .with_code(crate::upgrade::HANDOFF_REFUSAL_CODE).into());
                     }
@@ -433,6 +448,7 @@ impl RuntimeState {
             mut phase,
             move_operation_id,
             deferrable_admission,
+            holds_through_drain: _,
         } = start;
         let mut work = Some(work);
         let mut superseded_restart_intent = None;
@@ -662,6 +678,15 @@ impl RuntimeState {
                     .await;
                     let mut foreground_hold = None;
                     let mut result = match foreground {
+                        // A Move cancelled before it owned the session did no
+                        // source work. It ends as it does when the cancel
+                        // lands in the startup delivery wait below: cancelled,
+                        // not failed.
+                        Err(_)
+                            if kind == LifecycleKind::Move && cancelled.load(Ordering::Acquire) =>
+                        {
+                            Ok(DaemonLifecycleResult::Done)
+                        }
                         Err(error) => Err(LifecycleFailure::of(&error)),
                         Ok(admission) => {
                             foreground_hold = Some(admission.clone());

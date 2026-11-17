@@ -33,10 +33,10 @@ fn setup_reruns_without_questions_and_preserves_existing_accounts() {
     std::fs::create_dir_all(&tools).unwrap();
     std::fs::create_dir_all(root.path().join(".codex")).unwrap();
     mj_core::test_hooks::install_fake_command(&tools, "codex", "#!/bin/sh\nexit 0\n");
-    mj_core::test_hooks::install_fake_command(&tools, "claude", "#!/bin/sh\nexit 1\n");
     for run in 0..2 {
         if run == 1 {
             std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+            mj_core::test_hooks::install_fake_command(&tools, "claude", "#!/bin/sh\nexit 1\n");
         }
         let output = isolated_command(root.path())
             .args(["--instance", "setup-rerun", "setup"])
@@ -48,6 +48,12 @@ fn setup_reruns_without_questions_and_preserves_existing_accounts() {
             .env_remove("KIMI_CODE_HOME")
             .env_remove("GROK_HOME")
             .env_remove("MUSE_HOME")
+            .env_remove("MUSE_CLI")
+            .env_remove("DEEPSEEK_API_KEY")
+            .env_remove("DSH_ACP_DATA_DIR")
+            .env_remove("DSH_HOME")
+            .env_remove("CLAUDE_CODE_EXECUTABLE")
+            .env_remove("CODEX_PATH")
             .current_dir(root.path())
             .stdin(std::process::Stdio::null())
             .output()

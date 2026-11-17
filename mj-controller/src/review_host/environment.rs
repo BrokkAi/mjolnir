@@ -66,6 +66,32 @@ pub trait ReviewEnvironment: Send + Sync {
     /// their partial mailbox messages commit together while peers remain.
     fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String>;
 
+    /// Records review state together with the text the host settled roles from.
+    ///
+    /// The host owns that decision, so the store must not re-derive it: a
+    /// reviewer child's handback row can be replaced by a later command, and
+    /// reading it here would pair unrelated text with a settled verdict.
+    fn save_reviewer_outcome(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: &[crate::database::AcceptedReport],
+    ) -> Result<(), String> {
+        let _ = reports;
+        self.save_state(session_id, state)
+    }
+
+    /// Clears an active review and records its per-role output in one durable
+    /// write. The default keeps a test environment that has no store.
+    fn close_review(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        _resolution: crate::database::FinishedReviewResolution,
+    ) -> Result<(), String> {
+        self.save_state(session_id, state)
+    }
+
     /// Clears the in-flight flag of every review a restart interrupted, and
     /// reports whose they were. Baselines are deliberately left alone: the
     /// interrupted review never advanced one, so the next review covers the
@@ -435,6 +461,26 @@ impl ReviewEnvironment for ControllerEnvironment {
 
     fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String> {
         crate::database::save_turn_review_state(session_id, state)
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn save_reviewer_outcome(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: &[crate::database::AcceptedReport],
+    ) -> Result<(), String> {
+        crate::database::save_reviewer_outcome(session_id, state, reports.to_vec())
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn close_review(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        resolution: crate::database::FinishedReviewResolution,
+    ) -> Result<(), String> {
+        crate::database::close_turn_review_state(session_id, state, resolution)
             .map_err(|error| format!("{error:#}"))
     }
 

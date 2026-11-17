@@ -139,6 +139,7 @@ impl RuntimeState {
                         },
                         move_operation_id: None,
                         deferrable_admission: None,
+                        holds_through_drain: false,
                     },
                     move |state, session_id, cancelled, session_admission| async move {
                         // A recovered intent keeps the rules it was started with,

@@ -285,6 +285,8 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
          ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
          ALTER TABLE mailbox_outbox DROP COLUMN failure;
          DROP TABLE quota_reset_cache;
+         DROP TRIGGER subagent_accounting_kind_insert;
+         DROP TRIGGER subagent_accounting_kind_update;
          DROP TABLE subagent_accounting;
          DROP TABLE session_turn_selections;
          DROP TABLE github_watch_classification_failures;

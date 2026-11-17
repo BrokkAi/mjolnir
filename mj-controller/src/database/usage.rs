@@ -37,18 +37,32 @@ pub(super) fn record_turn_selection(
 ) -> Result<()> {
     let surface =
         mj_core::acp::surface::AcpSessionSurface::from_configuration(&configuration.values);
+    // A reviewer's launch settings are the authority for its turn. Its
+    // projected configuration can record the model without the effort the
+    // harness was started with, so read the registered child's selection as
+    // the fallback. The relation still exists while the reviewer runs.
+    let stored: Option<(Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT json_extract(record_json, '$.model'),
+                    json_extract(record_json, '$.effort')
+             FROM subagent_sessions WHERE child_session_id=?1",
+            [session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (stored_model, stored_effort) = stored.unwrap_or_default();
+    let model = surface.current_model().map(str::to_owned).or(stored_model);
+    let effort = surface
+        .current_effort()
+        .map(str::to_owned)
+        .or(stored_effort);
     // The session's profile at turn start: a later restart can switch it, and
     // destroying a sub-agent deletes its session row.
     connection.execute(
         "INSERT INTO session_turn_selections(session_id, command_id, model, effort, profile)
         VALUES (?1, ?2, ?3, ?4, (SELECT last_profile FROM sessions WHERE session_id=?1))
         ON CONFLICT(session_id, command_id) DO NOTHING",
-        params![
-            session,
-            command,
-            surface.current_model(),
-            surface.current_effort()
-        ],
+        params![session, command, model, effort],
     )?;
     Ok(())
 }
@@ -632,6 +646,95 @@ mod tests {
         assert_eq!(tree.summary.coverage.unfinished_turns, 1);
         assert!(tree.sessions.iter().all(|s| !s.operational_session_present));
         assert_eq!(tree.sessions[0].task_name.as_deref(), Some("investigate"));
+        Ok(())
+    }
+
+    // Hard-won: #1554: a reviewer's projected configuration can omit the
+    // effort its harness was launched with, leaving session_turn_selections
+    // without the effort the review-arms eval reads.
+    #[test]
+    fn reviewer_turn_selections_fall_back_to_the_registered_launch_settings() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("reviewer-selection.sqlite");
+        let parent = super::super::tests::session("root", "project");
+        save_session_to(&path, &parent)?;
+        let child = super::super::tests::session("reviewer", "project");
+        let relation: SubagentRecord = serde_json::from_value(serde_json::json!({
+            "kind": "reviewer",
+            "child_session_id": child.id,
+            "parent_session_id": parent.id,
+            "task_name": "review",
+            "profile_id": "codex",
+            "model": "gpt-6-terra",
+            "effort": "xhigh",
+            "working_directory": "",
+            "initial_prompt": "review",
+            "request_key": "review-key",
+            "created_at": "2026-11-16T00:00:00Z",
+            "handback_tool": true
+        }))?;
+        super::super::tests::register_test_subagent(&path, &child, &relation)?;
+        let events = [
+            MaterializedSessionMutation {
+                active_turn: Some(Some(MaterializedTurn {
+                    command_id: "review-turn-1".into(),
+                    accepted_ordinal: None,
+                    turn_start_position: 1,
+                    started_at_ms: 1,
+                    steered_into: None,
+                })),
+                ..Default::default()
+            },
+            MaterializedSessionMutation {
+                configuration: Some(configuration("sol", "low")),
+                active_turn: Some(Some(MaterializedTurn {
+                    command_id: "review-turn-2".into(),
+                    accepted_ordinal: None,
+                    turn_start_position: 3,
+                    started_at_ms: 3,
+                    steered_into: None,
+                })),
+                ..Default::default()
+            },
+        ];
+        apply_projection_page_to(&path, &child.id, |page| {
+            for (i, event) in events.iter().enumerate() {
+                page.apply(
+                    i as u64 + 1,
+                    &format!("{:064x}", i),
+                    &format!("{:064x}", i + 1),
+                    event,
+                )?;
+            }
+            Ok(())
+        })?;
+        let connection = open(&path)?;
+        let selection = |command: &str| -> Result<(Option<String>, Option<String>)> {
+            Ok(connection.query_row(
+                "SELECT model, effort FROM session_turn_selections
+                 WHERE session_id=?1 AND command_id=?2",
+                params![child.id, command],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        };
+        assert_eq!(
+            selection("review-turn-1")?,
+            (Some("gpt-6-terra".into()), Some("xhigh".into()))
+        );
+        assert_eq!(
+            selection("review-turn-2")?,
+            (Some("sol".into()), Some("low".into()))
+        );
+        drop(connection);
+        delete_session_from(&path, &child.id)?;
+        let connection = open(&path)?;
+        let retained: (Option<String>, Option<String>) = connection.query_row(
+            "SELECT model, effort FROM session_turn_selections
+             WHERE session_id=?1 AND command_id='review-turn-1'",
+            [&child.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(retained, (Some("gpt-6-terra".into()), Some("xhigh".into())));
         Ok(())
     }
 

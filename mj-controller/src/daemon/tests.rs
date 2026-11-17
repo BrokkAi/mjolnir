@@ -4814,6 +4814,7 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
                 phase: LifecyclePhase::RetiringContainer,
                 move_operation_id: None,
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             |state, id, _, _session_admission| async move {
                 state.bind_restart_intent(&id, "upgrade-test")?;
@@ -7257,8 +7258,9 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
     for id in ["close-first", "close-second"] {
         let barrier = barrier.clone();
         let finish = finish.clone();
+        // A close supersedes automatic work; it waits for a person's own.
         state
-            .start_or_join_lifecycle(
+            .start_automatic_lifecycle(
                 id.into(),
                 LifecycleKind::Create,
                 move |_, _, cancelled, _session_admission| async move {
@@ -8117,8 +8119,10 @@ esac
             None
         } else {
             Some(
+                // A close supersedes an automatic Move, such as quota
+                // recovery's; it waits for a Move a person asked for.
                 state
-                    .start_or_join_lifecycle(id.into(), LifecycleKind::Move, {
+                    .start_automatic_lifecycle(id.into(), LifecycleKind::Move, {
                         let cloning = cloning.clone();
                         move |_, _, cancelled, _session_admission| async move {
                             // Hold the destination-cloning cut before any worker is installed.
@@ -11389,6 +11393,7 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
                     phase: LifecyclePhase::Executing,
                     move_operation_id: Some(id.into()),
                     deferrable_admission: None,
+                    holds_through_drain: false,
                 },
                 move |_, _, _, _session_admission| async move {
                     released.notified().await;
@@ -12098,11 +12103,13 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
     }
     let _writer = crate::database::install_isolated_test_writer();
     let state = test_runtime_state();
+    let (started, stopping) = tokio::sync::oneshot::channel();
     let result = state
         .start_or_join_lifecycle(
             "failed-startup".into(),
             LifecycleKind::StartupCleanup,
-            |_state, _id, _cancelled, _session_admission| async {
+            |_state, _id, _cancelled, _session_admission| async move {
+                started.send(()).unwrap();
                 // A process-tree stop exceeds the former one-second join window.
                 tokio::time::sleep(Duration::from_millis(1100)).await;
                 Ok(DaemonLifecycleResult::Done)
@@ -12110,6 +12117,9 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
         )
         .await
         .unwrap();
+    // Shutdown interrupts a teardown that still waits for its session, and
+    // the next daemon runs it. This one is already stopping the process tree.
+    stopping.await.unwrap();
     state.cancel_and_wait_lifecycles().await.unwrap();
     assert!(matches!(
         RuntimeState::wait_lifecycle_result(result).await.unwrap(),
@@ -13087,6 +13097,7 @@ async fn startup_delivery_reservation_wait_does_not_prevent_move_cancellation() 
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some("pre-reservation-origin".into()),
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             {
                 let entered_source = entered_source.clone();
@@ -13464,6 +13475,7 @@ async fn startup_without_move_origin_ignores_historical_failed_move_after_resume
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some(historical.operation_id.clone()),
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             move |_, _, _, _session_admission| async move {
                 entered.notify_one();

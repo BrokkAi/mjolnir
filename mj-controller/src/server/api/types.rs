@@ -863,6 +863,24 @@ pub struct ReviewStatusResponse {
     pub review: Option<crate::server::ViewerTurnReview>,
 }
 
+/// Selects the finished review `GET /sessions/{id}/reviews` returns. Without
+/// `review`, the most recently finished review is returned.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinishedReviewQuery {
+    #[serde(default)]
+    pub review: Option<String>,
+}
+
+/// A finished review's per-reviewer output, readable after the reviewer
+/// sessions have been destroyed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinishedReviewResponse {
+    pub session_id: String,
+    #[serde(default)]
+    pub review: Option<crate::database::FinishedReview>,
+}
+
 // ---------------------------------------------------------------------------
 // SessionWiki
 // ---------------------------------------------------------------------------
