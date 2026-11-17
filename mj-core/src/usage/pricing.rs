@@ -45,6 +45,9 @@ fn base_model(model: &str) -> String {
 pub fn rates(model: &str) -> Option<[u64; 4]> {
     let base = base_model(model);
     Some(match base.as_str() {
+        // Checked 2026-11-17: https://developers.openai.com/api/docs/pricing
+        "gpt-6.2-sol" => [2000, 10000, 100, 2500],
+        "gpt-6.2-astra" => [8000, 40000, 400, 10000],
         // Checked 2026-11-11: https://developers.openai.com/api/docs/models/gpt-6.1-terra
         "gpt-6.1-terra" => [1000, 5000, 50, 1250],
         "gpt-6.1-sol" => [2000, 10000, 100, 2500],
