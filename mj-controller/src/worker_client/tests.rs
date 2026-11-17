@@ -3,6 +3,8 @@ use super::*;
 use crate::test_log::CapturedLog;
 use mj_core::relay::RelayObservation;
 use mj_worker::relay::DurableRelay;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What a direct (no actor) reconciliation of one session borrows.
 macro_rules! access {
@@ -278,8 +280,13 @@ exit 1
     let Err(error) = connected else {
         panic!("a proxy that exits 1 is a real failure");
     };
-    // Not a refusal, so it is a warning, and the proxy's own complaint is in it.
-    let warnings = log.at_or_above(tracing::Level::WARN);
+    // The lifecycle/actor caller reports the failure, without a duplicate here.
+    assert!(log.at_or_above(tracing::Level::WARN).is_empty());
+    let warnings = log
+        .at(tracing::Level::DEBUG)
+        .into_iter()
+        .filter(|event| event.contains("relay request failed"))
+        .collect::<Vec<_>>();
     assert_eq!(warnings.len(), 1, "{warnings:#?}");
     assert!(
         warnings[0].contains("worker socket path is too long")
@@ -379,7 +386,13 @@ fn a_worker_socket_that_appears_within_the_retry_budget_is_not_a_warning() {
         return;
     };
     let directory = tempfile::tempdir().expect("temp dir");
-    let spec = relay_proxy_before_the_worker_binds(directory.path(), Some(2));
+    let mut spec = relay_proxy_before_the_worker_binds(directory.path(), Some(2));
+    // Hard-won: 583e6ea48: a stale socket after park returns ECONNREFUSED until the new worker binds.
+    spec.args = spec
+        .args
+        .into_iter()
+        .map(|arg| arg.replace("No such file or directory", "Connection refused"))
+        .collect();
 
     let client = connect_and_let_reapers_report(&spec)
         .expect("the connection is retried until the worker binds its socket");
@@ -396,12 +409,11 @@ fn a_worker_socket_that_appears_within_the_retry_budget_is_not_a_warning() {
     assert_eq!(retries, 2, "{:#?}", log.events());
 }
 
-/// A socket still missing after the retry budget is a real failure: one
-/// warning that carries the proxy's complaint, and the same dead-transport
-/// error that worker recovery reads.
+/// A socket still missing after the retry budget returns the dead-transport
+/// error to the caller that owns recovery and reachability warnings.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_worker_socket_still_missing_after_the_retry_budget_is_one_warning() {
+async fn a_worker_socket_still_missing_returns_the_failure_to_its_owner() {
     let directory = tempfile::tempdir().expect("temp dir");
     let spec = relay_proxy_before_the_worker_binds(directory.path(), None);
     let log = CapturedLog::default();
@@ -425,7 +437,12 @@ async fn a_worker_socket_still_missing_after_the_retry_budget_is_one_warning() {
         "a missing socket is retried before it is reported"
     );
 
-    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert!(log.at_or_above(tracing::Level::WARN).is_empty());
+    let warnings = log
+        .at(tracing::Level::DEBUG)
+        .into_iter()
+        .filter(|event| event.contains("control socket is still missing"))
+        .collect::<Vec<_>>();
     assert_eq!(warnings.len(), 1, "{warnings:#?}");
     assert!(
         warnings[0].contains("control socket is still missing")
@@ -700,8 +717,15 @@ async fn a_proxy_that_exits_before_hello_reports_a_dead_transport() {
 async fn a_hello_failure_carries_the_proxy_stderr_tail() {
     const COMPLAINT: &str =
         "connect worker socket /x/control.sock: path must be shorter than SUN_LEN";
-    let spec = CommandSpec::new("sh", ["-c", &format!("echo '{COMPLAINT}' >&2; exit 1")])
-        .purpose("complaining relay proxy");
+    // Hard-won: 583e6ea48: embedded worker ERROR lines and backtraces were pasted into daemon warnings.
+    let stderr = format!(
+        "2026-11-17T13:45:12Z ERROR mj_worker: worker failed\nError: {COMPLAINT}\n\nCaused by:\n    0: connect unix socket /x/control.sock\n    1: path must be shorter than SUN_LEN"
+    );
+    let spec = CommandSpec::new(
+        "sh",
+        ["-c", &format!("printf '%s\\n' '{stderr}' >&2; exit 1")],
+    )
+    .purpose("complaining relay proxy");
 
     let error = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
         .await
@@ -709,6 +733,11 @@ async fn a_hello_failure_carries_the_proxy_stderr_tail() {
         .expect("a proxy that exits cannot complete hello");
 
     assert!(format!("{error:#}").contains(COMPLAINT), "{error:#}");
+    assert!(!format!("{error:#}").contains('\n'), "{error:#}");
+    assert!(
+        !format!("{error:#}").contains("ERROR mj_worker"),
+        "{error:#}"
+    );
     // Added context must not hide the classification recovery reads.
     assert!(RelayTransportDead::marks(&error), "{error:#}");
     assert!(RelayTransportDead::marks_failed_handshake(&error));

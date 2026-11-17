@@ -78,7 +78,7 @@ impl RelayClient {
                 }
                 ConnectRetry::SocketMissing => {
                     let Some(&delay) = WORKER_SOCKET_RETRY_DELAYS.get(socket_waits) else {
-                        tracing::warn!(
+                        tracing::debug!(
                             session_id = %expected_session_id,
                             purpose = %purpose,
                             operation = "hello",
@@ -183,7 +183,7 @@ impl RelayClient {
         } = proxy::spawn_session_proxy(spec, ssh_session.as_ref())
             .await
             .map_err(|error| {
-                tracing::warn!(
+                tracing::debug!(
                     session_id = %expected_session_id,
                     operation = "connect",
                     purpose = %spec.purpose,
@@ -204,19 +204,11 @@ impl RelayClient {
                 }
             })?;
         let stderr_tail: ProxyStderrTail = Default::default();
-        let handshake_done = Arc::new(AtomicBool::new(false));
         let draining = Some({
             let purpose = spec.purpose.clone();
             let session_id = expected_session_id.to_owned();
             let tail = stderr_tail.clone();
-            let handshake_done = handshake_done.clone();
-            tokio::spawn(drain_proxy_stderr(
-                errors,
-                purpose,
-                session_id,
-                tail,
-                handshake_done,
-            ))
+            tokio::spawn(drain_proxy_stderr(errors, purpose, session_id, tail))
         });
         let mut nonce_bytes = [0_u8; 8];
         getrandom::fill(&mut nonce_bytes).map_err(|error| {
@@ -258,7 +250,6 @@ impl RelayClient {
             .await
         {
             Ok(()) => {
-                handshake_done.store(true, Ordering::Release);
                 // The drain task keeps logging for the life of the connection.
                 Ok(client)
             }
@@ -361,11 +352,20 @@ impl RelayClient {
         if lines.is_empty() {
             return error;
         }
-        error.context(format!(
-            "relay proxy stderr (last {} lines):\n{}",
-            lines.len(),
-            lines.join("\n")
-        ))
+        tracing::debug!(stderr = %lines.join("\n"), "failed relay proxy stderr");
+        let headline = lines.iter().find_map(|line| line.strip_prefix("Error: "));
+        let cause = lines.iter().rev().find_map(|line| {
+            let (number, cause) = line.trim().split_once(": ")?;
+            (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+                .then_some(cause)
+        });
+        let summary = match (headline, cause) {
+            (Some(headline), Some(cause)) => format!("{headline}: {cause}"),
+            (Some(headline), None) => headline.to_owned(),
+            (None, Some(cause)) => cause.to_owned(),
+            (None, None) => lines.first().expect("nonempty stderr").trim().to_owned(),
+        };
+        error.context(format!("relay proxy: {summary}"))
     }
 
     /// Exchange `Hello` and record what the relay negotiated.
@@ -413,7 +413,8 @@ impl RelayClient {
 /// Whether a relay proxy that exited during hello found no control socket to
 /// connect to. The worker's proxy reports a failed connect as "connect worker
 /// socket <path>" (`mj-worker`'s `proxy`), and a socket file that does not
-/// exist yet as ENOENT.
+/// exist yet as ENOENT, or remains after a stopped worker as ECONNREFUSED.
 fn worker_socket_missing(stderr: &str) -> bool {
-    stderr.contains("connect worker socket") && stderr.contains("No such file or directory")
+    stderr.contains("connect worker socket")
+        && (stderr.contains("No such file or directory") || stderr.contains("Connection refused"))
 }

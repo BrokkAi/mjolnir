@@ -1432,6 +1432,9 @@ fn leased_relay_child_serves_stdio() {
                     .unwrap();
                 writeln!(log, "{}", request.request.method_name()).unwrap();
             }
+            if PathBuf::from(&root).join("worker-unreachable").exists() {
+                return;
+            }
             if matches!(
                 &request.request,
                 RelayRequest::Submit {
@@ -1491,6 +1494,9 @@ fn leased_relay_child_serves_stdio() {
                 };
                 let deadline = std::time::Instant::now() + Duration::from_secs(2);
                 let queue_changed = loop {
+                    if PathBuf::from(&root).join("worker-unreachable").exists() {
+                        return;
+                    }
                     let queue = queue_files();
                     if reported_queue.as_ref() != Some(&queue) {
                         reported_queue = Some(queue);
@@ -2837,6 +2843,7 @@ async fn broken_delegation_transport_preserves_worker_control_and_idle_reservati
         .env
         .insert(RELAY_SESSION_CONFIGURED.into(), "1".into());
     let mut connection = StandaloneSession::connect(&target).await.unwrap();
+    connection.start_observing(&target).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let snapshot = connection.sync().await.unwrap();
@@ -2947,6 +2954,18 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         })
         .unwrap();
     let mut connection = None;
+    // Hard-won: 583e6ea48: an actor reported ordinary unpark startup as a vanished running worker.
+    std::fs::write(
+        relay_root.join("worker-unreachable"),
+        b"boot has not bound control yet",
+    )
+    .unwrap();
+    let error = sync_actor_connection(&target, &mut connection)
+        .await
+        .unwrap_err();
+    assert!(error.is::<RelayJobDeferred>(), "{error:#}");
+    assert!(connection.is_none());
+    std::fs::remove_file(relay_root.join("worker-unreachable")).unwrap();
     let snapshot = sync_actor_connection(&target, &mut connection)
         .await
         .expect("failed startup must remain observable for automatic replacement")
@@ -5273,4 +5292,181 @@ async fn foreground_move_preempts_delegation_delivery_and_obtains_its_relay_leas
     moved.release();
     drop(moving);
     channels.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+// Hard-won: 583e6ea48: delegation replication redialed workers deliberately stopped under a lifecycle lease.
+#[tokio::test]
+async fn lifecycle_lease_stops_delegation_dials_until_control_returns() {
+    const CHILD: &str = "MJ_TEST_LEASE_STOPS_DELEGATION";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "lifecycle_lease_stops_delegation_dials_until_control_returns",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (actor, lease_id, mut connection) = lease_a_live_actor().await;
+    let root = actor._relay_root.path();
+    let requests = || std::fs::read_to_string(root.join(RELAY_REQUEST_LOG)).unwrap();
+    let before = requests();
+    // Model the stopped worker while its lifecycle owner still holds control.
+    std::fs::write(root.join("worker-unreachable"), b"stopped for park or swap").unwrap();
+    connection.sync().await.unwrap_err();
+    let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    record.state = mj_core::state::SessionState::Parked;
+    crate::database::save_session(&record).unwrap();
+    let after_stop = requests();
+    assert!(after_stop.len() > before.len());
+    tokio::time::sleep(RECONNECT_INTERVAL * 3).await;
+    assert_eq!(
+        requests(),
+        after_stop,
+        "the leased session must have no background dialer"
+    );
+
+    // The same lease can replace a worker. Returning it resumes replication,
+    // whereas a park retires the actor while still holding its lease.
+    std::fs::remove_file(root.join("worker-unreachable")).unwrap();
+    record.state = mj_core::state::SessionState::Running;
+    crate::database::save_session(&record).unwrap();
+    connection = StandaloneSession::connect(&leased_relay_target(root))
+        .await
+        .unwrap();
+    assert!(
+        !connection.waits_for_changes(),
+        "lifecycle connections do not start observers"
+    );
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: Some(Box::new(connection)),
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !requests()[after_stop.len()..].contains("poll_subagent_queue") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("returning control must resume queue observation");
+
+    let (reply, response) = oneshot::channel();
+    actor
+        .commands
+        .send(ActorCommand::Lease {
+            returns: actor.releases.clone(),
+            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            idle_harness: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    let mut lease = response.await.unwrap().unwrap();
+    // Hard-won: 583e6ea48: close returned its sealed connection before target teardown, restarting background polls.
+    let mut closed = (*lease.connection_mut().operational).clone();
+    closed.execution = mj_core::relay::RelayExecutionState::Closed;
+    lease.connection_mut().operational = closed.into();
+    lease.release();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while actor
+            ._views
+            .borrow()
+            .snapshot
+            .as_ref()
+            .is_none_or(|snapshot| {
+                snapshot.operational.execution != mj_core::relay::RelayExecutionState::Closed
+            })
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let after_close = requests();
+    tokio::time::sleep(RECONNECT_INTERVAL * 3).await;
+    assert_eq!(
+        requests(),
+        after_close,
+        "a sealed relay must not be followed into target teardown"
+    );
+    actor.retirement.send_replace(true);
+}
+
+#[cfg(unix)]
+// Hard-won: 583e6ea48: every transport retry and proxy exit repeated the same worker-loss warning.
+#[tokio::test]
+async fn worker_loss_warns_once_until_reachable_and_warns_on_the_next_loss() {
+    const CHILD: &str = "MJ_TEST_WORKER_LOSS_TRANSITIONS";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "worker_loss_warns_once_until_reachable_and_warns_on_the_next_loss",
+        );
+        return;
+    }
+    let log = crate::test_log::CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).unwrap();
+    let _writer = crate::database::install_isolated_test_writer();
+    let (actor, lease_id, connection) = lease_a_live_actor().await;
+    let root = actor._relay_root.path();
+    let marker = root.join("worker-unreachable");
+    std::fs::write(&marker, b"unexpected worker loss").unwrap();
+    drop(connection);
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: None,
+        })
+        .unwrap();
+    let warnings = || {
+        log.at(tracing::Level::WARN)
+            .into_iter()
+            .filter(|event| event.contains("session worker is "))
+            .collect::<Vec<_>>()
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while warnings().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(RECONNECT_INTERVAL * 4).await;
+    assert_eq!(warnings().len(), 1, "{:?}", warnings());
+    assert!(warnings()[0].contains("unreachable"));
+    std::fs::remove_file(&marker).unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while warnings().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(warnings()[1].contains("reachable again"));
+    std::fs::write(marker, b"second worker loss").unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while warnings().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(warnings().len(), 3, "{:?}", warnings());
+    assert!(warnings()[2].contains("unreachable"));
+    assert!(
+        log.at(tracing::Level::WARN)
+            .iter()
+            .all(|event| !event.contains("relay request failed")
+                && !event.contains("dropped relay proxy")
+                && !event.contains("delegation is unavailable")),
+        "{:?}",
+        log.events()
+    );
+    actor.retirement.send_replace(true);
 }

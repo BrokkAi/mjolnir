@@ -4612,6 +4612,13 @@ mod reader_tests {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("mj.sqlite3");
             let connection = Connection::open(&path).unwrap();
+            // Building the store as it stood at `revision` is fixture work
+            // that only this process reads. Flushed, it is one disk flush per
+            // historical step for every revision: the slowest test in the
+            // suite by far on a slow disk.
+            connection
+                .execute_batch("PRAGMA synchronous = OFF;")
+                .unwrap();
             connection
                 .execute_batch(include_str!("legacy_v1.sql"))
                 .unwrap();

@@ -91,7 +91,7 @@ impl ProvisionStage {
             Self::WaitingForContainerUpgrade => {
                 "Container upgrade pending; waiting for accepted work".into()
             }
-            Self::WaitingForWorkerStore => "Waiting for the worker binary store".into(),
+            Self::WaitingForWorkerStore => "Waiting for shared target content".into(),
             Self::WaitingForSshConnection => "Waiting for an SSH connection to open".into(),
             Self::WaitingForStartSlot => "Waiting for a container start slot".into(),
             Self::Provisioning => "Provision".into(),

@@ -2306,7 +2306,11 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
     );
 }
 
+/// The renewed login here is the profile's `.credentials.json`. On a Mac the
+/// Keychain is the only Claude login (#1491), so the file renews nothing there,
+/// and running this would read the real Keychain.
 // Hard-won: #1547: a sub-agent whose turn failed on a renewed login was reported failed and parked before the pushed login could reach it.
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn a_child_failed_on_a_renewed_login_is_held_only_while_its_worker_waits_for_the_new_login() {
     let home = tempfile::tempdir().unwrap();

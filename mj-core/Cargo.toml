@@ -79,6 +79,7 @@ reqwest.workspace = true
 ruzstd.workspace = true
 rustls.workspace = true
 serde = { workspace = true, features = ["rc"] }
+serde_ignored.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 similar = "2.7"
