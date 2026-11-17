@@ -14,6 +14,7 @@ import time
 import uuid
 
 
+# Hard-won: 835967621: fast cleanup erased prompts and retry rounds mixed writer handbacks.
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mj", type=Path, required=True)
@@ -233,21 +234,37 @@ effort = {json.dumps(args.effort)}
                 return candidate.resolve()
         raise RuntimeError(f"could not locate session checkout; candidates={candidates}; transcript tail:\n{transcript_tail()}")
 
-    recorded_children = {}
-
     def relations():
         with sqlite3.connect(f"file:{data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
-            children = [json.loads(row[0]) for row in database.execute(
-                "SELECT record_json FROM subagent_sessions WHERE parent_session_id=? ORDER BY child_session_id",
-                (session,))]
-        # Operational relations disappear on Destroy; retain their launch prompts
-        # while the review is running, then check cleanup against the sessions table.
-        recorded_children.update((child["child_session_id"], child) for child in children)
-        return list(recorded_children.values())
+            query = ("SELECT record_json FROM subagent_sessions WHERE parent_session_id=?")
+            parameters = (session,)
+            if args.brief_writer:
+                query += (" UNION ALL SELECT record_json FROM e2e_review_children "
+                          "WHERE parent_session_id=? AND child_session_id NOT IN "
+                          "(SELECT child_session_id FROM subagent_sessions)")
+                parameters += (session,)
+            return [json.loads(row[0]) for row in database.execute(query, parameters)]
 
     start = time.monotonic()
     try:
         cli("workspaces", "create", "Review before push regression")
+        if args.brief_writer:
+            # Test-only observation in this isolated database. Capture the exact
+            # stored launch atomically with Destroy, including children too fast
+            # for polling. This neither delays nor prevents normal child cleanup.
+            with sqlite3.connect(data / "mj.sqlite3") as database:
+                database.executescript("""
+                    CREATE TABLE e2e_review_children (
+                        child_session_id TEXT PRIMARY KEY,
+                        parent_session_id TEXT NOT NULL,
+                        record_json TEXT NOT NULL
+                    );
+                    CREATE TRIGGER e2e_capture_review_child
+                    BEFORE DELETE ON subagent_sessions BEGIN
+                        INSERT OR REPLACE INTO e2e_review_children
+                        VALUES (OLD.child_session_id, OLD.parent_session_id, OLD.record_json);
+                    END;
+                """)
         prompt = '''This is an isolated live regression. Append exactly the line `reviewed change` to README.md and commit it on the current branch. Follow Mjolnir's instructions about review before pushing. If a review finds issues, fix them, commit the fixes, and call request_review again; continue until you receive a clean verdict. Then push the branch to origin. When the push has succeeded, reply DONE. Do not edit any other files.'''
         if args.brief_writer:
             prompt = prompt.replace("Append exactly the line `reviewed change` to README.md",
@@ -273,8 +290,6 @@ effort = {json.dumps(args.effort)}
         conditions = {}
 
         def reviewed_state():
-            if args.brief_writer:
-                relations()
             value = transcript()
             messages = delivered_messages()
             tool_called = has_request_review_tool_call()
@@ -363,38 +378,60 @@ effort = {json.dumps(args.effort)}
                                   review_children_destroyed)
             writers = [child for child in children
                        if child.get("reviewer_launch", {}).get("role") == "brief_writer"]
-            assert len(writers) == 1, children
-            writer = writers[0]
-            reviewers = [child for child in children if child not in writers]
+            assert writers, children
+            reviewers = [child for child in children
+                         if child.get("reviewer_launch", {}).get("role", "reviewer") == "reviewer"]
             assert reviewers, children
-            with sqlite3.connect(f"file:{data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
-                handback = database.execute(
-                    "SELECT handback_command_id, handback_message FROM subagent_handbacks "
-                    "WHERE child_session_id=?", (writer["child_session_id"],)).fetchone()
-            assert handback and handback[0] and handback[1].strip(), handback
-            anchors = re.findall(r"[\w./-]+\.\w+:\d+", handback[1])
-            assert anchors, f"writer handback lacks file:line items: {handback[1]}"
-            for reviewer in reviewers:
-                prompt = reviewer["initial_prompt"]
-                heading = "## Relations computed from the repository"
-                assert heading in prompt, prompt
-                section = prompt.split(heading, 1)[1]
-                assert handback[1].strip() in section, "reviewer did not receive the writer's complete brief"
-                assert re.search(r"[\w./-]+\.\w+:\d+", section), section
-                (root / f"reviewer-{reviewer['child_session_id']}-prompt.txt").write_text(prompt)
-            (root / "writer-handback.txt").write_text(handback[1])
+            checkout = state["checkout"]
+            assert git(checkout, "show", "HEAD:greeting.py") == (
+                'def greeting(name):\n    return f"Welcome, {name}"\n'), "committed greeting change was omitted"
+            greeting_diff = git(checkout, "diff", "origin/rbp-test...HEAD", "--", "greeting.py")
+            assert '-    return f"Hello, {name}"' in greeting_diff, greeting_diff
+            assert '+    return f"Welcome, {name}"' in greeting_diff, greeting_diff
+            assert 'return greeting("world")' in git(checkout, "show", "HEAD:app.py")
             usage = json.loads(cli("usage", "--parent", session, "--json"))
             (root / "usage-tree.json").write_text(json.dumps(usage, indent=2) + "\n")
-            writer_usage = next(row for row in usage["sessions"]
-                                if row["session_id"] == writer["child_session_id"])
-            assert writer_usage["parent_session_id"] == session, writer_usage
-            assert not writer_usage["operational_session_present"], writer_usage
-            assert writer_usage["coverage"]["full_turn_reports"] >= 1, writer_usage
-            assert any(counter["tokens"] > 0 for counter in writer_usage["totals"].values()), writer_usage
-            brief_summary = {"writer": writer["child_session_id"],
-                             "reviewers": [child["child_session_id"] for child in reviewers],
-                             "anchors": anchors, "children_destroyed": len(children),
-                             "writer_usage": writer_usage}
+            checked_reviewers = set()
+            brief_summary = []
+            for writer in writers:
+                writer_id = writer["child_session_id"]
+                with sqlite3.connect(f"file:{data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                    handback = database.execute(
+                        "SELECT handback_command_id, handback_message FROM subagent_handbacks "
+                        "WHERE child_session_id=?", (writer_id,)).fetchone()
+                assert handback and handback[0] and handback[1].strip(), handback
+                brief = handback[1].strip()
+                anchors = re.findall(r"[\w./-]+\.\w+:\d+", brief)
+                assert anchors, f"writer handback lacks file:line items: {brief}"
+                commands = re.findall(r"Run this exact command: `([^`]+)`", writer["initial_prompt"])
+                assert commands, writer["initial_prompt"]
+                matched = []
+                for reviewer in reviewers:
+                    prompt = reviewer["initial_prompt"]
+                    # The captured tree range identifies the round even when a
+                    # finding causes another writer/reviewer pair to be launched.
+                    if re.findall(r"Run this exact command: `([^`]+)`", prompt) != commands:
+                        continue
+                    heading = "## Relations computed from the repository"
+                    assert heading in prompt, prompt
+                    section = prompt.split(heading, 1)[1]
+                    if brief not in section:
+                        continue
+                    assert re.search(r"[\w./-]+\.\w+:\d+", section), section
+                    reviewer_id = reviewer["child_session_id"]
+                    checked_reviewers.add(reviewer_id)
+                    matched.append(reviewer_id)
+                    (root / f"reviewer-{reviewer_id}-prompt.txt").write_text(prompt)
+                assert matched, f"no reviewer received writer {writer_id}'s brief for {commands}"
+                (root / f"writer-{writer_id}-handback.txt").write_text(brief)
+                writer_usage = next(row for row in usage["sessions"] if row["session_id"] == writer_id)
+                assert writer_usage["parent_session_id"] == session, writer_usage
+                assert not writer_usage["operational_session_present"], writer_usage
+                assert writer_usage["coverage"]["full_turn_reports"] >= 1, writer_usage
+                assert any(counter["tokens"] > 0 for counter in writer_usage["totals"].values()), writer_usage
+                brief_summary.append({"writer": writer_id, "reviewers": matched,
+                                      "anchors": anchors, "writer_usage": writer_usage})
+            assert checked_reviewers == {child["child_session_id"] for child in reviewers}, children
 
         checkout = state["checkout"]
         gate_refusal_seconds = None
@@ -444,6 +481,9 @@ effort = {json.dumps(args.effort)}
                 cli("suspend", "--session", session, "--acknowledge-unpublished-work", check=False)
                 child_ids = [relation["child_session_id"] for relation in relations()]
                 for child in child_ids:
+                    with sqlite3.connect(f"file:{data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                        if not database.execute("SELECT 1 FROM sessions WHERE session_id=?", (child,)).fetchone():
+                            continue
                     cli("wait", "--session", child, "--timeout", "90", "--json", check=False)
                     cli("destroy", "--session", child, check=False)
                 cli("destroy", "--session", session, check=False)

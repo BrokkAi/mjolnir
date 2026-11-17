@@ -231,9 +231,9 @@ At the end of milestone 2 these exist:
 Milestone 3 (2026-11-17): extended `tests/e2e/review_before_push.py` with
 `--brief-writer` and `--effort`. The brief mode commits a two-file change in a
 three-file Python fixture and requests review without pushing; the default mode
-retains the original push/gate regression. The test captures operational child
-records while review runs, then checks that the review host destroyed both
-children before test cleanup. It checks the complete writer handback against the
+retains the original push/gate regression. The test archives operational child
+records atomically when the review host destroys them, then checks that both
+children are gone before test cleanup. It checks the complete writer handback against the
 reviewer's recorded initial prompt, a retained `subagent_handbacks` command and
 message, and nonzero whole-turn writer usage in the requester's CLI usage tree.
 
@@ -286,3 +286,32 @@ daemons were stopped. No brief-writer product defect or Rust change was needed.
 Evidence: `e2e-5.log`, `summary.json`, `writer-handback.txt`, `usage-tree.json`, and
 `reviewer-71c5c9be8eb50f2911c2f81326d8fc52-prompt.txt` in report directory
 `.mj/agents/2f19d11c15792ec0986c374e155d5be8/` of the parent checkout.
+
+
+Milestone 3 review follow-up (2026-11-17): fixed the test's polling race by
+installing a test-only observation table and BEFORE DELETE trigger in its
+isolated SQLite database before creating the requester. The trigger copies the
+stored launch record during normal Destroy; it does not retain operational rows
+or delay the child. Live and archived relations are read in one SQL statement,
+so a child can finish entirely between polls without losing its prompt. Writer
+handbacks are matched to reviewer prompts using the exact captured Git diff
+commands and complete brief text, allowing multiple review rounds. The test now
+also checks the committed greeting contents and diff and the unchanged caller.
+Cleanup skips already-destroyed children instead of issuing expected 404s.
+The test carries a Hard-won comment for `835967621`.
+
+Reran only the e2e script with the same real build, codex4 profile, Terra/low and
+isolated instance, changing `--root` to
+`/home/jonathan/.cache/mjolnir/build/brief-m3-e2e-6`. PASS in 118.00
+seconds: one clean round, writer `03f683fba51dbdab5128377f0f8e72f2`, reviewer
+`43465a7d58db659749a55dadbdd93ad2`, requester `7d65491649f0833487d2dea3197198dc`. The intended committed greeting
+and caller fixture were verified. Both launch records survived in the test
+archive after their operational rows were deleted. The anchored writer handback
+was retained in `subagent_handbacks` and included verbatim in the reviewer
+prompt. The requester's `mj usage --parent` tree retained one writer whole turn
+and 84,764 total tokens after destruction.
+The daemon stopped successfully; Python compilation and diff checks passed.
+No Rust or product behavior changed. Evidence in the same report directory:
+`e2e-6.log`, `final-summary.json`, `final-usage-tree.json`,
+`writer-03f683fba51dbdab5128377f0f8e72f2-handback.txt` and
+`reviewer-43465a7d58db659749a55dadbdd93ad2-prompt.txt`.
