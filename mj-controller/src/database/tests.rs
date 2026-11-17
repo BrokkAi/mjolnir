@@ -5561,6 +5561,14 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
             .unwrap()
             .is_none()
     );
+    // Destroying the requesting session removes its reports with it, so a
+    // destroyed session cannot leave unreachable handbacks behind.
+    delete_session_from(&database, owner).unwrap();
+    let remaining: i64 = open(&database)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM review_reports", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remaining, 0);
 }
 
 // Hard-won: ee65b804b: a follow-up for a never-reviewed session had no row to mark and was never durable.

@@ -22,6 +22,7 @@ A person can see it work by running a review, letting it finish, and running `mj
 - [x] (2026-11-17T02:31Z) Add the database survival test, the API regression test, the CLI parse extension, and the effort regression test.
 - [x] (2026-11-17T02:31Z) Update the CLI, API, and review documentation.
 - [x] (2026-11-17T02:31Z) Run workspace clippy and the full suites of the touched crates. `brokk-mj-core` (659) and `brokk-mjolnir` (all targets) pass; the full `brokk-mj-controller` suite reports 2675 passed and four failures that reproduce alone on this host and are outside the touched code (a root-readability permission fixture and three quota-based spawn-selection tests).
+- [x] (2026-11-17T04:05Z) Review round 1: reviewers found that destroyed parent sessions left their reports behind. Added the `review_reports_session_destroyed` trigger to migration 134, extended the database test to assert the cleanup, and re-ran the schema reader tests (45), the review-host tests (75), and workspace clippy.
 - [ ] Commit and push.
 
 ## Surprises & Discoveries
@@ -45,6 +46,9 @@ A person can see it work by running a review, letting it finish, and running `mj
 
 - Decision: snapshot handbacks during normal review-state saves rather than only at close.
   Rationale: the review host destroys each reviewer child as soon as its role settles, and `save_state_to` prunes `subagent_handbacks` whose relation is gone. Reading the handback on every state save copies it while the child is alive. `COALESCE` in the upsert keeps the last non-null text if a later save cannot read it.
+
+- Decision: a trigger removes a session's reports when its `sessions` row is deleted, rather than relying on callers.
+  Rationale: review output belongs to the requesting session, so destroying that session must not leave unreachable handbacks behind. Every operational delete goes through `delete_session_from`, which deletes only the `sessions` row and lets triggers do the rest (as `prompt_history_session_destroyed` and `session_rows_deleted` already do). A trigger therefore covers every deletion path, and a reviewer child's deletion cannot remove its parent's report because the key is the parent's id. Round-1 review raised this gap; the trigger was added to revision 134 while the revision was still unreleased, so the shipped migration is complete rather than followed by a repair.
 
 - Decision: finalization takes an explicit `FinishedReviewResolution` from the review host.
   Rationale: a cancelled review keeps the stored driver snapshot from before cancellation, which can still carry a verdict the review was about to deliver. Inferring cancellation from the snapshot would call that review completed. `close_turn_review_state` writes the resolution and clears the active review in one transaction. The generic `save_turn_review_state` still infers a resolution for test and legacy paths, but every production close uses the explicit value.
@@ -78,7 +82,7 @@ A "reviewer child" is the sub-agent session that runs one reviewing role. A "rol
 
 ## Plan of Work
 
-Add the compatible `review_reports` table at schema revision 134 in `mj-controller/src/database/schema.rs`. Its primary key is `(parent_session_id, review_id, role)`; it stores the role's ordinal, command id, child session id, profile, model, effort, handback, verdict JSON, finish timestamp, resolution, and update timestamp. Add `DROP TABLE IF EXISTS review_reports` to the test downgrade helper in `stamp_schema_version`.
+In `mj-controller/src/database/schema.rs`, add the compatible migration to schema revision 134 for the `review_reports` table and the `review_reports_session_destroyed` trigger that removes a session's reports with the session row. Add the same `DROP TRIGGER` and `DROP TABLE` to the test downgrade helper in `stamp_schema_version`.
 
 In `mj-controller/src/database/turn_reviews.rs`, add `FinishedReview` and `FinishedReviewRole`. `save_turn_review_state_in` loads the previous active group, syncs report rows for the current or previous group, and finalizes a group that is being replaced or cleared. `close_turn_review_state_in` passes an explicit resolution. `finished_review_in` selects the newest finished review (or the named one), reads its role rows, parses the verdict, and reads the newest `session_turn_usage` row for the child.
 
@@ -111,13 +115,13 @@ The JSON must carry a `review.roles` array whose entries keep `handback`, `model
 
 Acceptance is observable in all three paths:
 
-- The database test builds a two-reviewer review, records handbacks, saves the open state, closes it as completed, deletes both child session rows, clears `subagent_sessions` and `subagent_handbacks`, and still reads both handbacks, both verdicts, both profiles/models/efforts, and the first reviewer's usage.
+- The database test builds a two-reviewer review, records handbacks, saves the open state, closes it as completed, deletes both child session rows, clears `subagent_sessions` and `subagent_handbacks`, and still reads both handbacks, both verdicts, both profiles/models/efforts, and the first reviewer's usage. It then deletes the requesting session and asserts that no report row remains.
 - The API test performs the same lifecycle through the isolated writer and assert the HTTP response fields, including `404` for an unknown review id.
 - The CLI parser accepts `mj review show --session s1 --review r1 --json` and defaults `--review` to absent.
 
 ## Idempotence and Recovery
 
-The migration is additive and repeats safely. Report syncing is an upsert; finalization updates only rows whose `finished_at_ms` is still null, so a retried close cannot move the finish time or change a resolution. If a daemon crashes between reviewer settlements, the next state save copies the handbacks that still exist; a report row already holding a handback is never overwritten with null. Re-running any test is safe; the tests use temporary directories or isolated stores. No production data is migrated or deleted.
+The migration is additive and repeats safely. Report syncing is an upsert; finalization updates only rows whose `finished_at_ms` is still null, so a retried close cannot move the finish time or change a resolution. If a daemon crashes between reviewer settlements, the next state save copies the handbacks that still exist; a report row already holding a handback is never overwritten with null. A destroyed session's reports go with its `sessions` row, and deleting them twice is harmless. Re-running any test is safe; the tests use temporary directories or isolated stores. No production data is migrated or deleted.
 
 ## Artifacts and Notes
 
@@ -195,4 +199,4 @@ In `mj-controller/src/server/api/types.rs`:
 
 The HTTP route is `GET /api/v1/sessions/{session_id}/reviews` with an optional `review` query parameter. The CLI command is `mj review show --session <id> [--review <id>] [--json]`.
 
-Revision note (2026-11-17): initial plan written alongside the implementation; all design decisions above are the ones actually used. The stale review-host test cases were found during the plan's validation step and removed there.
+Revision note (2026-11-17): initial plan written alongside the implementation; all design decisions above are the ones actually used. The stale review-host test cases were found during the plan's validation step and removed there. Round-1 review added the `review_reports_session_destroyed` trigger; the plan's migration, decision log, progress, and acceptance text were updated with it.

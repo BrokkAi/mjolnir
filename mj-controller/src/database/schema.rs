@@ -2543,6 +2543,10 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     // Compatible: a standalone table that older readers and writers neither
     // read nor rewrite. Finished review output belongs to the review, not to
     // its reviewer child sessions, which are destroyed when their role ends.
+    // The trigger removes a session's reports with the session itself, so a
+    // destroyed session cannot leave unreachable handbacks behind. A later
+    // migration that recreates `sessions` drops this trigger and must create
+    // it again.
     if version < 134 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
@@ -2565,6 +2569,10 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              );
              CREATE INDEX IF NOT EXISTS review_reports_finished
                  ON review_reports(parent_session_id, finished_at_ms DESC);
+             CREATE TRIGGER IF NOT EXISTS review_reports_session_destroyed
+                 AFTER DELETE ON sessions BEGIN
+                     DELETE FROM review_reports WHERE parent_session_id = OLD.session_id;
+                 END;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (134, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
              PRAGMA user_version = 134;
@@ -4773,7 +4781,10 @@ mod reader_tests {
         let connection = Connection::open(path).unwrap();
         if version < 134 {
             connection
-                .execute_batch("DROP TABLE IF EXISTS review_reports;")
+                .execute_batch(
+                    "DROP TRIGGER IF EXISTS review_reports_session_destroyed;
+                     DROP TABLE IF EXISTS review_reports;",
+                )
                 .unwrap();
         }
         if version < 133
