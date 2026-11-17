@@ -5518,6 +5518,176 @@ async fn queued_startup_prompts_are_delivered_in_order_once_the_harness_is_ready
     assert!(notice_texts(&state).is_empty(), "delivery posted a notice");
 }
 
+/// Peer messages accepted while a session is starting stay behind its first
+/// prompt, then land in the mailbox in send order. They are not a second
+/// prompt (#1553).
+#[tokio::test]
+async fn session_messages_while_starting_follow_the_first_prompt() {
+    let Some(_writer) =
+        startup_prompt_test_store("session_messages_while_starting_follow_the_first_prompt")
+    else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    state
+        .queue_api_followup(
+            "session-1",
+            "api-startup-order".into(),
+            crate::server::api::StartFollowup {
+                prompt: Some("open the brief".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("queue the startup prompt");
+    for (request_id, text, at) in [
+        ("first-note", "first note", 1),
+        ("second-note", "second note", 2),
+    ] {
+        state
+            .queue_startup_session_message(
+                "session-1",
+                crate::daemon::startup_followup::QueuedSessionMessage {
+                    request_id: request_id.into(),
+                    sender_id: "sender-1".into(),
+                    sender_title: "sender".into(),
+                    text: text.into(),
+                    created_at_ms: at,
+                    waited_on_group: Some("api-startup-order".into()),
+                },
+            )
+            .await
+            .expect("queue the session message");
+    }
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .expect("publish the ready view");
+
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "open the brief");
+    reply
+        .send(Ok(1))
+        .expect("the drain awaits the submit reply");
+
+    let pending = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = crate::database::pending_mailbox_events(10).unwrap();
+            if pending.len() >= 2 {
+                return pending;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the session messages were not queued behind the prompt");
+    let texts = pending
+        .iter()
+        .map(|row| {
+            assert_eq!(row.target_session_id, "session-1");
+            assert!(!row.unpark);
+            let event: mj_core::mailbox::MailboxEvent =
+                serde_json::from_str(&row.event_json).unwrap();
+            assert_eq!(event.source, "session_message");
+            assert!(event.wake);
+            let mj_core::mailbox::MailboxEventBody::SessionMessage { text, .. } = event.body else {
+                panic!("expected a session message");
+            };
+            text
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["first note", "second note"]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "a held session message was submitted as its own prompt"
+    );
+}
+
+/// A message held for a session that will never finish starting is returned
+/// to the sender, and the startup row stays so a retry is not delivered later.
+#[tokio::test]
+async fn a_session_message_while_starting_is_returned_when_startup_fails() {
+    let Some(_writer) = startup_prompt_test_store(
+        "a_session_message_while_starting_is_returned_when_startup_fails",
+    ) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let sender = runtime_test_session(
+        "sender-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&sender).unwrap();
+    let command_id =
+        mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id("bring-logs");
+    state
+        .queue_startup_session_message(
+            "session-1",
+            crate::daemon::startup_followup::QueuedSessionMessage {
+                request_id: "bring-logs".into(),
+                sender_id: "sender-1".into(),
+                sender_title: "sender".into(),
+                text: "bring the logs".into(),
+                created_at_ms: 5,
+                waited_on_group: None,
+            },
+        )
+        .await
+        .expect("queue the session message");
+
+    let mut session = state
+        .session_record("session-1")
+        .expect("the starting session is published");
+    session.state = SessionState::Error;
+    session.last_error = Some("provisioning failed".into());
+    crate::database::save_session(&session).unwrap();
+
+    // The notice is committed before the failed phase. Both are the receipt.
+    let (notice, stored_error) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = crate::database::pending_mailbox_events(10).unwrap();
+            let notice = pending.iter().find_map(|row| {
+                (row.target_session_id == "sender-1").then(|| row.event_json.clone())
+            });
+            let failed = crate::database::load_startup_delivery(&command_id)
+                .unwrap()
+                .filter(|row| row.phase == "failed")
+                .and_then(|row| row.error);
+            if let (Some(notice), Some(error)) = (notice, failed) {
+                return (notice, error);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the sender was not told the message was dropped");
+    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&notice).unwrap();
+    let mj_core::mailbox::MailboxEventBody::PlainText { text } = event.body else {
+        panic!("the undelivered notice is plain text, not a reply from the target");
+    };
+    assert!(text.contains("was not delivered"), "{text}");
+    assert!(text.contains("bring the logs"), "{text}");
+    assert!(text.contains("provisioning failed"), "{text}");
+    assert!(
+        stored_error.contains("was not delivered"),
+        "a retry has to read that the message was not delivered: {stored_error}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "the undelivered message was submitted"
+    );
+}
+
 /// A restored session's hand-off is queued ahead of any prompt, so the prompt
 /// is never submitted before the context it is meant to read. Here the
 /// hand-off cannot be installed, so the prompt behind it remains durable

@@ -107,6 +107,17 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { bail!("durable startup delivery is unavailable") })
     }
 
+    /// Hold one peer message until `session_id` finishes starting. The default
+    /// has no startup queue, so a backend that can deliver the message now
+    /// must override this.
+    fn queue_startup_session_message(
+        self: Arc<Self>,
+        _session_id: String,
+        _message: crate::daemon::startup_followup::QueuedSessionMessage,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { bail!("durable startup delivery is unavailable") })
+    }
+
     fn startup_status(&self, _session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(async { Ok(None) })
     }
@@ -343,6 +354,16 @@ impl ExportRuntime for RuntimeState {
         Box::pin(async move {
             self.queue_api_followup(&session_id, group_id, followup)
                 .await
+        })
+    }
+
+    fn queue_startup_session_message(
+        self: Arc<Self>,
+        session_id: String,
+        message: crate::daemon::startup_followup::QueuedSessionMessage,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            RuntimeState::queue_startup_session_message(&self, &session_id, message).await
         })
     }
 
@@ -1360,7 +1381,7 @@ impl ApiBackend {
                         request_created_at_ms,
                     )
                     .await?;
-                let status = if delivery.via == "mailbox" {
+                let status = if delivery.via == "mailbox" || delivery.via == "queued" {
                     "queued"
                 } else {
                     "submitted"

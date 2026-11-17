@@ -575,6 +575,18 @@ pub(crate) enum StartupStep {
     ApiPrompt {
         text: String,
     },
+    /// A peer message accepted while this session was still starting.
+    /// Delivered after earlier startup steps: through the mailbox when the
+    /// worker can take one, otherwise as the next turn. `waited_on_group` is
+    /// the startup group this message queued behind, when one was still
+    /// pending. The request id is the command id's `SessionMessageTurn` suffix.
+    SessionMessage {
+        sender_id: String,
+        sender_title: String,
+        text: String,
+        created_at_ms: u64,
+        waited_on_group: Option<String>,
+    },
 }
 
 /// One supervised drain per session. Pending payloads stay in SQLite.
