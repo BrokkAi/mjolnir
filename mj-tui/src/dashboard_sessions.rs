@@ -1261,6 +1261,8 @@ impl DashboardState {
     /// which is exactly the set its tab badge counts. A session with no row
     /// contributes to no badge, so leaving it unread hides nothing.
     pub(crate) fn mark_all_read(&mut self) -> DashboardAction {
+        use mj_core::attention::{NotificationDismissal, NotificationKind};
+
         let listed = self
             .ordered_sessions_unfiltered()
             .into_iter()
@@ -1268,18 +1270,27 @@ impl DashboardState {
             .collect::<Vec<_>>();
         let mut receipts = Vec::new();
         for session_id in listed {
-            let through = self.unread_frontiers.get(&session_id).copied().max(
-                self.notification_dismissals
-                    .get(&session_id)
-                    .and_then(|target| match target {
-                        mj_core::attention::NotificationDismissal::ReadThrough(through) => {
-                            Some(*through)
-                        }
-                        mj_core::attention::NotificationDismissal::Question(_)
-                        | mj_core::attention::NotificationDismissal::Failure(_)
-                        | mj_core::attention::NotificationDismissal::Stack { .. } => None,
-                    }),
-            );
+            let legacy_through = match self.notification_dismissals.get(&session_id) {
+                Some(NotificationDismissal::ReadThrough(through)) => Some(*through),
+                _ => None,
+            };
+            let important_through = self
+                .notification_cards
+                .as_ref()
+                .and_then(|cards| cards.get(&session_id))
+                .and_then(|card| {
+                    card.entries
+                        .iter()
+                        .filter(|entry| entry.kind == NotificationKind::Important)
+                        .map(|entry| entry.completed_ordinal)
+                        .max()
+                });
+            let through = self
+                .unread_frontiers
+                .get(&session_id)
+                .copied()
+                .max(legacy_through)
+                .max(important_through);
             let Some(through) = through else {
                 continue;
             };

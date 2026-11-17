@@ -1525,11 +1525,11 @@ pub(crate) mod tests {
             ("i1".into(), NotificationCard {
                 badge: NotificationKind::Important,
                 entries: vec![NotificationStackEntry {
-                    completed_ordinal: 5,
+                    completed_ordinal: 7,
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,
                 }],
-                dismissal: Some(NotificationDismissal::Stack { revision: 51 }),
+                dismissal: Some(NotificationDismissal::ReadThrough(7)),
                 holder: None,
                 form: None,
             }),
@@ -1646,8 +1646,19 @@ pub(crate) mod tests {
         assert_eq!(
             dashboard.handle_key(alt(KeyCode::Char('c'))),
             DashboardAction::DismissNotifications {
-                dismissals: vec![("i1".into(), NotificationDismissal::Stack { revision: 51 })],
+                dismissals: vec![("i1".into(), NotificationDismissal::ReadThrough(7))],
             }
+        );
+        assert!(dashboard.notification_dismissal_pending("i1"));
+        dashboard.notifications_dismissed(vec![(
+            "i1".into(),
+            NotificationDismissal::ReadThrough(7),
+            Ok(7),
+        )]);
+        assert!(!dashboard.notification_dismissal_pending("i1"));
+        assert_eq!(
+            dashboard.state.sessions["i1"].viewed_through_event_ordinal,
+            7
         );
         assert_eq!(
             dashboard.handle_key(alt(KeyCode::Char('n'))),
@@ -1659,7 +1670,7 @@ pub(crate) mod tests {
         dashboard.handle_key(alt(KeyCode::Char('s')));
         let bounded = dashboard.wanted_notification_message().unwrap();
         assert_eq!(bounded.session_id, "i1");
-        assert_eq!(bounded.source, NotificationReadSource::Through(5));
+        assert_eq!(bounded.source, NotificationReadSource::Through(7));
 
         dashboard.set_notification_cards(Some(Default::default()));
         assert!(dashboard.notification_entries().is_empty());
