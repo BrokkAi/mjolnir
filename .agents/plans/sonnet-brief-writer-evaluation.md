@@ -17,12 +17,12 @@ Determine whether Sonnet/high is an acceptable cheaper writer for the relation b
 - [x] Generalized the existing helper with isolated regression coverage; 10 new study checks, nine existing scorer checks and four workspace checks pass (23 total).
 - [x] Direct user approval received for 22 Sonnet/high writers on claude5, 66 Terra reviewers and Sol/high grading on codex4, with a 25% floor. The earlier rejected attempt executed nothing.
 - [x] Committed the tested generalized harness as `d1fb2768b`; no study sessions were launched.
-- [ ] Wait for claude5's five-hour window to recover to at least 25%; the 18:25 UTC direct report is 0% five-hour, 78% weekly, with codex4 at 71%. Claude6 is not permitted for this study.
-- [ ] Run one writer canary followed by the remaining writers after quota admission clears.
-- [ ] Complete paired leak judgments, any allowed rewrite/recheck, and report the result before any Sonnet-brief reviewers start.
-- [ ] Run one reviewer-job canary, then complete all 22 jobs and 66 reviewers.
-- [ ] Build and judge round K, handcheck required outputs, compute paired results and round-J consistency, and run the blinded containment diagnostic.
-- [ ] Independently verify the readout, document cost/tokens/time and limits, commit locally, report SHA, and stop all owned work. Never push.
+- [x] After quota recovery, verified claude5 at 91% five-hour and 78% weekly, and codex4 at 52%.
+- [x] Ran the writer canary and then all 22 Sonnet/high writers on claude5. Validated final lint, inventory, usage, image IDs and transcript audit in `91bcc1f9a`.
+- [x] Ran paired leak checks and one wording-only rewrite plus recheck for each of four flags. Reported the residual three caught and one partial before reviewer admission. Evidence is in `3b4c19156`.
+- [x] Verified the reviewer canary and finished 22 TS jobs with 66 unique Terra/high handbacks on codex4. Recovered two pre-prompt carriers by original ID after a worker replacement. Recovery and reviewer evidence are in `1283744eb` and `6235f3500`.
+- [x] Completed the 44-item containment diagnostic and round K's 540 judgments plus 87 hand checks. Stored containment in `75870fe95`. Computed paired results and the round J consistency check.
+- [x] Independently verified rates, paired intervals and control labels against the raw keys. Documented costs, tokens, timing and limitations. All 25 isolated checks passed, and all experiment drivers and watchers exited.
 
 ## Surprises & Discoveries
 
@@ -31,7 +31,9 @@ The initial assignment used five seeded BT control diffs and round-J baseline la
 
 Current quota is materially below the earlier estimates. Of the subscription Claude profiles, only claude6 currently clears every applicable quota window. Claude5's larger weekly balance does not override its five-hour floor violation. Do not use the usage-billed Claude AWS profile or the separate Fable quota pool as substitutes.
 
-Automatic approval review rejected the first attempted Sonnet canary before any command executed: the new external-model arm was requested only through an agent relay, which was not trusted user authorization for repository disclosure and quota use. The user subsequently directly authorized the full study on claude5. No Sonnet session or output exists yet because claude5's five-hour quota is below the floor. The rejection was not bypassed.
+Automatic approval review rejected the first attempted Sonnet canary before any command executed because the request came through an agent relay. The user then directly authorized the full study on claude5. The writer canary started after both quota guards cleared.
+
+Two carrier workers were replaced while the carriers were idle. The same configuration call was explicitly refused on each carrier during the reservation and succeeded after replacement. The recovery driver validates the saved identity and inventory of a pre-prompt carrier and preserves its ID. Ambiguous admissions still require reconciliation. Two isolated checks cover the recovery and refusal boundaries.
 
 ## Decision Log
 
@@ -47,9 +49,9 @@ Automatic approval review rejected the first attempted Sonnet canary before any 
 ## Outcomes & Retrospective
 
 
-Local preparation is tested and the user has directly authorized execution. No Sonnet writing, review or grading output exists yet: claude5's five-hour quota remains below 25%. Existing V1 artifacts remain unchanged. A configured helper automatically used claude6 for local code preparation before the profile restriction arrived; that helper is now closed and all remaining work uses the permitted profiles.
+Round K reads “Sol writes.” Primary catch rates were 22.2% with Sonnet briefs, 55.6% with Sol briefs, and 20.4% without briefs. Both preregistered criteria for Sonnet failed. Shared baseline catch rates in rounds J and K differed by zero points. The containment diagnostic found the full decisive fact in two of 18 primary Sonnet briefs and six of 18 primary Sol briefs. Estimated cost for all 22 Sonnet writers was $5.06. The final evidence lives in `results/brief-writer-sonnet/` under the harness directory.
 
-The quota helper `85c513259ed477cfee5713704b7ac016` was closed after it could not maintain the long wait. Its initial unsupported readiness report was rejected by the parent's direct check; no canary launched. The parent took over with data-root `writer-sonnet-quota-watch.py`, host PID 2401976, reusing `driver.quota_hold()` and the committed `mjx`. Its state file records `claude5: 0% left, below the floor of 25%` at 19:05 UTC. This process starts no study work: on readiness or a blocker it sends the coordinator one clearly identified automated status, and the coordinator is asked to wake the parent through normal `send_message`. Only the parent may launch the canary after another quota check. Waiting state and manifests are in the data root's `writer-sonnet-state.json` and `writer-sonnet-jobs.json`.
+The first quota helper returned readiness before actual recovery. The parent verified the quota directly and held the canary. A temporary local watcher using the committed quota guard then notified the coordinator at recovery. Study drivers used the same guard on both authorized profiles.
 
 ## Context and Orientation
 

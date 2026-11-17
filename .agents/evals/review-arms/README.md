@@ -880,6 +880,77 @@ Raw inputs and judgments remain under
 `/mnt/optane/review-arms-20261113/brief-judge-j/`; the blinding key remains in
 that data root's `private/key-brief-judge-j.json`.
 
+## Sonnet as the brief writer (round K)
+
+**Sol writes.** On the 18 primary diffs, the same Terra/high reviewer model
+caught 22.2% with Sonnet 5.5/high briefs, 55.6% with Sol/high briefs, and
+20.4% without a brief. Round K judged those three conditions together.
+Both preregistered criteria for accepting Sonnet failed.
+
+| Brief given to the reviewer | Primary catch rate (18 diffs) | Secondary catch rate (4 diffs) |
+| --- | ---: | ---: |
+| None | 20.4% | 33.3% |
+| Sol/high (BT) | 55.6% | 41.7% |
+| Sonnet 5.5/high (TS) | 22.2% | 33.3% |
+| Terra/high (TT, historical round J) | 29.6% | 41.7% |
+
+Mean catch rates weight every diff equally. With 10,000 paired bootstrap
+resamples over primary diffs, TS minus BT was **−33.3 points**
+(95% CI **−53.7 to −14.8**) and TS minus no brief was **+1.9 points**
+(**−9.3 to +16.7**). The secondary differences were −8.3 points
+(−25.0 to 0.0) and 0.0 points (0.0 to 0.0), respectively.
+TT's historical result is shown alongside round K for context.
+
+Two Sol/high judges on codex4 labeled each of 270 outputs in three
+blinded mixed batches. They agreed on 265 outputs. The hand check
+covered 87 outputs and resolved five split verdicts as missed. The
+registered readout uses Terra reviewers only. The other 66 stored Sol
+no-brief outputs went through the same judging process. The 138 shared
+BT and no-brief Terra handbacks received identical final labels in J
+and K. Both arms had a 0.0-point catch-rate change, including within
+each diff set.
+
+All 22 Sonnet briefs passed final lint and checkout inventory checks.
+After the allowed wording-only rewrites, three residual leak labels
+were caught: `activity-recorder-kills-api`,
+`pending-assessment-hidden-when-idle`, and `web-feed-self-deadlock`.
+`github-token-in-container-argv` remained partial. Both judges agreed
+on all four rechecks. The study retained these briefs with their
+relations intact, so these residual labels are a caveat when
+interpreting the reviewer results.
+
+In the separate blinded containment diagnostic, the judge marked
+the full decisive fact in 2/18 Sonnet briefs and 6/18 Sol briefs on the
+primary diffs. The secondary counts were 2/4 and 1/4, respectively.
+Primary yes/partial/no counts were 2/14/2 for Sonnet and 6/10/2 for
+Sol. This diagnostic used one Sol/high judge and sits outside the
+registered writer decision.
+
+| Writer | Estimated cost, all 22 | Median cost per brief | Median tokens | Median wall time |
+| --- | ---: | ---: | ---: | ---: |
+| Sol/high | $4.37 | $0.198 | 507,276 | 197.1 s |
+| Terra/high | $1.18 | $0.0515 | 233,994 | 103.7 s |
+| Sonnet 5.5/high | $5.06 | $0.206 | 536,261 | 304.1 s |
+
+Wall time runs from launch intent to the final writer turn, including
+setup and lint repairs. Estimated API-equivalent cost was $2.73 for the
+66 TS reviewers and $2.57 for the 16 grading and rewrite sessions.
+The $10.36 study subtotal covers writers, reviewers, graders and
+rewrites. Carrier work is outside that subtotal. Individual TS reviewer
+latency was unavailable from retained handbacks.
+
+Two carrier workers were replaced during the batch. Their explicitly
+refused configuration calls were retried on the original sessions
+before either carrier received its first prompt. The 22 carrier IDs
+and 66 reviewer IDs were unique. The experiment records the distinct
+writer and review image IDs per job. This comparison covers the frozen
+Mjolnir corpus and includes stored comparison reviews from earlier runs.
+
+The [registered plan](brief/PLAN-writer-sonnet.md),
+[round K summary](results/brief-writer-sonnet/summary.json), and
+[cost summary](results/brief-writer-sonnet/cost-summary.json) accompany
+the per-diff readout, leak checks, and containment results.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
