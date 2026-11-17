@@ -1,0 +1,35 @@
+{
+  "frozen_at": "2026-11-17T05:01:16.467293+00:00",
+  "stage": "completed paired leak recheck;17final texts admitted unchanged",
+  "published_briefs": 17,
+  "paired_rechecked_briefs": 4,
+  "round1_valid_verdicts": 8,
+  "final_labels": {
+    "missed": 13,
+    "partial": 3,
+    "caught": 1
+  },
+  "remaining_neutral_flags": [
+    "mcp-default-advisory-reported-clean",
+    "go-receiver-poisons-package-result-contract-discovery",
+    "python-module-binding-representative-after-event",
+    "unproven-override-family-certifies-empty"
+  ],
+  "retention_rule": "Existing StageB PLAN.md62\u201368, confirmed by lead: retain and report neutral relations after one wording-only rewrite/recheck; no second rewrite.",
+  "api_equivalent_estimated_round1_usd": 0.2037592,
+  "judges": "two codex4/gpt-6.1-sol/high, both suspended",
+  "text_snapshot": "arms/neutralized-stage",
+  "source_and_text_hashes_unchanged": true,
+  "quota_recovery": "Ordinary cached codex4 report99%@1794891172; lead reports week reset. No profile/config/probe/restart actions by this session.",
+  "accounting_limit": "Postrecheck cached snapshot predates judge completions; no isolated quota-delta inference.",
+  "files": {
+    "final17-published-briefs.json": "f68917089482da8b6244d33a56c6d869c8f3b110940ad8ba718e83e53bdb5cc0",
+    "completion-manifest.json": "95023ce249444e5e2486db21379ef971bce6a3e538ad74ea9e3c15fd50b7936f",
+    "workflow-out.json": "b645340ab11a9cf44ee4b5199c67451ae6755ca6ffbdc551333b6ba360008b08",
+    "key.json": "10ac9c6649914026b7b8af2daf861f5203e92633e35e6b719a1843d23197d4b0",
+    "settings.json": "568725953f4e447940a6da30a144c623ca9677545cc4adf8eba59b00fc3a495a",
+    "quota-before.json": "25a92b72bae9e0b5dd1f36a36ae6d2cfdb262939d2dd7d25521d7077d4ad5d0f",
+    "quota-after.json": "25a92b72bae9e0b5dd1f36a36ae6d2cfdb262939d2dd7d25521d7077d4ad5d0f",
+    "watch-outcome.json": "3c397db7424985a7ad2b16b388baf71f95fa526f414e727b50c04d0174117a1c"
+  }
+}
