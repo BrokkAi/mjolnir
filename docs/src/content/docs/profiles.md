@@ -37,7 +37,7 @@ the box later to restore the same choices. Container targets are unconstrained
 inside their isolation boundary but have no YOLO permission setting, so they
 use the shared choices.
 
-**Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
+**Create** and **Move…** offer **Native** (the agent's own sub-agents) or **Mjolnir** (children Mjolnir starts and tracks) delegation. Mjolnir
 requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task
 in the set the destination target uses.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
