@@ -1870,6 +1870,6 @@ mod tests;
 mod recovery;
 pub(crate) use recovery::{
     StatedReset, exhausted, long_window_stop, merge_reset_windows, message_reset, recovery_reset,
-    retry_reset,
+    retry_deadline,
 };
 pub(crate) use recovery::{quota_score, window_applies};
