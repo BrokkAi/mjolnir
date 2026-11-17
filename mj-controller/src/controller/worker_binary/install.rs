@@ -1173,6 +1173,9 @@ pub(super) fn install_worker_over_ssh(
 
 const PROFILE_CONTENT_STORE: &str = ".cache/mjolnir/profile-content";
 const PROFILE_CONTENT_MISSING: i32 = 75;
+// A retired/incomplete stage consumes the same existing retry slot as a
+// missing content pin, but needs a fresh host query rather than missing keys.
+const PROFILE_STAGE_MISSING: i32 = 76;
 
 // Registration and collection take the same store gate. A collector's
 // snapshot cannot predate a directory that an active attempt is about to use.
@@ -1226,17 +1229,17 @@ impl Drop for ProfileUpload {
 // A failed identity query never authorizes deletion.
 fn profile_script(body: &str) -> String {
     format!(
-        "{}\n{PROFILE_OWNER_SCRIPT}\n{body}",
+        "{}\nmj_profile_stage_missing_status={PROFILE_STAGE_MISSING}\n{PROFILE_OWNER_SCRIPT}\n{body}",
         mj_core::subprocess::PROCESS_BIRTH_SCRIPT
     )
 }
 
 const PROFILE_OWNER_SCRIPT: &str = r#"mj_profile_stage_missing() {
     echo "stage removed by a collector or incomplete: $work" >&2
-    return 1
+    return "$mj_profile_stage_missing_status"
 }
 mj_profile_check_marker() {
-    marker=$(cat -- "$1" 2>/dev/null) || { mj_profile_stage_missing; return 1; }
+    marker=$(cat -- "$1" 2>/dev/null) || { mj_profile_stage_missing; return "$mj_profile_stage_missing_status"; }
     [ "$marker" = "${work##*/}" ] || mj_profile_stage_missing
 }
 mj_profile_claim() {
@@ -1249,7 +1252,7 @@ mj_profile_claim() {
     # recreate a collected directory, or treat a partial receive as complete.
     if ! { printf '%s\n%s\n' "$$" "$birth" > "$work/.owner.next" &&
            mv -- "$work/.owner.next" "$work/.owner"; }; then
-        mj_profile_stage_missing; return 1
+        mj_profile_stage_missing; return "$mj_profile_stage_missing_status"
     fi
     mj_profile_check_marker "$work/.token"
 }
@@ -1258,7 +1261,7 @@ mj_profile_quiescent() {
     # so a killed later phase cannot inherit its predecessor's completion.
     if ! { cat -- "$work/.owner" > "$work/.quiescent.next" &&
            mv -- "$work/.quiescent.next" "$work/.quiescent"; }; then
-        mj_profile_stage_missing; return 1
+        mj_profile_stage_missing; return "$mj_profile_stage_missing_status"
     fi
 }
 mj_profile_warn_unknown() {
@@ -1385,7 +1388,7 @@ store="$HOME/$2"
 work="$HOME/$3"
 mj_profile_claim
 mj_profile_check_marker "$work/.received"
-[ -d "$work/profile" ] && [ -f "$work/.mj-keys" ] || { mj_profile_stage_missing; exit 1; }
+[ -d "$work/profile" ] && [ -f "$work/.mj-keys" ] || { mj_profile_stage_missing; exit "$mj_profile_stage_missing_status"; }
 rm -rf -- "$destination"
 mkdir -p -- "$(dirname -- "$destination")"
 chmod -- 700 "$store"
@@ -1443,9 +1446,9 @@ umask 077
 work="$HOME/$1"; destination=$2; pins="$work/.pins"
 mj_profile_claim
 mj_profile_check_marker "$work/.published"
-[ -d "$work/profile" ] && [ -d "$pins" ] && [ -f "$work/.mj-keys" ] || { mj_profile_stage_missing; exit 1; }
+[ -d "$work/profile" ] && [ -d "$pins" ] && [ -f "$work/.mj-keys" ] || { mj_profile_stage_missing; exit "$mj_profile_stage_missing_status"; }
 while IFS= read -r key; do
-    [ -f "$pins/$key" ] || { mj_profile_stage_missing; exit 1; }
+    [ -f "$pins/$key" ] || { mj_profile_stage_missing; exit "$mj_profile_stage_missing_status"; }
 done < "$work/.mj-keys"
 trap 'rm -rf -- "$work" "$pins"' EXIT
 cp -RL -- "$work/profile" "$destination" || { echo "could not copy stored profile content into $destination" >&2; exit 1; }
@@ -1747,12 +1750,23 @@ fn upload_profile_archive(
         if output.status == 0 {
             return Ok(());
         }
-        if output.status == PROFILE_CONTENT_MISSING && attempt == 0 {
-            missing = profile_content_keys(&output.stdout, &keys)?;
-            ensure!(
-                !missing.is_empty(),
-                "host reported missing profile content without any keys"
-            );
+        if attempt == 0
+            && matches!(
+                output.status,
+                PROFILE_CONTENT_MISSING | PROFILE_STAGE_MISSING
+            )
+        {
+            if output.status == PROFILE_STAGE_MISSING {
+                // Another daemon may collect the completed prior phase. A
+                // fresh query and transfer use the existing retry slot.
+                missing = query_missing()?;
+            } else {
+                missing = profile_content_keys(&output.stdout, &keys)?;
+                ensure!(
+                    !missing.is_empty(),
+                    "host reported missing profile content without any keys"
+                );
+            }
             continue;
         }
         bail!(
@@ -1980,6 +1994,7 @@ mod profile_archive_tests {
         warnings: RefCell<Vec<String>>,
         bin: RefCell<Option<PathBuf>>,
         disconnect_after_receive: Cell<bool>,
+        collect_before_publish: Cell<usize>,
     }
     impl SystemTar {
         fn new(home: &Path) -> Self {
@@ -1990,6 +2005,7 @@ mod profile_archive_tests {
                 warnings: RefCell::new(Vec::new()),
                 bin: RefCell::new(None),
                 disconnect_after_receive: Cell::new(false),
+                collect_before_publish: Cell::new(0),
             }
         }
         fn store(&self) -> PathBuf {
@@ -2050,6 +2066,24 @@ mod profile_archive_tests {
                         .set(self.delete_before_upload.get() - 1);
                     for path in self.stored_files() {
                         fs::remove_file(path)?;
+                    }
+                }
+            }
+            if command.purpose == "publish profile content" && self.collect_before_publish.get() > 0
+            {
+                self.collect_before_publish
+                    .set(self.collect_before_publish.get() - 1);
+                for entry in fs::read_dir(self.store())? {
+                    let path = entry?.path();
+                    if path
+                        .file_name()
+                        .unwrap()
+                        .as_encoded_bytes()
+                        .starts_with(b".stage-")
+                    {
+                        // The real receiver already exited quiescently. Model
+                        // a different daemon collecting the inter-phase gap.
+                        fs::remove_dir_all(path)?;
                     }
                 }
             }
@@ -2312,6 +2346,25 @@ mod profile_archive_tests {
         assert!(interrupted.join("profile/settings.json").exists());
         // Finish the simulated receiver by restoring its completed real owner.
         fs::copy(interrupted.join(".quiescent"), interrupted.join(".owner")).unwrap();
+        executor.collect_before_publish.set(1);
+        let before = executor.uploads.borrow().len();
+        let recovered = temp.path().join("automatically-recovered");
+        upload(&executor, &source, &recovered).unwrap();
+        assert_eq!(snapshot(&recovered), snapshot(&source));
+        assert_eq!(
+            executor.uploads.borrow().len() - before,
+            2,
+            "collector loss did not restart from transfer"
+        );
+        executor.collect_before_publish.set(2);
+        let before = executor.uploads.borrow().len();
+        let repeated = upload(&executor, &source, &temp.path().join("repeated-loss")).unwrap_err();
+        assert!(format!("{repeated:#}").contains("stage removed by a collector"));
+        assert_eq!(
+            executor.uploads.borrow().len() - before,
+            2,
+            "collector loss changed the existing retry count"
+        );
         let entries = profile_archive_entries(&source, &[]).unwrap();
         let compressed = build_profile_archive(&source, &entries, &HashSet::new()).unwrap();
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
@@ -2372,7 +2425,7 @@ mod profile_archive_tests {
                 .purpose("publish profile content"),
             )
             .unwrap();
-        assert_ne!(removed.status, 0);
+        assert_eq!(removed.status, PROFILE_STAGE_MISSING);
         assert!(String::from_utf8_lossy(&removed.stderr).contains("stage removed by a collector"));
         assert!(
             !destination.exists(),
