@@ -328,6 +328,10 @@ impl ApiBackend {
         Ok(())
     }
 
+    /// The parent's messages to its children and what became of them. The
+    /// mailbox's part comes from the store. The part kept in the parent's
+    /// worker queue is unknown while the parent has no session actor or its
+    /// actor has no snapshot yet; see [`InputProgress::queue_known`].
     pub(super) async fn subagent_input_progress(&self, parent: &str) -> Result<InputProgress> {
         let snapshot = self
             .session_handle(parent.to_owned())
@@ -724,11 +728,16 @@ async fn prompt_acceptance(child: &str, command: &str) -> Result<Option<u64>> {
 pub(super) struct InputProgress {
     pending: BTreeMap<String, Vec<String>>,
     deliveries: BTreeMap<String, Vec<serde_json::Value>>,
+    /// See [`Self::queue_known`]. The default is unknown.
+    queue_known: bool,
 }
 
 impl InputProgress {
     pub(super) fn from_snapshot(snapshot: &mj_core::state::ManagedSessionSnapshot) -> Self {
-        let mut progress = Self::default();
+        let mut progress = Self {
+            queue_known: true,
+            ..Self::default()
+        };
         let mut requests = snapshot.subagent_requests.iter().collect::<Vec<_>>();
         requests.sort_by_key(|r| (r.created_at_ms, &r.request_id));
         for request in requests {
@@ -902,6 +911,15 @@ impl InputProgress {
         current
     }
 
+    /// Whether the parent's worker queue was read: the messages still queued
+    /// in it and the outcome of every delivery made through it. It is not
+    /// read while the parent has no session actor, or its actor has no
+    /// snapshot yet, and then this progress holds only the mailbox's part.
+    /// Unknown is not empty: a failure in the unread queue is not absent.
+    pub fn queue_known(&self) -> bool {
+        self.queue_known
+    }
+
     /// Every message delivery to the child that failed, oldest first. A
     /// delivery that succeeded later does not undo one that failed: the work
     /// in the failed message is still lost, so each one is news (#1459).
@@ -945,14 +963,6 @@ pub(super) struct FailedDelivery<'a> {
     pub delivery: &'a serde_json::Value,
 }
 
-impl FailedDelivery<'_> {
-    /// The detail a report before #1459 folded into the child's finish
-    /// marker for this failure.
-    pub fn legacy_marker_detail(&self) -> String {
-        format!("Message {}: {}", self.request_id, self.error)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -965,6 +975,7 @@ mod tests {
         let progress = InputProgress {
             pending: BTreeMap::from([("child".to_owned(), vec!["message-1".to_owned()])]),
             deliveries: BTreeMap::new(),
+            queue_known: true,
         };
         assert_eq!(
             progress.status("child", Some(&record), ("stopping".into(), None, false)),

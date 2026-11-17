@@ -5335,36 +5335,54 @@ async fn an_older_message_that_fails_after_a_newer_one_was_delivered_is_reported
     );
 }
 
-/// Reports before #1459 folded the child's newest failed delivery into its
-/// finish marker. After an upgrade, neither that finish nor that failure is
-/// told again.
+// Hard-won: #1459: a reconcile that could not read the parent's queue told again a finish and failures reported before the upgrade.
 #[tokio::test]
-async fn a_finish_and_failure_told_by_a_report_before_the_upgrade_are_not_told_again() {
+async fn told_finishes_and_failures_are_not_told_again_whatever_the_parent_queue_shows() {
     if !isolated_parked_test(
-        "a_finish_and_failure_told_by_a_report_before_the_upgrade_are_not_told_again",
+        "told_finishes_and_failures_are_not_told_again_whatever_the_parent_queue_shows",
     ) {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
-    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
-    conversation.applied_event_ordinal = 9;
-    conversation.applied_event_digest = format!("{:064x}", 9);
-    let mut turn = finished_turn("task");
-    turn.outcome = mj_core::state::TurnOutcomeKind::Rejected {
-        message: "ACP prompt returned no session updates".into(),
-        reason: None,
+    let failed_turn = |ordinal: u64| {
+        let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+        conversation.applied_event_ordinal = ordinal;
+        conversation.applied_event_digest = format!("{ordinal:064x}");
+        let mut turn = finished_turn("task");
+        turn.completed_ordinal = ordinal;
+        turn.outcome = mj_core::state::TurnOutcomeKind::Rejected {
+            message: "ACP prompt returned no session updates".into(),
+            reason: None,
+        };
+        conversation.last_turn_outcome = Some(turn);
+        crate::database::save_materialized_session(&conversation).unwrap();
     };
-    conversation.last_turn_outcome = Some(turn);
-    crate::database::save_materialized_session(&conversation).unwrap();
+    failed_turn(9);
     let earlier = serde_json::json!({"status":"failed","error":"restart refused"});
     let newest = serde_json::json!({"status":"failed","error":"login refused"});
-    let (backend, _) = report_backend(parent_with_deliveries(&[
-        ("earlier", 1, 2, earlier.clone()),
-        ("newest", 3, 4, newest.clone()),
-    ]));
+    let with_failures = || {
+        parent_with_deliveries(&[
+            ("earlier", 1, 2, earlier.clone()),
+            ("newest", 3, 4, newest.clone()),
+        ])
+    };
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    let backend = |view: Option<ManagedSessionView>| {
+        Arc::new(ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "parent-1".into(),
+                accepted_ordinal: 30,
+                submitted: mpsc::unbounded_channel().0,
+                view,
+            })),
+            running_states(),
+            exports.clone(),
+        ))
+    };
     // What the earlier daemon stored when it told the parent of the failed
-    // child and its newest failed delivery in one report, listing both.
+    // child and its newest failed delivery in one report, listing both
+    // failures.
     let marker: mj_core::subagent::SubagentFinishIdentity =
         serde_json::from_value(serde_json::json!({
             "kind":"terminal", "state":"failed",
@@ -5389,13 +5407,46 @@ async fn a_finish_and_failure_told_by_a_report_before_the_upgrade_are_not_told_a
         Vec::new(),
     )
     .unwrap();
+    let told = || crate::database::pending_mailbox_events(10).unwrap().len();
 
-    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    // The parent's queue cannot be read yet, as after a restart. The finish is
+    // still decided, from the marker's own report, and was told; no failure
+    // is decided from a queue that was not read.
+    let unknown = backend(None);
+    unknown.reconcile_parent_reports("parent-1").await.unwrap();
+    assert!(matches!(
+        unknown
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
     assert_eq!(
-        crate::database::pending_mailbox_events(10).unwrap().len(),
+        told(),
         1,
-        "the parent was told of this finish and both failures"
+        "nothing is told again from a queue that was not read"
     );
+    // Read, the queue shows the failures the report listed beside the finish
+    // it told.
+    backend(Some(with_failures()))
+        .reconcile_parent_reports("parent-1")
+        .await
+        .unwrap();
+    assert_eq!(told(), 1, "the finish and both failures were told");
+    // A later finish is reported while the queue shows no failures, so its
+    // report lists none. When the failures show again, the earlier report
+    // still says they were told.
+    failed_turn(10);
+    backend(Some(ready_view("model")))
+        .reconcile_parent_reports("parent-1")
+        .await
+        .unwrap();
+    assert_eq!(told(), 2, "the later finish is news");
+    backend(Some(with_failures()))
+        .reconcile_parent_reports("parent-1")
+        .await
+        .unwrap();
+    assert_eq!(told(), 2, "the failures were told by the earlier report");
 }
 
 // Hard-won: #1378: a failed turn of a child that can still be prompted was indistinguishable from an unrecoverable child.

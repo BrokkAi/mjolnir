@@ -1213,6 +1213,9 @@ impl ApiBackend {
                 }))
             }
             SubagentToolAction::ListAgents => {
+                // This request was read from the parent's queue, so the queue
+                // is known here unless the parent's actor went away since; the
+                // listing then shows the mailbox's part, and decides nothing.
                 let inputs = self.subagent_input_progress(parent_session_id).await?;
                 let relations = self
                     .list_subagents(parent_session_id.to_owned())
@@ -1911,14 +1914,8 @@ impl ApiBackend {
                         &progress,
                     ),
                 );
-                let identity = report_identity(
-                    &state,
-                    output.as_deref(),
-                    finished,
-                    inputs.failed_deliveries(&id),
-                    &progress,
-                    relation.reported_finish.as_ref(),
-                );
+                let identity =
+                    finished.then(|| finish_identity(&state, output.as_deref(), &progress));
                 NotificationChildSnapshot {
                     relation,
                     progress,
@@ -1984,6 +1981,11 @@ impl ApiBackend {
         // finished, held for its facts, or its finish is reported (by an earlier
         // reconcile or by this one). Whatever its finish, every message to a
         // child that is news and failed is a notice of its own.
+        //
+        // A finish is decided without the parent's actor: its report waits in
+        // the durable outbox, and a child's park must not wait on the parent
+        // (3c8973b87). Failed deliveries are decided only from a parent queue
+        // that was read: an unread queue holds failures that are not absent.
         let mut ready = Vec::new();
         let mut failures = Vec::new();
         for child in children {
@@ -1999,8 +2001,10 @@ impl ApiBackend {
                 // turns while it waits, and handback refuses until the verdict.
                 ChildDisposition::NotNews("the child awaits its review's verdict")
             } else {
-                for failed in inputs.failed_deliveries(&id) {
-                    failures.push(failed_delivery_notice(&inputs, &child, &failed)?);
+                if inputs.queue_known() {
+                    for failed in inputs.failed_deliveries(&id) {
+                        failures.push(failed_delivery_notice(&inputs, &child, &failed)?);
+                    }
                 }
                 match &child.identity {
                     None => ChildDisposition::NotFinished,
@@ -2014,6 +2018,45 @@ impl ApiBackend {
                 }
             };
             reconciled.children.insert(id, disposition);
+        }
+        // A marker stored before #1459 can hold this very finish with a failed
+        // delivery folded into it. Its own report row says so, whatever the
+        // parent's queue shows now.
+        let folded = ready
+            .iter()
+            .filter_map(|child| {
+                let reported = child.relation.reported_finish.clone().filter(|reported| {
+                    matches!(
+                        reported,
+                        mj_core::subagent::SubagentFinishIdentity::Terminal {
+                            detail: Some(_),
+                            ..
+                        }
+                    )
+                })?;
+                Some((
+                    child.relation.child_session_id.clone(),
+                    reported,
+                    child.identity.clone()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        if !folded.is_empty() {
+            let parent = parent_id.to_owned();
+            let told = blocking("recognize finishes told before #1459", move || {
+                crate::database::finishes_told_by_folded_markers(&parent, folded)
+            })
+            .await?;
+            ready.retain(|child| {
+                let id = &child.relation.child_session_id;
+                let keep = !told.contains(id);
+                if !keep {
+                    reconciled
+                        .children
+                        .insert(id.clone(), ChildDisposition::Reported);
+                }
+                keep
+            });
         }
         // Told failures stay listed until they leave the delivery window, so
         // the store, not this snapshot, says which are news.
@@ -2513,53 +2556,44 @@ pub enum ReportNudge {
     Holding { give_up_at_ms: i64 },
 }
 
-/// What makes a child's finish new for its parent. A message delivery that
-/// failed is not part of it: it keeps the child's own state (#1381) and is told
-/// by a notice of its own, once per failed request (#1459), so a failure never
-/// hides, moves or repeats a finish, and a later delivery never hides a failure.
-///
-/// Reports before #1459 folded the child's newest failed delivery into this
-/// identity: a `Terminal` whose detail is `Message <id>: <error>`, with the
-/// child's state when it was finished. Such a marker with the child's current
-/// state and last completed turn is the finish the parent was told of, so it
-/// is kept rather than reported again after an upgrade.
-fn report_identity<'a>(
-    state: &str,
-    output: Option<&str>,
-    finished: bool,
-    mut failed_deliveries: impl Iterator<Item = subagent_input::FailedDelivery<'a>>,
-    progress: &ChildProgress,
-    reported: Option<&mj_core::subagent::SubagentFinishIdentity>,
-) -> Option<mj_core::subagent::SubagentFinishIdentity> {
-    if !finished {
-        return None;
-    }
-    if let Some(
-        reported @ mj_core::subagent::SubagentFinishIdentity::Terminal {
-            state: reported_state,
-            detail: Some(detail),
-            last_completed_ordinal,
-        },
-    ) = reported
-        && reported_state == state
-        && *last_completed_ordinal == progress.last_completed_ordinal
-        && failed_deliveries.any(|failed| *detail == failed.legacy_marker_detail())
-    {
-        return Some(reported.clone());
-    }
-    Some(finish_identity(state, output, progress))
-}
-
 /// The notice that tells a parent one message to its child was not delivered:
 /// the child's own state, whether it can take the message again, what is still
 /// queued for it, and that one failed delivery. What the child's finish says
 /// (its output, facts and failure) is its finish report's to tell.
+///
+/// A question to the oracle takes the oracle's report path, which names no
+/// session and points to `ask_oracle`; `send_message` refuses the oracle.
+/// Every worker's oracle path heads a report "answered" only for the state
+/// `completed`, so the notice carries the question's outcome as its state.
 fn failed_delivery_notice(
     inputs: &subagent_input::InputProgress,
     child: &NotificationChildSnapshot,
     failed: &subagent_input::FailedDelivery<'_>,
 ) -> Result<crate::database::FailedDeliveryNotice> {
     let id = &child.relation.child_session_id;
+    if child.relation.kind == mj_core::subagent::SubagentKind::Oracle {
+        let entry = serde_json::json!({
+            "oracle": true,
+            "child_session_id": id,
+            "task_name": child.relation.task_name,
+            "state": "not-delivered",
+            "finished": false,
+            "failure": {
+                "kind": "question_not_delivered",
+                "summary": format!(
+                    "Your question was not delivered: {}. Ask again with ask_oracle.",
+                    failed.error.trim_end_matches('.')
+                ),
+            },
+            "message_deliveries": [failed.delivery],
+            "output": null,
+            "report_dir": null,
+        });
+        return Ok(crate::database::FailedDeliveryNotice {
+            request_id: failed.request_id.to_owned(),
+            report: serde_json::from_value(entry)?,
+        });
+    }
     let mut entry = serde_json::json!({
         "child_session_id": id,
         "child_name": live_child_name(child.record.as_ref(), &child.relation.task_name),
@@ -2584,6 +2618,10 @@ fn failed_delivery_notice(
     })
 }
 
+/// What makes a child's finish new for its parent. A failed message delivery
+/// is not part of it: it keeps the child's own state (#1381) and is told by a
+/// notice of its own (#1459), so a failure never hides, moves or repeats a
+/// finish.
 fn finish_identity(
     state: &str,
     output: Option<&str>,

@@ -173,45 +173,62 @@ pub(crate) fn untold_failed_deliveries(
     notices: Vec<FailedDeliveryNotice>,
 ) -> Result<Vec<FailedDeliveryNotice>> {
     let connection = open_reader(&database_path())?;
+    untold_failed_deliveries_with(&connection, parent, notices)
+}
+
+/// The notices whose failure the parent has not been told of. A parent has
+/// nothing to be told of a child that is not its own, or of a reviewer, which
+/// its review reports.
+///
+/// A failure was told when its notice's outbox row exists, and report rows are
+/// never pruned while the parent exists. Reports before #1459 told failures
+/// only inside report rows: they folded the child's newest failure into its
+/// finish marker and listed all of the child's deliveries, so a failure that
+/// any of the child's reports listed as failed was told too. Every such row is
+/// read, not only the latest: the deliveries a reader sees can shrink and grow
+/// back (a parent queue that could not be read, a bounded window that pruning
+/// lets older messages back into), so the latest report need not list a
+/// failure that an earlier one did. The oracle's report path never showed
+/// delivery lines, so an oracle report told no failure.
+fn untold_failed_deliveries_with(
+    connection: &Connection,
+    parent: &str,
+    notices: Vec<FailedDeliveryNotice>,
+) -> Result<Vec<FailedDeliveryNotice>> {
+    let mut reported = std::collections::BTreeMap::new();
     let mut untold = Vec::with_capacity(notices.len());
     for notice in notices {
-        if !failed_delivery_told(
-            &connection,
-            parent,
-            &notice.report.child_session_id,
-            &notice.request_id,
+        let child = &notice.report.child_session_id;
+        let key = failed_delivery_key(parent, child, &notice.request_id)?;
+        if connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
+            [&key],
+            |row| row.get(0),
         )? {
-            untold.push(notice);
+            continue;
         }
+        if !reported.contains_key(child) {
+            let listed = failures_listed_in_reports(connection, parent, child)?;
+            reported.insert(child.clone(), listed);
+        }
+        if reported[child]
+            .as_ref()
+            .is_none_or(|listed| listed.contains(&notice.request_id))
+        {
+            continue;
+        }
+        untold.push(notice);
     }
     Ok(untold)
 }
 
-/// Whether the parent has been told that its message `request_id` to `child`
-/// was not delivered, or has nothing to be told: the child is not its own, or
-/// is a reviewer, which its review reports.
-///
-/// The notice's outbox row is the fact, and report rows are never pruned while
-/// the parent exists. Reports before #1459 told a failure only inside a report
-/// row: they folded the child's newest failure into its finish marker, and every
-/// report listed all of the child's deliveries. The deliveries a reader sees
-/// only grow until the oldest leave the window, so the report the child's marker
-/// names lists every failure known when it was made; a failure it lists as
-/// failed was told.
-fn failed_delivery_told(
+/// The failed requests that `child`'s reports to `parent` listed as failed,
+/// or `None` when the parent has nothing to be told of its messages to `child`.
+fn failures_listed_in_reports(
     connection: &Connection,
     parent: &str,
     child: &str,
-    request_id: &str,
-) -> Result<bool> {
-    let key = failed_delivery_key(parent, child, request_id)?;
-    if connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
-        [&key],
-        |row| row.get(0),
-    )? {
-        return Ok(true);
-    }
+) -> Result<Option<std::collections::BTreeSet<String>>> {
     let Some(stored) = connection
         .query_row(
             "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1 AND parent_session_id=?2",
@@ -220,33 +237,108 @@ fn failed_delivery_told(
         )
         .optional()?
     else {
-        return Ok(true);
+        return Ok(None);
     };
     let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
     if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
-        return Ok(true);
+        return Ok(None);
     }
-    let Some(identity) = relation.reported_finish else {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT json_extract(delivery.value, '$.request_id')
+         FROM mailbox_outbox AS report,
+              json_each(report.event_json, '$.body.report.message_deliveries') AS delivery
+         WHERE report.target_session_id = ?1
+           AND report.event_key LIKE 'subagent-finished-%'
+           AND json_extract(report.event_json, '$.body.report.child_session_id') = ?2
+           AND IFNULL(json_extract(report.event_json, '$.body.report.oracle'), 0) = 0
+           AND json_extract(delivery.value, '$.status') = 'failed'",
+    )?;
+    let listed = statement
+        .query_map(params![parent, child], |row| {
+            row.get::<_, Option<String>>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(listed.into_iter().flatten().collect()))
+}
+
+/// The children among `candidates` (a child, its stored report marker and its
+/// finish now) whose finish a report before #1459 already told. This read only
+/// spares the writer a transaction; [`enqueue_subagent_reports`] asks the same
+/// question again where it decides.
+pub(crate) fn finishes_told_by_folded_markers(
+    parent: &str,
+    candidates: Vec<(
+        String,
+        mj_core::subagent::SubagentFinishIdentity,
+        mj_core::subagent::SubagentFinishIdentity,
+    )>,
+) -> Result<std::collections::BTreeSet<String>> {
+    let connection = open_reader(&database_path())?;
+    let mut told = std::collections::BTreeSet::new();
+    for (child, reported, finish) in candidates {
+        if told_by_folded_marker(&connection, parent, &child, &reported, &finish)? {
+            told.insert(child);
+        }
+    }
+    Ok(told)
+}
+
+/// Whether `reported`, a child's stored report marker, is the one a report
+/// before #1459 wrote for `finish`. Those reports folded the child's newest
+/// failed delivery into the marker of the finish they told: a `Terminal` with
+/// the finish's state and last completed turn, whose detail is
+/// `Message <id>: <error>`. The marker's own report row, which listed that
+/// delivery as failed, says so; what the parent's queue shows now does not.
+fn told_by_folded_marker(
+    connection: &Connection,
+    parent: &str,
+    child: &str,
+    reported: &mj_core::subagent::SubagentFinishIdentity,
+    finish: &mj_core::subagent::SubagentFinishIdentity,
+) -> Result<bool> {
+    use mj_core::subagent::SubagentFinishIdentity;
+    let SubagentFinishIdentity::Terminal {
+        state,
+        detail: Some(detail),
+        last_completed_ordinal,
+    } = reported
+    else {
         return Ok(false);
     };
-    let Some(report) = connection
+    let (SubagentFinishIdentity::Turn {
+        state: finish_state,
+        ..
+    }
+    | SubagentFinishIdentity::Terminal {
+        state: finish_state,
+        ..
+    }) = finish;
+    if state != finish_state || *last_completed_ordinal != finish.completed_ordinal() {
+        return Ok(false);
+    }
+    let Some(stored) = connection
         .query_row(
             "SELECT event_json FROM mailbox_outbox WHERE event_key=?1",
-            [subagent_report_key(parent, child, &identity)?],
+            [subagent_report_key(parent, child, reported)?],
             |row| row.get::<_, String>(0),
         )
         .optional()?
     else {
         return Ok(false);
     };
-    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&report)?;
-    Ok(matches!(
-        event.body,
-        mj_core::mailbox::MailboxEventBody::SubagentFinished { report }
-            if report.message_deliveries.iter().any(|delivery| {
-                delivery["request_id"] == request_id && delivery["status"] == "failed"
-            })
-    ))
+    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&stored)?;
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = event.body else {
+        return Ok(false);
+    };
+    Ok(report.message_deliveries.iter().any(|delivery| {
+        delivery["status"] == "failed"
+            && *detail
+                == format!(
+                    "Message {}: {}",
+                    delivery["request_id"].as_str().unwrap_or_default(),
+                    delivery["error"].as_str().unwrap_or("delivery failed")
+                )
+    }))
 }
 
 /// The outbox rows and the report marker have one serialized database owner.
@@ -265,11 +357,8 @@ pub(crate) fn enqueue_subagent_reports(
     let inserted = submit_database_write("enqueue finished child reports", move |connection| {
         let transaction = connection.transaction()?;
         let mut inserted = false;
-        for notice in failures {
+        for notice in untold_failed_deliveries_with(&transaction, &parent, failures)? {
             let child = &notice.report.child_session_id;
-            if failed_delivery_told(&transaction, &parent, child, &notice.request_id)? {
-                continue;
-            }
             let key = failed_delivery_key(&parent, child, &notice.request_id)?;
             let event = mj_core::mailbox::MailboxEvent {
                 key: key.clone(),
@@ -301,6 +390,11 @@ pub(crate) fn enqueue_subagent_reports(
                 continue;
             }
             if relation.reported_finish.as_ref() == Some(&identity) {
+                continue;
+            }
+            if let Some(reported) = &relation.reported_finish
+                && told_by_folded_marker(&transaction, &parent, child_id, reported, &identity)?
+            {
                 continue;
             }
             let key = subagent_report_key(&parent, child_id, &identity)?;
