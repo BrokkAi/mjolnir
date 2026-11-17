@@ -187,6 +187,9 @@ pub(super) enum PersistenceRequest {
         session_id: String,
         epoch: u64,
         state: Box<TurnReviewState>,
+        /// The text the host settled this save's roles from, which the store
+        /// writes verbatim instead of reading the child's mutable handback.
+        reports: Vec<crate::database::AcceptedReport>,
         requests: Vec<ReviewRequest>,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -449,15 +452,18 @@ pub(super) async fn persistence_loop(
                 session_id,
                 epoch,
                 state,
+                reports,
                 requests,
                 reply,
             } => {
                 let save = environment.clone();
                 let owner = session_id.clone();
-                let result = tokio::task::spawn_blocking(move || save.save_state(&owner, &state))
-                    .await
-                    .map_err(|error| format!("review outcome save stopped: {error}"))
-                    .and_then(|result| result);
+                let result = tokio::task::spawn_blocking(move || {
+                    save.save_reviewer_outcome(&owner, &state, &reports)
+                })
+                .await
+                .map_err(|error| format!("review outcome save stopped: {error}"))
+                .and_then(|result| result);
                 let _ = reply.send(result.clone());
                 if let Err(error) = events.send(HostEvent::ReviewerOutcomeSaved {
                     session_id,

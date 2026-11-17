@@ -5449,7 +5449,22 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
         }),
         ..Default::default()
     };
-    save_turn_review_state_in(&database, owner, &state).unwrap();
+    save_reviewer_outcome_in(
+        &database,
+        owner,
+        &state,
+        vec![
+            super::AcceptedReport {
+                role: "reviewer-1".into(),
+                text: "The parser drops queued input.".into(),
+            },
+            super::AcceptedReport {
+                role: "reviewer-2".into(),
+                text: "No findings.".into(),
+            },
+        ],
+    )
+    .unwrap();
     let turn = MaterializedTurnOutcome {
         work_facts: None,
         answered_through: None,
@@ -5506,6 +5521,7 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
     )
     .unwrap();
     save_turn_review_state_in(&database, owner, &state).unwrap();
+    save_reviewer_outcome_in(&database, owner, &state, Vec::new()).unwrap();
     close_turn_review_state_in(
         &database,
         owner,

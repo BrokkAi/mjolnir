@@ -287,6 +287,8 @@ struct FakeEnvironment {
     /// Set to make reviewer resolution wait forever, the way an Auto
     /// reviewer choice can take minutes on a real host (I2-10).
     resolve_hangs: std::sync::atomic::AtomicBool,
+    /// Every report the host handed to persistence, in arrival order.
+    saved_reports: Mutex<Vec<crate::database::AcceptedReport>>,
 }
 
 struct SaveGate {
@@ -365,6 +367,7 @@ impl FakeEnvironment {
             background_holds: std::sync::atomic::AtomicUsize::new(0),
             live_holds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             resolve_hangs: std::sync::atomic::AtomicBool::new(false),
+            saved_reports: Mutex::new(Vec::new()),
         })
     }
 
@@ -659,6 +662,19 @@ impl ReviewEnvironment for FakeEnvironment {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((next, std::thread::current().id()));
         Ok(())
+    }
+
+    fn save_reviewer_outcome(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: &[crate::database::AcceptedReport],
+    ) -> Result<(), String> {
+        self.saved_reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(reports.iter().cloned());
+        self.save_state(session_id, state)
     }
 
     fn clear_interrupted(&self) -> Result<Vec<String>, String> {
@@ -1485,6 +1501,14 @@ async fn reviewer_outcome_is_saved_before_handback_acknowledgement() {
     );
     gate.release();
     finished.await.unwrap().unwrap();
+    assert_eq!(
+        environment.saved_reports.lock().unwrap().clone(),
+        vec![crate::database::AcceptedReport {
+            role: "reviewer-1".into(),
+            text: "No findings.".into(),
+        }],
+        "the store receives the exact text the host settled the role from"
+    );
     host.shutdown().await.unwrap();
 }
 

@@ -7292,7 +7292,15 @@ async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
         }),
         ..Default::default()
     };
-    crate::database::save_turn_review_state(&parent.id, &state).unwrap();
+    crate::database::save_reviewer_outcome(
+        &parent.id,
+        &state,
+        vec![crate::database::AcceptedReport {
+            role: "reviewer-1".into(),
+            text: "The parser drops queued input.".into(),
+        }],
+    )
+    .unwrap();
     crate::database::close_turn_review_state(
         &parent.id,
         &mj_core::storage::TurnReviewState {

@@ -27,6 +27,7 @@ A person can see it work by running a review, letting it finish, and running `mj
 - [x] (2026-11-17T05:40Z) Finalization follows the explicit close flag rather than the presence of an earlier row, and a replaced review is finalized from its own driver. Re-ran the database suite (264), the review-host suite (75), and workspace clippy.
 - [x] (2026-11-17T06:30Z) Review round 3: all three reviewers found that the cleared-group branch ignored the host's explicit resolution, which both production closes take. Restored it and added a regression for a review cancelled after its verdict was recorded. Re-ran `database::tests` (143), the schema reader tests (45), the review-host tests (75), and workspace clippy.
 - [x] (2026-11-17T07:20Z) Review round 4: a handback was re-read on every save, so a later one for another command could replace the accepted text. It is now copied once, when the role's outcome first appears, and the stored row keeps it; the existing regression records a later handback and asserts the retained text survives.
+- [x] (2026-11-17T08:40Z) Review round 5: narrowing the race was not a fix — the store still read a mutable row. The host now passes the exact accepted text through the persistence lane (`save_reviewer_outcome`, `AcceptedReport`), and the store writes it verbatim, never reading `subagent_handbacks`. Re-ran `database::` (265), the review-host suite (75), the API route test, and workspace clippy.
 - [ ] Commit and push.
 
 ## Surprises & Discoveries
@@ -58,7 +59,10 @@ A person can see it work by running a review, letting it finish, and running `mj
   Rationale: both production closes clear `active_group` before saving, so that branch is the one they take. A cancelled review's stored group can still carry the verdict it never delivered, and a permanent delivery failure can arrive after a clean verdict was recorded, so re-deriving the outcome from the older snapshot would contradict the host's decision. Inference is left only for a cleared group saved without a decision, which no production path produces. Round-3 review raised this; the database regression for a review cancelled after its verdict covers it.
 
 - Decision: copy a role's handback exactly once, when its outcome first appears, and never re-read it afterwards.
-  Rationale: the answer the host settled the role from is the authority. Re-reading `subagent_handbacks` on every save could pick up a newer report for another command and replace the retained output; the upsert now keeps the first non-null value (`COALESCE(review_reports.handback, excluded.handback)`). Round-4 review raised this; the database regression records a later handback and asserts the retained text is unchanged.
+  Rationale: superseded by the decision above, which removes the read entirely. It recorded the intermediate fix for round-4 review, when the store still read the child's row on the save that settled a role.
+
+- Decision: the review host passes each role's accepted text to persistence; the store never reads the child's handback row.
+  Rationale: the answer the host settled the role from is the authority, and `subagent_handbacks` keeps only the child's newest report, which another command can replace. Reading that row in the store was a second decision point on mutable data — narrowing it to a single save did not remove the race (round-5 review). `ReviewEnvironment::save_reviewer_outcome` now carries `database::AcceptedReport` values from `reviewer_finished`, where the driver decided the role's outcome, and the store writes exactly that text.
 
 - Decision: retain a handback only when the host settled the role from one (Clean or Findings).
   Rationale: `subagent_handbacks` keeps a child's newest handback, which can belong to another command. The review host rejects such a report when it decides the role, so copying the text regardless would present unrelated findings beside a failed verdict. A failed, pending, or cancelled role keeps no handback. Round-1 review raised this.
@@ -100,9 +104,11 @@ A "reviewer child" is the sub-agent session that runs one reviewing role. A "rol
 
 In `mj-controller/src/database/schema.rs`, add the compatible migration to schema revision 134 for the `review_reports` table and the `review_reports_session_destroyed` trigger that removes a session's reports with the session row. Add the same `DROP TRIGGER` and `DROP TABLE` to the test downgrade helper in `stamp_schema_version`.
 
-In `mj-controller/src/database/turn_reviews.rs`, add `FinishedReview` and `FinishedReviewRole`. `save_turn_review_state_in` loads the previous active group, syncs report rows for the current or previous group, and finalizes a group that is being replaced or cleared. `close_turn_review_state_in` passes an explicit resolution. `finished_review_in` selects the newest finished review (or the named one), reads its role rows, parses the verdict, and reads the newest `session_turn_usage` row for the child.
+In `mj-controller/src/database/turn_reviews.rs`, add `FinishedReview`, `FinishedReviewRole`, and `AcceptedReport`. `save_turn_review_state_in` loads the previous active group, syncs report rows for the current or previous group, and finalizes a group that is being replaced or cleared. `save_reviewer_outcome_in` also writes the text the host settled each role from. `close_turn_review_state_in` passes an explicit resolution. `finished_review_in` selects the newest finished review (or the named one), reads its role rows, parses the verdict, and reads the newest `session_turn_usage` row for the child. The store never reads `subagent_handbacks`.
 
-In `mj-controller/src/review_host/environment.rs`, add `close_review` with a default that calls `save_state`, and implement it with `close_turn_review_state`. In `events.rs`, carry the resolution on `PersistenceCompletion::Close` and route that completion through `close_review`. In `resolve.rs`, call `close_review` with `Completed` or `Failed` after the verdict is queued. In `roles.rs`, derive the resolution from the driver's phase and last verdict.
+In `mj-controller/src/review_host/environment.rs`, add `close_review` with a default that calls `save_state`, and `save_reviewer_outcome` with a default that does the same; implement both with `close_turn_review_state` and `save_reviewer_outcome`. In `events.rs`, carry the resolution on `PersistenceCompletion::Close` and the accepted reports on `PersistenceRequest::SaveReviewerOutcome`, and route each to its method. In `reviewer_child.rs`, build `database::AcceptedReport` entries from the answer the driver settled a role from. In `resolve.rs`, call `close_review` with `Completed` or `Failed` after the verdict is queued. In `roles.rs`, derive the resolution from the driver's phase and last verdict.
+
+The store never reads `subagent_handbacks`: the host's accepted text is the only source for a role's handback, so a later report from the same child for another command cannot become this review's output.
 
 In `mj-controller/src/database/usage.rs`, query the `subagent_sessions` relation for the child's model and effort and use them only where the projected configuration has no value.
 
@@ -189,6 +195,17 @@ In `mj-controller/src/database/turn_reviews.rs`:
         resolution: FinishedReviewResolution,
     ) -> anyhow::Result<()>;
 
+    pub struct AcceptedReport {
+        pub role: String,
+        pub text: String,
+    }
+
+    pub fn save_reviewer_outcome(
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: Vec<AcceptedReport>,
+    ) -> anyhow::Result<()>;
+
     pub fn finished_review(
         session_id: &str,
         review_id: Option<&str>,
@@ -201,6 +218,13 @@ In `mj-controller/src/review_host/environment.rs`:
         session_id: &str,
         state: &TurnReviewState,
         resolution: crate::database::FinishedReviewResolution,
+    ) -> Result<(), String>;
+
+    fn save_reviewer_outcome(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: &[crate::database::AcceptedReport],
     ) -> Result<(), String>;
 
 In `mj-controller/src/server/api/types.rs`:
@@ -216,4 +240,4 @@ In `mj-controller/src/server/api/types.rs`:
 
 The HTTP route is `GET /api/v1/sessions/{session_id}/reviews` with an optional `review` query parameter. The CLI command is `mj review show --session <id> [--review <id>] [--json]`.
 
-Revision note (2026-11-17): initial plan written alongside the implementation; all design decisions above are the ones actually used. The stale review-host test cases were found during the plan's validation step and removed there. Round-1 review added the `review_reports_session_destroyed` trigger; the plan's migration, decision log, progress, and acceptance text were updated with it. Round-2 review raised the compatibility floor to 134 and restricted retained handbacks to accepted outcomes; the context, decision log, and acceptance text were updated again. Round-3 review found that the cleared-group close ignored the host's explicit resolution; the decision log and the database regressions were updated a third time. Round-4 review found that the handback was re-read on every save; copying it once at settlement and the matching regression were recorded here.
+Revision note (2026-11-17): initial plan written alongside the implementation; all design decisions above are the ones actually used. The stale review-host test cases were found during the plan's validation step and removed there. Round-1 review added the `review_reports_session_destroyed` trigger; the plan's migration, decision log, progress, and acceptance text were updated with it. Round-2 review raised the compatibility floor to 134 and restricted retained handbacks to accepted outcomes; the context, decision log, and acceptance text were updated again. Round-3 review found that the cleared-group close ignored the host's explicit resolution; the decision log and the database regressions were updated a third time. Round-4 review found that the handback was re-read on every save; copying it once at settlement and the matching regression were recorded here. Round-5 review showed that narrowing the race was not a fix, so the accepted text now travels from the host through the persistence lane; the interfaces and dependencies section was updated with it.

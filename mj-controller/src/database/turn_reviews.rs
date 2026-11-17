@@ -1,4 +1,21 @@
+//! Durable review state and the finished report each review leaves behind.
+//!
+//! The review host owns every decision about a review, including which text
+//! settled a role. This module stores those decisions; it never re-derives one
+//! from another table, because the reviewer child's mutable rows are pruned
+//! when its role ends and can be rewritten by a later command.
+
 use super::*;
+
+/// One reviewing role's report, as the review host settled it.
+///
+/// The host passes the exact text it accepted, so a later handback from the
+/// same child cannot become this review's output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedReport {
+    pub role: String,
+    pub text: String,
+}
 
 /// One finished review and the output of each reviewing role. It is stored
 /// separately from the reviewer child sessions, which are destroyed as soon as
@@ -26,8 +43,7 @@ pub struct FinishedReviewRole {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    /// The complete text the reviewer handed back, before any verdict
-    /// formatting.
+    /// The text this role's outcome was settled from, when it handed back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handback: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,6 +113,20 @@ pub fn save_turn_review_state(session_id: &str, state: &TurnReviewState) -> Resu
     })
 }
 
+/// Records review state together with the reports the host settled roles from.
+/// A save that carries no reports keeps the text already stored.
+pub fn save_reviewer_outcome(
+    session_id: &str,
+    state: &TurnReviewState,
+    reports: Vec<AcceptedReport>,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let state = state.clone();
+    submit_database_write("save_reviewer_outcome", move |_| {
+        save_reviewer_outcome_in(&database_path(), &session_id, &state, reports)
+    })
+}
+
 /// Clears the active review and records its per-role output in the same
 /// transaction. The resolution is explicit because a cancelled review's stored
 /// group can still carry the verdict it was about to deliver.
@@ -117,7 +147,23 @@ pub(super) fn save_turn_review_state_in(
     session_id: &str,
     state: &TurnReviewState,
 ) -> Result<()> {
-    save_turn_review_state_in_with(path, session_id, state, None)
+    save_turn_review_state_in_with(path, session_id, state, None, &[])
+}
+
+/// [`save_reviewer_outcome`] at an explicit store path.
+pub(super) fn save_reviewer_outcome_in(
+    path: &Path,
+    session_id: &str,
+    state: &TurnReviewState,
+    reports: Vec<AcceptedReport>,
+) -> Result<()> {
+    save_turn_review_state_in_with(
+        path,
+        session_id,
+        state,
+        None,
+        &reports.into_iter().map(Into::into).collect::<Vec<_>>(),
+    )
 }
 
 pub(super) fn close_turn_review_state_in(
@@ -126,7 +172,16 @@ pub(super) fn close_turn_review_state_in(
     state: &TurnReviewState,
     resolution: FinishedReviewResolution,
 ) -> Result<()> {
-    save_turn_review_state_in_with(path, session_id, state, Some(resolution))
+    save_turn_review_state_in_with(path, session_id, state, Some(resolution), &[])
+}
+
+/// A role's report paired with the role it belongs to, as the store writes it.
+type StoredReport = (String, String);
+
+impl From<AcceptedReport> for StoredReport {
+    fn from(report: AcceptedReport) -> Self {
+        (report.role, report.text)
+    }
 }
 
 fn save_turn_review_state_in_with(
@@ -134,6 +189,7 @@ fn save_turn_review_state_in_with(
     session_id: &str,
     state: &TurnReviewState,
     close: Option<FinishedReviewResolution>,
+    reports: &[StoredReport],
 ) -> Result<()> {
     let mut connection = open(path)?;
     let transaction = connection.transaction()?;
@@ -143,7 +199,14 @@ fn save_turn_review_state_in_with(
     } else {
         Vec::new()
     };
-    record_review_reports(&transaction, session_id, previous.as_ref(), state, close)?;
+    record_review_reports(
+        &transaction,
+        session_id,
+        previous.as_ref(),
+        state,
+        close,
+        reports,
+    )?;
     save_turn_review_state_with(&transaction, session_id, state)?;
     let mut queued = false;
     if !events.is_empty() {
@@ -189,15 +252,19 @@ fn previous_active_group(
         .context("parse previous active review group")
 }
 
-/// Keeps the durable per-role report in step with review state. Handbacks are
-/// copied while the reviewer child still has one, so destroying the child and
-/// pruning its report cannot remove the reviewed output.
+/// Keeps the durable per-role report in step with review state.
+///
+/// `reports` carries the text the host settled this save's roles from. The
+/// store writes exactly that and nothing else: it never reads the reviewer
+/// child's mutable handback row, whose latest entry can belong to another
+/// command and would pair unrelated text with a settled verdict.
 fn record_review_reports(
     connection: &Connection,
     session_id: &str,
     previous: Option<&ActiveReviewGroup>,
     state: &TurnReviewState,
     close: Option<FinishedReviewResolution>,
+    reports: &[StoredReport],
 ) -> Result<()> {
     let current = state.active_group.as_ref();
     let same = match (previous, current) {
@@ -209,10 +276,7 @@ fn record_review_reports(
     // state carries: the cleared one when there is none, otherwise the current
     // one. A review a successor displaced has only its own driver to answer.
     if let Some(previous) = previous.filter(|_| !same) {
-        // Its own earlier group is not read here: a row that already holds a
-        // handback never takes another one, so only a review whose roles
-        // settled without any intervening save copies text now.
-        sync_review_report(connection, session_id, previous, &BTreeSet::new())?;
+        sync_review_report(connection, session_id, previous, &[])?;
         let resolution = match current {
             None => previous_resolution(previous, close),
             Some(_) => inferred_resolution(previous),
@@ -220,8 +284,7 @@ fn record_review_reports(
         finalize_review_report(connection, session_id, previous, resolution)?;
     }
     if let Some(current) = current {
-        let settled = newly_settled(if same { previous } else { None }, current);
-        sync_review_report(connection, session_id, current, &settled)?;
+        sync_review_report(connection, session_id, current, reports)?;
         // The close decision, not the presence of an earlier row, decides that
         // this review is finished: a first save may already be it.
         if let Some(resolution) = close {
@@ -229,47 +292,6 @@ fn record_review_reports(
         }
     }
     Ok(())
-}
-
-/// Roles whose accepted handback this save may copy: those that just settled.
-///
-/// The text the review used is the authority, so it is copied once, when the
-/// role's outcome first appears, and the stored row keeps it afterwards. An
-/// empty set means the review has no earlier saved state, so any role with an
-/// accepted outcome is new. A role that a successor review displaced does not
-/// qualify: its successor's close decision is not its own.
-fn newly_settled(
-    previous: Option<&ActiveReviewGroup>,
-    current: &ActiveReviewGroup,
-) -> BTreeSet<String> {
-    current
-        .driver
-        .roles
-        .iter()
-        .filter(|slot| {
-            let accepted = matches!(
-                slot.outcome,
-                Some(
-                    mj_core::review::verdict::ReviewVerdict::Clean
-                        | mj_core::review::verdict::ReviewVerdict::Findings { .. }
-                )
-            );
-            if !accepted {
-                return false;
-            }
-            match previous.and_then(|previous| {
-                previous
-                    .driver
-                    .roles
-                    .iter()
-                    .find(|prior| prior.role == slot.role)
-            }) {
-                Some(prior) => prior.outcome.is_none(),
-                None => true,
-            }
-        })
-        .map(|slot| slot.role.clone())
-        .collect()
 }
 
 /// The resolution for a review that is being cleared. The host's explicit
@@ -309,7 +331,7 @@ fn sync_review_report(
     connection: &Connection,
     session_id: &str,
     group: &ActiveReviewGroup,
-    settled: &BTreeSet<String>,
+    reports: &[StoredReport],
 ) -> Result<()> {
     let now = mj_core::clock::epoch_millis();
     for (ordinal, slot) in group.driver.roles.iter().enumerate() {
@@ -327,13 +349,10 @@ fn sync_review_report(
         let profile = reviewer.map_or("", |reviewer| reviewer.profile.as_str());
         let model = reviewer.and_then(|reviewer| reviewer.main.model.as_deref());
         let effort = reviewer.and_then(|reviewer| reviewer.main.effort.as_deref());
-        // An empty set is "no earlier state", so every accepted outcome is new.
-        let copy = settled.is_empty() || settled.contains(&slot.role);
-        let handback = if copy {
-            accepted_handback(connection, child, slot)?
-        } else {
-            None
-        };
+        let handback = reports
+            .iter()
+            .find(|(role, _)| role == &slot.role)
+            .map(|(_, text)| text.as_str());
         let verdict = slot
             .outcome
             .as_ref()
@@ -355,7 +374,7 @@ fn sync_review_report(
                  END,
                  model = COALESCE(excluded.model, review_reports.model),
                  effort = COALESCE(excluded.effort, review_reports.effort),
-                 handback = COALESCE(review_reports.handback, excluded.handback),
+                 handback = COALESCE(excluded.handback, review_reports.handback),
                  verdict = COALESCE(excluded.verdict, review_reports.verdict),
                  updated_at_ms = excluded.updated_at_ms",
             params![
@@ -375,37 +394,6 @@ fn sync_review_report(
         )?;
     }
     Ok(())
-}
-
-/// The text a role's own outcome was settled from, if the host accepted a
-/// handback for it. Only Clean and Findings outcomes are accepted reports: a
-/// failed role ended without one, and a pending or cancelled role was never
-/// settled. `subagent_handbacks` keeps the newest handback of a child, which
-/// can belong to another command, so a failed role's stored text is not this
-/// review's output.
-fn accepted_handback(
-    connection: &Connection,
-    child: Option<&str>,
-    slot: &mj_core::review::driver::ReviewerOutcomeSlot,
-) -> Result<Option<String>> {
-    let accepted = matches!(
-        slot.outcome,
-        Some(
-            mj_core::review::verdict::ReviewVerdict::Clean
-                | mj_core::review::verdict::ReviewVerdict::Findings { .. }
-        )
-    );
-    let Some(child) = child.filter(|_| accepted) else {
-        return Ok(None);
-    };
-    Ok(connection
-        .query_row(
-            "SELECT handback_message FROM subagent_handbacks WHERE child_session_id=?1",
-            [child],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten())
 }
 
 fn finalize_review_report(

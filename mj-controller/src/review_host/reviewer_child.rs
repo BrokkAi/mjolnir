@@ -612,10 +612,33 @@ impl HostState {
         };
         let prior = slot.state.clone();
         let prior_driver = slot.driver.snapshot();
+        let mut reports = Vec::new();
         let requests = match report {
             ReviewerReport::Answer(answer) => {
-                slot.driver
-                    .role_turn_completed(&command_id, &child_session_id, &answer)
+                let requests =
+                    slot.driver
+                        .role_turn_completed(&command_id, &child_session_id, &answer);
+                // The driver owns whether this answer settled the role. Only a
+                // clean or findings outcome used the text, and that text is
+                // what the store must record.
+                let settled = matches!(
+                    slot.driver
+                        .roles()
+                        .into_iter()
+                        .find(|row| row.role == role)
+                        .map(|row| row.state),
+                    Some(
+                        mj_review::driver::RoleState::Clean
+                            | mj_review::driver::RoleState::Findings
+                    )
+                );
+                if settled {
+                    reports.push(crate::database::AcceptedReport {
+                        role: role.clone(),
+                        text: answer,
+                    });
+                }
+                requests
             }
             ReviewerReport::Failed(reason) => {
                 slot.driver
@@ -640,6 +663,7 @@ impl HostState {
             session_id: session_id.clone(),
             epoch,
             state: Box::new(state),
+            reports,
             requests,
             reply,
         };
