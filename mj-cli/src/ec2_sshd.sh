@@ -11,11 +11,11 @@ if [ -z "$ssh_unit" ]; then
     exit 1
 fi
 systemctl start "$ssh_unit"
-# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).
+# OpenSSH defaults (MaxSessions 10, MaxStartups 10:30:100) refuse relay sessions at about 40 containers.
 mkdir -p /etc/ssh/sshd_config.d
 cat > /etc/ssh/sshd_config.d/60-mj-mux.conf <<'MJ_SSHD'
 # mj multiplexes worker relay sessions over shared SSH connections.
-# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).
+# OpenSSH defaults (MaxSessions 10, MaxStartups 10:30:100) refuse relay sessions at about 40 containers.
 MaxSessions 200
 MaxStartups 100:30:300
 MJ_SSHD
