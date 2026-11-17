@@ -1,0 +1,13 @@
+{
+  "jobs": 34,
+  "diffs": 17,
+  "outputs": 102,
+  "unique_sessions": 102,
+  "per_diff_arm": 3,
+  "actual_model": "gpt-6.1-terra",
+  "actual_effort": "high",
+  "actual_profile": "codex4",
+  "inventory_problems": 0,
+  "missing_total_token_reports": [],
+  "all_final_brief_hashes_unchanged": true
+}

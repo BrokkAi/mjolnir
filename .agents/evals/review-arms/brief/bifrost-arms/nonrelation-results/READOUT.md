@@ -1,0 +1,15 @@
+# Bifrost non-relation reading
+
+On the 13 non-relation known bugs, no brief caught **13/39 (33.3%)**, versus **15/39 (38.5%)** with blind Sol briefs: **+5.1 percentage points**, with a paired 95% bootstrap interval **0.0 to +12.8**. Two diffs improve by one catch each (model-overload uncertainty and implicit Option unwrapping); the other 11 tie. This is a secondary reading with an interval touching zero.
+
+The registered primary relation reading is unchanged: 9/51 versus 4/51, −9.8 points (95% interval −19.6 to −2.0). Across all 30 known bugs, descriptive totals are 22/90 (24.4%) without briefs versus 19/90 (21.1%) with briefs. These pooled totals do not replace the primary or introduce a new pass criterion. The study is not complete until the 40 ordinary controls are evaluated.
+
+All 78 reviewer outputs had two agreeing Sol/high catch labels. The 28 required handchecks were read in full against the frozen match rules and near-misses. The parent recorded independent blind decisions before reading the single Sol/high proposal; both accepted all 28 as caught. Decisions were sealed before private arm attribution and scoring. No cases, briefs, match rules, pass bars or original judgments were changed.
+
+All 13 original briefs were missed by both semantic leak judges; no wording edits were made. Three actual Terra/high reviewers per arm/diff produced 78 unique outputs. All 13 writers, two leak judges, 26 carriers, four catch judges and the handcheck assessor ended or are API-confirmed suspended. There were no failed, substituted or repeated review cells.
+
+Known recorded API-equivalent cost is **$8.232558928**, incomplete because carrier usage coverage is partial; full cost remains unknown. Components: writers $3.237596, leak judges $0.2585964, known recorded review cost $4.019188128 (reviewers $3.2510356 plus partial carrier reports), catch judges $0.5597 and handcheck $0.1574784. These are estimates, not subscription charges, and exclude parent/helper orchestration and earlier corpus/census/auxiliary work. Missing carrier usage is not zero, and persisted unfinished usage does not mean a worker is live.
+
+All current jobs use the same image, balanced 13 per arm; the prior relation stage had a different balanced mixture. Reviewer tool transcripts/latency are unavailable after normal role destruction, so no clean audit or zero latency is inferred. Source/history attributions remain confirmed; no new runtime reproductions were run. The MCP timeout census uncertainty remains recorded and that case remains included (both arms missed).
+
+The raw scoring file's legacy expected_catches_of_30 field is not normalized for a 13-item subset and is unused here. Per-case counts, source/found-by strata, raw paired judgments, unchanged proposal, independent parent notes, sealed decisions and hash lineage are preserved alongside this report. Unknown found-by metadata remains separate from known-empty labels. Ordinary controls follow next under the existing 25% per-launch floor and single pooled Control2 verification method.

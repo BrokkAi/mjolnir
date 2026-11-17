@@ -1,0 +1,85 @@
+{
+  "verdicts": [
+    {
+      "output_id": "53bac6a7c4d4dce7",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "partial",
+      "matching_finding": "MCP constructs evaluation options without an inconclusive override ... inheriting `Pass` ... it maps the outcome to `clean`, `finding`, or `unreliable` and returns the report alongside that status",
+      "rationale": "The output connects the new default Pass option to the MCP status consumer, but never identifies the consequential false clean label for an exit-zero inconclusive report. This is relevant tracing rather than a complete explanation of the faulty status projection, so the lower partial label applies.",
+      "finding_count": 17,
+      "confidence": "medium",
+      "judge": "A"
+    },
+    {
+      "output_id": "db656f7403280806",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "partial",
+      "matching_finding": "Empty open lookups are compared against an inventory built from active summaries with result contracts, keyed by language, member, and parameter count.",
+      "rationale": "The output identifies the broad applicability inventory and separately traces empty Open lookups to an Incomplete diagnostic. It never explains the lost receiver/package distinction or why an unrelated typed receiver poisons receiverless package-contract discovery, leaving the essential applicability defect unidentified.",
+      "finding_count": 13,
+      "confidence": "medium",
+      "judge": "A"
+    },
+    {
+      "output_id": "b8c28f04c5b5ce31",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "partial",
+      "matching_finding": "An empty vector from the new helper participates in the enclosing timeline result; when the combined result is empty, identifier resolution returns a namespace module if available, otherwise a `no_indexed_definition` diagnostic, before reaching the later same-file fallback",
+      "rationale": "The output traces event anchoring, declaration ranges, and the empty-result path to no_indexed_definition. It omits the decisive fact that repeated assignments share a declaration represented at the final spelling, so it does not explain why a valid earlier binding is rejected.",
+      "finding_count": 13,
+      "confidence": "medium",
+      "judge": "A"
+    },
+    {
+      "output_id": "6bb26f3b6b34cbd1",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "The hierarchy helper collects `ImplementedBy`/`OverriddenBy` targets for that outcome, otherwise constructs an empty vector, and returns `Some(targets)` in both cases ... Both empty-vector routes enter the new `Some(overrides) if overrides.is_empty()` arm",
+      "rationale": "The output explicitly connects unproven-family emptiness to the new absence-proof branch, then traces the resulting gap exclusion and its downstream completeness effects. Together these observations identify the uncertainty-versus-proven-empty confusion that unsoundly discharges dispatch incompleteness.",
+      "finding_count": 13,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "53bac6a7c4d4dce7",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "partial",
+      "matching_finding": "MCP constructs evaluation options without an inconclusive override",
+      "rationale": "The output connects the newly inherited Pass default to MCP status mapping, but never identifies the erroneous clean label for an inconclusive run. This locates the relevant consumer without explaining the false-clean behavior required for caught.",
+      "finding_count": 17,
+      "confidence": "medium",
+      "judge": "B"
+    },
+    {
+      "output_id": "db656f7403280806",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "partial",
+      "matching_finding": "Empty open lookups are compared against an inventory built from active summaries with result contracts, keyed by language, member, and parameter count.",
+      "rationale": "The output identifies the broad applicability inventory and traces empty Open lookups to query incompleteness. It does not identify the missing receiver/package distinction or explain why an unrelated receiver method incorrectly poisons discovery for a receiverless package contract, so the full matching rule is not met.",
+      "finding_count": 13,
+      "confidence": "medium",
+      "judge": "B"
+    },
+    {
+      "output_id": "b8c28f04c5b5ce31",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "partial",
+      "matching_finding": "An empty vector from the new helper participates in the enclosing timeline result; when the combined result is empty, identifier resolution returns a namespace module if available, otherwise a `no_indexed_definition` diagnostic",
+      "rationale": "The output traces the event-bound declaration filter and its empty result to no_indexed_definition. It omits the essential repeated-assignment identity behavior: the shared declaration is represented at a later spelling, so an already visible earlier binding is wrongly rejected.",
+      "finding_count": 13,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "6bb26f3b6b34cbd1",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "Both empty-vector routes enter the new `Some(overrides) if overrides.is_empty()` arm",
+      "rationale": "The output explicitly identifies that both proven-empty and unproven member families return Some(empty) and enter the new absence arm. Its subsequent gap-filter and binding-completeness discussion connects that lost distinction to unsound discharge of dynamic-dispatch uncertainty.",
+      "finding_count": 13,
+      "confidence": "high",
+      "judge": "B"
+    }
+  ],
+  "missing": []
+}

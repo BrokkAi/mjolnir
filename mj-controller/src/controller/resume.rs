@@ -1,5 +1,6 @@
 //! Resuming a stopped session onto a profile and target.
 
+use mj_core::targets::SshTrafficClass;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -826,6 +827,7 @@ impl Controller {
                         execute_checked(
                             syncing,
                             targets::command_on_locator(
+                                SshTrafficClass::Control,
                                 &backend,
                                 session_id,
                                 vec!["mkdir".into(), "-p".into(), worker_root.clone()],
@@ -1885,7 +1887,8 @@ impl Controller {
         // requests, including probing the platform of an existing SSH host. A resume
         // that could never install a worker fails here rather than after all
         // that work has been thrown away.
-        super::worker_binary::preflight_worker_binary(&target_template, executor)?;
+        let worker_target = super::backend::session_target(&self.config, &previous.bundle_id, target_id, executor)?;
+        super::worker_binary::preflight_worker_binary(&worker_target, executor)?;
         let native_continuity = self.config.native_continuity(
             archive_manifest.session.harness_kind,
             &archive_manifest.session.profile_id,

@@ -1,5 +1,6 @@
 //! Registration and ownership rules for child sessions on a parent's target.
 
+use mj_core::targets::SshTrafficClass;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -89,6 +90,7 @@ fn prepare_report_dir(
     exclude_in: Option<&str>,
 ) -> Result<String> {
     let command = mj_core::targets::command_on_locator(
+        SshTrafficClass::Control,
         backend,
         session_id,
         prepare_report_dir_argv(directory, exclude_in),
@@ -164,6 +166,7 @@ impl SubagentReportCleanup {
         ];
         argv.extend(self.child_ids.iter().cloned());
         let command = mj_core::targets::command_on_locator(
+            SshTrafficClass::Control,
             &self.backend,
             &self.session_id,
             argv,

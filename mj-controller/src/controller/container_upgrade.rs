@@ -202,11 +202,13 @@ impl Controller {
                 "The retained workspace was kept but no recovery copy holds the missing parent history. Supply a recovery archive and retry Resume."
             );
         }
-        let configured = self
-            .config
-            .targets
-            .get(&record.target_template_id)
-            .context("legacy target configuration missing")?;
+        let resolved = backend::session_target(
+            &self.config,
+            &record.bundle_id,
+            &record.target_template_id,
+            executor,
+        )?;
+        let configured = &resolved;
         let mut target = backend::backend_target(
             configured,
             mj_core::state::applied_container_settings(&record).resource_allocation,
@@ -352,11 +354,13 @@ impl Controller {
             .as_ref()
             .context("session has no retained container")?;
         let backend = backend_locator(locator, session, &self.config)?;
-        let template = self
-            .config
-            .targets
-            .get(&session.target_template_id)
-            .context("session target configuration is missing")?;
+        let resolved = backend::session_target(
+            &self.config,
+            &session.bundle_id,
+            &session.target_template_id,
+            executor,
+        )?;
+        let template = &resolved;
         let container = match template {
             TargetTemplate::LocalPodman { container }
             | TargetTemplate::LocalDocker { container }
@@ -367,10 +371,11 @@ impl Controller {
         };
         let workspace = targets::container_workspace_root(session.container_workspace.as_deref());
         let root = targets::worker_root(&backend, session_id)?;
+        let image = mj_core::state::ContainerSettings::upgrade_image(session, &container.image);
         let plan = targets::inspect_retained_container(
             &backend,
             session_id,
-            &container.image,
+            image,
             operation_id,
             Path::new(&workspace),
             Path::new(&root),
@@ -396,8 +401,7 @@ impl Controller {
             .as_mut()
             .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
         {
-            settings.default_image =
-                Some((image == mj_core::config::DEFAULT_CONTAINER_IMAGE).then(|| image.to_owned()));
+            settings.default_image = Some(mj_core::state::ContainerSettings::default_marker(image));
         }
         self.persist_session_state(session_id)
     }

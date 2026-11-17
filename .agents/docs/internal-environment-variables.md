@@ -64,3 +64,11 @@ successful response, existing behavior is preserved. Requests contain bounded
 recent user and assistant text, tool titles and activity facts. Running-turn
 questions produce `awaiting_input`; completed replies awaiting background work
 publish process-local `Expecting` activity without blocking checkpoints.
+
+`MJ_SESSION_PROJECT_TOOLS_ROOTS` is the controller-authored JSON array of
+repository checkout paths for container targets only (including Nitro).
+`mj-worker/src/worker_runtime/project_tools.rs` owns its parser and removes it
+before harness launch; it enables the post-clone mise preparation step. It is
+an environment handoff rather than a new launch-config field because older
+workers deny unknown launch fields. An older worker ignores this variable and
+continues its existing preparation without installing project tools.

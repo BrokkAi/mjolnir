@@ -209,12 +209,15 @@ pub(super) async fn prepare(
         .context("invalid completion timestamp")?
         .with_timezone(&chrono::Local)
         .fixed_offset();
-    let explicit = turn
+    let stated = turn
         .diagnostic
         .as_ref()
         .and_then(|d| d.reset_at.as_deref())
         .and_then(|text| crate::quota::normalize_reset_at(text, now))
-        .map(|t| t.timestamp())
+        .map(|t| crate::quota::StatedReset {
+            at: t.timestamp(),
+            relative: false,
+        })
         .or_else(|| {
             message(snapshot)
                 .and_then(|text| crate::quota::message_reset(&text, turn.completed_at_ms))
@@ -240,7 +243,7 @@ pub(super) async fn prepare(
         })
         .collect();
     let now_ms = mj_core::clock::epoch_millis();
-    let reset = crate::quota::recovery_reset(&windows, explicit, now_ms / 1000, consumed);
+    let reset = crate::quota::retry_deadline(&windows, stated, now_ms / 1000, consumed);
     if reset.is_none()
         && let Some(wait) = wait
     {
@@ -267,7 +270,7 @@ pub(super) async fn prepare(
     if crate::quota::long_window_stop(
         &windows,
         model.as_deref().unwrap_or(""),
-        explicit,
+        stated.map(|stated| stated.at),
         reset,
         now_ms / 1000,
     ) {

@@ -23,6 +23,10 @@ const MANAGED_NODE_DIR: &str = "node";
 /// compatible runtime. Keep this in lockstep with `assets/node/runtime.json`.
 pub const NODE_VERSION: &str = "24.22.1";
 
+/// Keep in lockstep with `assets/mise/runtime.json`. Static musl binary hashes:
+/// https://github.com/jdx/mise/releases/download/v2026.11.9/SHASUMS256.txt
+pub const MISE_VERSION: &str = "2026.11.9";
+
 /// The install receipt written by the worker and checked by managed clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

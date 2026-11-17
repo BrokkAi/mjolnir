@@ -73,6 +73,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         .env("CLAUDE_CONFIG_DIR", &claude_home))?;
 
     let mut config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -197,6 +198,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     let repository = std::env::var("MJ_IMPORT_E2E_KIMI_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -328,6 +330,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     let repository = std::env::var("MJ_IMPORT_E2E_GROK_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -566,6 +569,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     let repository = std::env::var("MJ_IMPORT_E2E_CODEX_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),

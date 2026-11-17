@@ -1,0 +1,28 @@
+{
+  "id": "ruby-constant-navigation-climbs-to-terminal",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "b57220583525a5690702f6d15a84431cf173f0db8bcc5acd18df423328a914c5",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes focused reference extraction and Ruby constant lookup, but never identifies climbing the entire scope_resolution chain or resolving a nonterminal selection to the terminal constant.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes focus bounds and Ruby constant resolution, but does not identify ascent through the full scope_resolution chain or navigation from a selected prefix to the terminal constant.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

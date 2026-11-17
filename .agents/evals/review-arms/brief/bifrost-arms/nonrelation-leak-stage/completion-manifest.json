@@ -1,0 +1,544 @@
+{
+  "recorded_epoch": 1794897720.5269983,
+  "scope": "nonrelation13round0 semantic leak only; stop before rewrite/review/otherroles",
+  "label_counts": {
+    "missed": 13
+  },
+  "briefs": 13,
+  "verdicts": 26,
+  "exact_A_B_and_hash_and_bug_mapping": "pass",
+  "judge_agreement": 13,
+  "rows": [
+    {
+      "id": "model-overload-unknown-competitor-discarded",
+      "label": "missed",
+      "brief_sha256": "095d969883c542bed9410af52914b2bfb949d4def86d2dd7f75233490b58de5d",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes model selection and conversion projection, but never identifies ignored unresolved competitors or the resulting unjustified singleton selection. Its code-path observations do not identify a defect.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes model selection callers and error propagation but never identifies unresolved competitors being discarded when one candidate succeeds. It asserts no defect in overload certainty.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "rust-while-let-binder-body-field",
+      "label": "missed",
+      "brief_sha256": "2fc693cd9b11e6e155c8d3f2c0ffebe0ae78d1fe0052f51f64a63a5de1121490",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output traces binding activation into lexical binding rows, but does not identify the body/consequence field mismatch for while-let or the resulting omitted binder. Merely citing the activation code does not satisfy the match rule.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output mentions consequence activation intervals and the binding hook, but does not identify the while_expression body/consequence distinction or the resulting missing while-let binder. Location overlap alone does not meet the partial bar.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "brief_sha256": "5ed703879717faed99c5b8cf3228d2e1611b67d6aec00bc92cc2f935ac04c5e2",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output says the visitor registers properties as fields, but never identifies callable object members as wrongly classified or connects that classification to missing function results. This is a description of indexing, without the required defect or related faulty symptom.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes object properties being registered as fields, but never distinguishes callable members or identifies their incorrect symbol kind or omission from function results. It therefore describes implementation without identifying the defect.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "brief_sha256": "7b158e915a5c0924b3390ab08ca6c6a7d5a009d6c516da24a6658d4bb8d874ea",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes epoch publication and generation handling, but never identifies an Immediate writer reservation on the matching-epoch path or contention behind unrelated writers.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output discusses epoch comparison and generation publication but does not identify the unconditional Immediate transaction or matching-epoch contention with unrelated writers.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "maintainability-file-cap-missing-truncated",
+      "label": "missed",
+      "brief_sha256": "276030a90d12253407794e4642bb62b69b203bb4c114801f843e1bfb52aeb425",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes report caps and serialization, but never identifies the max_files early break returning truncated=false when further distinct files remain. Its observations about rendered line numbers concern a different behavior and do not state a defect finding.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes cap parameters and the truncated result field, but does not identify the max_files early break or unreported omission of additional distinct files. Its observation about displayed line endpoints concerns a different behavior.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "brief_sha256": "08f91672bc0d6e8e710e0b86e91130800a27cc844d86676a0fd708e10ff0c8df",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes Rust declarations and shared indexing, but does not identify missing traversal of named fields inside enum struct variants or the resulting absent field declarations.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes Rust declaration indexing and parent-child storage but never identifies missing descent into named fields of enum struct variants.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "brief_sha256": "fee35958a9e49ce133873216fbb38f194adddf808b986fc127e0d4865f3a79f9",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output mentions importer candidates coming from files_mentioning, but never identifies terminal-module-name widening to unrelated code mentions or the expensive forward-edge verification it causes. It reports no related faulty symptom.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output notes that importer candidates use files_mentioning, but does not identify terminal-module-name widening to unrelated code mentions or the resulting expensive forward-edge verification. Naming the relevant query alone does not establish a related defective symptom.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "brief_sha256": "311f928ee162819f457e54d5c3ac362cd69fdeefba4920ecbf5b69fa9da66623",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output traces non-dropping local classification into scope-exit cleanup, but never identifies item macros generating an unseen impl Drop or the consequent unsound plain-struct classification and omitted cleanup uncertainty.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output traces non-dropping local classification into cleanup analysis, but never identifies item macros generating impl Drop or the resulting unsound plain_structs proof. A normal data-flow description does not identify the missing cleanup uncertainty.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "brief_sha256": "f174b8fb3a7e320a2874d21350336c249de05b7c15347c951dcbc83399c78aa1",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes progress reporting and request execution, but never identifies a timed-out notification remaining queued and being delivered after the response. It does not connect notification cancellation to request lifetime.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes progress reporting and request execution but does not discuss notify_progress timing out after enqueue or notifications surviving the response boundary.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "csharp-single-file-namespace-prunes-usages",
+      "label": "missed",
+      "brief_sha256": "143c9d4f03821fb7581062cdb4d28dc8cc5045dd26d9206388b85eb806b3238a",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes namespace_of_file and candidate routing, but never identifies multiple namespace blocks in one file or omitted usages in a later namespace. These contextual observations do not identify the required defect.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output mentions namespace_of_file and candidate routing, but never identifies multiple namespace blocks or later-namespace references being pruned from candidate files and usage results.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "brief_sha256": "8b87487a3f46e445fd94f0a8e2561506bbc5b873d29dd221370cec22164eb7f1",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes Rust role predicates and resolution, but never identifies associated constants being admitted into bare current-module value lookup or competing with a module constant.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes Rust reference roles and namespace predicates, but does not identify associated constants being admitted to bare current-module value lookup or competing with module constants.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "missed",
+      "brief_sha256": "b57220583525a5690702f6d15a84431cf173f0db8bcc5acd18df423328a914c5",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes focused reference extraction and Ruby constant lookup, but never identifies climbing the entire scope_resolution chain or resolving a nonterminal selection to the terminal constant.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes focus bounds and Ruby constant resolution, but does not identify ascent through the full scope_resolution chain or navigation from a selected prefix to the terminal constant.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "id": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "brief_sha256": "41a446fb937c7175aa35f1b290020c86c03cedcffcd2065744638a61a7e45429",
+      "judge_verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes container return-type extraction and explicit unwrap inference, but never identifies unconditional Option payload unwrapping for ordinary calls or invalid field navigation on the resulting receiver.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output mentions container return-type extraction and explicit unwrap inference, but never identifies unconditional Option payload inference for an ordinary call or invalid payload-field navigation.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ],
+  "flagged": [],
+  "sessions": [
+    {
+      "judge": "A",
+      "sid": "0bcf32de98ba9b7511ce1a406ed5ce06",
+      "actual_profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-nonrelation-leak-0-batch-0-A-0bcf32de98ba",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 179,
+        "completed_at_ms": 1794897624993,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-leak-driver/transcript-0bcf32de98ba9b7511ce1a406ed5ce06.json",
+      "transcript_pages": 1,
+      "transcript_complete": true,
+      "tool_requests": 8,
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-leak-driver/usage-0bcf32de98ba9b7511ce1a406ed5ce06.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 276224,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 42554,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 1502,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 179,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 320280,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 276224,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 42554,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 1502,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 179,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 320280,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 1277504000,
+      "cost_usd_estimated_api": 0.1277504
+    },
+    {
+      "judge": "B",
+      "sid": "40f6df64e23936f9f6eff0492806c38f",
+      "actual_profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-nonrelation-leak-0-batch-0-B-40f6df64e239",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 174,
+        "completed_at_ms": 1794897626721,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-leak-driver/transcript-40f6df64e23936f9f6eff0492806c38f.json",
+      "transcript_pages": 1,
+      "transcript_complete": true,
+      "tool_requests": 9,
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-leak-driver/usage-40f6df64e23936f9f6eff0492806c38f.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 227840,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 45666,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 1673,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 284,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 275179,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 227840,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 45666,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 1673,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 284,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 275179,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 1308460000,
+      "cost_usd_estimated_api": 0.130846
+    }
+  ],
+  "normal_suspensions": 2,
+  "cost_usd_estimated_api": 0.2585964,
+  "known_cost_usd_estimated_api": 0.2585964,
+  "missing_cost_sids": [],
+  "usage_totals_sum": {
+    "cached_read_tokens": 504064,
+    "cached_write_tokens": 0,
+    "input_tokens": 88220,
+    "output_tokens": 3175,
+    "thought_tokens": 463,
+    "total_tokens": 595459
+  },
+  "usage_coverage_sum": {
+    "recorded_turns": 2,
+    "full_turn_reports": 2,
+    "last_request_reports": 0,
+    "unspecified_reports": 0,
+    "missing_reports": 0,
+    "unfinished_turns": 0,
+    "provider_cost_turns": 0,
+    "estimated_cost_turns": 2,
+    "missing_cost_turns": 0
+  },
+  "usage_accounting": "Oneglobalrootonce/SID,completepages; missingcostnull/notfree;APIequivalentnotsubscriptioncharge;noquota-to-dollarconversion",
+  "quota_before": {
+    "remaining_min_percent": 81,
+    "refreshed_epoch": 1794897172,
+    "age_seconds": 350.18614768981934
+  },
+  "quota_after": {
+    "remaining_percent": [
+      81
+    ],
+    "refreshed_epoch": 1794897172,
+    "age_seconds": 548.5272078514099,
+    "refresh_after_completion": false
+  },
+  "original13bytes_preserved": true,
+  "registered_order_corpus_runtime_unchanged": true,
+  "old17md_leakrecords_and_existing_results_unchanged": true,
+  "protected_file_count": 149,
+  "round_key_sha256": "4551ce04b40cfbbbde1bef4541868cbaf38e9aafd7d0da1263431d26714901f9",
+  "raw_verdicts_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0/workflow-out.json",
+  "raw_verdicts_sha256": "e5151d7d40ae78edc4b088c78aadff706b63c44a27855d7df326fc32c96cbe14",
+  "per_judge_outputs": {
+    "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0/out/verdicts-0-B.json": "f6fd13deee6731e86b0d63e1df50403ccef3441b35dd1512c540b7ec9311f3dd",
+    "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0/out/verdicts-0-A.json": "bdfea4573f8e70fcc6e7829bcfc8e620f1358e0aad345488e2056af7e7f92334"
+  },
+  "verify_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794897645.2090464
+  },
+  "collect_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794897645.302217
+  },
+  "stop_boundary": "No rewrite-build/editor/publication/reviews/catchjudges/ordinaryroles, no operatorlabels/substitutions/retries/code/config/build/test/commits."
+}

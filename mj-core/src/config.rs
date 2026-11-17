@@ -46,7 +46,7 @@ use std::fs::{self, OpenOptions};
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
@@ -1115,15 +1115,17 @@ pub const CONFIG_VERSION: u32 = 23;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
-/// The registry repository every session image name is built from.
+/// The registry repository for the release image.
 pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
-/// The container image a session uses when its target names none.
+/// The image for daemon-container mode and quota containers.
 ///
 /// A release build names the immutable image published for its own version; a
 /// development build names the floating image published from master.
 /// `mj-core/build.rs` resolves which one this build is and bakes the answer in.
-pub const DEFAULT_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
-/// Whether this is a release build whose [`DEFAULT_CONTAINER_IMAGE`] carries
+pub const RELEASE_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
+/// The session image used when neither its project nor target selects one.
+pub const DEFAULT_SESSION_IMAGE: &str = "docker.io/library/buildpack-deps:noble";
+/// Whether this is a release build whose [`RELEASE_CONTAINER_IMAGE`] carries
 /// its own worker. The release workflow publishes that image with the worker
 /// built from the same commit, whose identity equals this build's, so a
 /// container on it needs no worker from the host. Neither a development build
@@ -1133,14 +1135,14 @@ pub const RELEASE_IMAGE_CARRIES_WORKER: bool =
 /// The image name every configuration up to [`LEGACY_DEFAULT_IMAGE_LAST_VERSION`]
 /// wrote into a container target a user had touched.
 ///
-/// Loading such a file replaces this literal with [`DEFAULT_CONTAINER_IMAGE`],
-/// so an upgraded install follows the image built for its own version instead
+/// Loading such a file replaces this literal with [`DEFAULT_SESSION_IMAGE`],
+/// so an upgraded install follows the current default session image instead
 /// of pinning whatever was current when the file was written.
 pub const LEGACY_DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 /// The last configuration version that wrote the default image into a file.
 const LEGACY_DEFAULT_IMAGE_LAST_VERSION: u32 = 14;
 
-/// The rule [`DEFAULT_CONTAINER_IMAGE`] is resolved from.
+/// The rule [`RELEASE_CONTAINER_IMAGE`] is resolved from.
 ///
 /// It is a function so one test build can exercise both channels; a single
 /// `build.rs` run compiles only one of them.
@@ -1157,8 +1159,7 @@ pub fn container_image_for(version: &str, release: bool) -> String {
 /// `default_image`.
 ///
 /// A target the user customized -- any other image -- is left alone. Split from
-/// [`TryFrom<StoredConfig>`] so a test build can exercise the release channel's
-/// rewrite without compiling a release `build.rs`.
+/// [`TryFrom<StoredConfig>`] to exercise legacy config migration directly.
 fn migrate_legacy_default_image(target: &mut TargetTemplate, default_image: &str) {
     if let Some(container) = target.container_mut()
         && container.image == LEGACY_DEFAULT_CONTAINER_IMAGE
@@ -1173,6 +1174,89 @@ fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<(), D::Error> {
     serde::de::IgnoredAny::deserialize(deserializer).map(|_| ())
+}
+
+/// OCI spelling for the architecture aliases accepted by container engines.
+/// Variant suffixes share the project's architecture-specific assignment.
+pub fn canonical_image_platform(platform: &str) -> &str {
+    match platform
+        .strip_prefix("linux/")
+        .unwrap_or(platform)
+        .split('/')
+        .next()
+    {
+        Some("x86_64" | "amd64") => "linux/amd64",
+        Some("aarch64" | "arm64") => "linux/arm64",
+        _ => platform,
+    }
+}
+
+/// Registry namespace used for published project session images.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImagesConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bundles: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl ImagesConfig {
+    /// Transfer assignments when project discovery consolidates two aliases.
+    /// Existing canonical assignments decide each platform.
+    pub fn consolidate_bundle(&mut self, alias: &str, canonical: &str) {
+        if alias == canonical {
+            return;
+        }
+        if let Some(images) = self.bundles.remove(alias) {
+            let canonical = self.bundles.entry(canonical.to_owned()).or_default();
+            for (platform, image) in images {
+                canonical.entry(platform).or_insert(image);
+            }
+        }
+    }
+
+    fn validate(&self, bundles: &BTreeMap<String, ProjectBundle>) -> Result<()> {
+        static REPORTED: std::sync::Mutex<BTreeSet<String>> =
+            std::sync::Mutex::new(BTreeSet::new());
+        for (bundle_id, images) in &self.bundles {
+            if !bundles.contains_key(bundle_id) {
+                if REPORTED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(bundle_id.clone())
+                {
+                    tracing::warn!(
+                        bundle = bundle_id,
+                        "image assignments for unknown bundle {bundle_id:?} are ignored; the entry is retained in config.toml"
+                    );
+                }
+                continue;
+            }
+            for (platform, image) in images {
+                let Some(architecture) = platform.strip_prefix("linux/") else {
+                    bail!("bundle {bundle_id:?} image platform {platform:?} must be linux/<arch>");
+                };
+                ensure!(
+                    !architecture.is_empty()
+                        && !architecture.contains('/')
+                        && architecture
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+                    "bundle {bundle_id:?} image platform {platform:?} must be linux/<arch>"
+                );
+                ensure!(
+                    !image.trim().is_empty() && !image.chars().any(char::is_whitespace),
+                    "bundle {bundle_id:?} image for {platform:?} must be a non-empty image reference without whitespace"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// The resolved configuration every part of Mjolnir works with.
@@ -1207,6 +1291,7 @@ pub struct Config {
     pub legacy_startup: (),
     pub profiles: BTreeMap<String, HarnessProfile>,
     pub bundles: BTreeMap<String, ProjectBundle>,
+    pub images: ImagesConfig,
     /// The hosts runtimes run on. `local` is implied even when it is absent.
     pub machines: BTreeMap<String, Machine>,
     pub targets: BTreeMap<String, TargetTemplate>,
@@ -1284,6 +1369,8 @@ struct StoredConfig {
     profiles: BTreeMap<String, HarnessProfile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     bundles: BTreeMap<String, ProjectBundle>,
+    #[serde(default, skip_serializing_if = "ImagesConfig::is_default")]
+    images: ImagesConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     machines: BTreeMap<String, Machine>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1457,6 +1544,7 @@ impl TryFrom<StoredConfig> for Config {
             legacy_startup,
             mut profiles,
             bundles,
+            images,
             mut machines,
             targets,
         } = stored;
@@ -1513,11 +1601,10 @@ impl TryFrom<StoredConfig> for Config {
         }
         // Up to version 14, a container target the user had touched carried
         // the then-current default image in the file. Move that literal back
-        // onto this build's default so an upgraded install follows the image
-        // built for its own version; a customized image is left alone.
+        // onto the current session default; a customized image is left alone.
         if version <= LEGACY_DEFAULT_IMAGE_LAST_VERSION {
             for target in resolved.values_mut() {
-                migrate_legacy_default_image(target, DEFAULT_CONTAINER_IMAGE);
+                migrate_legacy_default_image(target, DEFAULT_SESSION_IMAGE);
             }
         }
         Ok(Self {
@@ -1555,6 +1642,7 @@ impl TryFrom<StoredConfig> for Config {
             legacy_startup,
             profiles,
             bundles,
+            images,
             machines,
             targets: resolved,
             default_targets: BTreeSet::new(),
@@ -1608,6 +1696,7 @@ impl From<Config> for StoredConfig {
             legacy_startup: config.legacy_startup,
             profiles: config.profiles,
             bundles: config.bundles,
+            images: config.images,
             machines,
             targets,
         }
@@ -1636,6 +1725,7 @@ impl Default for Config {
             legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
+            images: ImagesConfig::default(),
             machines: BTreeMap::new(),
             targets: BTreeMap::new(),
             default_targets: BTreeSet::new(),
@@ -1645,6 +1735,46 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The image for a session on a container target. Bundle assignments take
+    /// precedence only for the target's platform; bare targets have no image.
+    pub fn session_image(
+        &self,
+        bundle_id: Option<&str>,
+        target_id: &str,
+        platform: &str,
+    ) -> Option<&str> {
+        let container = self.targets.get(target_id)?.container()?;
+        let platform = canonical_image_platform(platform);
+        Some(
+            bundle_id
+                .filter(|id| self.bundles.contains_key(*id))
+                .and_then(|id| self.images.bundles.get(id))
+                .and_then(|images| images.get(platform))
+                .map_or(container.image.as_str(), String::as_str),
+        )
+    }
+
+    /// Apply the same resolution to a configured target without changing it.
+    pub fn session_target(
+        &self,
+        bundle_id: Option<&str>,
+        target_id: &str,
+        platform: &str,
+    ) -> Result<TargetTemplate> {
+        let mut target = self
+            .targets
+            .get(target_id)
+            .with_context(|| format!("unknown target {target_id:?}"))?
+            .clone();
+        if let Some(image) = self.session_image(bundle_id, target_id, platform) {
+            target
+                .container_mut()
+                .expect("session image requires a container")
+                .image = image.to_owned();
+        }
+        Ok(target)
+    }
+
     /// Suggest additions for setup without replacing existing entries. Both
     /// setup surfaces use the same identities and collision-free names.
     pub fn setup_additions(&self, discovered: &Self) -> Self {
@@ -1872,6 +2002,7 @@ impl Config {
         for (id, bundle) in &self.bundles {
             bundle.validate(id)?;
         }
+        self.images.validate(&self.bundles)?;
         machines::validate_machines(&self.machines)?;
         for (id, target) in &self.targets {
             target.validate(id)?;
@@ -1900,7 +2031,7 @@ impl Config {
     pub fn with_local_targets(mut self) -> Self {
         let container = ContainerTemplate {
             build_cache: None,
-            image: DEFAULT_CONTAINER_IMAGE.into(),
+            image: DEFAULT_SESSION_IMAGE.into(),
             pull_policy: Default::default(),
             platform: None,
             cpus: None,

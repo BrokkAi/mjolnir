@@ -1,5 +1,6 @@
 use super::*;
 use mj_core::path_completion::{CompletionKind, ssh_completions};
+use mj_core::targets::SshTrafficClass;
 use std::cell::RefCell;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -2996,7 +2997,11 @@ fn tilde_workspace_prefix_becomes_home_relative() {
 #[test]
 fn shell_arguments_are_single_quoted_at_ssh_boundary() {
     let hostile = "repo'; touch /tmp/pwned; echo '";
-    let command = ssh_command(&ssh(), ["git", "clone", "--", hostile]);
+    let command = ssh_command(
+        SshTrafficClass::Control,
+        &ssh(),
+        ["git", "clone", "--", hostile],
+    );
     assert_eq!(
         unwrapped_remote_line(command.args.last().unwrap()),
         "'git' 'clone' '--' 'repo'\\''; touch /tmp/pwned; echo '\\'''"
@@ -4192,7 +4197,11 @@ test -s /tmp/mj-perf.txt
 "#;
         execute_checked(
             &ProcessExecutor,
-            &locator_command(&locator, vec!["sh".into(), "-c".into(), script.into()]),
+            &locator_command(
+                SshTrafficClass::Control,
+                &locator,
+                vec!["sh".into(), "-c".into(), script.into()],
+            ),
         )?;
         Ok(())
     })();

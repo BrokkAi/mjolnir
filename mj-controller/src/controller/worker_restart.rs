@@ -6,6 +6,7 @@
 //! and reconnect, so the sequence lives here once and each caller supplies
 //! only what it tells the operator.
 
+use mj_core::targets::SshTrafficClass;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -550,6 +551,7 @@ impl Controller {
                     super::execute_checked(
                         executor,
                         targets::command_on_locator(
+                            SshTrafficClass::Control,
                             backend,
                             session_id,
                             vec![

@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// `container_workspace` is the session record's recorded container workspace.
 /// Container targets clone into it and mount their workspace storage there;
@@ -67,7 +68,7 @@ pub fn provision_plan_named(
         plan.commands = plan
             .commands
             .into_iter()
-            .map(|command| command_over_ssh(command, ssh))
+            .map(|command| command_over_ssh(SshTrafficClass::Bulk, command, ssh))
             .collect();
         return Ok(plan);
     }
@@ -85,7 +86,7 @@ pub fn provision_plan_named(
         plan.commands = plan
             .commands
             .into_iter()
-            .map(|command| command_over_ssh(command, ssh))
+            .map(|command| command_over_ssh(SshTrafficClass::Bulk, command, ssh))
             .collect();
         return Ok(plan);
     }
@@ -169,14 +170,14 @@ pub fn provision_plan_named(
             validate_ssh(ssh)?;
             let workspace = workspace_for(template, session_id)?;
             commands.push(
-                ssh_command(ssh, ["mkdir", "-p", &workspace])
+                ssh_command(SshTrafficClass::Control, ssh, ["mkdir", "-p", &workspace])
                     .purpose("create SSH session workspace")
                     .stage(ProvisionStage::Provisioning)
                     .creates_target(),
             );
             commands.extend(install_git_plan(ExecutionBoundary::Ssh(ssh)).commands);
             commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
-                ssh_command_owned(ssh, args)
+                ssh_command_owned(SshTrafficClass::Bulk, ssh, args)
             }));
         }
         TargetTemplate::SshDocker { .. } | TargetTemplate::SshAppleContainer { .. } => {
@@ -205,7 +206,11 @@ pub fn provision_plan_named(
                 .commands,
             );
             commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
-                command_over_ssh(container_exec(MICROVM_ENGINE, name, args), ssh)
+                command_over_ssh(
+                    SshTrafficClass::Bulk,
+                    container_exec(MICROVM_ENGINE, name, args),
+                    ssh,
+                )
             }));
         }
         TargetTemplate::SshPodman { ssh, container } => {
@@ -228,7 +233,11 @@ pub fn provision_plan_named(
                 .commands,
             );
             commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
-                command_over_ssh(container_exec("podman", name, args), ssh)
+                command_over_ssh(
+                    SshTrafficClass::Bulk,
+                    container_exec("podman", name, args),
+                    ssh,
+                )
             }));
         }
     }
@@ -295,8 +304,13 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
             description: format!("smoke test Mjolnir setup target {smoke_id}"),
             commands: vec![
                 create.remove(0).purpose("create disposable setup sandbox"),
-                ssh_engine_command(ssh, MICROVM_ENGINE, ["exec", "-i", name.as_str(), "true"])
-                    .purpose("execute setup smoke command"),
+                ssh_engine_command(
+                    SshTrafficClass::Control,
+                    ssh,
+                    MICROVM_ENGINE,
+                    ["exec", "-i", name.as_str(), "true"],
+                )
+                .purpose("execute setup smoke command"),
                 nitro_destroy_in_one_command(ssh, &name),
             ],
         });
@@ -381,7 +395,7 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
         vec!["sh".to_owned(), "-c".to_owned(), script]
     };
     let run = match boundary {
-        ExecutionBoundary::Ssh(ssh) => command_over_ssh(run, ssh),
+        ExecutionBoundary::Ssh(ssh) => command_over_ssh(SshTrafficClass::Control, run, ssh),
         _ => run,
     };
 
@@ -389,8 +403,10 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
         description: format!("smoke test Mjolnir setup target {smoke_id}"),
         commands: vec![
             run.purpose("create disposable setup container"),
-            at_boundary(boundary, exec).purpose("execute setup smoke command"),
-            at_boundary(boundary, remove).purpose("remove disposable setup container"),
+            at_boundary(SshTrafficClass::Control, boundary, exec)
+                .purpose("execute setup smoke command"),
+            at_boundary(SshTrafficClass::Control, boundary, remove)
+                .purpose("remove disposable setup container"),
         ],
     })
 }
@@ -440,7 +456,7 @@ pub(super) fn run_ssh_docker_overlay_smoke_test(
     validate_ssh(ssh)?;
     validate_container_template(container)?;
     let name = resource_name(smoke_id)?;
-    let prepare = ssh_command(ssh, ["sh", "-c",
+    let prepare = ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c",
         "set -eu; root=$(mktemp -d /tmp/mj-docker-overlay-smoke.XXXXXXXXXX); printf 'lower\\n' >\"$root/original.txt\"; chmod 777 \"$root\"; chmod 666 \"$root/original.txt\"; printf '%s\\n' \"$root\""])
         .purpose("create remote Docker OverlayFS smoke source");
     let output = executor.execute(&prepare)?;
@@ -466,17 +482,19 @@ pub(super) fn run_ssh_docker_overlay_smoke_test(
     };
     let result = (|| {
         let create = command_over_ssh(
+            SshTrafficClass::Control,
             docker_container_run(container, &name, smoke_id, &[mount], CONTAINER_WORKSPACE)?,
             ssh,
         );
         execute_checked(executor, &create)?;
         let probe = command_over_ssh(
+            SshTrafficClass::Control,
             container_exec("docker", &name, ["sh", "-c", DOCKER_OVERLAY_SMOKE_PROBE]),
             ssh,
         )
         .purpose("verify remote Docker OverlayFS copy-on-write attachment");
         execute_checked(executor, &probe)?;
-        execute_checked(executor, &ssh_command(ssh, ["sh", "-c",
+        execute_checked(executor, &ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c",
             "test \"$(cat \"$1/original.txt\")\" = lower && test ! -e \"$1/container-created.txt\"", "mj-check-smoke-source", lower])
             .purpose("verify original remote attachment is unchanged"))
     })();
@@ -495,7 +513,7 @@ pub(super) fn run_ssh_docker_overlay_smoke_test(
         // Never remove a lower directory until its container and volumes are gone.
         execute_checked(
             executor,
-            &ssh_command(ssh, ["rm", "-rf", "--", lower])
+            &ssh_command(SshTrafficClass::Control, ssh, ["rm", "-rf", "--", lower])
                 .purpose("remove remote Docker smoke source"),
         )
     })();

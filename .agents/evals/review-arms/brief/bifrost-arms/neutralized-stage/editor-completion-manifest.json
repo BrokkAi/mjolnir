@@ -1,0 +1,815 @@
+{
+  "recorded_epoch": 1794890299.663142,
+  "scope": "four raw wording editor outputs only; no rewrite-collect publication or round1",
+  "owner_model": "gpt-6.1-sol",
+  "owner_effort": "medium",
+  "editor_count": 4,
+  "normal_suspensions": 4,
+  "rows": [
+    {
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "sid": "06bcf6c8a16279a1a06272a5a5324230",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-ece94ae11110f21e803a5d94-06bcf6c8a162",
+        "accepted_ordinal": 44,
+        "turn_start_position": 45,
+        "completed_ordinal": 154,
+        "completed_at_ms": 1794890120934,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "original_sha256": "d3d5ab41659aec2e013db20b804b6db2104ef7124e2231ce07c849f9cc4dae47",
+      "raw_editor_sha256": "9fddbbb7634ef2cbd21d2969c22ee653515274e4ae6a7867859305b92f7c7367",
+      "unchanged": false,
+      "lint_problems": [],
+      "anchor_set_equal": true,
+      "anchor_multiset_equal": true,
+      "added_anchor_set": [],
+      "dropped_anchor_set": [],
+      "added_anchor_occurrences": {},
+      "dropped_anchor_occurrences": {},
+      "added_anchor_count": 0,
+      "dropped_anchor_count": 0,
+      "original_anchor_occurrences": {
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:1121": 3,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:198": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:258": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:1124": 1,
+        "src/reference_differential/mod.rs:2954": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:476": 2,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:1993": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:2001": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:392": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:502": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:564": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:495": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:1033": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:486": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:485": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:1329": 1,
+        "crates/bifrost-rql/src/structural/search/results.rs:195": 1,
+        "crates/bifrost-rql/src/structural/search/execution.rs:1139": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:388": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:961": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:641": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:983": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:1004": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:2785": 1,
+        "crates/bifrost-rql/src/structural/search/semantic.rs:1140": 1,
+        "crates/bifrost-rql/src/structural/search/semantic.rs:1151": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:1891": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:1186": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:488": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:449": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:516": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:1492": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_shape.rs:144": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:242": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:492": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:292": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:614": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:396": 1,
+        "tests/suite_bench_policy/go_result_contract.rs:52": 1,
+        "tests/suite_bench_policy/go_result_contract.rs:1055": 1,
+        "tests/suite_bench_policy/go_result_contract.rs:1077": 1,
+        "tests/suite_bench_policy/go_result_contract.rs:1087": 1
+      },
+      "editor_anchor_occurrences": {
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:1121": 3,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:198": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:258": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:1124": 1,
+        "src/reference_differential/mod.rs:2954": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:476": 2,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:1993": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:2001": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:392": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:502": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:564": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:495": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:1033": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:486": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:485": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:1329": 1,
+        "crates/bifrost-rql/src/structural/search/results.rs:195": 1,
+        "crates/bifrost-rql/src/structural/search/execution.rs:1139": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:388": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:961": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:641": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:983": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:1004": 1,
+        "crates/bifrost-rql/src/structural/search/pipeline.rs:2785": 1,
+        "crates/bifrost-rql/src/structural/search/semantic.rs:1140": 1,
+        "crates/bifrost-rql/src/structural/search/semantic.rs:1151": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:1891": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_relations.rs:1186": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:488": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:449": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:516": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:1492": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/call_shape.rs:144": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:242": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:492": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:292": 1,
+        "crates/bifrost-rql/src/structural/search/effects.rs:614": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/effects.rs:396": 1,
+        "tests/suite_bench_policy/go_result_contract.rs:52": 1,
+        "tests/suite_bench_policy/go_result_contract.rs:1055": 1,
+        "tests/suite_bench_policy/go_result_contract.rs:1077": 1,
+        "tests/suite_bench_policy/go_result_contract.rs:1087": 1
+      },
+      "raw_output_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-relation-rewrite/go-receiver-poisons-package-result-contract-discovery/brief.md",
+      "diff_path": "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/diffs/go-receiver-poisons-package-result-contract-discovery.diff",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/usage-06bcf6c8a16279a1a06272a5a5324230.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 128256,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 14576,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 775,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 314,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 143607,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_models": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 128256,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 14576,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 775,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 314,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 143607,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 497276000
+    },
+    {
+      "id": "mcp-default-advisory-reported-clean",
+      "sid": "e8f78cd872b7f19d9d5dbb226e50f068",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-af40e85a8d2198bdefb04cec-e8f78cd872b7",
+        "accepted_ordinal": 44,
+        "turn_start_position": 45,
+        "completed_ordinal": 194,
+        "completed_at_ms": 1794890136936,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "original_sha256": "58cbbab7c391af92b80c56994089e49bcd6f22fb2a3574fb965ed900cac82555",
+      "raw_editor_sha256": "717c2880a703a6b2016aa96d0d116a0116d3073ddbe11d8f43499b5102c5ee46",
+      "unchanged": false,
+      "lint_problems": [],
+      "anchor_set_equal": true,
+      "anchor_multiset_equal": true,
+      "added_anchor_set": [],
+      "dropped_anchor_set": [],
+      "added_anchor_occurrences": {},
+      "dropped_anchor_occurrences": {},
+      "added_anchor_count": 0,
+      "dropped_anchor_count": 0,
+      "original_anchor_occurrences": {
+        "scripts/public/sync-policy-scan-action.sh:70": 1,
+        "scripts/public/sync-policy-scan-action.sh:74": 1,
+        ".github/actions/policy-scan/action.yml:98": 1,
+        "crates/bifrost-mcp/src/searchtools_service.rs:3619": 1,
+        "crates/bifrost-policy/src/coordinator.rs:326": 1,
+        "crates/bifrost-mcp/src/searchtools_service.rs:7024": 1,
+        "src/bin/bifrost.rs:2367": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4551": 2,
+        "crates/bifrost-policy/src/render/sarif.rs:859": 2,
+        "crates/bifrost-policy/src/render/sarif.rs:116": 1,
+        "crates/bifrost-policy/src/render/sarif.rs:131": 1,
+        ".github/actions/policy-scan/action.yml:499": 1,
+        ".github/actions/policy-scan/action.yml:516": 1,
+        ".github/actions/policy-scan/action.yml:683": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4080": 2,
+        "crates/bifrost-policy/src/coordinator.rs:5747": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4233": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5205": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5273": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5408": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5524": 1,
+        "src/bin/bifrost.rs:270": 1,
+        "src/bin/bifrost.rs:1884": 1,
+        "src/bin/bifrost.rs:1113": 1,
+        ".github/actions/policy-scan/action.yml:729": 1,
+        "crates/bifrost-policy/src/render/sarif.rs:1224": 1,
+        ".github/actions/policy-scan/action.yml:758": 1,
+        ".github/actions/policy-scan/action.yml:573": 1,
+        ".github/actions/policy-scan/action.yml:580": 1,
+        "crates/bifrost-policy/src/coordinator.rs:205": 1,
+        "crates/bifrost-policy/src/finding.rs:225": 1,
+        "crates/bifrost-policy/src/finding.rs:251": 1,
+        "crates/bifrost-policy/src/coordinator.rs:212": 1,
+        "crates/bifrost-policy/src/finding.rs:5420": 1,
+        "crates/bifrost-policy/src/finding.rs:5450": 1,
+        "crates/bifrost-policy/src/coordinator.rs:2867": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5587": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4667": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4675": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4739": 1,
+        "crates/bifrost-store/src/analyzer/store/policy_units.rs:762": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4224": 1,
+        "crates/bifrost-policy/src/coordinator.rs:6677": 1,
+        "crates/bifrost-policy/src/render/sarif.rs:864": 1,
+        "crates/bifrost-policy/src/render/sarif.rs:992": 1
+      },
+      "editor_anchor_occurrences": {
+        "scripts/public/sync-policy-scan-action.sh:70": 1,
+        "scripts/public/sync-policy-scan-action.sh:74": 1,
+        ".github/actions/policy-scan/action.yml:98": 1,
+        "crates/bifrost-mcp/src/searchtools_service.rs:3619": 1,
+        "crates/bifrost-policy/src/coordinator.rs:326": 1,
+        "crates/bifrost-mcp/src/searchtools_service.rs:7024": 1,
+        "src/bin/bifrost.rs:2367": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4551": 2,
+        "crates/bifrost-policy/src/render/sarif.rs:859": 2,
+        "crates/bifrost-policy/src/render/sarif.rs:116": 1,
+        "crates/bifrost-policy/src/render/sarif.rs:131": 1,
+        ".github/actions/policy-scan/action.yml:499": 1,
+        ".github/actions/policy-scan/action.yml:516": 1,
+        ".github/actions/policy-scan/action.yml:683": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4080": 2,
+        "crates/bifrost-policy/src/coordinator.rs:5747": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4233": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5205": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5273": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5408": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5524": 1,
+        "src/bin/bifrost.rs:270": 1,
+        "src/bin/bifrost.rs:1884": 1,
+        "src/bin/bifrost.rs:1113": 1,
+        ".github/actions/policy-scan/action.yml:729": 1,
+        "crates/bifrost-policy/src/render/sarif.rs:1224": 1,
+        ".github/actions/policy-scan/action.yml:758": 1,
+        ".github/actions/policy-scan/action.yml:573": 1,
+        ".github/actions/policy-scan/action.yml:580": 1,
+        "crates/bifrost-policy/src/coordinator.rs:205": 1,
+        "crates/bifrost-policy/src/finding.rs:225": 1,
+        "crates/bifrost-policy/src/finding.rs:251": 1,
+        "crates/bifrost-policy/src/coordinator.rs:212": 1,
+        "crates/bifrost-policy/src/finding.rs:5420": 1,
+        "crates/bifrost-policy/src/finding.rs:5450": 1,
+        "crates/bifrost-policy/src/coordinator.rs:2867": 1,
+        "crates/bifrost-policy/src/coordinator.rs:5587": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4667": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4675": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4739": 1,
+        "crates/bifrost-store/src/analyzer/store/policy_units.rs:762": 1,
+        "crates/bifrost-policy/src/coordinator.rs:4224": 1,
+        "crates/bifrost-policy/src/coordinator.rs:6677": 1,
+        "crates/bifrost-policy/src/render/sarif.rs:864": 1,
+        "crates/bifrost-policy/src/render/sarif.rs:992": 1
+      },
+      "raw_output_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-relation-rewrite/mcp-default-advisory-reported-clean/brief.md",
+      "diff_path": "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/diffs/mcp-default-advisory-reported-clean.diff",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/usage-e8f78cd872b7f19d9d5dbb226e50f068.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 177024,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 20781,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 1094,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 361,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 198899,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_models": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 177024,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 20781,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 1094,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 361,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 198899,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 702044000
+    },
+    {
+      "id": "python-module-binding-representative-after-event",
+      "sid": "e4afc927a1cb86482e32ebc32401630f",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-64c55b5505b86c74456d6adf-e4afc927a1cb",
+        "accepted_ordinal": 44,
+        "turn_start_position": 45,
+        "completed_ordinal": 148,
+        "completed_at_ms": 1794890113551,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "original_sha256": "f0a6730b61dd66e9698abc27fd487ad7a1dece75224ffb2d7f77985f4579bcc9",
+      "raw_editor_sha256": "01a936a33c239537efdd025576eb1465279d193c7e402b1a820e26d86af8a95e",
+      "unchanged": false,
+      "lint_problems": [],
+      "anchor_set_equal": true,
+      "anchor_multiset_equal": true,
+      "added_anchor_set": [],
+      "dropped_anchor_set": [],
+      "added_anchor_occurrences": {},
+      "dropped_anchor_occurrences": {},
+      "added_anchor_count": 0,
+      "dropped_anchor_count": 0,
+      "original_anchor_occurrences": {
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1510": 2,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1742": 5,
+        "crates/bifrost-analysis/src/searchtools/scan_usages.rs:1714": 1,
+        "crates/bifrost-analysis/src/searchtools/scan_usages.rs:1738": 1,
+        "crates/bifrost-analysis/src/symbol_rename.rs:337": 1,
+        "crates/bifrost-analysis/src/symbol_rename.rs:341": 1,
+        "crates/bifrost-analysis/src/symbol_rename.rs:359": 1,
+        "tests/suite_issues/issue_2053_python_module_rebindings.rs:26": 1,
+        "tests/common/search_tools.rs:23": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:624": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:1343": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1667": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1679": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1910": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1777": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1523": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1537": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1982": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1741": 1,
+        "crates/bifrost-python/src/graph/extractor.rs:1632": 1,
+        "crates/bifrost-python/src/graph/extractor.rs:1648": 1,
+        "crates/bifrost-python/src/graph/extractor.rs:1660": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1771": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1767": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1865": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1541": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1773": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1784": 1,
+        "crates/bifrost-analysis/src/analyzer/python/mod.rs:518": 1,
+        "crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:9642": 1,
+        "crates/bifrost-python/src/graph/extractor.rs:1873": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1799": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1824": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1796": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1754": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:1475": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:1726": 1
+      },
+      "editor_anchor_occurrences": {
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1510": 2,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1742": 5,
+        "crates/bifrost-analysis/src/searchtools/scan_usages.rs:1714": 1,
+        "crates/bifrost-analysis/src/searchtools/scan_usages.rs:1738": 1,
+        "crates/bifrost-analysis/src/symbol_rename.rs:337": 1,
+        "crates/bifrost-analysis/src/symbol_rename.rs:341": 1,
+        "crates/bifrost-analysis/src/symbol_rename.rs:359": 1,
+        "tests/suite_issues/issue_2053_python_module_rebindings.rs:26": 1,
+        "tests/common/search_tools.rs:23": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:624": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:1343": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1667": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1679": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1910": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1777": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1523": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1537": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1982": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1741": 1,
+        "crates/bifrost-python/src/graph/extractor.rs:1632": 1,
+        "crates/bifrost-python/src/graph/extractor.rs:1648": 1,
+        "crates/bifrost-python/src/graph/extractor.rs:1660": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1771": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1767": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1865": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1541": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1773": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1784": 1,
+        "crates/bifrost-analysis/src/analyzer/python/mod.rs:518": 1,
+        "crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:9642": 1,
+        "crates/bifrost-python/src/graph/extractor.rs:1873": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1799": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1824": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1796": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1754": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:1475": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/get_definition/mod.rs:1726": 1
+      },
+      "raw_output_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-relation-rewrite/python-module-binding-representative-after-event/brief.md",
+      "diff_path": "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/diffs/python-module-binding-representative-after-event.diff",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/usage-e4afc927a1cb86482e32ebc32401630f.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 105856,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 14912,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 657,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 209,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 121425,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_models": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 105856,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 14912,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 657,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 209,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 121425,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 469796000
+    },
+    {
+      "id": "unproven-override-family-certifies-empty",
+      "sid": "c1cd5127adc05918fa17de6abaadc9ec",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-ed07867cfb10069e62382727-c1cd5127adc0",
+        "accepted_ordinal": 44,
+        "turn_start_position": 45,
+        "completed_ordinal": 207,
+        "completed_at_ms": 1794890200788,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "original_sha256": "1a8fcf5b391b01269b2a45339f2be60ada9a20541f39b2dd85995a2863ace629",
+      "raw_editor_sha256": "e3b1f5c97bcf02a1cdc20edfb0b4a58c9e084b60b0eb36462017899005054b8c",
+      "unchanged": false,
+      "lint_problems": [],
+      "anchor_set_equal": true,
+      "anchor_multiset_equal": true,
+      "added_anchor_set": [],
+      "dropped_anchor_set": [],
+      "added_anchor_occurrences": {},
+      "dropped_anchor_occurrences": {},
+      "added_anchor_count": 0,
+      "dropped_anchor_count": 0,
+      "original_anchor_occurrences": {
+        "crates/bifrost-policy/src/taint_policy.rs:1382": 1,
+        "crates/bifrost-policy/src/taint_policy.rs:1444": 2,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:699": 2,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/source.rs:236": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:687": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:921": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:942": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:819": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:195": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:261": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:551": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:344": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:370": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:519": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:547": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:548": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/provider.rs:641": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/provider.rs:662": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:596": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:631": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:549": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:931": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:572": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/member_family.rs:146": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:945": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:554": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:559": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle.rs:51": 1,
+        "crates/bifrost-core/src/analyzer/config.rs:71": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:709": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:2084": 1,
+        "crates/bifrost-analysis/src/analyzer/dataflow/input.rs:99": 1,
+        "crates/bifrost-analysis/src/analyzer/value_flow/plan.rs:783": 1,
+        "crates/bifrost-analysis/src/analyzer/value_flow/plan.rs:808": 1,
+        "crates/bifrost-analysis/src/analyzer/java/semantic/control.rs:1996": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:2019": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:1087": 1
+      },
+      "editor_anchor_occurrences": {
+        "crates/bifrost-policy/src/taint_policy.rs:1382": 1,
+        "crates/bifrost-policy/src/taint_policy.rs:1444": 2,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:699": 2,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/source.rs:236": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:687": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:921": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:942": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:819": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:195": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:261": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:551": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:344": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:370": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:519": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:547": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:548": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/provider.rs:641": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/provider.rs:662": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:596": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:631": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:549": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:931": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:572": 1,
+        "crates/bifrost-analysis/src/analyzer/usages/member_family.rs:146": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:945": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:554": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:559": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle.rs:51": 1,
+        "crates/bifrost-core/src/analyzer/config.rs:71": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:709": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:2084": 1,
+        "crates/bifrost-analysis/src/analyzer/dataflow/input.rs:99": 1,
+        "crates/bifrost-analysis/src/analyzer/value_flow/plan.rs:783": 1,
+        "crates/bifrost-analysis/src/analyzer/value_flow/plan.rs:808": 1,
+        "crates/bifrost-analysis/src/analyzer/java/semantic/control.rs:1996": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:2019": 1,
+        "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:1087": 1
+      },
+      "raw_output_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-relation-rewrite/unproven-override-family-certifies-empty/brief.md",
+      "diff_path": "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/diffs/unproven-override-family-certifies-empty.diff",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/usage-c1cd5127adc05918fa17de6abaadc9ec.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 136448,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 27760,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 971,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 293,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 165179,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_models": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 136448,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 27760,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 971,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 293,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 165179,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 788748000
+    }
+  ],
+  "all17_published_brief_bytes_unchanged": true,
+  "frozen_code_inputs_and_editor_inputs_unchanged": true,
+  "unchanged_editor_outputs": 0,
+  "lint_failure_ids": [],
+  "anchor_change_ids": [],
+  "total_added_anchor_occurrences": 0,
+  "total_dropped_anchor_occurrences": 0,
+  "known_estimated_api_cost_usd": 0.2457864,
+  "usage_totals_sum": {
+    "cached_read_tokens": 547584,
+    "cached_write_tokens": 0,
+    "input_tokens": 78029,
+    "output_tokens": 3497,
+    "thought_tokens": 1177,
+    "total_tokens": 629110
+  },
+  "usage_accounting": "One global root snapshot/cost perSID, all4pages complete/full-turn; API estimates not subscription charges; no root/page summation",
+  "quota_before": {
+    "remaining_percent": 32,
+    "refreshed_epoch": 1794889972,
+    "age_at_read_seconds": 65.71522045135498,
+    "refresh_after_leak": true
+  },
+  "quota_after": {
+    "remaining_percent": 32,
+    "refreshed_epoch": 1794889972,
+    "age_at_read_seconds": 327.6631956100464,
+    "refresh_after_last_editor_completion": false
+  },
+  "quota_note": "First read had no cached report; no launches until ordinary cached32%report appeared. No probe/restart/config change. Snapshot delta is shared/not isolated.",
+  "next_action": "Parent reviews raw deltas before authorizing rewrite-collect and any round1",
+  "driver_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794890249.758327
+  }
+}

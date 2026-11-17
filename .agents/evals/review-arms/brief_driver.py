@@ -144,7 +144,7 @@ def run(bug_id, gate):
         save(d / "launch-intent.json", {"bug": bug_id, "model": WRITER_MODEL, "effort": WRITER_EFFORT,
                                         "profile": WRITER_PROFILE, "time_ns": time.time_ns()})
         with gate:
-            launch = mj("new", "--workspace-id", workspace, "--target", "podman", "--bundle", "mjolnir",
+            launch = mj("new", "--workspace-id", workspace, "--target", "podman", "--bundle", driver.BUNDLE,
                         "--at", bug["intro_commit"], "--base", bug["base_commit"], "--no-later-history",
                         # mj new takes a profile or a model, not both; a pinned writer gets its
                         # model below, before its first prompt, as verify_driver.py does.

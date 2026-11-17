@@ -219,7 +219,7 @@ pub struct CommandSpec {
     /// [`CommandSpec::open_ssh_session`]). The arguments stored here never
     /// contain them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_session: Option<SshTarget>,
+    pub ssh_session: Option<SshSessionRequest>,
     /// The session is a fail-fast probe: it is counted on a shard but never
     /// opens a master (see [`CommandSpec::ssh_probe_session`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -311,9 +311,12 @@ impl CommandSpec {
     /// one session on `ssh`'s shared connection. It also opens a connection
     /// to that destination when sharing is off, so a server's refusal of it
     /// is retried the same way.
-    pub fn ssh_session(mut self, ssh: &SshTarget) -> Self {
+    pub fn ssh_session(mut self, ssh: &SshTarget, class: SshTrafficClass) -> Self {
         self.ssh_destination = Some(ssh.destination.clone());
-        self.ssh_session = Some(ssh.clone());
+        self.ssh_session = Some(SshSessionRequest {
+            target: ssh.clone(),
+            class,
+        });
         self
     }
 
@@ -324,7 +327,7 @@ impl CommandSpec {
     /// probe still uses one of the master's sessions while it runs, so the
     /// executor counts it in the session ledger like any other session.
     pub fn ssh_probe_session(mut self, ssh: &SshTarget) -> Self {
-        self = self.ssh_session(ssh);
+        self = self.ssh_session(ssh, SshTrafficClass::Control);
         self.ssh_session_probe = true;
         self
     }
@@ -366,12 +369,13 @@ impl CommandSpec {
         walk: &mut SshWalk,
         marker: bool,
     ) -> Result<SessionCommand<'_>> {
-        let Some(ssh) = &self.ssh_session else {
+        let Some(request) = &self.ssh_session else {
             return Ok(SessionCommand {
                 command: std::borrow::Cow::Borrowed(self),
                 lease: None,
             });
         };
+        let ssh = &request.target;
         let _waiting = BlockingOperation::start(
             &format!(
                 "lease SSH connection to {} for {}",
@@ -382,7 +386,7 @@ impl CommandSpec {
         let lease = if self.ssh_session_probe {
             SshSessions::lease_probe(ssh, walk)
         } else {
-            SshSessions::lease(ssh, executor, walk)?
+            SshSessions::lease(ssh, request.class, executor, walk)?
         };
         let mut command = self.clone();
         command.ssh_session = None;
@@ -520,7 +524,8 @@ esac
                 destination: "fake-host".to_owned(),
                 ssh_args: Vec::new(),
             };
-            let mut command = ssh_command(&ssh, remote).purpose("run through the fake ssh");
+            let mut command = ssh_command(SshTrafficClass::Control, &ssh, remote)
+                .purpose("run through the fake ssh");
             let path = std::env::var("PATH").unwrap_or_default();
             command.env.insert(
                 "PATH".to_owned(),
@@ -1245,11 +1250,16 @@ impl CommandExecutor for ProcessExecutor {
                     &mut *input,
                     &|| false,
                     gate,
+                    None,
                 )
             })
         })
     }
 }
+
+/// Observe bytes as a supervised command drains them. The callback may run
+/// concurrently for stdout and stderr, and must finish without blocking.
+pub type CommandOutputObserver = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 /// Streams `input` into a freshly spawned child and collects its output.
 ///
@@ -1270,6 +1280,7 @@ fn stream_command_with_stdin(
     input: &mut (dyn Read + Send),
     is_cancelled: &(dyn Fn() -> bool + Sync),
     gate: Option<&Arc<StartGate>>,
+    observer: Option<CommandOutputObserver>,
 ) -> Result<CommandOutput> {
     let started = Instant::now();
     if is_cancelled() {
@@ -1297,8 +1308,9 @@ fn stream_command_with_stdin(
         .context("streamed command stderr missing")?;
     // Reader threads keep the child's output pipes drained; a child that fills
     // one while nobody reads would block instead of exiting.
-    let mut stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
-    let mut stderr_reader = PipeCollector::spawn(stderr);
+    let mut stdout_reader =
+        PipeCollector::spawn_observed(stdout, gate.cloned(), None, observer.clone());
+    let mut stderr_reader = PipeCollector::spawn_observed(stderr, None, None, observer);
     let process_result = std::thread::scope(|scope| -> Result<_> {
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
@@ -1497,6 +1509,42 @@ impl Drop for ProcessCancellationGuard {
 }
 
 impl CancellableProcessExecutor {
+    /// Feed input, close stdin at EOF, and observe both output streams while
+    /// retaining the executor's process-group, cancellation and SSH ownership.
+    pub fn execute_with_stdin_observed(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+        observer: Option<CommandOutputObserver>,
+    ) -> Result<CommandOutput> {
+        self.describe_cancellation(
+            command,
+            crate::runtime::off_async_worker(|| {
+                let _running = BlockingOperation::command(command);
+                // The stream is not read until the session has started, so a
+                // refused session is retried with the same stream. The child
+                // runs in its own process group so cancellation can kill the
+                // whole group, which is what releases a writer blocked on a
+                // full pipe.
+                with_ssh_refusal_retry(
+                    command,
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| {
+                        stream_command_with_stdin(
+                            cancellable_command(command),
+                            command,
+                            &mut *input,
+                            &|| self.is_cancelled(),
+                            gate,
+                            observer.clone(),
+                        )
+                    },
+                )
+            }),
+        )
+    }
+
     pub fn cancel_on_drop(&self) -> ProcessCancellationGuard {
         ProcessCancellationGuard(self.cancelled.clone())
     }
@@ -1704,9 +1752,18 @@ impl PipeCollector {
     }
 
     fn spawn_output(
+        pipe: impl PollablePipe,
+        gate: Option<Arc<StartGate>>,
+        output: Option<std::fs::File>,
+    ) -> Self {
+        Self::spawn_observed(pipe, gate, output, None)
+    }
+
+    fn spawn_observed(
         mut pipe: impl PollablePipe,
         gate: Option<Arc<StartGate>>,
         mut output: Option<std::fs::File>,
+        observer: Option<CommandOutputObserver>,
     ) -> Self {
         let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -1732,6 +1789,9 @@ impl PipeCollector {
                                     if scan.push(&chunk[..count], &mut passed) {
                                         gate.mark_started();
                                     }
+                                    if let Some(observer) = &observer {
+                                        observer(&passed);
+                                    }
                                     if let Some(file) = &mut output {
                                         file.write_all(&passed)?;
                                     } else {
@@ -1739,6 +1799,9 @@ impl PipeCollector {
                                     }
                                 }
                                 _ => {
+                                    if let Some(observer) = &observer {
+                                        observer(&chunk[..count]);
+                                    }
                                     if let Some(file) = &mut output {
                                         file.write_all(&chunk[..count])?;
                                     } else {
@@ -1757,6 +1820,9 @@ impl PipeCollector {
                 if let Some(scan) = &mut scan {
                     passed.clear();
                     scan.finish(&mut passed);
+                    if let Some(observer) = &observer {
+                        observer(&passed);
+                    }
                     if let Some(file) = &mut output {
                         file.write_all(&passed)?;
                     } else {
@@ -1928,6 +1994,7 @@ impl CancellableProcessExecutor {
                 &mut input,
                 &|| self.is_cancelled(),
                 gate,
+                None,
             );
         }
         let started = Instant::now();
@@ -2056,31 +2123,7 @@ impl CommandExecutor for CancellableProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        self.describe_cancellation(
-            command,
-            crate::runtime::off_async_worker(|| {
-                let _running = BlockingOperation::command(command);
-                // The stream is not read until the session has started, so a
-                // refused session is retried with the same stream. The child
-                // runs in its own process group so cancellation can kill the
-                // whole group, which is what releases a writer blocked on a
-                // full pipe.
-                with_ssh_refusal_retry(
-                    command,
-                    self,
-                    Some(&|| self.is_cancelled()),
-                    |command, gate| {
-                        stream_command_with_stdin(
-                            cancellable_command(command),
-                            command,
-                            &mut *input,
-                            &|| self.is_cancelled(),
-                            gate,
-                        )
-                    },
-                )
-            }),
-        )
+        self.execute_with_stdin_observed(command, input, None)
     }
 }
 
@@ -2874,13 +2917,14 @@ pub fn engine_command(
 
 /// `engine` followed by `args`, run on the SSH host.
 pub fn ssh_engine_command(
+    class: SshTrafficClass,
     ssh: &SshTarget,
     engine: &str,
     args: impl IntoIterator<Item = impl Into<String>>,
 ) -> CommandSpec {
     let mut argv = engine_argv(engine);
     argv.extend(args.into_iter().map(Into::into));
-    ssh_command_owned(ssh, argv)
+    ssh_command_owned(class, ssh, argv)
 }
 
 impl ImageHost {
@@ -2919,7 +2963,7 @@ impl ImageHost {
             | Self::SshNitro(ssh) => {
                 let mut argv = engine_argv(&args[0]);
                 argv.extend(args.into_iter().skip(1));
-                ssh_command_owned(ssh, argv)
+                ssh_command_owned(SshTrafficClass::Control, ssh, argv)
             }
         }
         .purpose(purpose)
@@ -3408,6 +3452,7 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
 
 /// Wrap an argv vector for execution at a provisioned session target.
 pub fn command_on_locator(
+    class: SshTrafficClass,
     locator: &TargetLocator,
     session_id: &str,
     args: Vec<String>,
@@ -3417,13 +3462,17 @@ pub fn command_on_locator(
     if args.is_empty() {
         bail!("target command must not be empty");
     }
-    Ok(locator_command(locator, args).purpose(purpose))
+    Ok(locator_command(class, locator, args).purpose(purpose))
 }
 
 /// Wrap a non-empty argv vector for execution at a target, without checking
 /// that the locator belongs to a particular session. Every per-target command
 /// is built here, so each target kind is spelled out once.
-pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpec {
+pub fn locator_command(
+    class: SshTrafficClass,
+    locator: &TargetLocator,
+    args: Vec<String>,
+) -> CommandSpec {
     match locator {
         TargetLocator::LocalBare { .. } => {
             let mut args = args.into_iter();
@@ -3438,7 +3487,7 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
             args,
         ),
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_owned(ssh, args)
+            ssh_command_owned(class, ssh, args)
         }
         TargetLocator::SshPodman {
             ssh, container_id, ..
@@ -3459,7 +3508,7 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
             );
             let mut argv = vec![remote.program];
             argv.extend(remote.args);
-            ssh_command_owned(ssh, argv)
+            ssh_command_owned(class, ssh, argv)
         }
     }
 }
@@ -3999,7 +4048,7 @@ mod executor_tests {
             ssh_args: Vec::new(),
         };
         let executor = MasterKilledOnce::default();
-        let output = executor.execute(&ssh_command(&ssh, ["true"]));
+        let output = executor.execute(&ssh_command(SshTrafficClass::Control, &ssh, ["true"]));
         set_ssh_connection_sharing_for_test(None);
 
         assert_eq!(output.expect("the retry succeeds").status, 0);

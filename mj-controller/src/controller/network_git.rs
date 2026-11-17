@@ -2,6 +2,7 @@
 
 use crate::targets::{self, CommandExecutor};
 use anyhow::{Context, Result, ensure};
+use mj_core::targets::SshTrafficClass;
 
 use super::Controller;
 
@@ -53,6 +54,7 @@ impl Controller {
             ];
             args.extend(arguments.iter().map(|argument| (*argument).to_owned()));
             let output = executor.execute(&targets::command_on_locator(
+                SshTrafficClass::Control,
                 backend,
                 session_id,
                 args,
@@ -178,6 +180,7 @@ fn initialize_workspace(
         ];
         args.extend(arguments.iter().map(|argument| (*argument).to_owned()));
         executor.execute(&targets::command_on_locator(
+            SshTrafficClass::Bulk,
             backend,
             session_id,
             args,
@@ -308,6 +311,7 @@ pub(super) fn configure_workspace(
         .accepted_statuses([0, 5]),
     );
     let command = targets::command_on_locator(
+        SshTrafficClass::Bulk,
         backend,
         session_id,
         targets::step_script(steps),

@@ -1,3 +1,4 @@
+use mj_core::targets::SshTrafficClass;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -2581,6 +2582,7 @@ fn managed_worktree_ssh_commands_preserve_hostile_path_boundaries() {
         ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
     };
     let command = managed_git_command(
+        SshTrafficClass::Control,
         &target,
         Path::new("/srv/project with ' quote"),
         ["worktree", "prune"],

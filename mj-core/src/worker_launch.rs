@@ -137,6 +137,10 @@ pub const SESSION_MANAGED_SUBAGENT_ENV: &str = "MJ_SESSION_MANAGED_SUBAGENT";
 /// never staged.
 pub const SESSION_MESSAGE_MCP_ENV: &str = "MJ_SESSION_MESSAGE_MCP";
 
+/// Controller-authored JSON checkout roots for container-only project tool
+/// installation. The worker consumes this directive before starting a harness.
+pub const SESSION_PROJECT_TOOLS_ROOTS: &str = "MJ_SESSION_PROJECT_TOOLS_ROOTS";
+
 /// Whether this worker executes the harness or only preserves recovered state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
