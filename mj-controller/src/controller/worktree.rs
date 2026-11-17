@@ -1509,9 +1509,7 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
             .collect();
         environment.push((
             "GIT_SSH_COMMAND".into(),
-            std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| {
-                mj_checkpoint::archive::NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()
-            }),
+            mj_core::local_git::git_ssh_command(),
         ));
         let mut args = vec![
             "git".into(),

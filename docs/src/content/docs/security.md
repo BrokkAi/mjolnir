@@ -292,9 +292,10 @@ who can intercept a first connection can present their own key, and it is
 trusted from then on. Other Git commands that run on a target follow that
 target's own SSH settings. A `StrictHostKeyChecking` option in a machine's
 `extra_args` (or an EC2 machine's `ssh_args`) changes the checking for
-Mjolnir's connections to that machine. Setting `GIT_SSH_COMMAND` does not
-reliably change it for Mjolnir's Git fetches: some of them set their own
-command.
+Mjolnir's connections to that machine. A `GIT_SSH_COMMAND` set where the
+Mjolnir daemon runs replaces the default for every Git command Mjolnir runs:
+on the controller, and on the SSH machines where it keeps the clone cache or
+moves a session's repository.
 
 A key that is already in `known_hosts` is checked, not trusted anew, unless an
 SSH option you set turns checking off. To avoid first-use trust:
@@ -310,6 +311,9 @@ SSH option you set turns checking off. To avoid first-use trust:
   `"-o", "StrictHostKeyChecking=yes"` to its `extra_args`; Mjolnir puts
   `extra_args` first, so it wins. EC2 machines take the same option in
   `ssh_args`. This covers Mjolnir's connection to the machine, not Git.
+- To refuse unknown keys for Mjolnir's Git commands, start the daemon with
+  `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"`. Keep
+  `BatchMode=yes`: no one is present to answer a prompt.
 
 ## Isolated sessions use independent network clones
 

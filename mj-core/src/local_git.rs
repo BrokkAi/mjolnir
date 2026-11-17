@@ -661,13 +661,32 @@ pub fn unattended_git_environment(command: &mut CommandSpec) {
     command
         .env
         .insert("GIT_NO_LAZY_FETCH".to_owned(), "1".to_owned());
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        command.env.insert(
-            "GIT_SSH_COMMAND".to_owned(),
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
-                .to_owned(),
-        );
-    }
+    command
+        .env
+        .insert("GIT_SSH_COMMAND".to_owned(), git_ssh_command());
+}
+
+/// SSH asks about an unknown host key itself, which `GIT_TERMINAL_PROMPT` does
+/// not reach, so Git that no one is watching gets a batch-mode command.
+pub const NON_INTERACTIVE_GIT_SSH_COMMAND: &str =
+    "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15";
+
+/// The command every Git process Mjolnir starts uses to reach an SSH remote,
+/// on the controller and on the target and cache hosts it runs Git on: the
+/// operator's `GIT_SSH_COMMAND` when it is set, otherwise
+/// [`NON_INTERACTIVE_GIT_SSH_COMMAND`]. This is the only place that decides,
+/// so one host-key rule covers them all (#1466).
+///
+/// An empty value counts as unset, as it does for Git, which would otherwise
+/// run a plain `ssh` that can prompt. A value that is not UTF-8 is kept, made
+/// lossy, rather than quietly replaced by the default.
+pub fn git_ssh_command() -> String {
+    std::env::var_os("GIT_SSH_COMMAND")
+        .filter(|command| !command.is_empty())
+        .map_or_else(
+            || NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned(),
+            |command| command.to_string_lossy().into_owned(),
+        )
 }
 
 fn git_output(
