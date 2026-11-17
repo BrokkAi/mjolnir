@@ -46,7 +46,44 @@ impl ChatState {
         self.paste(&text.replace(['\r', '\n'], " "));
     }
 
-    /// Draw the same editor's text/cursor in a horizontally scrolling line.
+    /// Restore literal text and return the displaced draft for the host to
+    /// retain. Search's preview must not replace its original unsent draft.
+    pub fn set_single_line_prompt_text(&mut self, text: String) -> String {
+        self.cancel_history_search();
+        let previous = self.input.clone();
+        self.set_input(text);
+        previous
+    }
+
+    /// Draw an editor slice with the same mapping for content and cursor.
+    /// Every stored newline occupies a visible cell; submission stays literal.
+    fn draw_prompt_slice(
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        text: &str,
+        cursor: usize,
+        focused: bool,
+    ) {
+        use unicode_width::UnicodeWidthStr;
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let display = |value: &str| sanitize_terminal_text(value).replace(['\n', '\r'], "⏎");
+        let column = display(&text[..cursor]).width();
+        let scroll = column.saturating_add(1).saturating_sub(area.width as usize);
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(display(text))
+                .style(crate::theme::raised())
+                .scroll((0, scroll.min(u16::MAX as usize) as u16)),
+            area,
+        );
+        if focused {
+            frame.set_cursor_position((area.x + (column - scroll) as u16, area.y));
+        }
+    }
+
+    /// Single-row presentation of the real Prompt. Search retains both its
+    /// selected match and the shared status/query instead of hiding the match.
     pub fn draw_single_line_prompt(
         &self,
         frame: &mut ratatui::Frame,
@@ -57,28 +94,42 @@ impl ChatState {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let (text, cursor) = if let Some(search) = self.history_search.as_ref() {
-            let prefix = "Search (Esc cancels): ";
-            (
-                format!("{prefix}{}", search.query),
-                prefix.width() + search.query.value()[..search.query.cursor()].width(),
-            )
-        } else {
-            (
-                sanitize_terminal_text(&self.input),
-                self.input[..self.input_cursor].width(),
-            )
+        let Some(search) = self.history_search.as_ref() else {
+            Self::draw_prompt_slice(frame, area, &self.input, self.input_cursor, focused);
+            return;
         };
-        let scroll = cursor.saturating_add(1).saturating_sub(area.width as usize);
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new(text)
-                .style(crate::theme::raised())
-                .scroll((0, scroll.min(u16::MAX as usize) as u16)),
-            area,
+        let (status, _) = super::history::history_search_status(search);
+        let match_width = area.width / 2;
+        let search_width = area.width.saturating_sub(match_width + 1);
+        let status_width = (status.width() as u16).min(search_width / 2);
+        let query_width = search_width.saturating_sub(status_width + 1);
+        Self::draw_prompt_slice(
+            frame,
+            ratatui::layout::Rect::new(area.x, area.y, match_width, 1),
+            &self.input,
+            0,
+            false,
         );
-        if focused {
-            frame.set_cursor_position((area.x + (cursor - scroll) as u16, area.y));
-        }
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new("│"),
+            ratatui::layout::Rect::new(area.x + match_width, area.y, 1, 1),
+        );
+        Self::draw_prompt_slice(
+            frame,
+            ratatui::layout::Rect::new(area.x + match_width + 1, area.y, query_width, 1),
+            search.query.value(),
+            search.query.cursor(),
+            focused,
+        );
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(status).style(crate::theme::muted()),
+            ratatui::layout::Rect::new(
+                area.right().saturating_sub(status_width),
+                area.y,
+                status_width,
+                1,
+            ),
+        );
     }
 
     pub(super) fn replace_input_range(

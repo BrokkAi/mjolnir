@@ -26,6 +26,10 @@ pub(super) enum ComposerIoUpdate {
         staging: bool,
         result: Result<ClipboardContent, String>,
     },
+    SessionHistoryListed {
+        generation: u64,
+        result: Result<Vec<mj_core::storage::PromptHistoryEntry>, String>,
+    },
     HistorySearchResults {
         generation: u64,
         result: Result<mj_core::storage::PromptHistoryPage, String>,
@@ -102,6 +106,7 @@ pub(super) struct ComposerRuntime {
     pub(super) prepared_startup: VecDeque<StartupPrompt>,
     pub(super) remote_streams: Vec<RemoteResultForwarder>,
     pub(super) history_task: Option<RemoteResultForwarder>,
+    pub(super) session_history_task: Option<RemoteResultForwarder>,
 }
 impl Default for ComposerRuntime {
     fn default() -> Self {
@@ -125,6 +130,7 @@ impl Default for ComposerRuntime {
             prepared_startup: VecDeque::new(),
             remote_streams: Vec::new(),
             history_task: None,
+            session_history_task: None,
         }
     }
 }
@@ -522,6 +528,13 @@ impl ChatState {
     }
     pub(super) fn apply_composer_update(&mut self, update: ComposerIoUpdate) {
         match update {
+            ComposerIoUpdate::SessionHistoryListed { generation, result } => match result {
+                Ok(entries) => self.set_session_history(generation, entries),
+                Err(error) => {
+                    tracing::warn!(%error, "session chat history listing failed");
+                    self.set_session_history_unavailable(generation, error);
+                }
+            },
             ComposerIoUpdate::HistorySearchResults { generation, result } => {
                 self.apply_history_search_results(generation, result)
             }

@@ -11,6 +11,11 @@ Text is shared with host notifications and resolved lazily for the displayed car
 
 ## Progress
 
+- [x] (2026-11-17, f5b4539b4 review) Retain refused text with its error separately from the draft. Captured Alt+Enter/Send restores recoverable text and preserves displaced drafts; only a successful send removes matching recovery text.
+- [x] (2026-11-17, f5b4539b4 review) Show selected search matches beside query/shared status in one row. Render each recalled newline as ⏎ with matching Unicode cursor mapping; keep payload newlines literal.
+- [x] (2026-11-17, f5b4539b4 review) Share the existing session-prompt listing dispatcher/results with detached editors and record successful replies through Prompt history. Extend existing notification/history tests.
+- [x] Focused validation passed: six existing history tests, four notification state tests and the existing attached-session prompt-list refresh regression (11 unique tests). Final dev/all-targets clippy passed for mj-chat and mj-tui with warnings denied. No commit or golden refresh.
+
 - [x] (2026-11-17) User-requested mouse selection: register the notification body with the shared selection owner, reuse transcript wrapping/copy rules and highlighting, and invalidate its row space on card identity changes. Extend one notification state test.
 - [x] (2026-11-17) Accepted Quick reply review: keep focus navigation/editing available during sends; suppress only duplicate in-flight drafts; let the editor consume history-search Enter; share the existing background history request/result owner with destination project binding. Extend the existing reply state test.
 - [x] Scoped validation passed: four notification state tests, twenty existing history tests, two existing CLI drag-selection tests and four unchanged notification-bearing goldens (30 unique tests). Dev/all-targets clippy passed for mj-chat, mj-tui and mj-cli with warnings denied; rustfmt/diff checks passed. No commit.
@@ -76,6 +81,10 @@ Text is shared with host notifications and resolved lazily for the displayed car
 
 ## Surprises & Discoveries
 
+- A command refusal previously discarded its captured text after removing the pending entry. Recoverable entries now own that text/error independently; unrelated success cannot erase them. Restoring also preserves the displaced draft rather than merely moving the data-loss case.
+- Reverse search stores its selected match in input, independently of its query. The compact host now renders both and uses shared status formatting from history_search_footer. Newline markers and cursor columns use the same sanitized display mapping.
+- Search and Up/Ctrl-P were separate asynchronous owners: session listings formerly returned via ChatIoUpdate while reverse search used composer updates. Session listings now use the existing composer result channel/generation guard for both attached and detached editors, with supervised task cancellation.
+
 - The detached reply editor reused Prompt input but had no history dispatcher or project binding. The existing ActiveChat dispatcher can move onto ChatState without a second fetch path: both hosts use its composer result channel and existing generation checks; the composer owns cancellation.
 - Notification body rows now use the transcript wrapper and copy metadata together, so copy joins soft-wrapped words while preserving hard line breaks and wide Unicode. The reply editor and controls are outside that registered surface.
 
@@ -136,6 +145,16 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Decision Log
+
+- Decision: accepted f5b4539b4 review: keep recoverable reply text/error per session until matching text is sent successfully. Alt+Enter and the clickable Restore unsent button restore the captured candidate; Enter sends the displayed draft. Preserve displaced drafts in the same recovery collection and rotate restored entries to the back so every retained reply remains reachable. Restoring cancels reverse search through the editor owner and preserves its original draft, not its temporary match.
+  Rationale: editing and unrelated receipts must never destroy an unsent submission; restoring must preserve newer work too. The gesture captures the restore text and original card/session just as Send captures text.
+  Date/Author: 2026-11-17 / parent review request, implementation worker.
+- Decision: accepted f5b4539b4 review: factor status formatting at the Prompt history owner, show the selected match/query/status together in the compact host, and map literal newlines to visible ⏎ cells only for presentation.
+  Rationale: one status interpretation and one display/cursor mapping prevent invisible content and divergent search modes; payload text remains unchanged.
+  Date/Author: 2026-11-17 / parent review request, implementation worker.
+- Decision: accepted f5b4539b4 review: move session-prompt list dispatch/results onto the existing composer owner used by both hosts, retain its generation checks, request listings for each detached destination and record successful Quick replies in Prompt history.
+  Rationale: Up/Ctrl-P and reverse search need their respective existing request paths; no new database or daemon operation is needed.
+  Date/Author: 2026-11-17 / parent review request, implementation worker.
 
 - Decision: user request 2026-11-17: reuse the global transcript selection state machine and transcript row-copy helpers for notification text; give each card/text-width row space a distinct surface identity.
   Rationale: drag, edge scrolling, highlight, clipboard routing and soft-wrap copy semantics have one owner. Removing a surface invalidates its selection before rendering/routing; reply/buttons retain their own pointer ownership.
@@ -240,6 +259,8 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 ## Outcomes & Retrospective
 
+The four accepted f5b4539b4 Quick reply findings are complete without a commit. Refused text/error and displaced drafts remain independently recoverable; captured Alt+Enter/Restore unsent gestures restore and cycle them without sending, while Enter sends the displayed draft. Unrelated successful receipts preserve other failures. Selected search matches and shared query/status render together; newline markers and cursor mapping expose multiline recalls without changing the payload. Up/Ctrl-P now receives the destination's stored prompt listing through the existing generation-checked composer path; successful Quick replies update local history and request a fresh listing. Eleven unique scoped tests and affected-crate all-targets clippy passed. The initial Unicode assertion was corrected to use existing wide-cell extraction; the initial clippy replacement lint was fixed mechanically. Evidence is in `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/qr-followup-report.md`.
+
 The mouse-selection follow-up and three accepted Quick reply findings are complete without a commit. Notification text uses the global selection state machine and the transcript wrapper/copy metadata; controls stay outside that surface and an in-flight drag retains the pointer across them. Detached Prompt history now shares the attached composer dispatcher, cancellation, result channel and generation guard, bound to the destination project. Pending sends no longer capture keyboard focus or prevent another draft, and search Enter cannot submit. Thirty unique scoped tests and three-crate all-targets clippy passed. No golden was changed because existing cases have no selection highlight, and all four affected render goldens match exactly. Evidence: `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/selection-review-report.md`.
 
 The user request of 2026-11-17 for Go to Session, Quick reply, Send, Skip, text margins and a distinct header is complete in the working tree without committing. Go to Session uses ordinary session navigation and the content holder, with the composer focused. Reply editors/drafts are session-bound and use the real Prompt handler; newline input is suppressed/flattened for the single-line presentation. Pointer gestures capture the card, destination and text; sends retain that identity under a stable prompt command ID. The existing asynchronous durable prompt queue owns submission, retries and receipts. Successful delivery clears only the matching line; refusals retain it, uncertain admission stays in flight, and errors remain visible on the card. The real conversation composer is independent. Alt+g opens, Alt+n clears/next, Alt+s skips, Alt+c clears Important entries, Alt+Enter sends, and plain Enter sends nonempty text or opens on empty. Alt+Up/Down scroll the card. The secondary palette supplies the blue metadata header; the new text margins, separator and reply row have the intended four-row height cost.
@@ -299,6 +320,8 @@ Capture the card, content holder and reply at the gesture/key event. The existin
 Extend the notification state/pointer tests and the existing durable prompt-refusal regression; update the existing layout golden with reply text and actual header color. Inspect the other affected render goldens before refreshing. Run scoped tests and three-crate dev/all-targets clippy outside the sandbox; do not commit.
 
 ## Concrete Steps
+
+For the f5b4539b4 follow-up, keep package selection fixed with `-p brokk-mj-chat -p brokk-mj-tui` and run the filters `chat::history::tests`, `notifications_pane::tests` and `an_accepted_prompt_lists_the_sessions_prompts_again_for_up`. Rerun only failed/changed conditions after fixes. Run `cargo clippy -p brokk-mj-chat -p brokk-mj-tui --all-targets -- -D warnings` outside the sandbox on the dev profile. All checks passed.
 
 For the selection/review follow-up, run `cargo test -p brokk-mj-tui notifications_pane::tests`, the four golden filters listed below, `cargo test -p brokk-mj-chat history`, and `cargo test -p brokk-mjolnir dragging_`. All passed outside the sandbox on the dev profile.
 
@@ -363,3 +386,5 @@ Revision note (2026-11-17): user removed Go To Message; navigation-only machiner
 Revision note (2026-11-17): user-requested ordinary session opening and Quick reply are implemented; ten scoped tests and three-crate clippy pass. No commit.
 
 Revision note (2026-11-17): completed shared notification selection and the accepted focus/search/history Quick reply review fixes. Thirty scoped tests, four unchanged goldens included, and three-crate dev/all-targets clippy passed; no commit.
+
+Revision note (2026-11-17): completed all four accepted f5b4539b4 Quick reply findings. Eleven unique scoped tests and two-crate dev/all-targets clippy passed; no commit or golden refresh.

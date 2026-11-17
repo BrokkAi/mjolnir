@@ -106,8 +106,41 @@ impl ChatState {
         )));
     }
 
+    /// Attached and detached Prompt editors use one listing dispatcher and
+    /// the same generation-checked composer result path.
+    pub fn dispatch_session_prompt_history(
+        &mut self,
+        session: impl std::future::Future<Output = anyhow::Result<mj_client::session::SessionHandle>>
+        + Send
+        + 'static,
+    ) {
+        let Some(generation) = self.take_session_history_request() else {
+            return;
+        };
+        let updates = self.composer_runtime.tx.clone();
+        self.composer_runtime.session_history_task = Some(super::composer::RemoteResultForwarder(
+            Some(tokio::spawn(async move {
+                let result = match session.await {
+                    Ok(session) => session
+                        .session_prompts()
+                        .await
+                        .map_err(|error| format!("{error:#}")),
+                    Err(error) => Err(format!("{error:#}")),
+                };
+                if let Err(error) =
+                    updates.send(super::composer::ComposerIoUpdate::SessionHistoryListed {
+                        generation,
+                        result,
+                    })
+                {
+                    tracing::debug!(%error, "session history result dropped because the editor closed");
+                }
+            })),
+        ));
+    }
+
     /// Ask for this session's stored prompts again.
-    pub(super) fn request_session_history(&mut self) {
+    pub fn request_session_history(&mut self) {
         self.session_history_generation = self.session_history_generation.wrapping_add(1);
         self.pending_session_history = Some(self.session_history_generation);
     }
@@ -330,7 +363,7 @@ impl ChatState {
         self.refresh_history_search();
     }
 
-    fn cancel_history_search(&mut self) {
+    pub(super) fn cancel_history_search(&mut self) {
         let Some(search) = self.history_search.take() else {
             return;
         };
@@ -394,7 +427,7 @@ impl ChatState {
         }
     }
 
-    pub(super) fn record_prompt_history(&mut self, prompt: &str) {
+    pub fn record_prompt_history(&mut self, prompt: &str) {
         if self.prompt_history.last().is_none_or(|last| last != prompt) {
             self.prompt_history.push(prompt.to_owned());
         }
@@ -468,36 +501,49 @@ pub(super) fn history_scope_name(scope: HistoryScope) -> &'static str {
     }
 }
 
-pub(super) fn history_search_footer(search: &HistorySearch) -> String {
-    let mut footer = format!(
-        "reverse-i-search [{}]: {}",
-        history_scope_name(search.scope),
-        search.query
-    );
+/// Shared status text for the conversation footer and a one-row Prompt host.
+/// Hints stay separate so the compact field does not reimplement search modes.
+pub(super) fn history_search_status(search: &HistorySearch) -> (String, &'static str) {
     let query_chars = search.query.chars().count();
     if let Some(error) = search.unavailable.as_deref() {
-        footer.push_str(&format!("  unavailable: {error}"));
+        (format!("unavailable: {error}"), "")
     } else if query_chars > 0 && query_chars < MIN_HISTORY_QUERY_CHARS {
-        footer.push_str(&format!(
-            "  type {MIN_HISTORY_QUERY_CHARS}+ characters · Alt-R scope · Esc cancel"
-        ));
+        (
+            format!("type {MIN_HISTORY_QUERY_CHARS}+ characters"),
+            " · Alt-R scope · Esc cancel",
+        )
     } else if query_chars > 0 && search.matches.is_empty() {
-        footer.push_str(if search.fetching {
-            "  searching…"
-        } else {
-            "  no match"
-        });
+        (
+            if search.fetching {
+                "searching…"
+            } else {
+                "no match"
+            }
+            .to_owned(),
+            "",
+        )
     } else if let Some(selected) = search.selected {
-        footer.push_str(&format!(
-            "  {}/{}{} · Enter accept · Esc cancel · Alt-R scope",
-            selected + 1,
-            search.matches.len(),
-            if search.more_may_follow() { "+" } else { "" }
-        ));
+        (
+            format!(
+                "{}/{}{}",
+                selected + 1,
+                search.matches.len(),
+                if search.more_may_follow() { "+" } else { "" }
+            ),
+            " · Enter accept · Esc cancel · Alt-R scope",
+        )
     } else {
-        footer.push_str("  type to search · Alt-R scope · Esc cancel");
+        ("type to search".into(), " · Alt-R scope · Esc cancel")
     }
-    footer
+}
+
+pub(super) fn history_search_footer(search: &HistorySearch) -> String {
+    let (status, hints) = history_search_status(search);
+    format!(
+        "reverse-i-search [{}]: {}  {status}{hints}",
+        history_scope_name(search.scope),
+        search.query
+    )
 }
 
 pub(super) fn highlighted_input_lines(input: &str, query: &str) -> Vec<Line<'static>> {
@@ -618,6 +664,28 @@ mod tests {
         request
     }
 
+    fn single_line_frame(chat: &ChatState, width: u16) -> (String, ratatui::layout::Position) {
+        use ratatui::backend::Backend;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| chat.draw_single_line_prompt(frame, frame.area(), true))
+            .unwrap();
+        let text = crate::selection::extract_rows(
+            terminal.backend().buffer(),
+            &crate::selection::SurfaceFrame::fixed(
+                crate::selection::SurfaceId::PromptInput,
+                ratatui::layout::Rect::new(0, 0, width, 1),
+            ),
+            &crate::selection::SelectionRange::new(
+                crate::selection::ContentPos::new(0, 0),
+                crate::selection::ContentPos::new(0, width - 1),
+            ),
+        );
+        let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+        (text, cursor)
+    }
+
     fn image_draft(chat: &mut ChatState) -> Vec<super::super::PromptImage> {
         chat.set_prompt_images_supported(true);
         chat.set_input("unfinished".into());
@@ -675,6 +743,30 @@ mod tests {
 
         answer_history_page(&mut chat, &["fix renderer"], None);
         assert_eq!(chat.input, "fix renderer");
+        let (shown, _) = single_line_frame(&chat, 100);
+        assert!(
+            shown.contains("fix renderer") && shown.contains("fix ") && shown.contains("1/1"),
+            "{shown}"
+        );
+        chat.handle_single_line_prompt_key(key(KeyCode::Char('x')));
+        answer_history_page(&mut chat, &[], None);
+        let (shown, _) = single_line_frame(&chat, 100);
+        assert!(
+            shown.contains("fix x") && shown.contains("no match"),
+            "{shown}"
+        );
+        assert!(
+            chat.handle_single_line_prompt_key(key(KeyCode::Enter))
+                .consumed
+        );
+        // Restoring a refused reply from a button also closes search. Return
+        // its original draft so the host can preserve it, not the preview.
+        assert_eq!(
+            chat.set_single_line_prompt_text("restored\nreply".into()),
+            "draft"
+        );
+        assert!(chat.history_search.is_none());
+        assert_eq!(chat.input, "restored\nreply");
     }
 
     #[test]
@@ -784,6 +876,30 @@ mod tests {
                 },
             ],
         );
+        // The detached presentation must expose all of a recalled multiline
+        // payload, including Unicode, while retaining literal submission text.
+        chat.record_prompt_history("first 世界\nsecond\nthird");
+        chat.clear_draft();
+        chat.handle_single_line_prompt_key(ctrl('p'));
+        assert_eq!(chat.input, "first 世界\nsecond\nthird");
+        let (shown, cursor) = single_line_frame(&chat, 80);
+        assert!(shown.contains("first 世界⏎second⏎third"), "{shown}");
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(cursor.x as usize, "first 世界⏎second⏎third".width());
+        let (shown, cursor) = single_line_frame(&chat, 8);
+        assert!(shown.contains("third") && cursor.x < 8, "{shown}");
+        chat.handle_single_line_prompt_key(ctrl('a'));
+        let (_, cursor) = single_line_frame(&chat, 80);
+        assert_eq!(cursor.x as usize, "first 世界⏎second⏎".width());
+        chat.handle_single_line_prompt_key(ctrl('a'));
+        chat.handle_single_line_prompt_key(ctrl('a'));
+        let (shown, cursor) = single_line_frame(&chat, 8);
+        assert!(shown.starts_with("first ") && cursor.x == 0, "{shown}");
+        chat.handle_single_line_prompt_key(ctrl('e'));
+        let (_, cursor) = single_line_frame(&chat, 80);
+        assert_eq!(cursor.x as usize, "first 世界".width());
+        chat.prompt_history.clear();
+        chat.clear_draft();
         chat.record_prompt_history("this visit");
 
         let mut recalled = Vec::new();

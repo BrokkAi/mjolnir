@@ -55,6 +55,31 @@ struct QuickReply {
     editor: mj_chat::chat::ChatState,
     pending: Vec<ReplySubmission>,
     error: Option<String>,
+    /// Failed submissions and drafts displaced by recovery remain recoverable
+    /// independently of the current editor, until that text is sent successfully.
+    recoverable: Vec<RecoverableReply>,
+}
+#[derive(Debug)]
+struct RecoverableReply {
+    text: String,
+    error: Option<String>,
+}
+impl QuickReply {
+    fn restore_candidate(&self) -> Option<&str> {
+        self.recoverable
+            .iter()
+            .find(|reply| reply.text != self.editor.single_line_prompt_text())
+            .map(|reply| reply.text.as_str())
+    }
+    fn keep_unsent(&mut self, text: String, error: Option<String>) {
+        if let Some(previous) = self.recoverable.iter_mut().find(|reply| reply.text == text) {
+            if error.is_some() {
+                previous.error = error;
+            }
+        } else if !text.trim().is_empty() {
+            self.recoverable.push(RecoverableReply { text, error });
+        }
+    }
 }
 impl std::fmt::Debug for QuickReply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -84,6 +109,7 @@ pub(crate) struct NotificationGesture {
     card: crate::NotificationCard,
     session_id: String,
     text: String,
+    restore_text: Option<String>,
 }
 
 pub(crate) struct NotificationEntry {
@@ -101,14 +127,19 @@ impl DashboardState {
             .replies
             .entry(session_id.to_owned())
             .or_insert_with(|| QuickReply {
-                editor: mj_chat::chat::ChatState::standby(
-                    session_id,
-                    &self.config,
-                    Default::default(),
-                    self.notices.clone(),
-                ),
+                editor: {
+                    let mut editor = mj_chat::chat::ChatState::standby(
+                        session_id,
+                        &self.config,
+                        Default::default(),
+                        self.notices.clone(),
+                    );
+                    editor.request_session_history();
+                    editor
+                },
                 pending: Vec::new(),
                 error: None,
+                recoverable: Vec::new(),
             })
     }
 
@@ -176,6 +207,11 @@ impl DashboardState {
                     .get(session_id)
                     .map(|session| session.bundle_id.clone()),
             );
+            let listing_control = control.clone();
+            let listing_session = session_id.clone();
+            reply.editor.dispatch_session_prompt_history(async move {
+                listing_control.session(listing_session).await
+            });
             let control = control.clone();
             let session_id = session_id.clone();
             reply
@@ -242,10 +278,16 @@ impl DashboardState {
                 if reply.editor.single_line_prompt_text() == pending.text {
                     reply.editor.clear_draft();
                 }
+                reply.editor.record_prompt_history(&pending.text);
+                reply.editor.request_session_history();
+                reply
+                    .recoverable
+                    .retain(|unsent| unsent.text != pending.text);
                 reply.error = None;
             }
             Err(error) => {
-                reply.error = Some(format!("Reply failed: {error}"));
+                reply.keep_unsent(pending.text, Some(error));
+                reply.error = None;
             }
         }
         if failed {
@@ -458,6 +500,14 @@ impl DashboardState {
             .get(&session_id)
             .map(|reply| reply.editor.single_line_prompt_text().to_owned())
             .unwrap_or_default();
+        let restore_text = (command == CommandId::NotificationSend)
+            .then(|| {
+                self.notifications
+                    .replies
+                    .get(&session_id)
+                    .and_then(|reply| reply.restore_candidate().map(str::to_owned))
+            })
+            .flatten();
         NotificationGesture {
             command,
             card: crate::NotificationCard {
@@ -466,6 +516,7 @@ impl DashboardState {
             },
             session_id,
             text,
+            restore_text,
         }
     }
 
@@ -478,7 +529,26 @@ impl DashboardState {
             card,
             session_id,
             text,
+            restore_text,
         } = gesture;
+        if let Some(restore) = restore_text {
+            let reply = self.quick_reply_mut(&session_id);
+            // The gesture carries the captured recovery. Preserve the current
+            // draft too, including any edits made after this button was drawn.
+            let previous = reply.editor.set_single_line_prompt_text(restore.clone());
+            reply.keep_unsent(previous, None);
+            // Rotate the restored entry to the back so repeated restoration
+            // reaches every retained reply, rather than alternating two drafts.
+            if let Some(index) = reply
+                .recoverable
+                .iter()
+                .position(|unsent| unsent.text == restore)
+            {
+                let restored = reply.recoverable.remove(index);
+                reply.recoverable.push(restored);
+            }
+            return DashboardAction::None;
+        }
         match command {
             CommandId::NotificationOpen | CommandId::NotificationDefault
                 if command == CommandId::NotificationOpen || text.trim().is_empty() =>
@@ -500,8 +570,10 @@ impl DashboardState {
                 let command_id = match mj_client::session::new_command_id("notification-reply") {
                     Ok(id) => id,
                     Err(error) => {
-                        self.quick_reply_mut(&session_id).error =
-                            Some(format!("Could not send reply: {error:#}"));
+                        self.quick_reply_mut(&session_id).keep_unsent(
+                            text.clone(),
+                            Some(format!("Could not send reply: {error:#}")),
+                        );
                         self.reveal_notification_reply_error(&session_id);
                         return DashboardAction::None;
                     }
@@ -708,7 +780,26 @@ pub(crate) fn render(
         .notifications
         .replies
         .get(&session_id)
-        .and_then(|reply| reply.error.as_deref());
+        .map(|reply| {
+            let mut messages = Vec::new();
+            if let Some(error) = &reply.error {
+                messages.push(error.clone());
+            }
+            for unsent in &reply.recoverable {
+                let text = unsent.text.replace('\n', "⏎");
+                let restore = if unsent.text == reply.editor.single_line_prompt_text() {
+                    "Enter sends this text"
+                } else {
+                    "Alt+Enter restores; Enter sends restored text"
+                };
+                messages.push(match &unsent.error {
+                    Some(error) => format!("Not sent: {text} — {error}; {restore}."),
+                    None => format!("Saved draft: {text}; {restore}."),
+                });
+            }
+            messages.join("\n")
+        })
+        .filter(|message| !message.is_empty());
     let mut text = match dashboard.notifications.errors.get(&entry.session_id) {
         Some(error) => format!("Could not clear: {error}\n{text}"),
         None => text,
@@ -760,24 +851,27 @@ pub(crate) fn render(
         target: entry.target.clone(),
     };
     let reply = dashboard.quick_reply_mut(&session_id);
+    let restoring = reply.restore_candidate().is_some();
     let pending = reply
         .pending
         .iter()
         .find(|pending| pending.text == reply.editor.single_line_prompt_text());
     let send_label = match pending {
+        _ if restoring => " Restore unsent ",
         Some(pending) if pending.card != current_card => " Sending earlier reply… ",
         Some(_) => " Sending… ",
         None if !reply.pending.is_empty() => " Send (reply in flight) ",
         None => " Send ",
     };
     let pending = pending.is_some();
-    let can_send = !pending
-        && !dashboard
-            .quick_reply_mut(&session_id)
-            .editor
-            .single_line_prompt_text()
-            .trim()
-            .is_empty();
+    let can_send = restoring
+        || (!pending
+            && !dashboard
+                .quick_reply_mut(&session_id)
+                .editor
+                .single_line_prompt_text()
+                .trim()
+                .is_empty());
     let send_width = (Line::raw(send_label).width() as u16).min(inner.width);
     let reply_y = inner.bottom() - 2;
     let send_area = Rect::new(
@@ -890,6 +984,7 @@ pub(crate) mod tests {
     #[derive(Clone)]
     struct HistoryBackend {
         inner: SessionHandle,
+        listings: tokio::sync::mpsc::UnboundedSender<String>,
         requests: tokio::sync::mpsc::UnboundedSender<(
             String,
             String,
@@ -898,8 +993,10 @@ pub(crate) mod tests {
     }
     impl SessionControlBackend for HistoryBackend {
         fn session(&self, session_id: String) -> BoxFuture<'_, anyhow::Result<SessionHandle>> {
-            assert_eq!(session_id, "q1");
-            let handle = SessionHandle::new(self.clone());
+            let mut backend = self.clone();
+            backend.inner =
+                mj_client::session::replacement_session_test_fixture(&session_id, 1).stopped;
+            let handle = SessionHandle::new(backend);
             Box::pin(async move { Ok(handle) })
         }
     }
@@ -917,7 +1014,15 @@ pub(crate) mod tests {
             Box::pin(async move { Ok(rx.await?) })
         }
         fn session_prompts(&self) -> BoxFuture<'_, anyhow::Result<Vec<PromptHistoryEntry>>> {
-            Box::pin(async { Ok(vec![]) })
+            self.listings.send(self.session_id().to_owned()).unwrap();
+            let session_id = self.session_id().to_owned();
+            Box::pin(async move {
+                Ok(vec![PromptHistoryEntry {
+                    id: 1,
+                    session_id,
+                    text: "stored\nprompt 世界".into(),
+                }])
+            })
         }
         fn config_result(
             &self,
@@ -1453,10 +1558,11 @@ pub(crate) mod tests {
         assert!(
             replies
                 .quick_reply_mut("q1")
-                .error
-                .as_ref()
-                .unwrap()
-                .contains("refused")
+                .recoverable
+                .iter()
+                .any(
+                    |reply| reply.error.as_deref() == Some("refused") && reply.text == "draft /? d"
+                )
         );
         assert_eq!(replies.quick_reply_mut("q2").editor.draft(), "other draft");
         // A later successful receipt clears only its original session's line.
@@ -1477,9 +1583,11 @@ pub(crate) mod tests {
         // only on a separate key press.
         let fixture = mj_client::session::replacement_session_test_fixture("q1", 1);
         let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (listings, mut listed) = tokio::sync::mpsc::unbounded_channel();
         let history = SessionControl::new(HistoryBackend {
             inner: fixture.stopped,
             requests,
+            listings,
         });
         replies.state.sessions.get_mut("q1").unwrap().bundle_id = "other-project".into();
         replies.handle_key(crossterm::event::KeyEvent::new(
@@ -1502,11 +1610,72 @@ pub(crate) mod tests {
                 entries: vec![PromptHistoryEntry {
                     id: 1,
                     session_id: "q1".into(),
-                    text: "recalled answer".into(),
+                    text: "recalled\nanswer".into(),
                 }],
                 next: None,
             })
             .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while replies
+                .quick_reply_mut("q1")
+                .editor
+                .single_line_prompt_text()
+                != "recalled\nanswer"
+            {
+                replies.service_notification_history(history.clone());
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let search_line = drawn(&mut replies, 180, 50)
+            .into_iter()
+            .find(|line| line.contains("Quick reply:"))
+            .unwrap();
+        assert!(search_line.contains("recalled⏎answer"), "{search_line}");
+        assert!(
+            search_line.contains("recalled") && search_line.contains("1/1"),
+            "{search_line}"
+        );
+        assert_eq!(
+            replies.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            replies.quick_reply_mut("q1").editor.draft(),
+            "recalled\nanswer"
+        );
+        assert!(replies.quick_reply_mut("q1").pending.is_empty());
+        let recalled_line = drawn(&mut replies, 180, 50)
+            .into_iter()
+            .find(|line| line.contains("Quick reply:"))
+            .unwrap();
+        assert!(recalled_line.contains("recalled⏎answer"), "{recalled_line}");
+        let DashboardAction::NotificationReply {
+            prompt: recalled, ..
+        } = replies.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("send recalled text");
+        };
+        assert_eq!(recalled.payload.text, "recalled\nanswer");
+        assert!(replies.notification_reply_finished("q1", &recalled.command_id, Ok(())));
+        replies.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            replies
+                .quick_reply_mut("q1")
+                .editor
+                .single_line_prompt_text(),
+            "recalled\nanswer",
+            "successful reply is immediately in local history"
+        );
+        replies.quick_reply_mut("q1").editor.clear_draft();
+        replies.service_notification_history(history.clone());
+        // A stored listing is independently dispatched for the destination.
+        let mut observed = Vec::new();
+        while let Ok(id) = listed.try_recv() {
+            observed.push(id);
+        }
+        assert!(observed.iter().any(|id| id == "q1"));
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !replies.quick_reply_mut("q1").editor.has_composer_updates() {
                 tokio::task::yield_now().await;
@@ -1514,20 +1683,152 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        assert!(replies.service_notification_history(history));
+        replies.quick_reply_mut("q2").editor.clear_draft();
+        replies.handle_key(alt(KeyCode::Char('s')));
         assert_eq!(
-            replies.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
+            replies.displayed_notification_session_id().as_deref(),
+            Some("q2")
         );
-        assert_eq!(
-            replies.quick_reply_mut("q1").editor.draft(),
-            "recalled answer"
-        );
-        assert!(replies.quick_reply_mut("q1").pending.is_empty());
-        assert!(matches!(
-            replies.handle_key(key(KeyCode::Enter)),
-            DashboardAction::NotificationReply { .. }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                replies.service_notification_history(history.clone());
+                replies.handle_key(key(KeyCode::Up));
+                if replies
+                    .quick_reply_mut("q2")
+                    .editor
+                    .single_line_prompt_text()
+                    == "stored\nprompt 世界"
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        replies.quick_reply_mut("q2").editor.clear_draft();
+        replies.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('p'),
+            crossterm::event::KeyModifiers::CONTROL,
         ));
+        assert_eq!(
+            replies
+                .quick_reply_mut("q2")
+                .editor
+                .single_line_prompt_text(),
+            "stored\nprompt 世界"
+        );
+
+        // Refusal A must survive edits to B and a later unrelated success.
+        let mut recovery = self::dashboard();
+        for ch in "refused A".chars() {
+            recovery.handle_key(key(KeyCode::Char(ch)));
+        }
+        let DashboardAction::NotificationReply { prompt: first, .. } =
+            recovery.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("send A");
+        };
+        recovery.quick_reply_mut("q1").editor.clear_draft();
+        for ch in "draft B".chars() {
+            recovery.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert!(recovery.notification_reply_finished(
+            "q1",
+            &first.command_id,
+            Err("denied A".into())
+        ));
+        assert_eq!(
+            recovery
+                .quick_reply_mut("q1")
+                .editor
+                .single_line_prompt_text(),
+            "draft B"
+        );
+        let refusal = drawn(&mut recovery, 180, 50).join("\n");
+        assert!(
+            refusal.contains("Not sent: refused A") && refusal.contains("denied A"),
+            "{refusal}"
+        );
+        assert_eq!(
+            recovery.handle_key(alt(KeyCode::Enter)),
+            DashboardAction::None,
+            "restore never sends"
+        );
+        assert_eq!(
+            recovery
+                .quick_reply_mut("q1")
+                .editor
+                .single_line_prompt_text(),
+            "refused A"
+        );
+        assert!(
+            recovery
+                .quick_reply_mut("q1")
+                .recoverable
+                .iter()
+                .any(|draft| draft.text == "draft B")
+        );
+        recovery.handle_key(key(KeyCode::Char('!')));
+        let DashboardAction::NotificationReply { prompt: second, .. } =
+            recovery.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("send edited A");
+        };
+        recovery.notification_reply_finished(
+            "q1",
+            &second.command_id,
+            Err("denied edited A".into()),
+        );
+        assert_eq!(
+            recovery
+                .quick_reply_mut("q1")
+                .recoverable
+                .iter()
+                .filter(|draft| draft.error.is_some())
+                .count(),
+            2
+        );
+        recovery.handle_key(alt(KeyCode::Enter));
+        assert_eq!(
+            recovery
+                .quick_reply_mut("q1")
+                .editor
+                .single_line_prompt_text(),
+            "draft B"
+        );
+        recovery.handle_key(alt(KeyCode::Enter));
+        let DashboardAction::NotificationReply { prompt: retry, .. } =
+            recovery.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("retry restored A");
+        };
+        assert_eq!(retry.payload.text, "refused A");
+        recovery.notification_reply_finished("q1", &retry.command_id, Ok(()));
+        assert!(
+            recovery
+                .quick_reply_mut("q1")
+                .recoverable
+                .iter()
+                .any(|draft| draft.error.as_deref() == Some("denied edited A"))
+        );
+        recovery.handle_key(alt(KeyCode::Enter));
+        assert_eq!(
+            recovery
+                .quick_reply_mut("q1")
+                .editor
+                .single_line_prompt_text(),
+            "refused A!"
+        );
+        recovery.handle_key(alt(KeyCode::Enter));
+        assert_eq!(
+            recovery
+                .quick_reply_mut("q1")
+                .editor
+                .single_line_prompt_text(),
+            "draft B",
+            "restoration also retains displaced unsent drafts"
+        );
 
         let mut dashboard = dashboard();
         dashboard.notification_dismissals.remove("q1");
