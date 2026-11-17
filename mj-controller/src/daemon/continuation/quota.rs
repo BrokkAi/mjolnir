@@ -200,12 +200,6 @@ pub(super) async fn prepare(
         .as_ref()
         .map(|r| r.windows.clone())
         .unwrap_or_default();
-    // When the provider was last read: the only evidence that a quota report
-    // postdates a refused retry, so a repeated duration may be believed again.
-    let report_refreshed_at = observed
-        .as_ref()
-        .or(cached.as_ref())
-        .map(|report| report.refreshed_at_epoch_seconds as i64);
     if !observed.as_ref().is_some_and(ProfileQuota::is_usage_priced)
         && let Some(cached) = cached
     {
@@ -249,13 +243,7 @@ pub(super) async fn prepare(
         })
         .collect();
     let now_ms = mj_core::clock::epoch_millis();
-    let reset = crate::quota::retry_deadline(
-        &windows,
-        stated,
-        now_ms / 1000,
-        consumed,
-        report_refreshed_at,
-    );
+    let reset = crate::quota::retry_deadline(&windows, stated, now_ms / 1000, consumed);
     let retried = consumed.is_some();
     if reset.is_none()
         && let Some(wait) = wait
@@ -281,8 +269,9 @@ pub(super) async fn prepare(
         submitted: false,
     };
     // A duration was read against the retry that followed it and refused
-    // again, with no newer reading from the provider to confirm it. Say so
-    // rather than silently ignoring what the provider said.
+    // again. A repeat cannot be told from the same limit sliding its reset,
+    // and no reading of the report distinguishes them, so this session does
+    // not retry on one more time. Say so rather than dropping it silently.
     if retried
         && stated.is_some_and(|stated| stated.relative)
         && reset != stated.map(|stated| stated.at)
