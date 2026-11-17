@@ -1115,15 +1115,17 @@ pub const CONFIG_VERSION: u32 = 23;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
-/// The registry repository every session image name is built from.
+/// The registry repository for the release image.
 pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
-/// The container image a session uses when its target names none.
+/// The image for daemon-container mode and quota containers.
 ///
 /// A release build names the immutable image published for its own version; a
 /// development build names the floating image published from master.
 /// `mj-core/build.rs` resolves which one this build is and bakes the answer in.
-pub const DEFAULT_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
-/// Whether this is a release build whose [`DEFAULT_CONTAINER_IMAGE`] carries
+pub const RELEASE_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
+/// The session image used when neither its project nor target selects one.
+pub const DEFAULT_SESSION_IMAGE: &str = "docker.io/library/buildpack-deps:noble";
+/// Whether this is a release build whose [`RELEASE_CONTAINER_IMAGE`] carries
 /// its own worker. The release workflow publishes that image with the worker
 /// built from the same commit, whose identity equals this build's, so a
 /// container on it needs no worker from the host. Neither a development build
@@ -1133,14 +1135,14 @@ pub const RELEASE_IMAGE_CARRIES_WORKER: bool =
 /// The image name every configuration up to [`LEGACY_DEFAULT_IMAGE_LAST_VERSION`]
 /// wrote into a container target a user had touched.
 ///
-/// Loading such a file replaces this literal with [`DEFAULT_CONTAINER_IMAGE`],
-/// so an upgraded install follows the image built for its own version instead
+/// Loading such a file replaces this literal with [`DEFAULT_SESSION_IMAGE`],
+/// so an upgraded install follows the current default session image instead
 /// of pinning whatever was current when the file was written.
 pub const LEGACY_DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 /// The last configuration version that wrote the default image into a file.
 const LEGACY_DEFAULT_IMAGE_LAST_VERSION: u32 = 14;
 
-/// The rule [`DEFAULT_CONTAINER_IMAGE`] is resolved from.
+/// The rule [`RELEASE_CONTAINER_IMAGE`] is resolved from.
 ///
 /// It is a function so one test build can exercise both channels; a single
 /// `build.rs` run compiles only one of them.
@@ -1157,8 +1159,7 @@ pub fn container_image_for(version: &str, release: bool) -> String {
 /// `default_image`.
 ///
 /// A target the user customized -- any other image -- is left alone. Split from
-/// [`TryFrom<StoredConfig>`] so a test build can exercise the release channel's
-/// rewrite without compiling a release `build.rs`.
+/// [`TryFrom<StoredConfig>`] to exercise legacy config migration directly.
 fn migrate_legacy_default_image(target: &mut TargetTemplate, default_image: &str) {
     if let Some(container) = target.container_mut()
         && container.image == LEGACY_DEFAULT_CONTAINER_IMAGE
@@ -1600,11 +1601,10 @@ impl TryFrom<StoredConfig> for Config {
         }
         // Up to version 14, a container target the user had touched carried
         // the then-current default image in the file. Move that literal back
-        // onto this build's default so an upgraded install follows the image
-        // built for its own version; a customized image is left alone.
+        // onto the current session default; a customized image is left alone.
         if version <= LEGACY_DEFAULT_IMAGE_LAST_VERSION {
             for target in resolved.values_mut() {
-                migrate_legacy_default_image(target, DEFAULT_CONTAINER_IMAGE);
+                migrate_legacy_default_image(target, DEFAULT_SESSION_IMAGE);
             }
         }
         Ok(Self {
@@ -2031,7 +2031,7 @@ impl Config {
     pub fn with_local_targets(mut self) -> Self {
         let container = ContainerTemplate {
             build_cache: None,
-            image: DEFAULT_CONTAINER_IMAGE.into(),
+            image: DEFAULT_SESSION_IMAGE.into(),
             pull_policy: Default::default(),
             platform: None,
             cpus: None,

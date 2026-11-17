@@ -96,7 +96,7 @@ impl QuotaRuntime {
     ///
     /// `Auto` runs the check on this host when `host_has_harness` is true.
     /// Otherwise it uses a container for an enabled local Podman or Docker
-    /// runtime whose engine is installed, running that runtime's image,
+    /// runtime whose engine is installed, running the release image,
     /// which the daemon already keeps downloaded. With no such runtime the
     /// check runs on this host, by design, and reports the missing harness.
     /// A named engine that is missing is an error the check reports; a named
@@ -142,7 +142,7 @@ impl QuotaRuntime {
                     );
                 };
                 let image = image(engine).unwrap_or_else(|| RuntimeImage {
-                    image: mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned(),
+                    image: mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned(),
                     pull_policy: ImagePullPolicy::Auto,
                 });
                 (engine, program, image)
@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn auto_runs_quota_checks_in_an_enabled_local_runtime_and_otherwise_on_the_host() {
-        let standard = mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned();
+        let standard = mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned();
         // The standard candidates exist in every loaded config, so an engine
         // that is not installed is what keeps the check on this machine.
         assert_eq!(auto_decision("", &[]), None);
@@ -839,11 +839,14 @@ mod tests {
              [targets.docker]\nkind = \"docker\"\nenabled = false\n";
         assert_eq!(auto_decision(both_off, &["podman", "docker"]), None);
         // A runtime the person configured wins over the standard candidate,
-        // and the check runs its image.
+        // while quota checks always run the release image.
         let mine = "[targets.zz-mine]\nkind = \"podman\"\nimage = \"example.invalid/mine:1\"\n";
         assert_eq!(
             auto_decision(mine, &["podman"]),
-            Some((Engine::Podman, "example.invalid/mine:1".to_owned()))
+            Some((
+                Engine::Podman,
+                mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned()
+            ))
         );
         // The daemon container's image ships both engine clients and its
         // config has the standard runtimes, but it has no engine to reach:
@@ -886,11 +889,15 @@ mod tests {
             downloads.sort();
             downloads
         };
-        let standard = mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned();
-        // Both runtimes pull by default, and the check shares Podman's download.
+        let standard = mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned();
+        // Session images and quota harness images are separate downloads.
         assert_eq!(
             downloads(""),
-            [("docker", standard.clone()), ("podman", standard.clone())]
+            [
+                ("docker", mj_core::config::DEFAULT_SESSION_IMAGE.to_owned()),
+                ("podman", mj_core::config::DEFAULT_SESSION_IMAGE.to_owned()),
+                ("podman", standard.clone()),
+            ]
         );
         // `never` on the runtime the check would use holds for the check too.
         let never = "[targets.podman]\nkind = \"podman\"\npull_policy = \"never\"\n\
@@ -900,11 +907,11 @@ mod tests {
 
     #[test]
     fn auto_prefers_a_harness_the_host_already_has_over_any_engine() {
-        let standard = mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned();
+        let standard = mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned();
         // Engine installed, harness on the host: no container.
         assert_eq!(decision("", &["podman", "docker"], false, true), None);
         assert_eq!(decision("", &["docker"], false, true), None);
-        // Engine installed, harness missing from the host: the engine's image.
+        // Engine installed, harness missing from the host: the release image.
         assert_eq!(
             decision("", &["podman"], false, false),
             Some((Engine::Podman, standard))

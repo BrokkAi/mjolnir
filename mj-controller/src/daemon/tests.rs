@@ -4360,6 +4360,15 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
     runtime.container_settings = Some(applied);
     session.target_runtime = Some(runtime.into());
     crate::database::save_session(&session).unwrap();
+    // A historical default marker survives persistence and only an explicit
+    // container upgrade requests the current session default.
+    let recorded = crate::database::load_session_record("session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mj_core::state::ContainerSettings::requested(&recorded).default_image,
+        Some(Some(mj_core::config::DEFAULT_SESSION_IMAGE.to_owned()))
+    );
     let state = test_runtime_state();
     let controller = Controller {
         config: Config::default(),
@@ -4880,7 +4889,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
     let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
     let applied = mj_core::state::ContainerSettings::applied(
         &session,
-        mj_core::config::DEFAULT_CONTAINER_IMAGE,
+        mj_core::config::DEFAULT_SESSION_IMAGE,
     );
     runtime.container_settings = Some(applied.clone());
     session.target_runtime = Some(runtime.into());

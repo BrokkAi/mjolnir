@@ -401,7 +401,7 @@ impl Controller {
             .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
         {
             settings.default_image =
-                Some((image == mj_core::config::DEFAULT_CONTAINER_IMAGE).then(|| image.to_owned()));
+                Some((image == mj_core::config::DEFAULT_SESSION_IMAGE).then(|| image.to_owned()));
         }
         self.persist_session_state(session_id)
     }

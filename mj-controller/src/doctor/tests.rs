@@ -940,13 +940,13 @@ fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
         (
             "docker",
             TargetTemplate::LocalDocker {
-                container: container(mj_core::config::DEFAULT_CONTAINER_IMAGE),
+                container: container(mj_core::config::DEFAULT_SESSION_IMAGE),
             },
         ),
         (
             "podman",
             TargetTemplate::LocalPodman {
-                container: container(mj_core::config::DEFAULT_CONTAINER_IMAGE),
+                container: container(mj_core::config::DEFAULT_SESSION_IMAGE),
             },
         ),
     ]);

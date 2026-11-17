@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-/// The registry repository every session image name is built from. Keep it
+/// The registry repository for release images. Keep it
 /// equal to `mj_core::config::CONTAINER_IMAGE_REPOSITORY`, which
-/// `the_baked_default_image_agrees_with_the_channel_rule` checks.
+/// `the_baked_release_image_agrees_with_the_channel_rule` checks.
 const AGENT_DEV_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
 
 fn tracked_read(path: &Path) -> Option<String> {

@@ -43,8 +43,8 @@ pub struct ContainerSettings {
     /// Which image the container was created from, as far as upgrades care:
     /// `Some(Some(image))` for the default image of the Mjolnir that created
     /// it, `Some(None)` for a configured image, and `None` for a container
-    /// recorded before Mjolnir tracked this. A release's default is its own
-    /// version's image, so a newer default may be offered as an explicit upgrade.
+    /// recorded before Mjolnir tracked this. Old release-image strings remain
+    /// readable; an explicit upgrade follows the current session default.
     /// This snapshot never authorizes container replacement.
     #[serde(
         default,
@@ -87,7 +87,7 @@ impl ContainerSettings {
                 .map(|image| {
                     image
                         .as_ref()
-                        .map(|_| crate::config::DEFAULT_CONTAINER_IMAGE.to_owned())
+                        .map(|_| crate::config::DEFAULT_SESSION_IMAGE.to_owned())
                 }),
         }
     }
@@ -96,7 +96,7 @@ impl ContainerSettings {
     pub fn applied(session: &SessionRecord, image: &str) -> Self {
         Self {
             default_image: Some(
-                (image == crate::config::DEFAULT_CONTAINER_IMAGE).then(|| image.to_owned()),
+                (image == crate::config::DEFAULT_SESSION_IMAGE).then(|| image.to_owned()),
             ),
             ..Self::requested(session)
         }
