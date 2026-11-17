@@ -36,6 +36,7 @@ import threading
 import time
 
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
+MJX = pathlib.Path(__file__).resolve().parent / "mjx"
 # Subscription Claude Code profiles that offer opus; claude-aws bills Bedrock.
 # claude6 left out: its login failed with ACP auth_required on 2026-11-14.
 PROFILES = ["claude", "claude2", "claude3", "claude4", "claude5", "claude7"]
@@ -79,13 +80,13 @@ for sub in ("out", "sessions", "prompts"):
 if a.kind == "verify" and not (V / "SPEC.md").exists():  # verifiers read the spec from the verify dir
     (V / "SPEC.md").write_text((pathlib.Path(__file__).resolve().parent / "verify/SPEC.md").read_text())
 if not (ROOT / "verify/workspace.json").exists():  # creates the workspace, or selects one with this name
-    r = subprocess.run(["mj", "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
+    r = subprocess.run([str(MJX), "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
     (ROOT / "verify/workspace.json").write_bytes(r.stdout)
 WORKSPACE = json.loads((ROOT / "verify/workspace.json").read_text())["workspace"]["id"]
 
 
 def mj(*args, timeout=300):
-    r = subprocess.run(["mj", *map(str, args), "--json"], capture_output=True, timeout=timeout)
+    r = subprocess.run([str(MJX), *map(str, args), "--json"], capture_output=True, timeout=timeout)
     if r.returncode:
         raise RuntimeError(f"mj {args[0]}: {r.stderr.decode()[-1200:]}")
     return json.loads(r.stdout) if r.stdout.strip() else {}
@@ -171,13 +172,13 @@ def upload_inputs(sid, batch_path):
     if a.kind == "task":
         for src in sorted(f for f in batch_path.rglob("*") if f.is_file() and f.name != a.output):
             rel = src.relative_to(batch_path)
-            r = subprocess.run(["mj", "put-file", "--session", sid, "--path", f"{INPUT}/{batch_path.name}/{rel}",
+            r = subprocess.run([str(MJX), "put-file", "--session", sid, "--path", f"{INPUT}/{batch_path.name}/{rel}",
                                 "--overwrite", str(src)], capture_output=True, timeout=300)
             if r.returncode:
                 raise RuntimeError(f"put-file {rel} into {sid}: {r.stderr.decode()[-400:]}")
         return
     for src in (V / "SPEC.md", batch_path):
-        r = subprocess.run(["mj", "put-file", "--session", sid, "--path", f"{INPUT}/{src.name}", "--overwrite",
+        r = subprocess.run([str(MJX), "put-file", "--session", sid, "--path", f"{INPUT}/{src.name}", "--overwrite",
                             str(src)], capture_output=True, timeout=300)
         if r.returncode:
             raise RuntimeError(f"put-file {src.name} into {sid}: {r.stderr.decode()[-400:]}")
@@ -185,7 +186,7 @@ def upload_inputs(sid, batch_path):
 
 def fetch_output(sid):
     name = a.output if a.kind == "task" else "verdicts.jsonl" if a.kind == "judge" else "verify-out.json"
-    r = subprocess.run(["mj", "fetch", "--session", sid, "--path", name, "--stdout"],
+    r = subprocess.run([str(MJX), "fetch", "--session", sid, "--path", name, "--stdout"],
                        capture_output=True, timeout=300)
     if r.returncode:
         raise RuntimeError(f"session {sid} left no {name}: {r.stderr.decode()[-400:]}")
