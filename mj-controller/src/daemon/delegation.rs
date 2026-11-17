@@ -234,6 +234,7 @@ async fn run(
                 let backend = backend.clone();
                 let runtime = state.clone();
                 let parent = id.0.clone();
+                let deferral = dispatch.deferral(&id);
                 tracing::debug!(parent_session_id = %parent, request_id = %id.1, "delegation dispatch");
                 let task = jobs.spawn(async move {
                     match job {
@@ -265,14 +266,14 @@ async fn run(
                             let result = backend.execute_subagent_tool_durable(parent.clone(), request).await?;
                             // Durable results can wait for the replacement daemon.
                             drop(_admission);
-                            let delivered = deliver_background(&runtime, &parent, result.clone()).await;
+                            let delivered = deliver_background(&runtime, &parent, result.clone(), &deferral).await;
                             if let Err(error) = &delivered {
                                 tracing::warn!(parent_session_id = %parent, request_id = %result.result.request_id, %error, "delegation delivery failed; retaining result for retry");
                             }
                             Ok(Completed::Executed(result, matches!(delivered, Ok(Delivery::Delivered))))
                         }
                         Job::Deliver(result) => {
-                            match deliver_background(&runtime, &parent, result).await? {
+                            match deliver_background(&runtime, &parent, result, &deferral).await? {
                                 Delivery::Delivered => Ok(Completed::Delivered),
                                 Delivery::Stopped => Ok(Completed::Stopped),
                             }
@@ -681,8 +682,10 @@ async fn deliver_background(
     runtime: &RuntimeState,
     parent: &str,
     stored_result: StoredDelegationResult,
+    deferral: &std::sync::atomic::AtomicBool,
 ) -> Result<Delivery> {
-    let Some(admission) = admit_delivery(&runtime.recovery_observer.gate, parent).await else {
+    let Some(admission) = admit_delivery(&runtime.recovery_observer.gate, parent, deferral).await
+    else {
         return Ok(Delivery::Stopped);
     };
     let handle = runtime.workspace_session_handle(parent).await?;
@@ -716,6 +719,7 @@ enum Delivery {
 async fn admit_delivery(
     gate: &Arc<crate::recovery_gate::RecoveryGate>,
     parent: &str,
+    deferral: &std::sync::atomic::AtomicBool,
 ) -> Option<crate::recovery_gate::RecoveryAttempt> {
     use crate::recovery_gate::{BackgroundWork, RefusalCause};
     let kind = BackgroundWork::DelegationDelivery;
@@ -723,9 +727,14 @@ async fn admit_delivery(
     let mut deferred_by = None;
     loop {
         let refusal = match gate.try_start(parent, kind) {
-            Ok(admission) => return Some(admission),
+            Ok(admission) => {
+                deferral.store(false, std::sync::atomic::Ordering::Release);
+                return Some(admission);
+            }
             Err(refusal) => refusal,
         };
+        // While deferred, the attempt gives its dispatch slot to other sessions.
+        deferral.store(true, std::sync::atomic::Ordering::Release);
         if deferred_by.as_ref() != Some(&refusal.holders) {
             tracing::debug!(parent_session_id = parent, holders = %refusal.holders.join(" and "), "delegation delivery deferred");
             deferred_by = Some(refusal.holders.clone());
@@ -2204,8 +2213,13 @@ mod tests {
         let other = gate
             .try_start("other", BackgroundWork::RecoveryCopyCapturing)
             .unwrap();
-        let mut waiting = Box::pin(admit_delivery(&gate, "parent"));
+        let deferral = std::sync::atomic::AtomicBool::new(false);
+        let mut waiting = Box::pin(admit_delivery(&gate, "parent", &deferral));
         assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(
+            deferral.load(Ordering::Acquire),
+            "a deferred wait frees its dispatch slot"
+        );
         // Paused time: a retry timer would fire, a publication-driven wait does not.
         tokio::time::advance(Duration::from_secs(3600)).await;
         assert!(futures::poll!(&mut waiting).is_pending());
@@ -2214,5 +2228,6 @@ mod tests {
         assert!(futures::poll!(&mut waiting).is_pending());
         drop(copy);
         assert!(futures::poll!(&mut waiting).is_ready());
+        assert!(!deferral.load(Ordering::Acquire));
     }
 }
