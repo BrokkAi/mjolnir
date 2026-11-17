@@ -8,9 +8,6 @@ use super::*;
 /// How long a whole park may run: an idle reservation, one stop, one write.
 const PARK_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Preparation may download a harness; it holds no daemon handoff admission.
-const UNPARK_TIMEOUT: Duration = Duration::from_secs(600);
-
 impl RuntimeState {
     pub(crate) fn install_report_backend(
         &self,
@@ -180,10 +177,13 @@ impl RuntimeState {
                 LifecycleKind::Unpark,
                 // A close cancels preparation or readiness observation, then
                 // settles the child through its ordinary lifecycle.
+                // There is no deadline: preparation sends the profile archive
+                // and may download a harness, and over a slow link that takes
+                // as long as the link needs (#1571). Close cancels it, and it
+                // holds no daemon handoff admission.
                 |state, session_id, cancelled| async move {
                     let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled.clone())
-                            .with_deadline(UNPARK_TIMEOUT),
+                        CancellableProcessExecutor::new(cancelled.clone()),
                         state.clone(),
                         session_id.clone(),
                     );
