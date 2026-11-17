@@ -492,6 +492,10 @@ pub struct ChatState {
     /// a large session opens on its tail and converts the rest off the event
     /// loop. Zero whenever the projection is complete.
     unconverted_prefix: usize,
+    /// Explicitly loaded history stays available when the live tail slides.
+    /// An explicit history jump widened the view. Preserve that loaded prefix
+    /// when the live session next publishes its bounded tail.
+    retain_loaded_history: bool,
     /// The last unconverted transcript item: the projection item a pending
     /// prefix has to end at to be spliced in front of the tail. `None`
     /// whenever the projection is complete.
@@ -723,6 +727,7 @@ impl ChatState {
             pending_diffstats: VecDeque::new(),
             scheduled_diffstats: BTreeSet::new(),
             unconverted_prefix: 0,
+            retain_loaded_history: false,
             prefix_seam: None,
             transcript_loading: false,
             standby: false,
@@ -1069,11 +1074,25 @@ impl ChatState {
                 self.entries.clear();
                 self.invalidate_render_cache();
             }
-            self.entries = materialized_chat_entries_reusing(
-                session,
-                self.unconverted_prefix,
-                std::mem::take(&mut self.entries),
-            );
+            let mut previous = std::mem::take(&mut self.entries);
+            let mut history = Vec::new();
+            if self.retain_loaded_history {
+                if let Some(first) = session.transcript.first() {
+                    let prefix = previous.partition_point(|entry| entry.start_seq < first.position);
+                    history.extend(previous.drain(..prefix));
+                } else {
+                    self.retain_loaded_history = false;
+                }
+            }
+            let tail =
+                materialized_chat_entries_reusing(session, self.unconverted_prefix, previous);
+            self.entries = if history.is_empty() {
+                tail
+            } else {
+                history.extend(tail);
+                mj_client::transcript::apply_entry_list_rules(&mut history);
+                history
+            };
             if self.has_inline_submissions() {
                 self.sync_inline_submissions();
             }

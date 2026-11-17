@@ -230,6 +230,37 @@ impl DashboardState {
         }
     }
 
+    /// Metadata from the same message read that supplies the displayed text.
+    pub fn notification_message_position(
+        &self,
+        session_id: &str,
+        stable_id: &str,
+    ) -> Option<Result<u64, String>> {
+        if let Some(item) = self.session_details.get(session_id).and_then(|detail| {
+            detail
+                .projection
+                .transcript
+                .iter()
+                .find(|item| item.stable_id == stable_id)
+        }) {
+            return Some(Ok(item.position));
+        }
+        self.notifications
+            .message_read
+            .as_ref()
+            .filter(|read| {
+                read.session_id == session_id
+                    && read.stable_id == stable_id
+                    && read.status == crate::ingest::TranscriptHydration::Ready
+            })
+            .map(|read| {
+                read.item
+                    .as_ref()
+                    .map(|item| item.position)
+                    .ok_or_else(|| "message not available".to_owned())
+            })
+    }
+
     pub fn notification_message_read_finished(
         &mut self,
         session_id: &str,

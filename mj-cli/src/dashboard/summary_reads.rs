@@ -5,6 +5,7 @@ use tokio_util::task::AbortOnDropHandle;
 pub(super) enum ReadKey {
     Summary(String),
     Item(String, String),
+    History(String, String),
 }
 
 struct Read {
@@ -35,6 +36,7 @@ impl SummaryReads {
         &mut self,
         wanted: BTreeMap<String, u64>,
         item: Option<(String, String)>,
+        navigation: BTreeMap<ReadKey, u64>,
         updates: &UnboundedSender<DashboardIoUpdate>,
     ) -> Vec<String> {
         let mut requests: BTreeMap<_, _> = wanted
@@ -44,6 +46,7 @@ impl SummaryReads {
         if let Some((session_id, stable_id)) = item {
             requests.insert(ReadKey::Item(session_id, stable_id), 0);
         }
+        requests.extend(navigation);
         let removed_keys = self
             .reads
             .keys()
@@ -66,6 +69,14 @@ impl SummaryReads {
                 ReadKey::Summary(id) => spawn_stored_session_summary(
                     id.clone(),
                     viewed,
+                    self.generation,
+                    Arc::clone(&self.permits),
+                    updates.clone(),
+                ),
+                ReadKey::History(session_id, stable_id) => io::spawn_notification_history(
+                    session_id.clone(),
+                    stable_id.clone(),
+                    usize::try_from(viewed).unwrap_or(usize::MAX),
                     self.generation,
                     Arc::clone(&self.permits),
                     updates.clone(),
@@ -95,7 +106,7 @@ impl SummaryReads {
             .filter(|(_, read)| read.task.is_some())
             .filter_map(|(key, _)| match key {
                 ReadKey::Summary(id) => Some(id),
-                ReadKey::Item(..) => None,
+                ReadKey::Item(..) | ReadKey::History(..) => None,
             })
     }
 
@@ -103,6 +114,18 @@ impl SummaryReads {
         self.reads
             .get(&ReadKey::Item(session_id.to_owned(), stable_id.to_owned()))
             .is_some_and(|read| read.task.is_some())
+    }
+
+    pub(super) fn finish_history(
+        &mut self,
+        session_id: &str,
+        stable_id: &str,
+        generation: u64,
+    ) -> bool {
+        self.finish_key(
+            &ReadKey::History(session_id.to_owned(), stable_id.to_owned()),
+            generation,
+        )
     }
 
     pub(super) fn finish_item(
@@ -146,13 +169,33 @@ mod tests {
         let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
         let wanted = (0..1200).map(|id| (format!("child-{id}"), 0)).collect();
         let item = Some(("notification".into(), "outside-tail".into()));
-        reads.reconcile(wanted, item.clone(), &updates);
+        let navigation = BTreeMap::from([(
+            ReadKey::History("notification".into(), "buried".into()),
+            600,
+        )]);
+        reads.reconcile(wanted, item.clone(), navigation.clone(), &updates);
+        let old_history =
+            reads.reads[&ReadKey::History("notification".into(), "buried".into())].generation;
         let old_item =
             reads.reads[&ReadKey::Item("notification".into(), "outside-tail".into())].generation;
         let old = reads.reads[&ReadKey::Summary("child-0".into())].generation;
         tokio::task::yield_now().await;
-        assert_eq!(reads.reconcile(BTreeMap::new(), None, &updates).len(), 1200);
-        reads.reconcile(BTreeMap::from([("child-0".into(), 0)]), item, &updates);
+        assert_eq!(
+            reads
+                .reconcile(BTreeMap::new(), None, BTreeMap::new(), &updates)
+                .len(),
+            1200
+        );
+        reads.reconcile(
+            BTreeMap::from([("child-0".into(), 0)]),
+            item,
+            navigation,
+            &updates,
+        );
+        let current_history =
+            reads.reads[&ReadKey::History("notification".into(), "buried".into())].generation;
+        assert!(!reads.finish_history("notification", "buried", old_history));
+        assert!(reads.finish_history("notification", "buried", current_history));
         let current_item =
             reads.reads[&ReadKey::Item("notification".into(), "outside-tail".into())].generation;
         assert!(!reads.finish_item("notification", "outside-tail", old_item));

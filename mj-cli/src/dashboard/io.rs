@@ -103,6 +103,12 @@ pub(crate) enum DashboardIoUpdate {
     TranscriptTailSeed {
         materialized: Box<MaterializedSession>,
     },
+    NotificationHistory {
+        session_id: String,
+        stable_id: String,
+        generation: u64,
+        result: std::result::Result<mj_chat::chat::TranscriptSnapshot, String>,
+    },
     StoredTranscriptItem {
         session_id: String,
         stable_id: String,
@@ -857,6 +863,10 @@ impl DashboardContext {
                 self.dashboard
                     .set_stopped_subagent_transcript(&session_id, result);
             }
+            DashboardIoUpdate::NotificationHistory { session_id, stable_id, generation, result } => {
+                if !self.summary_reads.finish_history(&session_id, &stable_id, generation) { return; }
+                super::drafts::finish_notification_history(&mut self.notification_positions, &mut self.chats, &mut self.dashboard, &session_id, &stable_id, result);
+            }
             DashboardIoUpdate::StoredTranscriptItem { session_id, stable_id, generation, result } => {
                 if !self.summary_reads.finish_item(&session_id, &stable_id, generation) { return; }
                 let item = match result {
@@ -864,7 +874,9 @@ impl DashboardContext {
                     Ok(mj_client::daemon::StoredTranscriptItem::Missing | mj_client::daemon::StoredTranscriptItem::Unsupported) => None,
                     Err(error) => { self.dashboard.set_notice(format!("Could not read notification message: {error}")); None }
                 };
+                let position = item.as_ref().map(|item| item.position).ok_or_else(|| "message not available".to_owned());
                 self.dashboard.notification_message_read_finished(&session_id, &stable_id, item);
+                self.notification_item_located(&session_id, &stable_id, position);
             }
             DashboardIoUpdate::StoredSessionSummary { session_id, generation, result } => {
                 if !self.summary_reads.finish(&session_id, generation) {

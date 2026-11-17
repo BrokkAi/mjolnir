@@ -265,6 +265,11 @@ impl DashboardAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationPosition {
     Message(String),
+    /// The host is loading enough stored history to contain this located item.
+    History {
+        message_id: String,
+        position: u64,
+    },
     End,
     /// Resolve through the message owner after the full projection arrives.
     LatestAgentMessage,

@@ -35,7 +35,7 @@ pub(super) fn capture_editor_draft(
 }
 
 /// Explicit notification navigation survives an asynchronous attach, but is
-/// consumed once a chat exists, even when that conversation was already warm.
+/// consumed only after the target is anchored or a failure has been reported.
 pub(super) fn apply_notification_position(
     positions: &mut BTreeMap<String, mj_tui::NotificationPosition>,
     chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
@@ -46,17 +46,93 @@ pub(super) fn apply_notification_position(
     let chat = chats.get_mut(session_id)?;
     let target = positions.get(session_id)?;
     let target = dashboard.resolve_notification_position(session_id, target);
-    let located = target != NotificationPosition::End;
-    let position = match target {
-        NotificationPosition::Message(id) => mj_chat::chat::TranscriptPosition::at_stable_id(id),
-        NotificationPosition::End => mj_chat::chat::TranscriptPosition::bottom(),
+    let located = match target {
+        NotificationPosition::Message(id)
+        | NotificationPosition::History { message_id: id, .. } => {
+            if !chat.restore_transcript_message(&id) {
+                return None;
+            }
+            true
+        }
+        NotificationPosition::End => {
+            chat.restore_transcript_position(mj_chat::chat::TranscriptPosition::bottom());
+            false
+        }
         NotificationPosition::LatestAgentMessage | NotificationPosition::Question(_) => {
             return None;
         }
     };
     positions.remove(session_id);
-    chat.restore_transcript_position(position);
     Some(located)
+}
+
+pub(super) fn notification_history_items(chat: &mj_chat::chat::ChatState, position: u64) -> u64 {
+    let latest = chat
+        .entries()
+        .last()
+        .map_or(position, |entry| entry.start_seq)
+        .max(position);
+    // Eight leading items put the question's immediate context above the
+    // jump. The count spans target to latest; it is what this jump needs,
+    // not a history cap.
+    latest
+        .saturating_sub(position)
+        .saturating_add(1)
+        .saturating_add(8)
+}
+
+fn clear_notification_loading_notice(dashboard: &mut DashboardState) {
+    if matches!(
+        dashboard.notice().as_deref(),
+        Some(
+            "Loading notification message…"
+                | "Waiting for the notification message locator…"
+                | "loading earlier history…"
+        )
+    ) {
+        dashboard.clear_notice();
+    }
+}
+
+/// Completes the same pending jump after background conversion. A successful
+/// read is insufficient: the installed chat must actually anchor its target.
+pub(super) fn finish_notification_history(
+    positions: &mut BTreeMap<String, mj_tui::NotificationPosition>,
+    chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    dashboard: &mut DashboardState,
+    session_id: &str,
+    message_id: &str,
+    result: std::result::Result<mj_chat::chat::TranscriptSnapshot, String>,
+) -> Option<bool> {
+    let target = dashboard.resolve_notification_position(session_id, positions.get(session_id)?);
+    let matches = match target {
+        mj_tui::NotificationPosition::Message(id)
+        | mj_tui::NotificationPosition::History { message_id: id, .. } => id == message_id,
+        _ => false,
+    };
+    if !matches {
+        return None;
+    }
+    let chat = chats.get_mut(session_id)?;
+    let error = match result {
+        Ok(snapshot) => {
+            chat.hydrate_transcript_history(snapshot);
+            if apply_notification_position(positions, chats, dashboard, session_id) == Some(true) {
+                clear_notification_loading_notice(dashboard);
+                return Some(true);
+            }
+            "the stored history does not contain the target".to_owned()
+        }
+        Err(error) => error,
+    };
+    chats
+        .get_mut(session_id)?
+        .restore_transcript_position(mj_chat::chat::TranscriptPosition::bottom());
+    positions.remove(session_id);
+    dashboard.set_notice(format!(
+        "Could not load that message: {error}. Showing the end of the conversation."
+    ));
+    Some(false)
 }
 
 impl DashboardContext {
@@ -141,27 +217,107 @@ impl DashboardContext {
     /// Consume an explicit navigation request only when a chat is ready. Both
     /// the warm-chat path and asynchronous attach completion use this owner.
     pub(crate) fn apply_notification_position(&mut self, session_id: &str) {
-        if apply_notification_position(
+        let result = apply_notification_position(
             &mut self.notification_positions,
             &mut self.chats,
             &self.dashboard,
             session_id,
-        ) == Some(false)
-        {
+        );
+        if result == Some(false) {
             self.dashboard.set_notice("The notification message could not be located; showing the end of the conversation.");
-        } else if let Some(target) = self.notification_positions.get(session_id) {
-            self.dashboard.set_notice(
-                if matches!(target, mj_tui::NotificationPosition::Question(_)) {
+            return;
+        }
+        if let Some(target) = self.notification_positions.get(session_id) {
+            let target = self
+                .dashboard
+                .resolve_notification_position(session_id, target);
+            if let mj_tui::NotificationPosition::Message(id) = target
+                && let Some(result) = self
+                    .dashboard
+                    .notification_message_position(session_id, &id)
+            {
+                self.notification_item_located(session_id, &id, result);
+                return;
+            }
+            let notice = match self.notification_positions.get(session_id).unwrap() {
+                mj_tui::NotificationPosition::Question(_) => {
                     "Waiting for the notification message locator…"
-                } else {
-                    "Loading notification message…"
-                },
-            );
-        } else if matches!(
-            self.dashboard.notice().as_deref(),
-            Some("Loading notification message…" | "Waiting for the notification message locator…")
-        ) {
-            self.dashboard.clear_notice();
+                }
+                mj_tui::NotificationPosition::Message(_)
+                | mj_tui::NotificationPosition::History { .. } => "loading earlier history…",
+                _ => "Loading notification message…",
+            };
+            self.dashboard.set_notice(notice);
+        } else {
+            clear_notification_loading_notice(&mut self.dashboard);
+        }
+    }
+
+    pub(super) fn notification_history_requests(
+        &self,
+    ) -> BTreeMap<super::summary_reads::ReadKey, u64> {
+        use super::summary_reads::ReadKey;
+        self.notification_positions
+            .iter()
+            .filter_map(|(session_id, target)| {
+                let chat = self.chats.get(session_id)?;
+                match self
+                    .dashboard
+                    .resolve_notification_position(session_id, target)
+                {
+                    mj_tui::NotificationPosition::Message(id) => {
+                        Some((ReadKey::Item(session_id.clone(), id), 0))
+                    }
+                    mj_tui::NotificationPosition::History {
+                        message_id,
+                        position,
+                    } => {
+                        let items = notification_history_items(chat, position);
+                        Some((ReadKey::History(session_id.clone(), message_id), items))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn notification_item_located(
+        &mut self,
+        session_id: &str,
+        message_id: &str,
+        result: std::result::Result<u64, String>,
+    ) {
+        let Some(target) = self.notification_positions.get(session_id) else {
+            return;
+        };
+        if self
+            .dashboard
+            .resolve_notification_position(session_id, target)
+            != mj_tui::NotificationPosition::Message(message_id.to_owned())
+        {
+            return;
+        }
+        match result {
+            Ok(position) => {
+                self.notification_positions.insert(
+                    session_id.to_owned(),
+                    mj_tui::NotificationPosition::History {
+                        message_id: message_id.to_owned(),
+                        position,
+                    },
+                );
+                self.apply_notification_position(session_id);
+            }
+            Err(error) => {
+                finish_notification_history(
+                    &mut self.notification_positions,
+                    &mut self.chats,
+                    &mut self.dashboard,
+                    session_id,
+                    message_id,
+                    Err(error),
+                );
+            }
         }
     }
 

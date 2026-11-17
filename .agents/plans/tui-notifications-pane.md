@@ -18,6 +18,12 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 ## Progress
 
+- [x] 1d2150be0 review: confirmed StoredProjectionTail forwards an arbitrary requested item count into the SQL LIMIT; no new daemon API is needed.
+- [x] Keep notification navigation pending until the chat anchors the stable id. Add a stored-history request under the existing read owner, using latest position minus target position plus eight leading context items.
+- [x] Convert the returned history off the event loop; hydrate the live chat without replacing its drafts/forms, including same-frontier reads, and retain the loaded prefix across later live tails.
+- [x] Extend the existing CLI navigation and read-owner cancellation regressions for old targets, same-frontier hydration, later live updates, read errors and still-absent targets.
+- [x] Affected tests passed: CLI notification navigation (1), read-owner generation/cancellation (1), TUI notifications (3), existing chat-prefix regressions (10). Final dev/all-targets clippy passed for mj-chat, mj-tui and mj-cli. No commit.
+
 - [x] Review follow-up on f7b8ed60b: traced the projection path before editing; confirmed live SessionControl snapshots return the bounded managed-session view rather than the unbounded database projection.
 - [x] Parent authorized an indexed one-item read; the existing `(session_id, stable_id)` primary key covers it, with no migration.
 - [x] Captured card identity at pointer-down and carried it through Clear/Later/Go To actions; keys capture at the key press. Pending question navigation waits for its locator.
@@ -46,6 +52,9 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 
 ## Surprises & Discoveries
+
+The previous navigation helper treated a known stable id as a successful jump even when the chat had no corresponding entry. ChatState then fell back to Bottom during resolution. ChatState::apply_materialized also rebuilds only when its event ordinal changes, so a wider stored tail at the same frontier cannot be installed by that method alone. The stored-tail API already forwards the caller's count into load_materialized_projection_tail and its SQL LIMIT. Stored transcript conversion can reuse TranscriptSnapshot's background construction; chat hydration must preserve the loaded prefix when the next bounded live projection arrives.
+
 
 Later must retain the full card identity too: a session-only deferral would still defer a new question published between press and release. Its local ordering now matches both session and dismissal target. Pending question navigation also retains that identity; replacement requests terminate through the existing missing-message notice instead of satisfying the old request's locator. The wire has no terminal "locator failed" fact, so an unresolved current question stays pending with an explicit waiting-for-locator notice rather than silently consuming an End anchor.
 
@@ -86,6 +95,11 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Decision Log
+
+- Decision: a pending notification position is consumed only after ChatState confirms the target entry was anchored, or after an explicitly reported failure. Missing chat entries trigger the existing count-limited stored-tail operation through SummaryReads' generation/cancellation owner. The count spans target to latest position plus eight leading items to show the question's immediate context; it is not a cap. Prepared entries hydrate the live chat without replacing interactive state, and the widened history remains retained across live tail updates.
+  Rationale: parent accepted all reviewers' 1d2150be0 finding and specified this design. A stable id alone does not prove that the visible chat can resolve it; loading and anchoring are distinct states. No new daemon API, protocol or persisted format is introduced.
+  Date/Author: 2026-11-17, parent session and implementation worker.
+
 
 - Decision: bind pointer actions to an immutable snapshot of the rendered card, captured when the Form arms the control, and carry the session/dismissal identity in the resulting dashboard action. Keys capture when pressed. Keep missing question locators pending through the existing notification-position map and retry when operational updates arrive.
   Rationale: parent approved issues 1 and 3 independently of content acquisition; the existing Form pointer cancellation still owns cancellation on session-order/modal changes, without a second freshness check.
@@ -149,6 +163,9 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Outcomes & Retrospective
+
+The 1d2150be0 buried-question navigation defect is fixed in the working tree. A stable id alone no longer consumes the pending jump: ChatState confirms a concrete entry anchor. Missing entries retain the pending request and show `loading earlier history…`; the existing SummaryReads owner loads a count-limited stored tail covering the target through the latest loaded position plus eight preceding context items. TranscriptSnapshot conversion runs on a blocking background thread. Hydration widens the chat at the same event frontier without replacing its composer or forms, and the loaded prefix survives later bounded live updates. Failed reads and returned history still lacking the target consume the request only with an explicit `Could not load that message` notice and Bottom; successful jumps clear only their own loading notice. The existing CLI navigation regression covers both outcomes, actual anchor ordinal, draft/form preservation and a later live projection. Fifteen focused tests and final three-crate dev/all-targets clippy passed. No new daemon API, protocol/schema/persisted-format change, golden refresh, full suite or commit was made.
+
 
 The three accepted f7b8ed60b review issues are fixed without committing. Pointer actions capture the rendered card at press and retain its identity through the dashboard action; Later matches the full identity, and Clear lets the daemon refuse a stale target. Existing Form/begin_surface_frame cancellation remains the sole gesture cancellation owner; no second freshness check was added beside it. Question navigation waits for a locator, retries after operational updates even without a new projection, and uses the existing unavailable-message notice if its original request changes. A primary-key single-item read fetches located questions outside the runtime tail through SummaryReads' existing generations, semaphore and cancellation. Found, missing and unsupported results terminate; loading is shown only for a pending read, and missing/unsupported show message not available. Protocol 103 adds this operation, with an explicit client Unsupported result for older endpoints and no database migration. All eight focused tests and four-crate dev/all-targets clippy pass; neither golden changed. The initial CLI fixture compile error was fixed by converting an array into SnapshotMap. No further live harness run was requested for this round; API behavior is tested against the real isolated daemon/client transport.
 
@@ -250,3 +267,5 @@ Revision note (2026-11-17): corrected the recency filter to preserve millisecond
 Revision note (2026-11-17): recorded the f7b8ed60b review stop condition and decisive live-snapshot/database-reader evidence. No source edits, tests, builds or commits were performed in this round.
 
 Revision note (2026-11-17): completed the parent-approved indexed read and captured-card/deferred-question follow-ups. Eight focused tests and four-crate clippy pass; no golden refresh, migration or commit.
+
+Revision note (2026-11-17): fixed 1d2150be0 buried-question Go To by retaining pending navigation until the target is installed and anchored. Existing count-limited tail reads now run under the same generation/cancellation owner. Fifteen focused tests and three-crate clippy pass; no commit.

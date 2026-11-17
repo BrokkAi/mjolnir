@@ -1961,4 +1961,131 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
         form_draft
     );
     assert_eq!(chats["session-1"].draft(), "Keep this unsent answer");
+    // The locator can point before the entire live tail. Keep the jump
+    // pending until a count-limited stored tail installs the actual entry.
+    let mut full = materialized.clone();
+    for position in 4..=600 {
+        full.transcript.push(Arc::new(TranscriptItem {
+            stable_id: format!("reply-{position}"), position,
+            latest_content_event_ordinal: Some(position), created_at_ms: 0, last_changed_at_ms: 0,
+            body: TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":format!("Message {position}")}})], streaming: false },
+        }));
+    }
+    full.applied_event_ordinal = 600;
+    let mut live_tail = full.clone();
+    live_tail.transcript = full.transcript[88..].to_vec();
+    chats
+        .get_mut("session-1")
+        .unwrap()
+        .apply_materialized(&live_tail, &[], &[]);
+    positions.insert(
+        "session-1".into(),
+        mj_tui::NotificationPosition::Message("reply-30".into()),
+    );
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
+        None
+    );
+    assert!(positions.contains_key("session-1"));
+    positions.insert(
+        "session-1".into(),
+        mj_tui::NotificationPosition::History {
+            message_id: "reply-30".into(),
+            position: 30,
+        },
+    );
+    let count = drafts::notification_history_items(&chats["session-1"], 30) as usize;
+    let mut stored_tail = full.clone();
+    stored_tail.transcript =
+        full.transcript[full.transcript.len().saturating_sub(count)..].to_vec();
+    assert!(
+        stored_tail.transcript.len() < full.transcript.len(),
+        "the jump does not need the whole session"
+    );
+    assert_eq!(
+        stored_tail.transcript.first().unwrap().position,
+        22,
+        "the read includes eight context items"
+    );
+    dashboard.set_notice("An unrelated background failure");
+    assert_eq!(
+        drafts::finish_notification_history(
+            &mut positions,
+            &mut chats,
+            &mut dashboard,
+            "session-1",
+            "reply-30",
+            Ok(mj_chat::chat::TranscriptSnapshot::from_materialized(
+                &stored_tail
+            ))
+        ),
+        Some(true)
+    );
+    assert!(!positions.contains_key("session-1"));
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("An unrelated background failure")
+    );
+    let anchored = chats["session-1"].transcript_position();
+    assert_eq!(
+        serde_json::to_value(&anchored)
+            .unwrap()
+            .pointer("/Entry/start_seq"),
+        Some(&serde_json::json!(30))
+    );
+    // A later bounded live projection must not discard the loaded question
+    // and silently move the successfully anchored reader back to Bottom.
+    live_tail.applied_event_ordinal = 601;
+    chats
+        .get_mut("session-1")
+        .unwrap()
+        .apply_materialized(&live_tail, &[], &[]);
+    assert_eq!(chats["session-1"].transcript_position(), anchored);
+    assert_eq!(chats["session-1"].draft(), "Keep this unsent answer");
+    assert_eq!(
+        serde_json::to_value(chats["session-1"].elicitation_draft().unwrap()).unwrap(),
+        form_draft
+    );
+    for result in [
+        Err("stored history read failed".to_owned()),
+        Ok(mj_chat::chat::TranscriptSnapshot::from_materialized(
+            &stored_tail,
+        )),
+    ] {
+        positions.insert(
+            "session-1".into(),
+            mj_tui::NotificationPosition::Message("absent-target".into()),
+        );
+        assert_eq!(
+            drafts::apply_notification_position(
+                &mut positions,
+                &mut chats,
+                &dashboard,
+                "session-1"
+            ),
+            None
+        );
+        assert_eq!(
+            drafts::finish_notification_history(
+                &mut positions,
+                &mut chats,
+                &mut dashboard,
+                "session-1",
+                "absent-target",
+                result
+            ),
+            Some(false)
+        );
+        assert!(!positions.contains_key("session-1"));
+        assert_eq!(
+            chats["session-1"].transcript_position(),
+            mj_chat::chat::TranscriptPosition::bottom()
+        );
+        assert!(
+            dashboard
+                .notice()
+                .unwrap()
+                .contains("Could not load that message")
+        );
+    }
 }
