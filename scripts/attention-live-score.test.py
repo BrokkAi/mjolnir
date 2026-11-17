@@ -46,8 +46,13 @@ class ScoringEvidenceTests(unittest.TestCase):
             Path(directory, "scoring").mkdir()
             report = score.r3_selection(directory, episodes, lab, answers, {"C": set()})
             record = json.loads(Path(directory, "scoring/r3-selection.json").read_text())
-            self.assertEqual((record["episodes"], record["missing_answer_episodes"]), (1, 1))
+            # A missing answer refuses the fit: selecting cD from the episodes that
+            # happen to have answers would choose the confirmation rule on a filtered sample.
+            self.assertTrue(record["status"].startswith("refused"), record)
+            self.assertNotIn("cD", record)
+            self.assertEqual(record["missing_answer_episodes"], 1)
             self.assertIn("1 episodes missing answers", report)
+        self.assertIn("1 episodes lack a needed wording C answer", text)
         # Coverage follows the actual rule's cut, not the current cut or label membership.
         later["glide"]["input"]["probabilities"]["required"] = 0.3
         self.assertFalse(score.missing_rule_answers(bad_episode, lab, ("C", "A", 0.5, 0.5), answers))

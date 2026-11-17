@@ -941,7 +941,9 @@ def ask_score_block(eps, lab, answers, rng, all_answers=None, b_status=None, exc
     c_available = {"C": answers.get("C", {})}
     ready, c_wire, c_missing = answer_ready_episodes(eps, lab, C_WORDING_GRID, c_available, exclusions["C"])
     lines.append(f"Kept {len(ready)}/{len(eps)} full-trace episodes; {c_wire} declared exclusions; {c_missing} pending answers.\n")
-    if ready:
+    if c_missing:
+        lines.append(f"{c_missing} episodes lack a needed wording C answer, so any table here would describe a filtered sample; R3 is refused (see r3-selection.json).\n")
+    elif ready:
         text, _ = family_score_block(ready, lab, c_available, rng, "C", C_WORDING_GRID)
         lines.append(text)
     else:
@@ -1242,10 +1244,15 @@ def development_v2(out, lab):
 def r3_selection(out, eps, lab, answers, exclusions):
     retained, wire, missing = answer_ready_episodes(eps, lab, C_WORDING_GRID, answers, exclusions["C"])
     path = os.path.join(out, "scoring", "r3-selection.json")
-    if not retained:
+    # Fitting on the episodes that happen to have answers would select the
+    # confirmation cD from a filtered sample, so any missing answer refuses the
+    # fit. Declared missing-wire exclusions are pre-registered and allowed.
+    if missing or not retained:
+        status = (f"refused: {missing} episodes lack a needed wording C answer" if missing
+                  else "no answer-complete episodes")
         with open(path, "w") as f:
-            json.dump(dict(status="no answer-complete episodes", missing_answer_episodes=missing, declared_excluded_episodes=wire), f, indent=1)
-        return f"\nR3 cD not fixed: no answer-complete episodes; {wire} declared exclusions, {missing} episodes missing answers.\n"
+            json.dump(dict(status=status, missing_answer_episodes=missing, declared_excluded_episodes=wire), f, indent=1)
+        return f"\nR3 cD not fixed ({status}); {wire} declared exclusions, {missing} episodes missing answers.\n"
     sessions = sorted({e["session"] for e in retained})
     per = {p: evaluate(retained, lab, p, answers) for p in C_WORDING_GRID}
     cf, chosen = cross_fit(per, sessions)
