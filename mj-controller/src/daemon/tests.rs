@@ -7238,8 +7238,9 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
     for id in ["close-first", "close-second"] {
         let barrier = barrier.clone();
         let finish = finish.clone();
+        // A close supersedes automatic work; it waits for a person's own.
         state
-            .start_or_join_lifecycle(
+            .start_automatic_lifecycle(
                 id.into(),
                 LifecycleKind::Create,
                 move |_, _, cancelled| async move {
