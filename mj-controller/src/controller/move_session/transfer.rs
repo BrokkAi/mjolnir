@@ -288,6 +288,12 @@ stage=$1; marker=$2; identity=$3
 if [ "$(cat -- "$marker" 2>/dev/null || true)" != "$identity" ]; then
     rm -rf -- "$stage" "$marker"
 fi
+# The capture holds private files; rsync restores the source's directory
+# modes inside the stage, so the stage's parent is what keeps others out.
+umask 077
+parent=$(dirname -- "$stage")
+mkdir -p -- "$parent"
+chmod 700 -- "$parent"
 mkdir -p -- "$stage"
 printf '%s' "$identity" > "$marker"
 "#;
@@ -1727,6 +1733,11 @@ mod tests {
             true,
         )
         .unwrap();
+        assert_eq!(
+            std::fs::metadata(directory.path()).unwrap().mode() & 0o777,
+            0o700,
+            "the staging parent must keep other host users out of the capture"
+        );
         let sent = std::fs::metadata(first_daemon.stage.join("data")).unwrap();
         // The interrupted attempt also left its partial file for rsync to continue.
         std::fs::create_dir_all(first_daemon.stage.join(".move-partial")).unwrap();
