@@ -1718,7 +1718,7 @@ fn system_git_children_cannot_stop_on_a_prompt() {
         value("GIT_SSH_COMMAND"),
         std::env::var("GIT_SSH_COMMAND")
             .ok()
-            .or_else(|| Some(NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned())),
+            .or_else(|| { Some(mj_core::local_git::NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()) }),
         "an operator's own SSH command wins; otherwise SSH runs in batch mode"
     );
 }

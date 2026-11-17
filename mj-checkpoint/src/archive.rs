@@ -2667,16 +2667,15 @@ pub(crate) use git::linked_worktree_directories;
 pub(crate) use git::restore_linked_worktrees as restore_linked_worktrees_for_test;
 pub use git::{
     EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode,
-    GitOutput, GitSnapshotProgress, MergeConflicts, NON_INTERACTIVE_GIT_ENV,
-    NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, ReflogAnchor, ReflogEntry,
-    ReviewPoint, SessionDiff, SessionExportError, SystemGit, UntrackedFiles, capture_paths,
-    capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
-    collect_git_snapshot_with_progress, collect_plain_directory_snapshot, diff_between_trees,
-    empty_tree_id, has_origin_refs, managed_base_is_available, merge_trees, migrate_review_ref,
-    numstat_between_trees, pin_review_tree, push_branch, push_review_base_ref, read_head_reflog,
-    read_review_point, record_overridden_tree, record_review_point, record_reviewed_tree,
-    remote_workspace_base, restore_git_snapshot, session_diff, session_diff_details,
-    session_start_scope, tree_without_paths, validate_symlink_target,
+    GitOutput, GitSnapshotProgress, MergeConflicts, NON_INTERACTIVE_GIT_ENV, PushBranchError,
+    PushedBranch, ReflogAnchor, ReflogEntry, ReviewPoint, SessionDiff, SessionExportError,
+    SystemGit, UntrackedFiles, capture_paths, capture_worktree_tree, collect_git_metadata_snapshot,
+    collect_git_snapshot, collect_git_snapshot_with_progress, collect_plain_directory_snapshot,
+    diff_between_trees, empty_tree_id, has_origin_refs, managed_base_is_available, merge_trees,
+    migrate_review_ref, numstat_between_trees, pin_review_tree, push_branch, push_review_base_ref,
+    read_head_reflog, read_review_point, record_overridden_tree, record_review_point,
+    record_reviewed_tree, remote_workspace_base, restore_git_snapshot, session_diff,
+    session_diff_details, session_start_scope, tree_without_paths, validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
