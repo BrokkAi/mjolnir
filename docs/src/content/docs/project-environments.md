@@ -5,8 +5,9 @@ description: Declare a repository's tools with mise, and build images from that 
 
 A repository says which tools its sessions need with [mise](https://mise.jdx.dev/),
 a tool-version manager. Container sessions install those tools after the
-clone, before the agent starts. For faster starts, `mj image build` builds an
-image from the same recipe and records it for the project.
+clone, in the background while the agent starts. For faster starts,
+`mj image build` builds an image from the same recipe and records it for the
+project.
 
 ## Declaring tools
 
@@ -33,28 +34,36 @@ the recipe pins download URLs and checksums.
 ## What happens when a session starts
 
 On a container target (Podman, Docker, Apple container, their SSH forms, and
-Nitro), after cloning each repository the worker runs, in every checkout that
-has a recipe:
+Nitro), after cloning each repository the worker asks mise what every
+checkout with a recipe is missing. This is the launch's short "Install project
+tools" step. The worker uses the image's own `mise` if it has one, and
+otherwise installs Mjolnir's pinned, checksum-verified mise. Installed tools
+are on `PATH` for the agent and its commands through mise's shims directory.
+
+If nothing is missing, as on an image built from the recipe, nothing else
+happens. Otherwise the agent starts at once and the worker runs, in the
+background, in each checkout that needs it:
 
     mise bootstrap packages apply --yes
     mise install
 
-The launch shows this as the "Install project tools" step. The worker uses the
-image's own `mise` if it has one, and otherwise installs Mjolnir's pinned,
-checksum-verified mise. Installed tools are on `PATH` for the agent and its
-commands through mise's shims directory. System packages need root, which
-Podman sessions have; on Docker and Apple container the image user needs root
-or passwordless `sudo`.
-
-If a command fails, the session still starts. A notice names the failing
+The agent gets two messages through its mailbox, the same one that carries
+sub-agent reports. The first, waiting for it when it starts, lists what is
+being installed and warns that commands needing those tools may wait or fail
+until the second. The second says the install finished, or names the failing
 command and the log file, `project-tools.log` in the session's worker
-directory, so the agent can repair the recipe and rerun `mise install`.
-Sessions on bare targets never run this step: system packages would otherwise
-be installed on your own machine.
+directory, so the agent can repair the recipe and rerun `mise install`. A
+failure also shows a notice in the session; the session itself is
+unaffected. Closing the session stops the install.
 
-The step runs in every new container, so a cold toolchain download is repeated
-per session. Rust and Node on the default image take roughly twenty seconds;
-large recipes take minutes. Build an image to avoid that.
+System packages need root, which Podman sessions have; on Docker and Apple
+container the image user needs root or passwordless `sudo`. Sessions on bare
+targets never run this step: system packages would otherwise be installed on
+your own machine.
+
+The install runs in every new container, so a cold toolchain download is
+repeated per session. Rust and Node on the default image take roughly twenty
+seconds; large recipes take minutes. Build an image to avoid that.
 
 ## Building a project image
 
@@ -84,7 +93,7 @@ for the project and platform:
 
 New sessions of that project on a target of that platform run the recorded
 image instead of the target's image. In them the "Install project tools" step
-finds everything installed and takes well under a second. Delete the entry to
+finds everything installed, and the agent gets no messages about it. Delete the entry to
 go back to the target's image.
 
 Options: `--target` chooses the target whose image is the base and whose host

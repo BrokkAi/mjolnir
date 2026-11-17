@@ -1306,6 +1306,8 @@ pub async fn run_daemon_owned(
         shell_cleanup,
         _managed_harness,
         _managed_node,
+        // Held to the end of the session: dropping it stops the install.
+        _project_tools,
         ..
     } = running_harness;
 
