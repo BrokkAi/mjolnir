@@ -18,6 +18,10 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 ## Progress
 
+- [x] 11619f2aa issue #2: capture the displayed Important card's ReadThrough boundary and identity in pending navigation; resolve the newest nonempty agent message at or before that boundary, retaining the captured card in the CLI action path.
+- [x] Extend the existing CLI navigation regression: summary A, capture Go To, then hydrate newer reply B; navigation must anchor A while a newly opened card targets B.
+- [x] Focused CLI navigation passed (one test); dev/all-targets clippy for brokk-mj-tui and brokk-mjolnir passed with warnings denied. No commit; issue #1/history merging remains untouched pending the parent's design decision.
+
 - [x] 64316e6d3 review: add normalized omission ranges to ProjectionWindow at the trim, stored-read and feed-selection owners; carry that authority into ChatState initialization and updates.
 - [x] Preserve loaded rows only in explicit omissions (or beyond an older live frontier); absent covered identities are removed. Stale history hydration consults the same authority, including canonical items still awaiting local prefix conversion.
 - [x] Extend the existing gap regression with actual projected interim/real terminal tools: covered fallback removal, retained gap message/anchor, and no resurrection from a stale stored read. CLI's bounded fixture now carries its window.
@@ -66,6 +70,8 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 
 ## Surprises & Discoveries
+
+Summary-only navigation previously saved a query for the latest agent message, rather than the displayed reply's boundary. That query could resolve against a later projection. The existing daemon-published ReadThrough ordinal supplies the immutable completion boundary without extending the summary wire shape; the pending position now carries that boundary and the original NotificationCard. When no daemon dismissal target exists, the already-loaded summary frontier supplies the boundary at capture time.
 
 The live snapshot already carries ProjectionWindow, but the chat discarded it; the old metadata carried only an omitted-item count and could not distinguish trim gaps from removals. ProjectionWindow now publishes normalized half-open omission intervals, rebuilt at the database actor reader from its selected turn ranges and extended by actual trims/feed clipping. Within covered positions, a missing identity is authoritative removal. The chat also retains its canonical input handles so rows awaiting local prefix conversion are not mistaken for removals while a stored history read completes. The terminal regression drives the existing transcript projector's consumption path; no terminal-content inference or special fallback-tool rule is added to the chat.
 
@@ -118,6 +124,9 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Decision Log
+
+- Decision: resolve pending Important navigation to the newest nonempty agent message at or before the captured ReadThrough boundary, preserving NotificationCard through the CLI; never recompute the boundary from the current card after hydration.
+  Rationale: the parent accepted issue #2 and explicitly allowed boundary-based resolution. This keeps message selection in the shared notification-position owner and needs no daemon, schema or persisted-format change. Issue #1 is deferred; do not touch history merge or prefix hydration for this round.
 
 - Decision: extend ProjectionWindow with optional, default-empty omission ranges computed by selection owners. Use those ranges in both live updates and stored-history hydration; keep covered identities only when the canonical live input still contains them. Pass the window through ActiveChat and treat apply_materialized without a window as a complete projection.
   Rationale: parent accepted the 64316e6d3 finding and explicitly authorized extending metadata at its owner. A missing rendered entry can mean omission, deliberate removal or pending conversion, so the reader must consult published coverage and canonical identity rather than infer meaning from tool content. The field is additive runtime metadata, omitted when empty; no store schema or persisted format changes.
@@ -205,6 +214,8 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Outcomes & Retrospective
+
+The accepted 11619f2aa issue #2 is fixed without committing. Summary-only Important navigation now captures NotificationCard plus its ReadThrough completion boundary, retaining both in the CLI pending-position path. The shared notification-position owner resolves the newest nonempty agent message at or before that captured boundary after hydration; a newer reply cannot retarget it. The existing CLI regression captures summary A (position 3), then receives reply B (position 4) and its updated dismissal target, and verifies the pending jump anchors A while a fresh card targets B. The focused regression (one test) and dev/all-targets clippy for brokk-mj-tui and brokk-mjolnir passed outside the sandbox; diff whitespace checks passed. No protocol, schema, summary wire shape or persisted format changed. Issue #1 remains deferred and history merge/prefix hydration code is untouched. Evidence: `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/summary-boundary-fix.md`.
 
 The accepted 64316e6d3 removal finding is fixed without committing. ProjectionWindow now declares normalized omitted position ranges from the trim, SQL selection and client clipping owners. ActiveChat carries that authority into updates; history merges preserve missing entries only in declared omissions or beyond an older live frontier. Covered missing identities are removed, including when a stale stored-history result arrives. Canonical identities awaiting local prefix conversion still count as present. Restoring a complete projection clears earlier omissions. The existing gap regression drives real fallback-terminal creation and ACP replacement, proving the covered fallback disappears while a middle-gap message and its anchor survive; it also checks stale hydration and full-window restoration. Eleven unique scoped tests passed across the initial prefix run and corrected failing-test reruns, plus CLI navigation. Dev/all-targets clippy passed for brokk-mj-chat and brokk-mjolnir. Mechanical fixes: parent-visible helper scope, fixture streaming reset and canonical tool identity, and single-range iterator lint. Evidence and resolved failure logs are in `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/coverage-removals-fix.md`. No mj-transcript source, schema, persisted format, protocol number, golden, or live instance changed.
 

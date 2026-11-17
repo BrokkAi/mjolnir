@@ -58,7 +58,7 @@ pub(super) fn apply_notification_position(
             chat.restore_transcript_position(mj_chat::chat::TranscriptPosition::bottom());
             false
         }
-        NotificationPosition::LatestAgentMessage | NotificationPosition::Question(_) => {
+        NotificationPosition::AgentMessageThrough { .. } | NotificationPosition::Question(_) => {
             return None;
         }
     };

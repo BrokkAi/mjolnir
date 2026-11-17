@@ -227,17 +227,22 @@ impl DashboardState {
                 .filter(|detail| detail.pending_elicitations.is_empty())
                 .and_then(|detail| detail.question_message.clone()),
             AttentionLevel::Important => {
-                let Some(detail) = detail.filter(|detail| {
-                    detail.transcript_hydration == crate::ingest::TranscriptHydration::Ready
-                }) else {
-                    return NotificationPosition::LatestAgentMessage;
+                let card = crate::NotificationCard {
+                    session_id: session_id.to_owned(),
+                    target: self.notification_dismissal_target(session_id),
                 };
-                detail
-                    .projection
-                    .last_agent_message
-                    .as_ref()
-                    .and_then(|(index, _)| detail.projection.transcript.get(*index))
-                    .map(|item| item.stable_id.clone())
+                let ordinal = match card.target {
+                    Some(mj_core::attention::NotificationDismissal::ReadThrough(ordinal)) => {
+                        ordinal
+                    }
+                    _ => detail
+                        .and_then(|detail| detail.materialized_applied_event_ordinal)
+                        .unwrap_or(0),
+                };
+                return self.resolve_notification_position(
+                    session_id,
+                    &NotificationPosition::AgentMessageThrough { card, ordinal },
+                );
             }
             _ => None,
         };
@@ -261,13 +266,30 @@ impl DashboardState {
     /// Keep pending navigation tied to the request that was actually opened.
     pub fn resolve_notification_position(
         &self,
-        session_id: &str,
+        _session_id: &str,
         target: &crate::NotificationPosition,
     ) -> crate::NotificationPosition {
         use crate::NotificationPosition;
         match target {
-            NotificationPosition::LatestAgentMessage => {
-                self.notification_position(session_id, AttentionLevel::Important)
+            NotificationPosition::AgentMessageThrough { card, ordinal } => {
+                let Some(detail) = self.session_details.get(&card.session_id).filter(|detail| {
+                    detail.transcript_hydration == crate::ingest::TranscriptHydration::Ready
+                }) else {
+                    return target.clone();
+                };
+                // A newer reply must not retarget the card that began this jump.
+                detail
+                    .projection
+                    .transcript
+                    .iter()
+                    .rev()
+                    .find_map(|item| {
+                        (item.position <= *ordinal
+                            && matches!(&item.body, mj_core::state::TranscriptBody::Agent { chunks, .. }
+                                if !mj_core::transcript::materialized_chunks_text(chunks).trim().is_empty()))
+                        .then(|| NotificationPosition::Message(item.stable_id.clone()))
+                    })
+                    .unwrap_or(NotificationPosition::End)
             }
             NotificationPosition::Question(card)
                 if self.notification_dismissal_target(&card.session_id) == card.target =>

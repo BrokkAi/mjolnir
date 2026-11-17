@@ -1828,19 +1828,29 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
     );
     dashboard
         .set_session_attention_for("session-1", mj_core::attention::SessionAttention::Important);
+    dashboard.set_notification_dismissals(
+        [(
+            "session-1".into(),
+            mj_core::attention::NotificationDismissal::ReadThrough(3),
+        )]
+        .into(),
+    );
     dashboard.focus_sessions();
     for _ in 0..4 {
         dashboard.handle_key(plain_key(KeyCode::Tab));
     }
     let DashboardAction::OpenAtMessage {
-        card: _,
+        card,
         session_id,
         position,
     } = dashboard.handle_key(plain_key(KeyCode::Enter))
     else {
         panic!("summary-only important card opens at its pending message");
     };
-    assert_eq!(position, mj_tui::NotificationPosition::LatestAgentMessage);
+    assert_eq!(
+        position,
+        mj_tui::NotificationPosition::AgentMessageThrough { card, ordinal: 3 }
+    );
     positions.insert(session_id, position);
     assert_eq!(
         drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
@@ -1848,12 +1858,28 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
     );
     assert_eq!(chats["session-1"].transcript_position(), requested);
     assert!(positions.contains_key("session-1"));
+    // Reply B arrives before projection hydration. The displayed summary was
+    // reply A (position 3); neither its pending target nor captured card moves.
+    let mut newer = materialized.clone();
+    let mut reply_b = (*newer.transcript.last().unwrap().as_ref()).clone();
+    reply_b.stable_id = "reply-4".into();
+    reply_b.position = 4;
+    reply_b.latest_content_event_ordinal = Some(4);
+    newer.transcript.push(Arc::new(reply_b));
+    newer.applied_event_ordinal = 4;
+    chats
+        .get_mut("session-1")
+        .unwrap()
+        .apply_materialized(&newer, &[], &[]);
+    dashboard.set_notification_dismissals(
+        [(
+            "session-1".into(),
+            mj_core::attention::NotificationDismissal::ReadThrough(4),
+        )]
+        .into(),
+    );
     dashboard.apply_prepared_materialized_session(
-        mj_tui::PreparedMaterializedSessionDetail::from_materialized(
-            materialized.clone(),
-            0,
-            Default::default(),
-        ),
+        mj_tui::PreparedMaterializedSessionDetail::from_materialized(newer, 0, Default::default()),
     );
     assert_eq!(
         drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
@@ -1862,7 +1888,7 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
     assert!(!positions.contains_key("session-1"));
     assert_eq!(
         dashboard.notification_position("session-1", mj_tui::AttentionLevel::Important),
-        mj_tui::NotificationPosition::Message("reply-3".into())
+        mj_tui::NotificationPosition::Message("reply-4".into())
     );
     // Saved agent-message anchors use their durable transcript ordinal.
     assert_eq!(

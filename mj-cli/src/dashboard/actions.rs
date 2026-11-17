@@ -1382,10 +1382,15 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::NotificationLater { .. } => {}
         DashboardAction::OpenAtMessage {
-            card: _,
+            card,
             session_id,
-            position,
+            mut position,
         } => {
+            if let mj_tui::NotificationPosition::AgentMessageThrough { card: captured, .. } =
+                &mut position
+            {
+                *captured = card;
+            }
             context
                 .notification_positions
                 .insert(session_id.clone(), position);

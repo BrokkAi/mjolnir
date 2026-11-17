@@ -271,8 +271,11 @@ pub enum NotificationPosition {
         position: u64,
     },
     End,
-    /// Resolve through the message owner after the full projection arrives.
-    LatestAgentMessage,
+    /// Resolve the displayed reply through its captured completion boundary.
+    AgentMessageThrough {
+        card: NotificationCard,
+        ordinal: u64,
+    },
     /// Wait for the question locator rather than consuming an end anchor.
     Question(NotificationCard),
 }
