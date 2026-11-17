@@ -262,10 +262,22 @@ pub(super) async fn apply_phone_action(
                     published,
                 })
                 .map_err(|_| anyhow::anyhow!("phone server stopped before publishing session"))?;
-            services
-                .daemon_runtime
-                .wait_create_session(&registered_session_id)
-                .await
+            // The phone already has the published session. If the daemon stops
+            // under this wait the next daemon finishes the create and updates
+            // the record the phone shows, so that is no result, not a failure.
+            let lifecycle = control
+                .lifecycle
+                .as_ref()
+                .expect("New action has a daemon create control");
+            tokio::select! {
+                outcome = services.daemon_runtime.wait_create_outcome(&registered_session_id) => {
+                    match outcome {
+                        crate::daemon::create::CreateWait::Finished => Ok(()),
+                        crate::daemon::create::CreateWait::Failed(error) => Err(error),
+                    }
+                }
+                () = lifecycle.shutdown_stopped() => Ok(()),
+            }
         }
         ControllerAction::Prompt {
             session_id,

@@ -170,60 +170,12 @@ impl RuntimeState {
         if !needs_provisioning {
             return Ok(());
         }
-        let session_id = relation.child_session_id.clone();
-        let parent_session_id = relation.parent_session_id.clone();
-        let control = LifecycleControl::default();
-        self.start_or_join_lifecycle_controlled(
-            session_id.clone(),
-            LifecycleKind::Create,
+        self.start_create_lifecycle(
+            relation.child_session_id.clone(),
+            LifecycleControl::default(),
+            CreateInputs::Subagent(Box::new(relation.clone())),
             None,
-            Some(relation.request_key.clone()),
-            Some(control.clone()),
-            move |state, session_id, cancelled| async move {
-                let mut controller = tokio::task::spawn_blocking(Controller::load)
-                    .await
-                    .context("load controller for sub-agent startup")??;
-                // The lifecycle owner now excludes competing resume/close work.
-                // Recovery may already have settled this registration before
-                // admission; replay never reinstalls an existing worker.
-                if controller
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .is_none_or(|record| record.state != mj_core::state::SessionState::Provisioning)
-                {
-                    return Ok(DaemonLifecycleResult::Done);
-                }
-                let executor = DaemonStageReportingExecutor::new(
-                    CancellableProcessExecutor::new(cancelled),
-                    state.clone(),
-                    session_id.clone(),
-                );
-                if let Err(error) = controller
-                    .provision_subagent_session_controlled(&session_id, &executor, || {
-                        control.stopped_for_shutdown()
-                    })
-                    .await
-                {
-                    drop(controller);
-                    state.reload_controller().await?;
-                    if let Err(prompt_error) = state
-                        .reconcile_parent_reports(&parent_session_id)
-                        .await
-                    {
-                        tracing::warn!(
-                            child_session_id = %session_id,
-                            parent_session_id,
-                            error = format!("{prompt_error:#}"),
-                            "could not enqueue the parent's finished child reports after provisioning failure"
-                        );
-                    }
-                    return Err(error);
-                }
-                Ok(DaemonLifecycleResult::Done)
-            },
-        )?;
-        Ok(())
+        )
     }
 
     /// Record, through the ordinary lifecycle write, that a child registered by
@@ -599,12 +551,55 @@ impl RuntimeState {
         let capacity_warning = (!capacity_warning.is_empty()).then_some(capacity_warning);
         drop(_container_admission);
         let session_id = registered.session.id.clone();
+        self.start_create_lifecycle(
+            session_id,
+            control,
+            CreateInputs::TopLevel {
+                publication,
+                remember_launch_choices,
+            },
+            None,
+        )?;
+        let publishing = crate::launch_timing::LaunchPhaseTimer::new(
+            &registered.session.id,
+            "publish registered session view",
+        );
+        self.reload_controller().await?;
+        drop(publishing);
+        Ok((registered, review_notice, capacity_warning))
+    }
+
+    /// Admit the Create lifecycle of a registered session, top-level or
+    /// sub-agent: the one create body. A create is resumable: shutdown
+    /// interrupts it before it commits instead of cancelling it, it holds no
+    /// handoff admission while it provisions, and the next daemon finishes it
+    /// from the durable create intent.
+    ///
+    /// `recovery_operation` is the intent's operation id when a restarted
+    /// daemon re-admits an interrupted create; that run first retires what
+    /// the interrupted attempt built. A sub-agent create is always admitted
+    /// under its own request key, so a replayed spawn joins it instead of
+    /// starting a second one.
+    pub(super) fn start_create_lifecycle(
+        self: &Arc<Self>,
+        session_id: String,
+        control: LifecycleControl,
+        inputs: CreateInputs,
+        recovery_operation: Option<String>,
+    ) -> Result<()> {
+        let recovering = recovery_operation.is_some();
         let scheduled_at = std::time::Instant::now();
+        let request_key = match &inputs {
+            CreateInputs::Subagent(relation) => Some(relation.request_key.clone()),
+            CreateInputs::TopLevel { .. } => {
+                recovery_operation.map(|operation| format!("recovery:{operation}"))
+            }
+        };
         self.start_or_join_lifecycle_controlled(
             session_id,
             LifecycleKind::Create,
             None,
-            None,
+            request_key,
             Some(control.clone()),
             move |state, session_id, cancelled| async move {
                 tracing::info!(%session_id, elapsed_ms = scheduled_at.elapsed().as_millis(),
@@ -617,6 +612,33 @@ impl RuntimeState {
                     .await
                     .context("load controller for daemon create task")??;
                 drop(loading);
+                // Recovery may already have settled this registration before
+                // admission; replay never provisions a finished session. A
+                // recovering create is checked by its reset instead.
+                if !recovering
+                    && controller.state.sessions.get(&session_id).is_none_or(|record| {
+                        record.state != mj_core::state::SessionState::Provisioning
+                    })
+                {
+                    return Ok(DaemonLifecycleResult::Done);
+                }
+                let (kind, publication, parent): (_, Option<Publication>, Option<String>) = match inputs {
+                    CreateInputs::TopLevel {
+                        publication,
+                        remember_launch_choices,
+                    } => (
+                        crate::controller::CreateKind::TopLevel {
+                            remember_launch_choices,
+                        },
+                        publication,
+                        None,
+                    ),
+                    CreateInputs::Subagent(relation) => (
+                        crate::controller::CreateKind::Subagent,
+                        None,
+                        Some(relation.parent_session_id),
+                    ),
+                };
                 let publication_timing =
                     crate::launch_timing::LaunchPhaseTimer::new(&session_id, "await publication");
                 let publication_error = if let Some(publication) = publication {
@@ -639,23 +661,55 @@ impl RuntimeState {
                 }
                 let executor = DaemonStageReportingExecutor::new(
                     CancellableProcessExecutor::new(cancelled),
-                    state,
+                    state.clone(),
                     session_id.clone(),
                 );
+                // The commit and the write that marks the session running
+                // are the one stretch a handoff waits for: a daemon replaced
+                // between them would redo a create that had just succeeded.
+                let commit_admission = Mutex::new(None);
+                let commit = || {
+                    let admission = match crate::upgrade::activity("session create commit") {
+                        Ok(admission) => admission,
+                        Err(error) => {
+                            // The daemon is being replaced: the next one owns
+                            // this create, which has not committed.
+                            control.cancel_for_shutdown();
+                            return Err(error);
+                        }
+                    };
+                    ensure!(
+                        control.grant_commit(),
+                        "session creation cancelled before commit"
+                    );
+                    *commit_admission
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some(admission);
+                    Ok(())
+                };
+                // A create stopped before the phone was told it exists is
+                // discarded by the ordinary rollback, not left for the next
+                // daemon to provision for a client that was never answered.
+                let published = publication_error.is_none();
+                let interrupted = || published && control.stopped_for_shutdown();
                 let provision = controller
-                    .provision_session_controlled_with_commit(
-                        &session_id,
-                        &executor,
-                        || {
-                            ensure!(
-                                control.grant_commit(),
-                                "session creation cancelled before commit"
-                            );
-                            Ok(())
-                        },
-                        remember_launch_choices,
-                    )
+                    .run_create(&session_id, &executor, kind, recovering, commit, &interrupted)
                     .await;
+                drop(commit_admission);
+                if let Some(parent) = parent
+                    && provision.is_err()
+                {
+                    drop(controller);
+                    state.reload_controller().await?;
+                    if let Err(prompt_error) = state.reconcile_parent_reports(&parent).await {
+                        tracing::warn!(
+                            child_session_id = %session_id,
+                            parent_session_id = parent,
+                            error = format!("{prompt_error:#}"),
+                            "could not enqueue the parent's finished child reports after provisioning failure"
+                        );
+                    }
+                }
                 if let Some(error) = publication_error {
                     return match provision {
                         Ok(()) => Err(error),
@@ -668,41 +722,105 @@ impl RuntimeState {
                 Ok(DaemonLifecycleResult::Done)
             },
         )?;
-        let publishing = crate::launch_timing::LaunchPhaseTimer::new(
-            &registered.session.id,
-            "publish registered session view",
-        );
-        self.reload_controller().await?;
-        drop(publishing);
-        Ok((registered, review_notice, capacity_warning))
+        Ok(())
     }
 
-    pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
-        let result = {
-            let lifecycle_owner = self.owner();
-            let lifecycle = &lifecycle_owner.lifecycle;
-            let active = lifecycle
-                .get(session_id)
-                .with_context(|| format!("no create operation exists for session {session_id}"))?;
-            ensure!(
-                active.kind == LifecycleKind::Create,
-                "session {session_id} is no longer being created"
-            );
-            active.result.clone()
-        };
-        let channel = result.clone();
-        let outcome = Self::wait_lifecycle_result(result).await;
-        self.remove_completed_lifecycle(&channel);
-        match outcome? {
-            DaemonLifecycleResult::Done => Ok(()),
-            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
-                unreachable!("cleanup cannot return a move outcome")
+    /// Re-admit the creates a previous daemon's shutdown interrupted. Runs at
+    /// startup before clients are served, so a client that reconnects to wait
+    /// for its session finds the create in the lifecycle registry. Returns the
+    /// sessions it owns, which the unowned-lifecycle reconciliation must skip.
+    ///
+    /// An intent whose session is no longer creating (finished or failed by
+    /// something that did not settle the intent, such as an older daemon) is
+    /// discarded. Capacity is not admitted again: the original create passed
+    /// that gate, and refusing here would strand a session the person already
+    /// has.
+    pub(super) fn recover_creates(
+        self: &Arc<Self>,
+        intents: Vec<crate::database::SessionCreateIntent>,
+    ) -> Result<BTreeSet<String>> {
+        let mut owned = BTreeSet::new();
+        for intent in intents {
+            let creating = self
+                .owner()
+                .controller()
+                .state
+                .sessions
+                .get(&intent.session_id)
+                .is_some_and(|record| !crate::database::create_intent_is_stale(record));
+            if !creating {
+                crate::database::discard_session_create_intent(
+                    &intent.session_id,
+                    &intent.operation_id,
+                )?;
+                tracing::info!(session_id = %intent.session_id, "discarded a create intent whose session is no longer creating");
+                continue;
             }
-            DaemonLifecycleResult::DeferredCleanup => {
-                unreachable!("session creation cannot schedule target cleanup")
+            tracing::info!(session_id = %intent.session_id, "resuming a session creation interrupted by a daemon restart");
+            let inputs = match crate::database::load_subagent(&intent.session_id)? {
+                Some(relation) => CreateInputs::Subagent(Box::new(relation)),
+                None => CreateInputs::TopLevel {
+                    publication: None,
+                    remember_launch_choices: intent.remember_launch_choices,
+                },
+            };
+            self.start_create_lifecycle(
+                intent.session_id.clone(),
+                LifecycleControl::default(),
+                inputs,
+                Some(intent.operation_id),
+            )?;
+            owned.insert(intent.session_id);
+        }
+        Ok(owned)
+    }
+
+    /// How a wait for a session's creation ends, answered from durable state
+    /// alone (the create intent row and the session record), so every daemon
+    /// gives the same answer and a client that loses its daemon only asks
+    /// again. While the intent row exists the create is unfinished and the
+    /// wait sleeps until the daemon publishes a change to session records.
+    pub(crate) async fn wait_create_outcome(&self, session_id: &str) -> CreateWait {
+        // Subscribed before the first read, so a change between the read and
+        // the sleep still wakes it.
+        let mut changes = self.revisions.subscribe();
+        loop {
+            let id = session_id.to_owned();
+            match blocking(move || crate::database::session_create_end(&id)).await {
+                Ok(crate::database::CreateEnd::Finished) => return CreateWait::Finished,
+                Ok(crate::database::CreateEnd::Failed(reason)) => {
+                    return CreateWait::Failed(anyhow::anyhow!(reason));
+                }
+                Ok(crate::database::CreateEnd::Unfinished) => {}
+                Err(error) => return CreateWait::Failed(error),
+            }
+            if changes.changed().await.is_err() {
+                return CreateWait::Failed(anyhow::anyhow!("the daemon is shutting down"));
             }
         }
     }
+}
+
+/// The inputs only one kind of create has.
+pub(super) enum CreateInputs {
+    /// A session with its own environment. A phone create supplies the
+    /// publication that tells it the session exists.
+    TopLevel {
+        publication: Option<Publication>,
+        remember_launch_choices: bool,
+    },
+    /// A child worker on its parent's target.
+    Subagent(Box<mj_core::subagent::SubagentRecord>),
+}
+
+/// Tells a create that its phone was told the session exists.
+pub(super) type Publication = tokio::sync::oneshot::Receiver<std::result::Result<(), String>>;
+
+/// How a wait for a session's creation ended.
+#[derive(Debug)]
+pub(crate) enum CreateWait {
+    Finished,
+    Failed(anyhow::Error),
 }
 
 fn validate_minimum_container_allocation(
@@ -881,12 +999,10 @@ mod delegation_replay_tests {
             }
             control.request_cancel("create test cancelled");
             drop(publish);
-            assert!(
-                runtime
-                    .wait_create_session(&registered.session.id)
-                    .await
-                    .is_err()
-            );
+            assert!(matches!(
+                runtime.wait_create_outcome(&registered.session.id).await,
+                super::CreateWait::Failed(_)
+            ));
         }
     }
 
