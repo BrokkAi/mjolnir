@@ -209,7 +209,10 @@ fn record_review_reports(
     // state carries: the cleared one when there is none, otherwise the current
     // one. A review a successor displaced has only its own driver to answer.
     if let Some(previous) = previous.filter(|_| !same) {
-        sync_review_report(connection, session_id, previous)?;
+        // Its own earlier group is not read here: a row that already holds a
+        // handback never takes another one, so only a review whose roles
+        // settled without any intervening save copies text now.
+        sync_review_report(connection, session_id, previous, &BTreeSet::new())?;
         let resolution = match current {
             None => previous_resolution(previous, close),
             Some(_) => inferred_resolution(previous),
@@ -217,7 +220,8 @@ fn record_review_reports(
         finalize_review_report(connection, session_id, previous, resolution)?;
     }
     if let Some(current) = current {
-        sync_review_report(connection, session_id, current)?;
+        let settled = newly_settled(if same { previous } else { None }, current);
+        sync_review_report(connection, session_id, current, &settled)?;
         // The close decision, not the presence of an earlier row, decides that
         // this review is finished: a first save may already be it.
         if let Some(resolution) = close {
@@ -225,6 +229,47 @@ fn record_review_reports(
         }
     }
     Ok(())
+}
+
+/// Roles whose accepted handback this save may copy: those that just settled.
+///
+/// The text the review used is the authority, so it is copied once, when the
+/// role's outcome first appears, and the stored row keeps it afterwards. An
+/// empty set means the review has no earlier saved state, so any role with an
+/// accepted outcome is new. A role that a successor review displaced does not
+/// qualify: its successor's close decision is not its own.
+fn newly_settled(
+    previous: Option<&ActiveReviewGroup>,
+    current: &ActiveReviewGroup,
+) -> BTreeSet<String> {
+    current
+        .driver
+        .roles
+        .iter()
+        .filter(|slot| {
+            let accepted = matches!(
+                slot.outcome,
+                Some(
+                    mj_core::review::verdict::ReviewVerdict::Clean
+                        | mj_core::review::verdict::ReviewVerdict::Findings { .. }
+                )
+            );
+            if !accepted {
+                return false;
+            }
+            match previous.and_then(|previous| {
+                previous
+                    .driver
+                    .roles
+                    .iter()
+                    .find(|prior| prior.role == slot.role)
+            }) {
+                Some(prior) => prior.outcome.is_none(),
+                None => true,
+            }
+        })
+        .map(|slot| slot.role.clone())
+        .collect()
 }
 
 /// The resolution for a review that is being cleared. The host's explicit
@@ -264,6 +309,7 @@ fn sync_review_report(
     connection: &Connection,
     session_id: &str,
     group: &ActiveReviewGroup,
+    settled: &BTreeSet<String>,
 ) -> Result<()> {
     let now = mj_core::clock::epoch_millis();
     for (ordinal, slot) in group.driver.roles.iter().enumerate() {
@@ -281,7 +327,13 @@ fn sync_review_report(
         let profile = reviewer.map_or("", |reviewer| reviewer.profile.as_str());
         let model = reviewer.and_then(|reviewer| reviewer.main.model.as_deref());
         let effort = reviewer.and_then(|reviewer| reviewer.main.effort.as_deref());
-        let handback = accepted_handback(connection, child, slot)?;
+        // An empty set is "no earlier state", so every accepted outcome is new.
+        let copy = settled.is_empty() || settled.contains(&slot.role);
+        let handback = if copy {
+            accepted_handback(connection, child, slot)?
+        } else {
+            None
+        };
         let verdict = slot
             .outcome
             .as_ref()
@@ -303,7 +355,7 @@ fn sync_review_report(
                  END,
                  model = COALESCE(excluded.model, review_reports.model),
                  effort = COALESCE(excluded.effort, review_reports.effort),
-                 handback = COALESCE(excluded.handback, review_reports.handback),
+                 handback = COALESCE(review_reports.handback, excluded.handback),
                  verdict = COALESCE(excluded.verdict, review_reports.verdict),
                  updated_at_ms = excluded.updated_at_ms",
             params![
@@ -329,8 +381,8 @@ fn sync_review_report(
 /// handback for it. Only Clean and Findings outcomes are accepted reports: a
 /// failed role ended without one, and a pending or cancelled role was never
 /// settled. `subagent_handbacks` keeps the newest handback of a child, which
-/// can belong to another command, so retaining it without that check would
-/// present unrelated findings beside a failed verdict.
+/// can belong to another command, so a failed role's stored text is not this
+/// review's output.
 fn accepted_handback(
     connection: &Connection,
     child: Option<&str>,

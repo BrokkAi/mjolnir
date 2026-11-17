@@ -5493,6 +5493,19 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
         active_group: None,
         ..state.clone()
     };
+    // A reviewer's child can record another command's handback afterwards. The
+    // text the review settled from is the authority and must not be replaced.
+    record_subagent_handback_to(
+        &database,
+        children[0],
+        &mj_core::subagent::SubagentHandback {
+            command_id: "a-later-command".into(),
+            message: "Findings from a later task.".into(),
+            recorded_at_ms: 300,
+        },
+    )
+    .unwrap();
+    save_turn_review_state_in(&database, owner, &state).unwrap();
     close_turn_review_state_in(
         &database,
         owner,
@@ -5528,7 +5541,8 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
     assert_eq!(first.effort.as_deref(), Some("high"));
     assert_eq!(
         first.handback.as_deref(),
-        Some("The parser drops queued input.")
+        Some("The parser drops queued input."),
+        "a later handback for another command never replaces the accepted one"
     );
     assert!(matches!(
         first.verdict.as_ref(),
