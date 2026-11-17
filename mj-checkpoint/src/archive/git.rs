@@ -34,12 +34,6 @@ pub struct GitOutput {
 pub const NON_INTERACTIVE_GIT_ENV: [(&str, &str); 2] =
     [("GIT_TERMINAL_PROMPT", "0"), ("GIT_NO_LAZY_FETCH", "1")];
 
-/// SSH asks about an unknown host key itself, which `GIT_TERMINAL_PROMPT` does
-/// not reach. An operator who set `GIT_SSH_COMMAND` already chose how to reach
-/// the host and keeps their command; otherwise Git gets a batch-mode one.
-pub const NON_INTERACTIVE_GIT_SSH_COMMAND: &str =
-    "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15";
-
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemGit;
 
@@ -53,8 +47,8 @@ impl GitCommandRunner for SystemGit {
         for (name, value) in &command.env {
             process.env(name, value);
         }
-        if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-            process.env("GIT_SSH_COMMAND", NON_INTERACTIVE_GIT_SSH_COMMAND);
+        if let Some(default) = mj_core::local_git::local_git_ssh_command() {
+            process.env("GIT_SSH_COMMAND", default);
         }
         let output = mj_core::subprocess::run_with_input(&mut process, &command.stdin)
             .with_context(|| format!("run git in {}", repository.display()))?;

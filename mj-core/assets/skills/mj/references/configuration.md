@@ -1304,7 +1304,7 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_GITHUB_CLI_BIN` | Path or command name for the GitHub CLI used to read tokens. |
 | `RUST_LOG` | Tracing/log filter for Mjolnir processes. |
 | `GH_TOKEN`, `GITHUB_TOKEN` | GitHub token source, checked in that order before `gh auth token`, for private clones and live non-local session sync when no session token override or App is configured. |
-| `GIT_SSH_COMMAND` | Overrides Mjolnir's non-interactive SSH command for checkpoint/archive Git operations. |
+| `GIT_SSH_COMMAND` | Overrides Mjolnir's non-interactive SSH command for the Git the daemon runs to reach a remote: the clone cache, checkpoint base checks, managed worktree and publication checks on this computer, and a Move's read of its source. Git that runs on a target follows that target's own SSH settings. |
 
 Worker lookup checks `MJ_WORKER_BINARY`, `MJ_WORKER_DIR`, packaged or sibling
 workers, the native `mj-worker` companion for a bare runtime on this machine,

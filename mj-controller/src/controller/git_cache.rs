@@ -266,8 +266,12 @@ key=$2
 source=$3
 snapshot=$4
 has_token=$5
+# How Git reaches an SSH remote, as the controller decided it. Empty leaves
+# this host's GIT_SSH_COMMAND as it is: on the controller that is the
+# operator's own command, inherited exactly.
+ssh_command=$6
 # Any further arguments are a history cutoff: its head, then its base.
-shift 5
+shift 6
 umask 077
 mkdir -p "$cache_root/mirrors" "$cache_root/locks" "$(dirname "$snapshot")"
 entry="$cache_root/mirrors/$key"
@@ -308,7 +312,9 @@ if [ "$has_token" = 1 ]; then
     export GH_TOKEN
 fi
 export GIT_TERMINAL_PROMPT=0
-export GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15'
+if [ -n "$ssh_command" ]; then
+    export GIT_SSH_COMMAND="$ssh_command"
+fi
 git_remote() {
     if [ "$has_token" = 1 ]; then
         git -c credential.https://github.com.helper= -c 'credential.https://github.com.helper=!f() { if [ "$1" = get ]; then printf "%s\n" username=x-access-token "password=$GH_TOKEN"; fi; }; f' "$@"
@@ -391,6 +397,12 @@ fn prepare_repository(
         source.to_owned(),
         snapshot.to_string_lossy().into_owned(),
         u8::from(token).to_string(),
+        match host {
+            CacheHost::Local => mj_core::local_git::local_git_ssh_command()
+                .unwrap_or_default()
+                .to_owned(),
+            _ => mj_core::local_git::remote_git_ssh_command()?,
+        },
     ];
     if let Some(cutoff) = cutoff {
         cutoff.validate()?;
@@ -915,6 +927,76 @@ mod tests {
             .is_err()
         );
         assert!(!snapshot.exists());
+    }
+
+    /// The clone cache runs Git on the controller or on a container target's
+    /// SSH host with the SSH command the controller decided, so the operator's
+    /// `GIT_SSH_COMMAND` governs it as it does every other Git command.
+    // Hard-won: #1466: the clone cache forced accept-new over the operator's GIT_SSH_COMMAND
+    #[cfg(unix)]
+    #[test]
+    fn the_clone_cache_reaches_ssh_remotes_with_the_controllers_ssh_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = root.join("ssh-arguments");
+        let fake_ssh = bin.join("ssh");
+        std::fs::write(
+            &fake_ssh,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SSH_TEST_LOG\"\nexit 255\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (ssh_command, chosen) in [
+            (
+                mj_core::local_git::NON_INTERACTIVE_GIT_SSH_COMMAND,
+                "StrictHostKeyChecking=accept-new",
+            ),
+            (
+                "ssh -o StrictHostKeyChecking=yes",
+                "StrictHostKeyChecking=yes",
+            ),
+        ] {
+            let _ = std::fs::remove_file(&log);
+            let mut command = CacheHost::Local.git_shell_command(
+                PREPARE_REPOSITORY_SCRIPT,
+                [
+                    root.join("cache").display().to_string(),
+                    "repository".into(),
+                    "ssh://git.example.invalid/repository.git".into(),
+                    root.join("cache/sessions/one/repository.bundle")
+                        .display()
+                        .to_string(),
+                    "0".into(),
+                    ssh_command.into(),
+                ],
+                "prepare cached Git objects",
+            );
+            command.env.insert(
+                "PATH".into(),
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            );
+            command
+                .env
+                .insert("SSH_TEST_LOG".into(), log.display().to_string());
+            let output = ProcessExecutor.execute(&command).unwrap();
+            assert_ne!(output.status, 0, "the fake SSH refuses every connection");
+            let arguments = std::fs::read_to_string(&log)
+                .unwrap_or_else(|error| panic!("{ssh_command}: SSH never ran: {error}"));
+            let options: Vec<_> = arguments.lines().collect();
+            assert!(options.contains(&chosen), "{ssh_command}: {arguments}");
+            assert_eq!(
+                options
+                    .iter()
+                    .filter(|option| option.starts_with("StrictHostKeyChecking="))
+                    .count(),
+                1,
+                "{ssh_command}: {arguments}"
+            );
+        }
     }
 
     // Hard-won: #1388: packing one session's history blocked every clone of the same repository.
