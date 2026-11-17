@@ -266,8 +266,9 @@ key=$2
 source=$3
 snapshot=$4
 has_token=$5
-# How Git reaches an SSH remote, decided by the controller for every Git
-# command Mjolnir runs, here and on the hosts it runs Git on.
+# How Git reaches an SSH remote, as the controller decided it. Empty leaves
+# this host's GIT_SSH_COMMAND as it is: on the controller that is the
+# operator's own command, inherited exactly.
 ssh_command=$6
 # Any further arguments are a history cutoff: its head, then its base.
 shift 6
@@ -311,7 +312,9 @@ if [ "$has_token" = 1 ]; then
     export GH_TOKEN
 fi
 export GIT_TERMINAL_PROMPT=0
-export GIT_SSH_COMMAND="$ssh_command"
+if [ -n "$ssh_command" ]; then
+    export GIT_SSH_COMMAND="$ssh_command"
+fi
 git_remote() {
     if [ "$has_token" = 1 ]; then
         git -c credential.https://github.com.helper= -c 'credential.https://github.com.helper=!f() { if [ "$1" = get ]; then printf "%s\n" username=x-access-token "password=$GH_TOKEN"; fi; }; f' "$@"
@@ -394,7 +397,12 @@ fn prepare_repository(
         source.to_owned(),
         snapshot.to_string_lossy().into_owned(),
         u8::from(token).to_string(),
-        mj_core::local_git::remote_git_ssh_command()?,
+        match host {
+            CacheHost::Local => mj_core::local_git::local_git_ssh_command()
+                .unwrap_or_default()
+                .to_owned(),
+            _ => mj_core::local_git::remote_git_ssh_command()?,
+        },
     ];
     if let Some(cutoff) = cutoff {
         cutoff.validate()?;

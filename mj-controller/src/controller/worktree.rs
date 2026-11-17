@@ -1507,10 +1507,24 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect();
-        environment.push((
-            "GIT_SSH_COMMAND".into(),
-            mj_core::local_git::remote_git_ssh_command()?,
-        ));
+        // Git on this computer inherits an operator's command exactly; Git on
+        // a target receives it as text.
+        let runs_here = matches!(
+            self.location,
+            ExecutorGitLocation::Local
+                | ExecutorGitLocation::Session {
+                    backend: crate::targets::TargetLocator::LocalBare { .. },
+                    ..
+                }
+        );
+        let ssh_command = if runs_here {
+            mj_core::local_git::local_git_ssh_command().map(str::to_owned)
+        } else {
+            Some(mj_core::local_git::remote_git_ssh_command()?)
+        };
+        if let Some(ssh_command) = ssh_command {
+            environment.push(("GIT_SSH_COMMAND".into(), ssh_command));
+        }
         let mut args = vec![
             "git".into(),
             "-C".into(),

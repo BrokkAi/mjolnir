@@ -685,9 +685,11 @@ pub fn local_git_ssh_command() -> Option<&'static str> {
         .then_some(NON_INTERACTIVE_GIT_SSH_COMMAND)
 }
 
-/// [`local_git_ssh_command`]'s decision as text, for Git Mjolnir runs on
-/// another machine, such as a clone-cache host. An operator command that is not
-/// UTF-8 cannot travel as text and is refused rather than altered.
+/// [`local_git_ssh_command`]'s decision as text, for Git that runs on another
+/// machine, such as a clone-cache host or a session's target, where the
+/// command must travel in an argument. An operator command that is not UTF-8
+/// cannot travel as text and is refused rather than altered; Git on this
+/// computer uses [`local_git_ssh_command`] and inherits it instead.
 pub fn remote_git_ssh_command() -> anyhow::Result<String> {
     match std::env::var_os("GIT_SSH_COMMAND") {
         None => Ok(NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()),
