@@ -892,7 +892,11 @@ fn validate_action_against(
 }
 
 pub(super) fn validate_public_id(id: &str) -> Result<(), ApiError> {
-    validate_id("request", id).map_err(|_| ApiError::bad_request("invalid id"))
+    // The validator's own sentence quotes the id; this one states the rule
+    // without echoing caller input back to a browser.
+    validate_id("request", id).map_err(|_| {
+        ApiError::bad_request("invalid id; use 1-64 ASCII letters, digits, '.', '-' or '_'")
+    })
 }
 
 pub(super) fn validate_title(title: &str) -> Result<(), ApiError> {

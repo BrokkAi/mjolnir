@@ -323,6 +323,73 @@ async fn authenticated_message_route_passes_sender_and_target_to_daemon_operatio
     assert!(requests[0].created_at_ms > 0);
 }
 
+/// The body limit stands in front of the prompt validator, so it must admit
+/// every prompt the validator accepts, and a body it refuses must say how
+/// much would have fit. `mj message` reaches this route.
+// Hard-won: #1556: a prompt within the text limit was refused as an unexplained 413
+#[tokio::test]
+async fn the_longest_accepted_message_reaches_the_validator_and_refusals_name_their_limits() {
+    use super::super::{MAX_BODY_BYTES, MAX_PROMPT_CHARS, MAX_PROMPT_TEXT_BODY_BYTES};
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["high"])),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+    });
+    let send = |request_id: &str, text: String| {
+        let body = serde_json::to_vec(&serde_json::json!({"request_id": request_id, "text": text}))
+            .unwrap();
+        bearer(Request::post("/api/v1/sessions/session-1/message"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    // JSON spends six bytes on a control character, the most it spends on
+    // any, so this is the largest body an acceptable prompt can produce.
+    let longest = "\u{1}".repeat(MAX_PROMPT_CHARS);
+    assert!(serde_json::to_vec(&longest).unwrap().len() > MAX_BODY_BYTES);
+    let response = app.clone().oneshot(send("longest", longest)).await.unwrap();
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        json_body(response).await
+    );
+    assert_eq!(backend.submissions.lock().unwrap().len(), 1);
+
+    let response = app
+        .clone()
+        .oneshot(send("one-more", "\u{1}".repeat(MAX_PROMPT_CHARS + 1)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(refusal.contains("1-65536 characters"), "{refusal}");
+
+    let response = app
+        .clone()
+        .oneshot(send("too-large", "x".repeat(MAX_PROMPT_TEXT_BODY_BYTES)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(
+        refusal.contains(&format!("({MAX_PROMPT_TEXT_BODY_BYTES} bytes)")),
+        "{refusal}"
+    );
+
+    let response = app
+        .oneshot(send(&"c".repeat(65), "short".into()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(refusal.contains("use 1-64 ASCII letters"), "{refusal}");
+    assert_eq!(backend.submissions.lock().unwrap().len(), 1);
+}
+
 /// A message with no sender comes from the user's own shell, so it is the
 /// user's prompt and takes the prompt endpoint's path: it waits for a session
 /// still starting, and its request id is the command id, so a retry after an

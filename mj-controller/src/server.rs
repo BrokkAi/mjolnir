@@ -85,6 +85,12 @@ const CODE_LOCKOUT_BASE: Duration = Duration::from_secs(30);
 const CODE_LOCKOUT_CAP: Duration = Duration::from_secs(60 * 60);
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_PROMPT_CHARS: usize = 64 * 1024;
+/// The largest body of an API request that carries prompt or message text:
+/// the ordinary allowance plus the longest text [`validate_prompt_text`]
+/// accepts with every character JSON-escaped (`\u0001` is six bytes). Any
+/// text the validator accepts therefore reaches it, and text it refuses is
+/// refused with the validator's own reason rather than a bare 413 (#1556).
+const MAX_PROMPT_TEXT_BODY_BYTES: usize = MAX_BODY_BYTES + 6 * MAX_PROMPT_CHARS;
 /// How many repositories one dirty-worktree acknowledgement may name. A bundle
 /// with more repositories than this than has bigger problems than the phone.
 const MAX_DIRTY_ACKNOWLEDGEMENTS: usize = 32;

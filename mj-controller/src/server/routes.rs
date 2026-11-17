@@ -160,11 +160,11 @@ pub(super) fn router(options: ServerOptions) -> Router {
         )
         .route(
             "/api/sessions/{session_id}/attachments",
-            post(upload_attachment).layer(DefaultBodyLimit::max(MAX_ATTACHMENT_UPLOAD_BYTES)),
+            post(upload_attachment).layer(named_body_limit(MAX_ATTACHMENT_UPLOAD_BYTES)),
         )
         .route(
             "/api/sessions/{session_id}/draft",
-            put(save_draft).layer(DefaultBodyLimit::max(MAX_DRAFT_BYTES)),
+            put(save_draft).layer(named_body_limit(MAX_DRAFT_BYTES)),
         )
         .route("/api/sessions/{session_id}/history", get(prompt_history))
         .route(
@@ -173,22 +173,22 @@ pub(super) fn router(options: ServerOptions) -> Router {
         )
         .route(
             "/api/actions",
-            post(action).layer(DefaultBodyLimit::max(MAX_PROMPT_BODY_BYTES)),
+            post(action).layer(named_body_limit(MAX_PROMPT_BODY_BYTES)),
         )
         // Configuration is edited here, on the cookie-only surface, and never
         // through `/api/actions` or `/api/v1`; see `settings.rs`.
         .route("/api/settings", get(read_settings))
         .route(
             "/api/settings/page",
-            post(render_settings_page).layer(DefaultBodyLimit::max(MAX_SETTINGS_BODY_BYTES)),
+            post(render_settings_page).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
         )
         .route(
             "/api/settings/edit",
-            post(edit_settings).layer(DefaultBodyLimit::max(MAX_SETTINGS_BODY_BYTES)),
+            post(edit_settings).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
         )
         .route(
             "/api/settings/save",
-            post(save_settings).layer(DefaultBodyLimit::max(MAX_SETTINGS_BODY_BYTES)),
+            post(save_settings).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -219,7 +219,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/auth/login", get(create_session_from_query))
         .merge(protected)
         .nest("/api/v1", api::router(state.clone()))
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(named_body_limit(MAX_BODY_BYTES))
         .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
         .layer(axum::middleware::from_fn(finalize_static_etag))
         .layer(axum::middleware::from_fn(security_headers))
