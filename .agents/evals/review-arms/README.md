@@ -915,6 +915,29 @@ python3 audit.py
 `carrier_test.py <bug>` checks that the carrier answers a bug's context
 without tools, and then destroys its session.
 
+The writer-study helper retains its historical filename,
+`brief_writer_terra.py`, and selects a study with `--writer terra` (default)
+or `--writer sonnet`. Sonnet writers use `brief_driver.py --kind blind-sonnet`
+with an explicit Claude `--profile`; their three-Terra reviewer arm is TS.
+The shared prompt, lint and blinding rules are unchanged. Set the selected
+Claude profile and codex4 to 25% floors using the existing profile-specific
+`REVIEW_ARMS_QUOTA_FLOOR` syntax before starting work.
+
+Sonnet's leak/rewrite artifacts use `briefs/blind-sonnet*`, its paired
+containment inputs use `briefs/writer-contains-sonnet`, and results go to
+`results/brief-writer-sonnet/`. The readout uses round K's mixed TS, BT and
+no-brief judgments, with round J as a consistency reference. TT's round-J
+result is historical context beside the reading. These paths keep the
+completed Terra study separate:
+
+```sh
+python3 -B brief_writer_terra.py leak-build --writer sonnet
+python3 -B brief_writer_terra.py leak-collect --writer sonnet
+python3 -B brief_writer_terra.py contains-build --writer sonnet
+python3 -B brief_writer_terra.py usage --writer sonnet
+python3 -B brief_writer_terra.py readout --writer sonnet --name brief-judge-k
+```
+
 Stage 2 (pooled findings, per-session scoring). Run long drivers with
 `setsid nohup`, because a harness background task has a time limit:
 

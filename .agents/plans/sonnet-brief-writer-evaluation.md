@@ -14,8 +14,9 @@ Determine whether Sonnet/high is an acceptable cheaper writer for the relation b
 - [x] Checked production quota and model discovery. Claude6 has 32% of its week; claude5's five-hour window has 23% and is ineligible under the 25% floor. Codex4 has 78%. Model ID `sonnet` advertises Sonnet 5.5 and high effort.
 - [x] Read the existing writer, review, judging and readout design through a delegated source map; no sessions for the experiment have started.
 - [x] Added Sonnet writer kind and TS review-arm mappings; the writer CLI exposes the new kind and both quota windows were rechecked.
-- [ ] Generalize the existing helper with isolated regression coverage.
-- [ ] Obtain direct user approval for the complete Sonnet study after local preparation; the initial launch attempt was rejected before execution.
+- [x] Generalized the existing helper with isolated regression coverage; 10 new study checks, nine existing scorer checks and four workspace checks pass (23 total).
+- [x] Direct user approval received for 22 Sonnet/high writers on claude5, 66 Terra reviewers and Sol/high grading on codex4, with a 25% floor. The earlier rejected attempt executed nothing.
+- [ ] Wait for claude5's five-hour window to recover to at least 25%; its latest report is 7% five-hour, 79% weekly. Claude6 is not permitted for this study.
 - [ ] Commit the frozen plan and tested harness, then run one writer canary followed by the remaining writers.
 - [ ] Complete paired leak judgments, any allowed rewrite/recheck, and report the result before any Sonnet-brief reviewers start.
 - [ ] Run one reviewer-job canary, then complete all 22 jobs and 66 reviewers.
@@ -29,13 +30,14 @@ The initial assignment used five seeded BT control diffs and round-J baseline la
 
 Current quota is materially below the earlier estimates. Of the subscription Claude profiles, only claude6 currently clears every applicable quota window. Claude5's larger weekly balance does not override its five-hour floor violation. Do not use the usage-billed Claude AWS profile or the separate Fable quota pool as substitutes.
 
-Automatic approval review rejected the first attempted Sonnet canary before any command executed: the new external-model arm was requested only through an agent relay, which is not trusted user authorization for repository disclosure and quota use. No Sonnet session or output exists. Complete local code/tests and obtain direct approval before launching any study session; do not route the rejected action through another tool or child.
+Automatic approval review rejected the first attempted Sonnet canary before any command executed: the new external-model arm was requested only through an agent relay, which was not trusted user authorization for repository disclosure and quota use. The user subsequently directly authorized the full study on claude5. No Sonnet session or output exists yet because claude5's five-hour quota is below the floor. The rejection was not bypassed.
 
 ## Decision Log
 
 
 - Decision: Keep the historical filename `brief_writer_terra.py` and generalize it with `--writer {terra,sonnet}`, defaulting to terra. Rationale: one implementation can serve both studies without copied helpers or compatibility wrappers; existing commands and regressions remain valid. Date/author: 2026-11-17, parent c8c109b6.
 - Decision: Use `blind-sonnet`, arm TS, and native model ID `sonnet` with effort high, initially pinned to claude6. Rationale: the ID and effort were discovered from production `mj models --profile claude6`. Date/author: 2026-11-17, parent.
+- Decision superseding the initial profile choice: Use claude5 only, wait for both its five-hour and weekly windows, and retain codex4's 25% floor. Never use claude6 or consume a banked reset to avoid the wait. Rationale: the user directly authorized claude5, and the supervisor reserved claude6 for its own session. `mj models --profile claude5` independently confirms `sonnet` means Sonnet 5.5 and supports high effort. Date/author: 2026-11-17, parent.
 - Decision: Reuse the established bootstrap seed 20261116, 10,000 common-index resamples over diffs, and exact rational contrasts. Rationale: the new study changes writer identity, not the estimation method. The dropped seed 20261117 belonged only to the abandoned five-diff control. Date/author: 2026-11-17, parent.
 - Decision: Keep the existing scorer's full baseline selection rather than adding a new model-filter feature. Round K will contain TS66, BT66, no-brief Terra72 and no-brief Sol66: 270 outputs, three batches of eight/eight/six diffs. Rationale: this matches round J and avoids changing sampling/completeness logic; the reading excludes Sol reviewer outputs. Date/author: 2026-11-17, parent.
 - Decision: Use Sol/high on codex4 for paired leak checks, round K, handcheck and containment. Rationale: Carbon's pool is closed; Sol/high is the registered judging and containment model. Record all grader provenance before runs. Date/author: 2026-11-17, parent.
@@ -44,7 +46,7 @@ Automatic approval review rejected the first attempted Sonnet canary before any 
 ## Outcomes & Retrospective
 
 
-Local preparation and implementation are in progress. No Sonnet writing, review or grading output exists yet. Execution additionally awaits direct user approval after an automatic-review rejection. Existing V1 artifacts must remain unchanged and independently readable.
+Local preparation is tested and the user has directly authorized execution. No Sonnet writing, review or grading output exists yet: claude5's five-hour quota remains below 25%. Existing V1 artifacts remain unchanged. A configured helper automatically used claude6 for local code preparation before the profile restriction arrived; that helper is now closed and all remaining work uses the permitted profiles.
 
 ## Context and Orientation
 
@@ -70,7 +72,7 @@ Use the same paired leak and rewrite pipeline under Sonnet-specific directories.
 
 ### Milestone 2: Writers and reviewers
 
-Run one Sonnet writer canary, verify actual model/effort/profile, artifact output, lint, inventory, image identity, transcript isolation and usage coverage. Only then launch the remaining writers with stop-on-failure. Check both claude6 and codex4 floors before new work. Report refusals or below-floor conditions immediately; do not switch profiles silently, consume API credit, or modify configuration.
+Run one Sonnet writer canary on claude5, verify actual model/effort/profile, artifact output, lint, inventory, image identity, transcript isolation and usage coverage. Only then launch the remaining writers with stop-on-failure. Check both claude5 and codex4 floors before new work. Wait while either is below 25%, and report refusals or below-floor conditions. Do not switch profiles, consume API credit or banked resets, or modify configuration.
 
 After all 22 briefs pass checks, run the paired Sol/high leak judgments and any single rewrite/recheck. Report the result to the supervisor before starting reviewers. Then run a single TS review job, verify three nonempty Terra/high handbacks, exact brief injection and clean inventory, and complete the remaining 21 jobs. Record per-job image IDs and wall times. Individual reviewer latency may be unknown when retained handbacks have no prompt timestamp; preserve that distinction.
 
@@ -87,14 +89,14 @@ From `.agents/evals/review-arms/`, use the committed wrapper to check quota and 
 
     export REVIEW_ARMS_DIR=/mnt/optane/review-arms-20261113
     export REVIEW_ARMS_INSTANCE=default
-    export REVIEW_ARMS_QUOTA_FLOOR=claude6=25,codex4=25
-    ./mjx quota --profile claude6 --json
+    export REVIEW_ARMS_QUOTA_FLOOR=claude5=25,codex4=25
+    ./mjx quota --profile claude5 --json
     ./mjx quota --profile codex4 --json
-    ./mjx models --profile claude6 --json
+    ./mjx models --profile claude5 --json
 
 The updated helper commands retain their existing steps and add writer selection:
 
-    python3 -B brief_driver.py --kind blind-sonnet --profile claude6 --stop-on-failure archive-resume-hint-without-prompt
+    python3 -B brief_driver.py --kind blind-sonnet --profile claude5 --stop-on-failure archive-resume-hint-without-prompt
     python3 -B brief_writer_terra.py leak-build --writer sonnet
     python3 -B brief_writer_terra.py leak-collect --writer sonnet
     python3 -B brief_writer_terra.py contains-build --writer sonnet
@@ -128,4 +130,4 @@ The registered plan revision is supervisor commit `702aab028bf9bad94245b875f6680
 
 Use the existing installed `mjx`, `brief_driver.py`, `driver.py`, `brief_score.py`, `verify_driver.py` and generalized `brief_writer_terra.py`. No new scheduler, runner, store, plugin, production setting or build layout is needed. Parent owns design, documentation, orchestration, integrated review and commits; children may implement disjoint harness slices and independently verify measurement integrity. No concurrent Cargo or other build is planned.
 
-Revision note: Initial plan records the revised mixed-round design and actual quota/model discovery before implementation or experimental output. The progress and execution gate now record the automatic-review rejection before any Sonnet session started.
+Revision note: Initial plan records the revised mixed-round design and actual quota/model discovery before implementation or experimental output. Subsequent progress records the rejected pre-authorization attempt, the user's direct authorization, the claude5-only restriction, and successful isolated local checks. Actual execution waits for claude5 quota recovery.
