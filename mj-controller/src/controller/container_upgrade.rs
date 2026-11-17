@@ -66,9 +66,8 @@ impl Controller {
                 !executor.cancellation_requested(),
                 "pending container upgrade cancelled; environment retained"
             );
-            let attempt = if let Some(owner) =
-                crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "container upgrade")?
-            {
+            let attempt = {
+                let owner = crate::worker_lifecycle::WorkerPermit::acquire(session_id, admission)?;
                 owner.scope(async {
                     owner.verify_target(target)?;
                     let source = plan.source_is_current(executor)?;
@@ -135,8 +134,6 @@ impl Controller {
                     if let Some(lease) = lease.take() { lease.finish_replacement(connection); }
                     Ok(true)
                 }).await?
-            } else {
-                false
             };
             if attempt {
                 return Ok(());

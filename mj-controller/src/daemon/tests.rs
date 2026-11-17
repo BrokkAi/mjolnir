@@ -1179,6 +1179,28 @@ pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeStat
     ))
 }
 
+fn test_runtime_state_loading_the_store_with_live_recovery() -> (
+    Arc<RuntimeState>,
+    crate::recovery::RecoveryCoordinator,
+    crate::worker_upgrade::WorkerUpgradeCoordinator,
+) {
+    let remote = spawn_remote_session_manager().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        remote.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        remote.control,
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ));
+    (state, recovery, upgrades)
+}
+
 /// The wait notice names what the daemon is waiting for, so `UpgradeBlockers`
 /// must report a live gate label and stop reporting it once released. A
 /// lifecycle hold also names its session, kind and current stage, read from the
@@ -5000,7 +5022,7 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
         target: *child.target.clone().unwrap(),
         desired_build: "fixture".into(),
     };
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire("child-1", "test child wake")
+    let owner = crate::controller::test_support::worker_test_permit("child-1", "test child wake")
         .unwrap()
         .unwrap();
     owner
@@ -9694,14 +9716,15 @@ async fn discard_intent_recovers_without_checkpointing_and_reconciles_children()
         .checkpoint
         .clone()
         .unwrap();
-    controller
-        .prepare_discard(
+    crate::controller::test_support::worker_test_scope(LATCH_RELAY_SESSION, || {
+        controller.prepare_discard(
             LATCH_RELAY_SESSION,
             &checkpoint,
             &ProcessExecutor,
             || Ok(()),
         )
-        .unwrap();
+    })
+    .unwrap();
     let durable = Controller::load().unwrap();
     assert_eq!(
         durable.state.sessions[LATCH_RELAY_SESSION].state,
@@ -9847,11 +9870,8 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     )
     .unwrap();
 
-    let mut state = test_runtime_state_loading_the_store();
-    // This fixture needs live recovery admission. Its usual inert observers
-    // belong to coordinators already dropped by the runtime helper.
-    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
-    Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
+    let (state, mut recovery, _upgrades) =
+        test_runtime_state_loading_the_store_with_live_recovery();
     // A recovery copy in flight holds the child's stop at its start, where
     // the operation is already visible.
     let recovery_attempt = state
@@ -9938,9 +9958,8 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
             .unwrap();
     }
 
-    let mut state = test_runtime_state_loading_the_store();
-    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
-    Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
+    let (state, mut recovery, _upgrades) =
+        test_runtime_state_loading_the_store_with_live_recovery();
     let attempt_a = state
         .recovery_observer
         .gate

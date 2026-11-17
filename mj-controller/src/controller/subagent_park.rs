@@ -148,7 +148,7 @@ impl Controller {
         manager: &SessionManagerControl,
         failure: Option<&str>,
     ) -> Result<ParkOutcome> {
-        crate::worker_lifecycle::run(session_id, "stop idle subagent worker", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
             ensure!(
                 self.state.subagents.contains_key(session_id),
@@ -210,10 +210,11 @@ impl Controller {
     /// It never stops a worker that may have resumed accepted work.
     pub async fn unpark_subagent_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        crate::worker_lifecycle::run(session_id, "unpark subagent worker", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
             let owner = crate::worker_lifecycle::require(session_id)?;
             owner.verify_cached_target(&self.state)?;
             ensure!(
@@ -672,7 +673,7 @@ mod tests {
             .clone()
             .unwrap();
         let owner =
-            crate::worker_lifecycle::WorkerPermit::try_acquire(LATCH_RELAY_SESSION, "test unpark")
+            crate::controller::test_support::worker_test_permit(LATCH_RELAY_SESSION, "test unpark")
                 .unwrap()
                 .unwrap();
         owner.scope(async {
@@ -707,7 +708,11 @@ mod tests {
         let executor = WakeTarget::new();
         tokio::time::timeout(
             Duration::from_secs(10),
-            controller.unpark_subagent_worker(LATCH_RELAY_SESSION, &executor),
+            controller.unpark_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                &executor,
+            ),
         )
         .await
         .expect("a running turn must not delay readiness")
@@ -766,7 +771,11 @@ mod tests {
         )
         .unwrap();
         controller
-            .unpark_subagent_worker(LATCH_RELAY_SESSION, &WakeTarget::new())
+            .unpark_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                &WakeTarget::new(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -789,7 +798,11 @@ mod tests {
             let executor = executor.clone();
             async move {
                 controller
-                    .unpark_subagent_worker(LATCH_RELAY_SESSION, &*executor)
+                    .unpark_subagent_worker(
+                        &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                        LATCH_RELAY_SESSION,
+                        &*executor,
+                    )
                     .await
             }
         });
@@ -930,7 +943,7 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'wake publication failed'); END;",
             )
             .unwrap();
-        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        let owner = crate::controller::test_support::worker_test_permit(
             LATCH_RELAY_SESSION,
             "test wake transaction",
         )

@@ -626,19 +626,18 @@ impl RuntimeState {
         session_id: &str,
         error: &str,
     ) {
-        let provisioning = {
-            let controller_owner = self.owner();
-            let controller = controller_owner.controller();
-            durable_session_state(controller, session_id) == Some(SessionState::Provisioning)
-        };
-        if !provisioning {
-            return;
-        }
         let cause = format!("session provisioning ended without finishing: {error}");
         let applied = blocking({
             let session_id = session_id.to_owned();
             move || {
                 let mut controller = Controller::load()?;
+                // The store owns whether provisioning is unfinished. A stale
+                // publication must not skip settlement before the operation ran.
+                if durable_session_state(&controller, &session_id)
+                    != Some(SessionState::Provisioning)
+                {
+                    return Ok(false);
+                }
                 controller.fail_interrupted_lifecycle(&session_id, &cause)
             }
         })

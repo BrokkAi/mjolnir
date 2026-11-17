@@ -88,7 +88,7 @@ impl Controller {
         layout: SessionExportLayout,
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
-        crate::worker_lifecycle::run(session_id, "checkpoint session latched with layout", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
         if let Some(operation) = crate::database::load_move_operation(session_id)?
             && operation.queue_admission_started
             && !operation.queue_admission_finished
