@@ -541,3 +541,33 @@ test('a card without a Quick reply hides its form even though the form is a flex
   view.nodes.skip.onclick();
   assert.equal(view.nodes.reply.hidden, true);
 });
+
+// Hard-won: review of a1ab175cc: forms have no dismissal target, so every request of a session shared one skip key.
+test('a new form request or holder after a skip is a new card, not deferred', () => {
+  const parent = row('p', 'needs_input', 3, { form_holder: 'c1', notification_dismissal: null });
+  const child = (id, requests) => row(id, 'working', 1, { subagent_parent_id: 'p', pending_elicitation_ids: requests });
+  const view = screen([parent, child('c1', ['r1']), child('c2', []), row('b', 'needs_input', 2)]);
+  view.nodes.skip.onclick();
+  assert.deepEqual(view.ids(), ['b', 'p']);
+  view.context.viewerState.rows.get('c1').pending_elicitation_ids = ['r2'];
+  assert.deepEqual(view.ids(), ['p', 'b'], 'a new request id from the same holder');
+  view.render();
+  view.nodes.skip.onclick();
+  assert.deepEqual(view.ids(), ['b', 'p']);
+  view.context.viewerState.rows.get('c2').pending_elicitation_ids = ['r2'];
+  view.context.viewerState.rows.get('p').form_holder = 'c2';
+  assert.deepEqual(view.ids(), ['p', 'b'], 'a new holder');
+  assert.equal(view.read('inboxSkipped.length'), 0);
+});
+
+test('an ! card asks for the message at its ReadThrough ordinal, and the cache keys on the same identity as skip', async () => {
+  const view = screen([row('a', 'important', 3, { notification_dismissal: { read_through: 41 } })],
+    { texts: { '/api/sessions/a/notification-message': { text: 'the reply at 41' } } });
+  await settle();
+  const params = new URL(view.requests.find(r => r.url.includes('/a/notification-message')).url, 'http://x').searchParams;
+  assert.equal(params.get('through'), '41');
+  const entry = view.read('inboxEntries()[0]');
+  assert.equal(view.read('[...inboxTexts.keys()][0]'), view.read('inboxKey(inboxEntries()[0])'));
+  assert.equal(view.read('inboxCard(inboxEntries()[0]).key'), view.read('inboxKey(inboxEntries()[0])'));
+  assert.ok(entry);
+});

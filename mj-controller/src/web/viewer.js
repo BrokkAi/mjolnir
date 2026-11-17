@@ -1235,9 +1235,16 @@ function inboxDestination(entry) {
   return holder && sessionById(holder) ? holder : entry.id;
 }
 
-/// The identity of a card: its session and the notification it shows.
+/// The identity of a card, and the one owner of it: the session, the
+/// destination holding the request, the pending request ids, the question
+/// message and the dismissal target. Skip, the message cache and a gesture's
+/// captured card all key on this, so a new request, a new holder or a new
+/// notification is a new card for every one of them.
 function inboxKey(entry) {
-  return `${entry.id}|${JSON.stringify(entry.notification_dismissal ?? null)}`;
+  if (entry.launchFailure) return `launch-failure|${entry.launchFailure.id}`;
+  const identity = inboxTextIdentity(entry);
+  return [entry.id, identity.holder, entry.attention, identity.requests, identity.question,
+    JSON.stringify(entry.notification_dismissal ?? null), entry.last_message_at_ms || ''].join('|');
 }
 
 /// What a gesture on a card acts on, captured when the gesture starts so a
@@ -1291,11 +1298,6 @@ function inboxTextIdentity(row) {
     ?? holderRow.pending_elicitation_ids ?? [];
   return { holder, requests: requests.join(','), question: holderRow.question_message || '' };
 }
-function inboxTextKey(row) {
-  const identity = inboxTextIdentity(row);
-  return [row.id, identity.holder, row.attention, identity.requests, identity.question,
-    JSON.stringify(row.notification_dismissal ?? null), row.last_message_at_ms || ''].join('|');
-}
 function inboxText(row, key) {
   const known = inboxTexts.get(key);
   // A conflict waits for the next snapshot, once, rather than asking again.
@@ -1304,6 +1306,10 @@ function inboxText(row, key) {
   inboxTexts.set(key, entry);
   const identity = inboxTextIdentity(row);
   const query = new URLSearchParams({ holder: identity.holder, requests: identity.requests, question: identity.question });
+  // An `!` card names the message by its ReadThrough ordinal, so a newer reply
+  // can never answer for it.
+  const through = row.notification_dismissal?.read_through;
+  if (through !== undefined) query.set('through', String(through));
   request(`/api/sessions/${encodeURIComponent(row.id)}/notification-message?${query}`)
     .then(answer => {
       entry.state = typeof answer?.text === 'string' ? 'ready' : 'missing';
@@ -1537,7 +1543,7 @@ bindInboxControl(inboxNodes.skip, inboxSkip);
 bindInboxControl(inboxNodes.clearAll, inboxClearAll);
 bindInboxControl(inboxNodes.retry, card => {
   const entry = inboxEntries().find(item => inboxKey(item) === card.key);
-  if (entry && !entry.launchFailure) inboxTexts.delete(inboxTextKey(entry));
+  if (entry && !entry.launchFailure) inboxTexts.delete(inboxKey(entry));
   renderInbox();
 });
 // Send and Enter in the line are one gesture on the card the form showed. An
@@ -1585,7 +1591,7 @@ function renderInbox() {
   if (failure) {
     setInboxText(nodes.body, failure.error || LAUNCH_FAILURE_TEXT);
   } else {
-    const key = inboxTextKey(entry);
+    const key = inboxKey(entry);
     // Showing a card again tries a failed read again; the same card never loops.
     if (key !== inboxShownKey && inboxTexts.get(key)?.state === 'error') inboxTexts.delete(key);
     inboxShownKey = key;

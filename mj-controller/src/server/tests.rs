@@ -5641,3 +5641,34 @@ fn notification_message_for_a_legacy_worker_falls_back_to_the_last_agent_message
     );
     assert_eq!(read(facts(true)), None);
 }
+
+// An `!` card names its message by ReadThrough ordinal: a different or missing
+// boundary is a conflict, never the latest reply.
+#[tokio::test]
+async fn notification_message_for_an_important_card_requires_its_read_through_boundary() {
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::Important;
+        snapshot.sessions[0].notification_dismissal =
+            Some(mj_core::attention::NotificationDismissal::ReadThrough(3));
+    });
+    let cookie = login_cookie(&app).await;
+    for stale in [
+        "holder=session-1&through=4",
+        "holder=session-1",
+        "holder=session-1&through=3&requests=x",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{stale}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+    }
+}

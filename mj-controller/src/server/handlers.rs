@@ -168,6 +168,9 @@ pub(super) struct NotificationMessageQuery {
     requests: String,
     #[serde(default)]
     question: String,
+    /// An `!` card's ReadThrough completed ordinal: the newest agent message
+    /// at or before it is the card's message.
+    through: Option<u64>,
 }
 
 /// Resolve the first source of the shared rule to text. A question read that
@@ -203,7 +206,15 @@ pub(super) async fn notification_message(
     use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
     validate_public_id(&session_id)?;
     // Copy what the snapshot holds, then release it before any database read.
-    let (holder, kind, pending_request, review_activity, question_message, supports_open_request) = {
+    let (
+        holder,
+        kind,
+        pending_request,
+        review_activity,
+        question_message,
+        supports_open_request,
+        through,
+    ) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
         let holder = session
@@ -219,6 +230,23 @@ pub(super) async fn notification_message(
             .map(|request| request.id.as_str())
             .collect::<Vec<_>>()
             .join(",");
+        // An `!` card's boundary is its ReadThrough ordinal, checked here and
+        // then used as the bound of the read, so no newer reply can answer.
+        let through = match (&session.notification_dismissal, expected.through) {
+            (Some(mj_core::attention::NotificationDismissal::ReadThrough(held)), Some(asked))
+                if *held == asked =>
+            {
+                Some(asked)
+            }
+            (Some(mj_core::attention::NotificationDismissal::ReadThrough(_)), _) | (_, Some(_)) => {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "the notification changed; its message will be read again",
+                )
+                .with_code(Some("notification_changed")));
+            }
+            _ => None,
+        };
         if holder != expected.holder
             || requests != expected.requests
             || holder_session.question_message.as_deref().unwrap_or("") != expected.question
@@ -246,6 +274,7 @@ pub(super) async fn notification_message(
                 .map(|review| review.status.clone()),
             holder_session.question_message.clone(),
             holder_session.supports_open_request,
+            through,
         )
     };
     let reader = holder.clone();
@@ -268,9 +297,17 @@ pub(super) async fn notification_message(
                     )
                 }))
             },
-            || {
-                Ok(crate::database::load_materialized_session_summary(&reader)?
-                    .and_then(|summary| summary.last_agent_message))
+            || match (kind, through) {
+                (NotificationKind::Important, Some(through)) => {
+                    crate::database::load_materialized_agent_message_through(&reader, through)
+                }
+                // An important card with no boundary has no message to name.
+                (NotificationKind::Important, None) => Ok(None),
+                // A legacy worker's question is the agent's latest reply.
+                (NotificationKind::NeedsInput, _) => {
+                    Ok(crate::database::load_materialized_session_summary(&reader)?
+                        .and_then(|summary| summary.last_agent_message))
+                }
             },
         )
     })
