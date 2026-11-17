@@ -379,6 +379,9 @@ pub(super) async fn run_daemon_runtime(
         delegation_updates,
         cancellation.clone(),
     );
+    // Reviewer prewarm holds no admission: it is cancelled with the daemon
+    // and planned again from the session records by the next one.
+    let reviewer_prewarm = super::prewarm::spawn(state.clone(), cancellation.clone());
     // Recovery can inspect the initial turn immediately. Install the quota
     // owner and its current profile identities before starting that reader.
     let mut update_feed = continuation::spawn(state.clone(), manager_updates, cancellation.clone());
@@ -979,6 +982,11 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join store compatibility watch",
         compatibility_watch.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join reviewer prewarm",
+        reviewer_prewarm.await.map_err(anyhow::Error::new),
     );
     epilogue.record(
         &mut outcome,
