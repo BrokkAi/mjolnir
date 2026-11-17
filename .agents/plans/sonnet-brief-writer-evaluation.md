@@ -13,7 +13,9 @@ Determine whether Sonnet/high is an acceptable cheaper writer for the relation b
 - [x] (2026-11-17 17:43 UTC) Read the revised registered study plan from supervisor commit `702aab028bf9bad94245b875f66803772acaf431` before any Sonnet output. Round K compares all three conditions together; the earlier five-diff drift sample is removed.
 - [x] Checked production quota and model discovery. Claude6 has 32% of its week; claude5's five-hour window has 23% and is ineligible under the 25% floor. Codex4 has 78%. Model ID `sonnet` advertises Sonnet 5.5 and high effort.
 - [x] Read the existing writer, review, judging and readout design through a delegated source map; no sessions for the experiment have started.
-- [ ] Generalize the existing helper and add the Sonnet writer/reviewer arm with isolated regression coverage.
+- [x] Added Sonnet writer kind and TS review-arm mappings; the writer CLI exposes the new kind and both quota windows were rechecked.
+- [ ] Generalize the existing helper with isolated regression coverage.
+- [ ] Obtain direct user approval for the complete Sonnet study after local preparation; the initial launch attempt was rejected before execution.
 - [ ] Commit the frozen plan and tested harness, then run one writer canary followed by the remaining writers.
 - [ ] Complete paired leak judgments, any allowed rewrite/recheck, and report the result before any Sonnet-brief reviewers start.
 - [ ] Run one reviewer-job canary, then complete all 22 jobs and 66 reviewers.
@@ -26,6 +28,8 @@ Determine whether Sonnet/high is an acceptable cheaper writer for the relation b
 The initial assignment used five seeded BT control diffs and round-J baseline labels. Before any output, review changed the design to fresh mixed judging of TS, BT and no-brief on all 22 diffs. The primary decision therefore uses only round-K labels. Round J is a consistency reference, not a substitute baseline.
 
 Current quota is materially below the earlier estimates. Of the subscription Claude profiles, only claude6 currently clears every applicable quota window. Claude5's larger weekly balance does not override its five-hour floor violation. Do not use the usage-billed Claude AWS profile or the separate Fable quota pool as substitutes.
+
+Automatic approval review rejected the first attempted Sonnet canary before any command executed: the new external-model arm was requested only through an agent relay, which is not trusted user authorization for repository disclosure and quota use. No Sonnet session or output exists. Complete local code/tests and obtain direct approval before launching any study session; do not route the rejected action through another tool or child.
 
 ## Decision Log
 
@@ -40,7 +44,7 @@ Current quota is materially below the earlier estimates. Of the subscription Cla
 ## Outcomes & Retrospective
 
 
-Preparation is complete. No Sonnet writing, review or grading output exists yet. Implementation, canaries and measurements remain. Existing V1 artifacts must remain unchanged and independently readable.
+Local preparation and implementation are in progress. No Sonnet writing, review or grading output exists yet. Execution additionally awaits direct user approval after an automatic-review rejection. Existing V1 artifacts must remain unchanged and independently readable.
 
 ## Context and Orientation
 
@@ -124,4 +128,4 @@ The registered plan revision is supervisor commit `702aab028bf9bad94245b875f6680
 
 Use the existing installed `mjx`, `brief_driver.py`, `driver.py`, `brief_score.py`, `verify_driver.py` and generalized `brief_writer_terra.py`. No new scheduler, runner, store, plugin, production setting or build layout is needed. Parent owns design, documentation, orchestration, integrated review and commits; children may implement disjoint harness slices and independently verify measurement integrity. No concurrent Cargo or other build is planned.
 
-Revision note: Initial plan records the revised mixed-round design and actual quota/model discovery before implementation or experimental output.
+Revision note: Initial plan records the revised mixed-round design and actual quota/model discovery before implementation or experimental output. The progress and execution gate now record the automatic-review rejection before any Sonnet session started.

@@ -12,7 +12,8 @@ it, checks the rules a script can check (lint), and asks the same writer to
 fix a brief that breaks them, at most FIX_ROUNDS times. Output goes to
 $REVIEW_ARMS_DIR/briefs/<kind>/<diff>/ (--kind, default blind: the Sol/high
 writer of stage B; blind-terra: the same writer run on Terra/high,
-brief/PLAN-writer-terra.md); the transcript is stored under
+brief/PLAN-writer-terra.md; blind-sonnet: Sonnet/high,
+brief/PLAN-writer-sonnet.md); the transcript is stored under
 reviewers/ so that audit.py can scan it. Every step writes a file; a writer
 with a session is resumed, never started twice.
 """
@@ -31,7 +32,8 @@ import driver
 from driver import ROOT, SCRIPTS, MJX, mj, save, session
 
 # Brief kind -> writer model and effort. Everything else (prompt, tools, blinding, lint) is shared.
-KINDS = {"blind": ("gpt-6.1-sol", "high"), "blind-terra": ("gpt-6.1-terra", "high")}
+KINDS = {"blind": ("gpt-6.1-sol", "high"), "blind-terra": ("gpt-6.1-terra", "high"),
+         "blind-sonnet": ("sonnet", "high")}
 KIND = "blind"
 WRITER_MODEL, WRITER_EFFORT = KINDS[KIND]
 # --profile pins the writer to one mj profile (None: load balancing picks one).
