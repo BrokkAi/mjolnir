@@ -6607,28 +6607,36 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
     // sized session onto it survives. Resolving it away would make validation
     // inherit the source size and refuse the Move.
     let mut cleared = selection("local-bare", None, true);
-    super::reflect_move_resource_selection(
+    assert!(!super::resolve_move_destination_size(
         &sized_source(container_size(16, 32)),
         &mut cleared,
         &state,
         &config.targets["local-bare"],
-        false,
-    );
+    ));
     assert!(cleared.clear_resource_allocation);
     assert_eq!(cleared.resource_allocation, None);
 
     // A container destination takes the host's remembered size, else the
     // baseline, and carries it instead of the clear instruction.
     let mut defaulted = selection("podman", None, true);
-    super::reflect_move_resource_selection(
+    assert!(super::resolve_move_destination_size(
         &sized_source(None),
         &mut defaulted,
         &state,
         &config.targets["podman"],
-        false,
-    );
+    ));
     assert_eq!(defaulted.resource_allocation, container_size(4, 8));
     assert!(!defaulted.clear_resource_allocation);
+
+    // A size the selection already names is kept, whoever asked for it.
+    let mut explicit = selection("podman", container_size(6, 16), false);
+    assert!(!super::resolve_move_destination_size(
+        &sized_source(None),
+        &mut explicit,
+        &state,
+        &config.targets["podman"],
+    ));
+    assert_eq!(explicit.resource_allocation, container_size(6, 16));
 
     state.remember_container_size(
         "local",
@@ -6638,57 +6646,51 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         },
     );
     let mut remembered = selection("podman", None, true);
-    super::reflect_move_resource_selection(
+    super::resolve_move_destination_size(
         &sized_source(None),
         &mut remembered,
         &state,
         &config.targets["podman"],
-        false,
     );
     assert_eq!(remembered.resource_allocation, container_size(12, 24));
 
-    // A kept environment has nothing to size, even when the session is a
-    // legacy container record with no allocation of its own.
-    let mut kept = selection("podman", None, true);
-    super::reflect_move_resource_selection(
-        &sized_source(None),
-        &mut kept,
-        &state,
-        &config.targets["podman"],
-        true,
-    );
-    assert!(kept.clear_resource_allocation);
-    assert_eq!(kept.resource_allocation, None);
-
     // Retrying the same command after a container Move was sealed carries the
     // sealed default, so the retry is accepted rather than refused as a
-    // different selection.
+    // different selection -- and it does not consult the host's remembered
+    // size, which another session may have changed since the Move was sealed.
     let sealed = selection("podman", container_size(12, 24), false);
     let mut retried = selection("podman", None, true);
-    super::reconcile_retry_resource_selection(&state, &config.targets, &sealed, &mut retried);
+    super::reconcile_retry_resource_selection(&sealed, true, &mut retried);
     assert_eq!(retried, sealed);
+    state.remember_container_size(
+        "local",
+        mj_core::state::HostContainerSize {
+            cpus: 2,
+            memory_bytes: 4 << 30,
+        },
+    );
+    let mut retried_after_change = selection("podman", None, true);
+    super::reconcile_retry_resource_selection(&sealed, true, &mut retried_after_change);
+    assert_eq!(
+        retried_after_change, sealed,
+        "the sealed Move owns the size it resolved, not the host's current one"
+    );
 
-    // A sealed size the request did not resolve to stays a difference: the
+    // A sealed size that was not this Move's default stays a difference: the
     // person asked for the default and the Move would apply something else.
-    let explicit = selection("podman", container_size(6, 16), false);
     let mut conflicting = selection("podman", None, true);
-    super::reconcile_retry_resource_selection(&state, &config.targets, &explicit, &mut conflicting);
+    super::reconcile_retry_resource_selection(&sealed, false, &mut conflicting);
     assert!(conflicting.clear_resource_allocation);
-    assert_ne!(conflicting, explicit);
+    assert_ne!(conflicting, sealed);
 
     // A retry that says nothing keeps what the Move was sealed with, and a
-    // fixed destination's sealed clear is still the same request.
+    // fixed destination's sealed clear is the same request.
     let mut omitted = selection("podman", None, false);
-    super::reconcile_retry_resource_selection(&state, &config.targets, &explicit, &mut omitted);
-    assert_eq!(omitted, explicit);
+    super::reconcile_retry_resource_selection(&sealed, false, &mut omitted);
+    assert_eq!(omitted, sealed);
     let sealed_fixed = selection("local-bare", None, true);
     let mut retried_fixed = selection("local-bare", None, true);
-    super::reconcile_retry_resource_selection(
-        &state,
-        &config.targets,
-        &sealed_fixed,
-        &mut retried_fixed,
-    );
+    super::reconcile_retry_resource_selection(&sealed_fixed, false, &mut retried_fixed);
     assert_eq!(retried_fixed, sealed_fixed);
 }
 

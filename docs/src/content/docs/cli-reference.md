@@ -253,8 +253,9 @@ mj move-sources --session <id> [--cleanup <operation-id> --yes]
 
 Move keeps the logical session, workspace, transcript, and recoverable
 repository state while rebuilding its execution environment. At least one of
-`--target` or `--profile` is required; an omitted selector keeps its current
-value. The destination must satisfy the same compatibility checks as resume.
+`--target`, `--profile`, or the container size is required; an omitted selector
+keeps its current value. The destination must satisfy the same compatibility
+checks as resume.
 Moving between harnesses creates a bounded transcript handoff rather than
 copying harness-private process state.
 
@@ -271,6 +272,10 @@ destination means that same default. The confirmation prints the destination
 size, so a size the Move chose is readable before it runs. A fixed (bare) host
 keeps its own CPU and memory, so the size flags are refused there, and
 `--clear-resources` is what lets a sized session move onto one.
+
+The size flags alone are a Move: `mj move --session <id> --cpus 8 --memory-gib
+16` resizes the container on the target the session already names, without
+naming a profile or a target again.
 
 `--subagents native` switches to harness delegation; `--subagents mjolnir`
 uses the global task choices in `[subagents.straightforward]` and, when

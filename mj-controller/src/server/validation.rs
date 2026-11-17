@@ -159,9 +159,14 @@ pub(super) fn validate_move_selection(
     snapshot: &ViewerSnapshot,
 ) -> Result<(), ApiError> {
     validate_public_id(&selection.session_id)?;
-    if selection.profile_id.is_none() && selection.target_template_id.is_none() {
+    // A size alone is a change: it resizes the destination container on the
+    // target the session already names.
+    if selection.profile_id.is_none()
+        && selection.target_template_id.is_none()
+        && selection.resource_allocation.is_none()
+    {
         return Err(ApiError::bad_request(
-            "move must select a profile, a target, or both",
+            "move must select a profile, a target, or a container size",
         ));
     }
     if selection.clear_resource_allocation && selection.resource_allocation.is_some() {

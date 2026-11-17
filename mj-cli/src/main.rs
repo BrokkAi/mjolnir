@@ -349,7 +349,7 @@ struct CheckpointArgs {
 #[derive(Debug, Args)]
 #[command(group(
     ArgGroup::new("destination")
-        .args(["target", "profile"])
+        .args(["target", "profile", "cpus"])
         .required(true)
         .multiple(true)
 ))]
@@ -406,7 +406,8 @@ struct MoveArgs {
     profile: Option<String>,
     /// Container CPU limit for the destination, with --memory-gib. Omit both
     /// to keep the source size, or to take the destination host's remembered
-    /// size (else 4 CPUs) when the source has none.
+    /// size (else 4 CPUs) when the source has none. Given alone, they resize
+    /// the container on the target the session already names.
     #[arg(
         long,
         requires = "memory_gib",

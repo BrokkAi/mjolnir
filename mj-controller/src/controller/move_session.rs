@@ -1310,9 +1310,14 @@ impl Controller {
                 selection.subagents = None;
             }
         }
+        // A Move must change something about the environment. A size alone is
+        // a change: it resizes the destination container on the target the
+        // session already names.
         ensure!(
-            selection.profile_id.is_some() || selection.target_template_id.is_some(),
-            "move requires a target or profile selection"
+            selection.profile_id.is_some()
+                || selection.target_template_id.is_some()
+                || selection.resource_allocation.is_some(),
+            "move requires a target, a profile, or a container size"
         );
         ensure!(
             previous
@@ -1368,10 +1373,15 @@ impl Controller {
             if selection.additional_mounts.is_none() {
                 selection.additional_mounts = sealed.additional_mounts.clone();
             }
+            // The accepted preparation is the sealed record of this decision,
+            // so a retry compares against what the Move decided rather than
+            // against host state other sessions keep changing.
             reconcile_retry_resource_selection(
-                &self.state,
-                &self.config.targets,
                 sealed,
+                retained
+                    .accepted_preparation
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.sized_by_destination_default),
                 &mut selection,
             );
             if selection.subagents.is_none() {
@@ -1455,6 +1465,16 @@ impl Controller {
             &target_id,
         )
         .map_err(anyhow::Error::msg)?;
+        // The environment decision and everything after it must read one
+        // answer for the destination size, so the request is resolved first:
+        // a clear request on a container destination means the default size,
+        // and the decision must compare that size, not the absence of one.
+        let requested_size = (
+            selection.resource_allocation.clone(),
+            selection.clear_resource_allocation,
+        );
+        let sized_by_destination_default =
+            resolve_move_destination_size(source, &mut selection, &self.state, target);
         let in_place = move_in_place_for_record(
             source,
             &selection,
@@ -1462,11 +1482,13 @@ impl Controller {
             self.state.subagents.contains_key(&source.id),
             previous.as_ref(),
         )?;
-        // A Move that creates an environment keeps the source's size when the
-        // source has one. When it has none -- a bare source moved into a
-        // container, or a Move that clears an inherited size -- the
-        // destination decides, once, in `reflect_move_resource_selection`.
-        reflect_move_resource_selection(source, &mut selection, &self.state, target, in_place);
+        // A kept environment has nothing to size, so the sealed selection
+        // keeps the request rather than a size the environment does not have.
+        if in_place {
+            selection.resource_allocation = requested_size.0;
+            selection.clear_resource_allocation = requested_size.1;
+        }
+        let sized_by_destination_default = sized_by_destination_default && !in_place;
         super::backend::validate_resource_allocation(
             target,
             move_requested_allocation(source, &selection),
@@ -1597,6 +1619,7 @@ impl Controller {
                     && !self.state.active_child_session_ids(&source.id).is_empty()),
             conversion,
             selection,
+            sized_by_destination_default,
             source_profile_id: source.last_profile.clone(),
             source_target_template_id: source.target_template_id.clone(),
             cross_harness,
@@ -3255,75 +3278,53 @@ fn move_default_allocation(
     })
 }
 
-/// What a Move applies where a size is still missing, decided in one place so
-/// the preparation, the sealed selection, capacity admission and the
-/// destination record cannot disagree (#1585).
+/// What a Move applies where its selection names no size: the destination's
+/// default, decided once here so the environment decision, the sealed
+/// selection, capacity admission and the destination record cannot disagree
+/// (#1585). Returns whether the applied size is that default.
 ///
-/// A kept environment has nothing to size. Otherwise a destination whose
-/// answer is "the default" replaces a clear request with the size it resolves
-/// to: the sealed selection then carries one instruction rather than two that
-/// contradict each other. A fixed destination has no default, and there the
-/// clear request is what allows the Move onto it at all, so it survives.
-fn reflect_move_resource_selection(
+/// A destination without a default -- a fixed host -- has none to give, so
+/// there the clear request survives: it is what allows a sized session onto
+/// that host at all. The caller resolves before deciding whether the
+/// environment is kept, and puts the request back when it is.
+fn resolve_move_destination_size(
     source: &mj_core::state::SessionRecord,
     selection: &mut MoveSelection,
     state: &mj_core::state::State,
     target: &mj_core::config::TargetTemplate,
-    in_place: bool,
-) {
-    if in_place || move_requested_allocation(source, selection).is_some() {
-        return;
-    }
-    if let Some(default_size) = move_default_allocation(state, target) {
-        selection.resource_allocation = Some(default_size);
-        selection.clear_resource_allocation = false;
-    }
-}
-
-/// Whether a retry that still says "clear inherited sizing" asks for what the
-/// sealed Move already applied.
-///
-/// Preparation turns that instruction into the destination's default size, so
-/// the sealed selection carries a size where the repeated request carries the
-/// instruction. They are the same request when the sealed size is exactly the
-/// size clearing resolves to for the destination the Move was sealed for.
-fn move_clears_to_sealed_default(
-    state: &mj_core::state::State,
-    targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
-    sealed: &MoveSelection,
 ) -> bool {
-    if sealed.clear_resource_allocation || sealed.resource_allocation.is_none() {
+    if move_requested_allocation(source, selection).is_some() {
         return false;
     }
-    let Some(target) = sealed
-        .target_template_id
-        .as_deref()
-        .and_then(|id| targets.get(id))
-    else {
+    let Some(default_size) = move_default_allocation(state, target) else {
         return false;
     };
-    sealed.resource_allocation == move_default_allocation(state, target)
+    selection.resource_allocation = Some(default_size);
+    selection.clear_resource_allocation = false;
+    true
 }
 
 /// Reconcile a retry's resource selection with the one its Move was sealed
 /// with.
 ///
 /// A request that omits the size keeps the sealed one, so a surface without
-/// the flag can retry a Move another surface sealed. A request that asks to
-/// clear inherited sizing is the same request as one whose sealed Move holds
-/// the size clearing resolved to, because preparation replaces the
-/// instruction with that size (#1585). Anything else keeps its own value and
-/// is then refused as a different selection.
+/// the flag can retry a Move another surface sealed. A request that repeats a
+/// clear instruction is the same request as one whose sealed Move holds the
+/// size that instruction resolved to, because preparation replaces it with
+/// that size (#1585). The sealed Move owns that fact, so the comparison does
+/// not consult the host's remembered size, which other sessions change.
+/// Anything else keeps its own value and is then refused as a different
+/// selection.
 fn reconcile_retry_resource_selection(
-    state: &mj_core::state::State,
-    targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
     sealed: &MoveSelection,
+    sealed_by_default: bool,
     request: &mut MoveSelection,
 ) {
     if request.resource_allocation.is_some() {
         return;
     }
-    if !request.clear_resource_allocation || move_clears_to_sealed_default(state, targets, sealed) {
+    let repeats_a_resolved_clear = request.clear_resource_allocation && sealed_by_default;
+    if !request.clear_resource_allocation || repeats_a_resolved_clear {
         request.resource_allocation = sealed.resource_allocation.clone();
         request.clear_resource_allocation = sealed.clear_resource_allocation;
     }
