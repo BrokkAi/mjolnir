@@ -1,0 +1,101 @@
+{
+  "transcript_count": 22,
+  "tool_item_count": 144,
+  "hit_count": 8,
+  "transcripts_missing": [],
+  "hits": [
+    {
+      "bug": "activity-recorder-kills-api",
+      "reviewer": "fcaaeb24ce62",
+      "seq": 128,
+      "tool_title_start": "python3 - <<'PY'",
+      "rule": "memory-or-sessions",
+      "matched_text": "o cursor the database starts at the global latest sequence;', 'Session deletion removes the session row (src/hel_database.rs:2092), while the event cursor uses SQLite\\u2019s retained sequence; with no cursor the database",
+      "decisive_command_fragment": "python3 heredoc that edits brief.md for lint corrections",
+      "classification": "false-positive (manual review)",
+      "reason": "Audit regex matched prose/source-search text in the tool input; invocation did not access external history or services."
+    },
+    {
+      "bug": "export-relative-read-root",
+      "reviewer": "89f4c7c4c976",
+      "seq": 64,
+      "tool_title_start": "cat > brief.md <<'EOF'",
+      "rule": "git-history-escape",
+      "matched_text": "/hel_archive.rs:2270) used for configured repository destinations (src/hel_config.rs:628).\\n- Session diff uses the scratch-index tree capture (src/hel_archive/git.rs:1184), also used by review delta capture (src/hel_rev",
+      "decisive_command_fragment": "cat > brief.md <<'EOF' (writes the submitted brief)",
+      "classification": "false-positive (manual review)",
+      "reason": "Audit regex matched prose/source-search text in the tool input; invocation did not access external history or services."
+    },
+    {
+      "bug": "export-relative-read-root",
+      "reviewer": "89f4c7c4c976",
+      "seq": 64,
+      "tool_title_start": "cat > brief.md <<'EOF'",
+      "rule": "memory-or-sessions",
+      "matched_text": "ession.rs:147, mj-controller/src/hel_controller/resume.rs:799), which records a base for a fresh branch (mj-controller/src/hel_controller/worktree.rs:201).\\n- `read_session_file` uses the same relative destination valida",
+      "decisive_command_fragment": "cat > brief.md <<'EOF' (writes the submitted brief)",
+      "classification": "false-positive (manual review)",
+      "reason": "Audit regex matched prose/source-search text in the tool input; invocation did not access external history or services."
+    },
+    {
+      "bug": "github-token-in-container-argv",
+      "reviewer": "0ed9f9944380",
+      "seq": 55,
+      "tool_title_start": "\"nl -ba src/hel_targets.rs | sed -n '623,775p;1390,1430p;1450,1500p;1560,1650p'; nl -ba src/hel_setup.rs | sed -n '150,200p'; rg -n 'fn backend_bundle|clone|execute\\\\(|struct Comma",
+      "rule": "git-history-escape",
+      "matched_text": "1430p;1450,1500p;1560,1650p'; nl -ba src/hel_setup.rs | sed -n '150,200p'; rg -n 'fn backend_bundle|clone|execute\\\\\\\\(|struct CommandPlan|trait CommandExecutor|git config|remote.*url' src/hel_targets.rs src/hel_controlle",
+      "decisive_command_fragment": "\"nl -ba src/hel_targets.rs | sed -n '623,775p;1390,1430p;1450,1500p;1560,1650p'; nl -ba src/hel_setup.rs | sed -n '150,200p'; rg -n 'fn backend_bundle|clone|execute\\\\(|struct Comma",
+      "classification": "false-positive (manual review)",
+      "reason": "The match is a search term passed to rg while inspecting repository source; no Git history command was invoked."
+    },
+    {
+      "bug": "github-token-in-container-argv",
+      "reviewer": "0ed9f9944380",
+      "seq": 63,
+      "tool_title_start": "cat > brief.md <<'EOF'",
+      "rule": "github-or-web",
+      "matched_text": "ion_session_with` passes `None` as the token (src/hel_controller.rs:705), whereas ordinary provisioning and resume obtain it from the controller environment or `gh auth token` (src/hel_controller.rs:617, src/hel_controll",
+      "decisive_command_fragment": "cat > brief.md <<'EOF' (writes the submitted brief)",
+      "classification": "false-positive (manual review)",
+      "reason": "The match is a GitHub-related source phrase in the brief content written to brief.md; no network/GitHub command was invoked."
+    },
+    {
+      "bug": "github-token-in-container-argv",
+      "reviewer": "0ed9f9944380",
+      "seq": 63,
+      "tool_title_start": "cat > brief.md <<'EOF'",
+      "rule": "git-history-escape",
+      "matched_text": "fore provisioning (src/hel_controller.rs:1382).\\n- `github_repository_from_origin`, used for URL conversion (src/hel_controller.rs:2978), also interprets local Git origins during setup (src/hel_setup.rs:188) and configur",
+      "decisive_command_fragment": "cat > brief.md <<'EOF' (writes the submitted brief)",
+      "classification": "false-positive (manual review)",
+      "reason": "Audit regex matched prose/source-search text in the tool input; invocation did not access external history or services."
+    },
+    {
+      "bug": "metadata-checkpoint-overwrites-checkout",
+      "reviewer": "aebea250ec9e",
+      "seq": 63,
+      "tool_title_start": "cat > brief.md <<'EOF'",
+      "rule": "git-history-escape",
+      "matched_text": "rc/checkpoint/capture.rs:762); ordinary snapshot collection also enumerates review refs and adds their tips to its history selection (mj-checkpoint/src/archive/git.rs:137).\\n- `restore_git_snapshot` passes no session and",
+      "decisive_command_fragment": "cat > brief.md <<'EOF' (writes the submitted brief)",
+      "classification": "false-positive (manual review)",
+      "reason": "Audit regex matched prose/source-search text in the tool input; invocation did not access external history or services."
+    },
+    {
+      "bug": "path-completion-lost-on-step-redraw",
+      "reviewer": "99e119c4e065",
+      "seq": 57,
+      "tool_title_start": "cat > brief.md <<'EOF'",
+      "rule": "git-history-escape",
+      "matched_text": ").\\n- The repository source field requests local directory completion only for path-shaped text (mj-controller/src/web/viewer.js:1377); the controller's remote Git parsing also uses its path predicate to distinguish sour",
+      "decisive_command_fragment": "cat > brief.md <<'EOF' (writes the submitted brief)",
+      "classification": "false-positive (manual review)",
+      "reason": "Audit regex matched prose/source-search text in the tool input; invocation did not access external history or services."
+    }
+  ],
+  "parent_review": {
+    "classification": "all8falsepositives; no stage-B isolation violation observed",
+    "evidence_reviewed": "All8matched excerpts; full Python brief-only edit at activity-recorder seq128 and source-only rg search at github-token seq55 checked independently. Other hits are quoted cat heredocs writing brief.md.",
+    "limits": "Heuristic transcript audit plus inventory checks; not an OS-level network trace."
+  }
+}
