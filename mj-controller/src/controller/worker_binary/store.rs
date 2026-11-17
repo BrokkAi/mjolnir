@@ -21,7 +21,7 @@ fn store_directory(worker_root: &Path) -> Option<PathBuf> {
 
 /// Key of one target store: this daemon's data directory, the target's command
 /// prefix and the store path.
-fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
+pub(super) fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
     let command = targets::locator_command(SshTrafficClass::Control, locator, vec!["true".into()]);
     format!(
         "{:?}:{}:{:?}:{root}",
