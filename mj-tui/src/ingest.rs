@@ -562,7 +562,10 @@ impl DashboardState {
                 detail.notification_dismissal = None;
             }
         }
-        self.notification_dismissals = targets;
+        self.notifications
+            .errors
+            .retain(|id, _| self.notification_dismissals.get(id) == targets.get(id));
+        self.notification_dismissals = targets.into();
     }
     pub fn set_session_attention(
         &mut self,
@@ -1345,6 +1348,7 @@ impl DashboardState {
             .or_default();
         detail.notification_dismissal =
             Some(NotificationDismissalState::Submitting(target.clone()));
+        self.notifications.errors.remove(session_id);
         Some(target)
     }
 
@@ -1453,6 +1457,9 @@ impl DashboardState {
             }
             Err(error) => {
                 detail.notification_dismissal = None;
+                self.notifications
+                    .errors
+                    .insert(session_id.to_owned(), error.clone());
                 Some(Err(error))
             }
         }

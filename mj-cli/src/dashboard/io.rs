@@ -961,6 +961,7 @@ impl DashboardContext {
                         self.refresh_chat_context();
                         self.apply_runtime_review_to_chat(&session_id);
                         self.dashboard.clear_notice();
+                        self.apply_notification_position(&session_id);
                         self.acknowledge_visible_chats();
                     }
                     Err(error) => {

@@ -21,22 +21,22 @@
 │                 │                                                                                  │                 │
 │                 │Attach host directory:                                                            │                 │
 │                 │Container destination:                                                            │                 │
-│                 │Access: ro · read-only ▾                                                          │                 │
-│                 │                                                                                  │                 │
-│                 │Build cache                                                                       │                 │
-│                 │  /mnt/nvme/mbx                                                                   │  ───────────────╯
+│                 │Access: ro · read-only ▾                                                          │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
-│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
+│                 │Build cache                                                                       │                 │
+│                 │  /mnt/nvme/mbx                                                                   │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │  ──────── ▁   ▄ ╮
 │                 │  Cancel     Save                                                                 │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
 │                                                                                                       ──────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
@@ -63,22 +63,22 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 │                                                                                  │                 │
 │                 │Attach host directory:                                                            │                 │
 │                 │Container destination:                                                            │                 │
-│                 │Access: ro · read-only ▾                                                          │                 │
-│                 │                                                                                  │                 │
+│                 │Access: ro · read-only ▾                                                          │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │Build cache                                                                       │                 │
-│                 │  /mnt/nvme/mbx                                                                   │  ───────────────╯
-│                 │CPU must be a positive whole number.                                              │  ───────────────╮
-│                 │                                                                                  │                 │
+│                 │  /mnt/nvme/mbx                                                                   │                 │
+│                 │CPU must be a positive whole number.                                              │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
 │                 │  Cancel     Save                                                                 │  ───────────────╯
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                                                                                       ───────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                                                                                                      │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
@@ -105,22 +105,22 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 │                                                                                  │                 │
 │                 │Attach host directory:                                                            │                 │
 │                 │Container destination:                                                            │                 │
-│                 │Access: ro · read-only ▾                                                          │                 │
-│                 │                                                                                  │                 │
-│                 │Build cache                                                                       │                 │
-│                 │  none for this session                                                           │  ───────────────╯
+│                 │Access: ro · read-only ▾                                                          │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
-│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
+│                 │Build cache                                                                       │                 │
+│                 │  none for this session                                                           │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │  ──────── ▁   ▄ ╮
 │                 │  Cancel     Save                                                                 │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
 │                                                                                                       ──────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
@@ -136,8 +136,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No messa  ╭ × Edit container size and mounts ──────────────────────────────────╮              │
 │  │           │Session: ACP pretty name                                            │              │
 │              │Applies when a new environment is explicitly created; Restart keeps │              │
-│              │                                                                    │              │
-│              │CPUs:                                                               │  ion.        │
+│              │                                                                    │  ion.        │
+│              │CPUs:                                                               │              │
 │              │Memory (GiB):                                                       │              │
 │              │Empty keeps the target's value.                                     │              │
 │              │                                                                    │              │
@@ -147,22 +147,22 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │              │Attach host directory:                                              │              │
 │              │Container destination:                                              │              │
 │              │Access: ro · read-only ▾                                            │              │
-│              │                                                                    │              │
-│              │Remembered directories                                              │              │
-│              │/srv/models                                                         │              │
 │              │                                                                    │  ────────────╯
-│              │Build cache                                                         │  ────────────╮
-│              │  none for this session                                             │              │
+│              │Remembered directories                                              │  ────────────╮
+│              │/srv/models                                                         │              │
 │              │                                                                    │  to open.    │
+│              │Build cache                                                         │  ────────────╯
+│              │  none for this session                                             │  ───── ▁   ▄ ╮
+│              │                                                                    │              │
 │              │Enter attaches/accepts · Space edits · d removes · Tab moves        │  ────────────╯
 │              │  Cancel     Save                                                   │  ───── ▁   ▄ ╮
-│              ╰────────────────────────────────────────────────────────────────────╯              │
-│                                                                                      ────────────╯
-│                                                                                      ───── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets    │
-│                                      ││  claude-1  Claude Code  refreshing…                      │
-│                                      ││  codex-1   Codex        refreshing…                      │
+│              ╰────────────────────────────────────────────────────────────────────╯  H Resets    │
+│                                                                                                  │
+│                                                                                                  │
 │                                      ││  codex-2   Codex        refreshing…                      │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
@@ -181,22 +181,22 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │Target image: ghcr.io/brokkai/mjolnir/agent-dev:2.52.0 (sha256:selected)            │                │
 │                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
 │                │running turn.                                                                       │                │
-│                │Container upgrade reattaches the existing workspace and build cache mounts.         │                │
-│                │Writable-layer state, including manually installed packages, may be lost.           │                │
+│                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╯
+│                │Writable-layer state, including manually installed packages, may be lost.           │  ──────────────╮
 │                │A checkpoint does not preserve the whole environment.                               │                │
-│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │c Cancel  ·  r Restart agent  ·  u Upgrade container and restart…                   │                │
+│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │c Cancel  ·  r Restart agent  ·  u Upgrade container and restart…                   │  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                │                                                                                    │  ──────────────╯
 │                │                                                                                    │  ─────── ▁   ▄ ╮
 │                │  Cancel     Restart agent     Upgrade container and restart…                       │                │
-│                ╰────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╯
-│                                                                                                        ─────── ▁   ▄ ╮
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                                      │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
@@ -215,21 +215,21 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │Target image: ghcr.io/brokkai/mjolnir/agent-dev:2.52.0 (sha256:selected)            │                │
 │                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
 │                │running turn.                                                                       │                │
-│                │Container upgrade reattaches the existing workspace and build cache mounts.         │                │
-│                │Writable-layer state, including manually installed packages, may be lost.           │                │
+│                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╯
+│                │Writable-layer state, including manually installed packages, may be lost.           │  ──────────────╮
 │                │A checkpoint does not preserve the whole environment.                               │                │
-│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │c Cancel  ·  u Upgrade container and restart…                                       │                │
+│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │c Cancel  ·  u Upgrade container and restart…                                       │  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                │                                                                                    │  ──────────────╯
 │                │                                                                                    │  ─────── ▁   ▄ ╮
 │                │  Cancel     Upgrade container and restart…                                         │                │
-│                ╰────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╯
-│                                                                                                        ─────── ▁   ▄ ╮
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                                      │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette

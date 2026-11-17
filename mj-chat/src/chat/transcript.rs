@@ -426,6 +426,12 @@ pub(super) enum TranscriptAnchor {
 pub struct TranscriptPosition(SavedTranscriptAnchor);
 
 impl TranscriptPosition {
+    /// Follow the newest transcript content without routing a navigation key
+    /// through the composer or an open form.
+    pub fn bottom() -> Self {
+        Self(SavedTranscriptAnchor::Bottom)
+    }
+
     /// Start an opening view at a materialized transcript item. Resolution can
     /// wait for the older prefix to finish loading.
     pub fn at_stable_id(stable_id: String) -> Self {

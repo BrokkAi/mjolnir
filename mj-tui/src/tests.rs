@@ -182,6 +182,7 @@ fn ctrl_c_is_inert_on_an_empty_dashboard_and_every_pane() {
         Focus::Prompt,
         Focus::Targets,
         Focus::Quota,
+        Focus::Notifications,
         Focus::Workspaces,
     ] {
         let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
@@ -237,6 +238,7 @@ fn escape_never_quits_the_combined_surface() {
         Focus::Prompt,
         Focus::Targets,
         Focus::Quota,
+        Focus::Notifications,
         Focus::Workspaces,
     ] {
         assert_eq!(dashboard.focus, expected);

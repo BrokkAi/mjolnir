@@ -54,6 +54,7 @@ mod ingest;
 mod keybinds;
 pub mod login_terminal;
 mod modal_surface;
+mod notifications_pane;
 mod notify;
 mod row_index;
 mod session_view;
@@ -283,6 +284,10 @@ pub enum DashboardAction {
     },
     Open {
         session_id: String,
+    },
+    OpenAtMessage {
+        session_id: String,
+        message_id: Option<String>,
     },
     /// Open a session in a new conversation pane beside or under the focused
     /// one. `Horizontal` puts the new pane to the right, `Vertical` below.
@@ -816,7 +821,7 @@ impl SessionOperationKind {
 
 /// Which part of the combined surface owns the keyboard.
 ///
-/// Workspaces, the three support panes, and the composer share a Tab ring; the transcript
+/// Workspaces, the four support panes, and the composer share a Tab ring; the transcript
 /// is not a stop on it, because it is read with the wheel and PageUp/PageDown
 /// rather than driven from the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -825,6 +830,7 @@ pub enum Focus {
     Sessions,
     Quota,
     Targets,
+    Notifications,
     Prompt,
 }
 
@@ -834,6 +840,7 @@ pub enum SupportPane {
     Sessions,
     Targets,
     Quota,
+    Notifications,
 }
 
 impl SupportPane {
@@ -843,6 +850,7 @@ impl SupportPane {
             Self::Sessions => Focus::Sessions,
             Self::Targets => Focus::Targets,
             Self::Quota => Focus::Quota,
+            Self::Notifications => Focus::Notifications,
         }
     }
 }
@@ -854,40 +862,22 @@ impl Focus {
             Self::Sessions => Some(SupportPane::Sessions),
             Self::Targets => Some(SupportPane::Targets),
             Self::Quota => Some(SupportPane::Quota),
+            Self::Notifications => Some(SupportPane::Notifications),
             Self::Workspaces | Self::Prompt => None,
         }
     }
 }
 
 /// Tab order starts with Workspaces, then Sessions, the composer, and the
-/// two support panes. Shift-Tab walks it backwards.
-pub(crate) const FOCUS_ORDER: [Focus; 5] = [
+/// remaining support panes. Shift-Tab walks it backwards.
+pub(crate) const FOCUS_ORDER: [Focus; 6] = [
     Focus::Workspaces,
     Focus::Sessions,
     Focus::Prompt,
     Focus::Targets,
     Focus::Quota,
+    Focus::Notifications,
 ];
-
-/// Read one pane size without making the shared workspace model depend on the
-/// TUI's pane enum.
-fn pane_size_for(sizes: PaneSizes, pane: SupportPane) -> PaneSize {
-    match pane {
-        SupportPane::Sessions => sizes.sessions,
-        SupportPane::Targets => sizes.targets,
-        SupportPane::Quota => sizes.quota,
-    }
-}
-
-/// Mutably access one pane size without coupling the shared workspace model to
-/// the TUI's pane enum.
-fn pane_size_for_mut(sizes: &mut PaneSizes, pane: SupportPane) -> &mut PaneSize {
-    match pane {
-        SupportPane::Sessions => &mut sizes.sessions,
-        SupportPane::Targets => &mut sizes.targets,
-        SupportPane::Quota => &mut sizes.quota,
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -950,8 +940,9 @@ pub struct DashboardPasteTarget {
 pub struct DashboardState {
     pub(crate) form_holders: mj_core::snapshot_map::SnapshotMap<String, String>,
     pub(crate) unread_frontiers: mj_core::snapshot_map::SnapshotMap<String, u64>,
-    pub(crate) notification_dismissals:
+    pub(crate) notification_dismissals: Tracked<
         mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::NotificationDismissal>,
+    >,
     pub(crate) served_attention:
         Tracked<mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>>,
     paste_revision: u64,
@@ -1079,6 +1070,7 @@ pub struct DashboardState {
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
     pane_sizes: PaneSizes,
+    notifications: notifications_pane::NotificationsPane,
     /// The active pane and its assignment are the sole session selection.
     navigation: conversation_navigation::ConversationNavigation,
     pub(crate) browse_pane: Option<tile_layout::PaneId>,
@@ -1099,6 +1091,7 @@ pub struct DashboardState {
     /// to a different row than the highlight.
     opening_session: Option<String>,
     pub(crate) pane_areas: Option<[Rect; DASHBOARD_PANE_COUNT]>,
+    pub(crate) notifications_area: Option<Rect>,
     /// Whether the last frame was too narrow for a sidebar, so the Sessions
     /// list was stacked above the conversation in its compact form. Read by
     /// the renderer's size checks; set once per frame.
@@ -1393,6 +1386,7 @@ impl DashboardState {
                 sessions: sidebar_size,
                 ..PaneSizes::default()
             },
+            notifications: Default::default(),
             navigation: conversation_navigation::ConversationNavigation::default(),
             browse_pane: None,
             pin_ids: BTreeMap::new(),
@@ -1403,6 +1397,7 @@ impl DashboardState {
             conversation_zoomed: false,
             opening_session: None,
             pane_areas: None,
+            notifications_area: None,
             narrow_layout: Cell::new(false),
             conversation_pane_areas: Vec::new(),
             conversation_area: None,

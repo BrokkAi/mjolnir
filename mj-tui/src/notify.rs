@@ -202,7 +202,11 @@ impl DashboardState {
 
     /// What to say about a session at `level`: the question's own message,
     /// the recorded error, or the last line the agent wrote.
-    fn notification_body(&self, session_id: &str, level: AttentionLevel) -> String {
+    pub(crate) fn notification_message(
+        &self,
+        session_id: &str,
+        level: AttentionLevel,
+    ) -> (String, Option<String>) {
         let detail = self.session_details.get(session_id);
         let text = match level {
             AttentionLevel::Waiting => detail
@@ -248,6 +252,23 @@ impl DashboardState {
                 .map(str::to_owned)
                 .unwrap_or_else(|| "Finished".to_owned()),
         };
+        let message_id = detail.and_then(|detail| match level {
+            AttentionLevel::Waiting if detail.pending_elicitations.is_empty() => {
+                detail.question_message.clone()
+            }
+            AttentionLevel::Important => detail
+                .projection
+                .last_agent_message
+                .as_ref()
+                .and_then(|(index, _)| detail.projection.transcript.get(*index))
+                .map(|item| item.stable_id.clone()),
+            _ => None,
+        });
+        (text, message_id)
+    }
+
+    fn notification_body(&self, session_id: &str, level: AttentionLevel) -> String {
+        let (text, _) = self.notification_message(session_id, level);
         let line = text.lines().next().unwrap_or_default().trim();
         let mut body = line.chars().take(120).collect::<String>();
         if line.chars().count() > 120 {

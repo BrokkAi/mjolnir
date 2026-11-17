@@ -34,6 +34,24 @@ pub(super) fn capture_editor_draft(
     }
 }
 
+/// Explicit notification navigation survives an asynchronous attach, but is
+/// consumed once a chat exists, even when that conversation was already warm.
+pub(super) fn apply_notification_position(
+    positions: &mut BTreeMap<String, Option<String>>,
+    chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    session_id: &str,
+) -> Option<bool> {
+    let chat = chats.get_mut(session_id)?;
+    let target = positions.remove(session_id)?;
+    let located = target.is_some();
+    if let Some(id) = target {
+        chat.restore_transcript_position(mj_chat::chat::TranscriptPosition::at_stable_id(id));
+    } else {
+        chat.restore_transcript_position(mj_chat::chat::TranscriptPosition::bottom());
+    }
+    Some(located)
+}
+
 impl DashboardContext {
     /// Opens the conversation for `session_id` without waiting on the session
     /// manager. Attaching can involve worker/relay I/O, so the result comes
@@ -111,6 +129,19 @@ impl DashboardContext {
         // has no matching pending request, so retaining the entry would allow
         // a stale answer to return on a later attach.
         chat.restore_elicitation_drafts(drafts.into_iter().map(|cached| cached.draft).collect());
+    }
+
+    /// Consume an explicit navigation request only when a chat is ready. Both
+    /// the warm-chat path and asynchronous attach completion use this owner.
+    pub(crate) fn apply_notification_position(&mut self, session_id: &str) {
+        if apply_notification_position(
+            &mut self.notification_positions,
+            &mut self.chats,
+            session_id,
+        ) == Some(false)
+        {
+            self.dashboard.set_notice("The notification message could not be located; showing the end of the conversation.");
+        }
     }
 
     /// Enters an existing pin or opens the session in Browse.
@@ -205,6 +236,7 @@ impl DashboardContext {
                 chat.adopt_live_composer(composer);
                 chat.keep_deferred_submission_as_draft();
             }
+            self.apply_notification_position(session_id);
             self.acknowledge_visible_chats();
             return;
         }

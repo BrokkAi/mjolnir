@@ -392,6 +392,7 @@ pub(crate) struct DashboardContext {
     question_drafts: BTreeMap<String, Vec<CachedQuestionDraft>>,
     transcript_positions: BTreeMap<String, mj_chat::chat::TranscriptPosition>,
     question_targets_seen: BTreeMap<String, BTreeSet<String>>,
+    notification_positions: BTreeMap<String, Option<String>>,
     /// Composer text is owned by this terminal once a session is opened. The
     /// inherited shared value is retained only as a compare-and-clear baseline
     /// for the detach persistence task.
@@ -2021,6 +2022,7 @@ impl DashboardContext {
             question_drafts: BTreeMap::new(),
             transcript_positions: BTreeMap::new(),
             question_targets_seen: BTreeMap::new(),
+            notification_positions: BTreeMap::new(),
             composer_drafts: ComposerDraftCache::default(),
             draft_save_failures: BTreeMap::new(),
             opening_chat_sessions: BTreeMap::new(),

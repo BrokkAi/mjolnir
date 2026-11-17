@@ -29,7 +29,11 @@ pub(crate) fn key(code: KeyCode) -> KeyEvent {
 }
 
 /// The drawn buffer as one string per row.
-pub(crate) use mj_chat::golden::buffer_lines;
+pub(crate) fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    let mut lines = mj_chat::golden::buffer_lines(buffer);
+    pin_notification_ages(&mut lines);
+    lines
+}
 
 pub(crate) fn assert_dialog_spacing(lines: &[String], title: &str, action: &str) {
     let cells: Vec<Vec<char>> = lines.iter().map(|line| line.chars().collect()).collect();
@@ -80,6 +84,35 @@ pub(crate) fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> 
     let mut lines = buffer_lines(terminal.backend().buffer());
     pin_spinner_glyphs(&mut lines);
     lines
+}
+
+/// Notification ages use the wall clock in production. Goldens retain the
+/// header and its spacing while replacing just that changing value.
+pub(crate) fn pin_notification_ages(lines: &mut [String]) {
+    for index in 1..lines.len() {
+        // Other panes and overlapping dialogs have their own clocks. Only
+        // the card header immediately below this pane's title belongs here.
+        if !lines[index - 1].contains(" Notifications (") {
+            continue;
+        }
+        let line = &mut lines[index];
+        let Some(end) = line.find("s ago") else {
+            continue;
+        };
+        let start = line[..end]
+            .trim_end_matches(|ch: char| ch.is_ascii_digit())
+            .len();
+        if start == end
+            || !line[..start].contains(" · ")
+            || !["│? ", "│! ", "|? ", "|! "]
+                .iter()
+                .any(|header| line[..start].contains(header))
+        {
+            continue;
+        }
+        let replacement = format!("<age>{}", " ".repeat(end - start));
+        line.replace_range(start..end + 5, &replacement);
+    }
 }
 
 /// Replace the compact Scan spinner's frames with `?`. Spinners take their

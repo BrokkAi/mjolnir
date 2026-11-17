@@ -1762,3 +1762,87 @@ async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft(
             .is_some_and(|notice| notice.contains("unknown session"))
     );
 }
+
+#[tokio::test]
+async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_chat() {
+    use mj_core::state::{TranscriptBody, TranscriptItem};
+    let mut positions = BTreeMap::from([("session-1".into(), Some("reply-2".into()))]);
+    let mut chats = BTreeMap::new();
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, "session-1"),
+        None
+    );
+    assert!(positions.contains_key("session-1"));
+    let mut chat = open_test_chat("session-1");
+    let mut materialized = MaterializedSession::empty("session-1");
+    for position in 1..=3 {
+        materialized.transcript.push(Arc::new(TranscriptItem {
+            stable_id: format!("reply-{position}"), position,
+            latest_content_event_ordinal: Some(position), created_at_ms: 0, last_changed_at_ms: 0,
+            body: TranscriptBody::Agent { chunks: vec![serde_json::json!({"content": {"type":"text", "text": format!("Message {position}")}})], streaming: false },
+        }));
+    }
+    materialized.applied_event_ordinal = 3;
+    chat.apply_materialized(&materialized, &[], &[]);
+    chat.set_draft("Keep this unsent answer".into());
+    chat.restore_transcript_position(mj_chat::chat::TranscriptPosition::at_stable_id(
+        "reply-1".into(),
+    ));
+    let previous = chat.transcript_position();
+    chats.insert("session-1".into(), chat);
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, "session-1"),
+        Some(true)
+    );
+    let requested = chats["session-1"].transcript_position();
+    assert_ne!(requested, previous);
+    assert_eq!(chats["session-1"].draft(), "Keep this unsent answer");
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, "session-1"),
+        None
+    );
+    assert_eq!(chats["session-1"].transcript_position(), requested);
+    materialized.applied_event_ordinal = 4;
+    materialized.pending_elicitations.push(
+        mj_core::elicitation::ElicitationRequest::from_acp_params(
+            "notification-form",
+            serde_json::json!({
+                "mode": "form", "sessionId": "session-1", "message": "Choose a path",
+                "requestedSchema": {"type": "object", "properties": {"path": {"type": "string"}}}
+            }),
+        )
+        .expect("valid pending form"),
+    );
+    let chat = chats.get_mut("session-1").unwrap();
+    chat.apply_materialized(&materialized, &[], &[]);
+    chat.restore_transcript_position(mj_chat::chat::TranscriptPosition::at_stable_id(
+        "reply-1".into(),
+    ));
+    for ch in "Keep this form answer".chars() {
+        chat.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::NONE,
+        ));
+    }
+    let form_draft =
+        serde_json::to_value(chat.elicitation_draft().expect("open pending form")).unwrap();
+    assert!(form_draft.to_string().contains("Keep this form answer"));
+    assert_ne!(
+        chat.transcript_position(),
+        mj_chat::chat::TranscriptPosition::bottom()
+    );
+    positions.insert("session-1".into(), None);
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, "session-1"),
+        Some(false)
+    );
+    assert_eq!(
+        chats["session-1"].transcript_position(),
+        mj_chat::chat::TranscriptPosition::bottom()
+    );
+    assert_eq!(
+        serde_json::to_value(chats["session-1"].elicitation_draft().unwrap()).unwrap(),
+        form_draft
+    );
+    assert_eq!(chats["session-1"].draft(), "Keep this unsent answer");
+}
