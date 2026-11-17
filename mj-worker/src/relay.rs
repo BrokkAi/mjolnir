@@ -2026,10 +2026,7 @@ fn seed_legacy_notification_stack(snapshot: &mut RelaySnapshot) {
                 .map_or(EntryMessage::None, EntryMessage::Found),
         });
     }
-    if let Some((assessment, reply)) = snapshot
-        .assessment
-        .as_deref()
-        .zip(snapshot.completed_reply_message.as_ref())
+    if let Some(assessment) = snapshot.assessment.as_deref()
         && assessment.current()
         && assessment.attention == Some(mj_core::attention::AssessmentAttention::Important)
         && assessment.completed_ordinal > snapshot.person_input_through
@@ -2044,7 +2041,10 @@ fn seed_legacy_notification_stack(snapshot: &mut RelaySnapshot) {
         entries.push(NotificationStackEntry {
             completed_ordinal: assessment.completed_ordinal,
             kind: NotificationKind::Important,
-            message: EntryMessage::Found(reply.clone()),
+            message: snapshot
+                .completed_reply_message
+                .clone()
+                .map_or(EntryMessage::None, EntryMessage::Found),
         });
         entries.sort_by_key(|entry| entry.completed_ordinal);
     }

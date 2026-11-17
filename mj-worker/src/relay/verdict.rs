@@ -1614,8 +1614,15 @@ mod settled_task_tests {
         relay
     }
 
+    // Hard-won: 4206e12f7: upgrading lost Important replies with no native message ID.
     #[test]
     fn notification_stack_replays_after_mailbox_wakes_and_fences_stale_clear() {
+        for reply_id in [Some("retained-reply"), None] {
+            check_notification_stack_after_upgrade(reply_id);
+        }
+    }
+
+    fn check_notification_stack_after_upgrade(reply_id: Option<&str>) {
         use crate::relay::test_support::{finish_prompt, prompt, relay_request, submit_relay};
         use mj_core::assessment::{Action, Status};
         use mj_core::attention::{AssessmentAttention, EntryMessage, NotificationKind};
@@ -1625,15 +1632,13 @@ mod settled_task_tests {
         let run = |relay: &mut DurableRelay, id: &str, reply_id: Option<&str>| {
             submit_relay(relay, id, prompt("Check results"));
             relay.claim_pending_commands(true).unwrap();
-            if let Some(reply_id) = reply_id {
-                reply_with_id(relay, Some(reply_id), "Important result");
-            }
+            reply_with_id(relay, reply_id, "Turn result");
             finish_prompt(relay, id);
             let mut assessment = (**relay.snapshot.assessment.as_ref().unwrap()).clone();
             assessment.status = Status::Assessed;
             assessment
         };
-        let mut important = run(&mut relay, "first-person", Some("retained-reply"));
+        let mut important = run(&mut relay, "first-person", reply_id);
         important.attention = Some(AssessmentAttention::Important);
         important.action = Some(Action::Finished);
         relay.store_assessment(important.clone()).unwrap();
@@ -1656,9 +1661,12 @@ mod settled_task_tests {
         .unwrap();
         let mut relay = claude_relay(dir.path());
         relay.set_acp_ready(true);
+        let expected = reply_id.map_or(EntryMessage::None, |id| {
+            EntryMessage::Found(format!("agent:{id}"))
+        });
         assert_eq!(
             relay.snapshot.notification_stack.entries[0].message,
-            EntryMessage::Found("agent:retained-reply".into()),
+            expected
         );
         let generated = mj_core::continuation::GeneratedPrompt::SessionMessageTurn;
         let mut question = run(&mut relay, &generated.command_id("first-wake"), None);
@@ -1677,10 +1685,7 @@ mod settled_task_tests {
                 .map(|entry| (entry.kind, &entry.message))
                 .collect::<Vec<_>>(),
             [
-                (
-                    NotificationKind::Important,
-                    &EntryMessage::Found("agent:retained-reply".into())
-                ),
+                (NotificationKind::Important, &expected),
                 (NotificationKind::NeedsInput, &EntryMessage::None)
             ]
         );
