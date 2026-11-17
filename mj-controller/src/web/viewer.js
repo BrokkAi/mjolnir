@@ -1460,8 +1460,27 @@ async function inboxSend(card) {
   // A slash command is the conversation composer's to run: it needs the
   // session's own settings. The line goes there as its draft, unsent.
   if (submitted.startsWith('/')) {
-    await queueDraftSave(destination, submitted);
-    inboxClearSubmitted(destination, submitted);
+    // The session's own unsent draft is never touched: the command is handed
+    // over only when the composer there is empty, and Quick reply keeps its
+    // text until the composer actually holds it.
+    let draft;
+    try {
+      draft = draftWriters.get(destination)?.desired
+        ?? (await request(`/api/sessions/${encodeURIComponent(destination)}/client-state`)).draft;
+    } catch (error) {
+      inboxError = { key: card.key, text: `Not sent: could not check the conversation's draft: ${error.message}` };
+      renderInbox();
+      return;
+    }
+    if (draft) {
+      inboxError = {
+        key: card.key,
+        text: 'Slash commands run in the conversation; your draft there is kept. Go to Session to run it.',
+      };
+      renderInbox();
+      return;
+    }
+    composerHandoff = { sessionId: destination, text: submitted, placed: () => inboxClearSubmitted(destination, submitted) };
     navigate({ name: 'conversation', sessionId: destination, from: 'notifications' });
     return;
   }
@@ -7930,6 +7949,11 @@ function queueDraftSave(sessionId, draft) {
   return writer.task;
 }
 
+/// A slash command typed in a notification's Quick reply, waiting for its
+/// session's conversation to open: `{ sessionId, text, placed }`. Held in the
+/// page only, so Quick reply never writes the session's saved draft.
+let composerHandoff = null;
+
 /// Put back what this viewer last typed here and did not send.
 async function restoreDraft(sessionId, generation) {
   const revision = composerGeneration;
@@ -7944,9 +7968,16 @@ async function restoreDraft(sessionId, generation) {
       if (draft) {
         setComposerText(draft);
         updateCommandPalette();
+      } else if (composerHandoff?.sessionId === sessionId && !composerText()) {
+        // A line handed over from a notification's Quick reply, in page only:
+        // it lands in an empty composer, unsent and not saved as a draft.
+        setComposerText(composerHandoff.text);
+        updateCommandPalette();
+        composerHandoff.placed();
       }
       draftComposerBaseline = composerGeneration;
     }
+    composerHandoff = null;
     if (stored.through_event_ordinal > acknowledged) {
       acknowledged = stored.through_event_ordinal;
     }

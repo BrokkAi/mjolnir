@@ -65,6 +65,15 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
     renderRoute: () => context.rendered.push('route'),
     rendered: [],
     drafts,
+    draftWriters: new Map(),
+    composer: '',
+    composerGeneration: 0,
+    conversationGeneration: 1,
+    draftComposerBaseline: null,
+    acknowledged: 0,
+    composerText: () => context.composer,
+    setComposerText: text => { context.composer = text; context.composerGeneration += 1; },
+    updateCommandPalette: () => {},
     queueDraftSave: async (id, text) => { drafts.push([id, text]); },
     MAX_PROMPT_REQUEST_BYTES: 32 * 1024 * 1024,
     TextEncoder,
@@ -89,6 +98,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
     },
   });
   vm.runInContext(sourceBetween('function el(', 'const bootStatus'), context);
+  vm.runInContext(sourceBetween('/// A slash command typed in a notification', 'let historyOpen'), context);
   vm.runInContext(sourceBetween('function newCommandId(', '/// Guard against sending twice.'), context);
   vm.runInContext(sourceBetween('function submissionBody(', 'async function submitPrompt('), context);
   vm.runInContext(sourceBetween('function hasNotification(', '/// Notifications, unread output'), context);
@@ -250,7 +260,7 @@ test('an edit made while a send is in flight survives its acknowledgement', asyn
   assert.equal(view.nodes.send.disabled, false);
 });
 
-test('quick reply builds the composer\'s own action: ! runs a shell command and a slash command goes to the composer unsent', async () => {
+test('quick reply builds the composer\'s own action: ! runs a shell command and a slash command is never sent as a prompt', async () => {
   const view = screen([row('a', 'needs_input', 3)]);
   view.render();
   view.nodes.input.value = '!ls -l';
@@ -260,13 +270,8 @@ test('quick reply builds the composer\'s own action: ! runs a shell command and 
   assert.deepEqual(plain(view.requests.find(r => r.body?.action === 'run-shell').body).command, 'ls -l');
   assert.equal(view.requests.some(r => r.body?.action === 'prompt'), false);
 
-  view.nodes.input.value = '/model fast';
-  view.nodes.input.oninput();
-  view.nodes.reply.onsubmit({ preventDefault() {} });
-  await settle();
-  assert.deepEqual(plain(view.drafts), [['a', '/model fast']]);
-  assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'a', from: 'notifications' }]);
-  assert.equal(view.requests.some(r => r.body?.text === '/model fast'), false, 'a local command is never sent as a prompt');
+  // Slash commands are the composer's: see the hand-off tests below.
+  assert.equal(view.requests.some(r => r.body?.text === '/model fast'), false);
 });
 
 test('Go to Session opens a pending form\'s holder and returns here on Back', () => {
@@ -446,4 +451,56 @@ test('a new notification from a skipped session is not deferred', () => {
   view.context.viewerState.rows.get('a').notification_dismissal = { question: { turn_id: 'a2' } };
   assert.deepEqual(view.ids(), ['a', 'b'], 'the new question is a new card and comes first');
   assert.equal(view.read('inboxSkipped.length'), 0, 'the old deferral is dropped');
+});
+
+test('a slash command is handed to an empty composer in page only, and Quick reply clears once it is there', async () => {
+  const view = screen([row('a', 'needs_input', 3)], { texts: { '/api/sessions/a/client-state': { draft: '', through_event_ordinal: 0 } } });
+  view.nodes.input.value = '/model fast';
+  view.nodes.input.oninput();
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'a', from: 'notifications' }]);
+  assert.equal(view.nodes.input.value, '/model fast', 'kept until the composer holds it');
+  await view.read("restoreDraft('a', 1)");
+  assert.equal(view.context.composer, '/model fast');
+  assert.equal(view.nodes.input.value, '', 'cleared once placed');
+  assert.equal(view.read('inboxDrafts.has("a")'), false);
+  assert.deepEqual(view.drafts, [], 'Quick reply never writes the saved draft');
+  assert.equal(view.requests.some(r => r.body?.action === 'prompt'), false);
+});
+
+test('a slash command never overwrites the conversation draft and keeps the quick reply', async () => {
+  const view = screen([row('a', 'needs_input', 3)], { texts: { '/api/sessions/a/client-state': { draft: 'my unsent thoughts' } } });
+  view.nodes.input.value = '/model fast';
+  view.nodes.input.oninput();
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  assert.deepEqual(view.nav, []);
+  assert.equal(view.read('composerHandoff'), null);
+  assert.equal(view.nodes.input.value, '/model fast');
+  assert.equal(view.nodes.cardError.textContent, 'Slash commands run in the conversation; your draft there is kept. Go to Session to run it.');
+  assert.deepEqual(view.drafts, []);
+});
+
+test('when the draft cannot be checked, or the composer is no longer empty, nothing is lost', async () => {
+  const failing = screen([row('a', 'needs_input', 3)], { texts: { '/api/sessions/a/client-state': new Error('offline') } });
+  failing.nodes.input.value = '/model fast';
+  failing.nodes.input.oninput();
+  failing.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  assert.deepEqual(failing.nav, []);
+  assert.equal(failing.nodes.input.value, '/model fast');
+  assert.match(failing.nodes.cardError.textContent, /^Not sent: could not check/);
+
+  const typed = screen([row('a', 'needs_input', 3)], { texts: { '/api/sessions/a/client-state': { draft: '' } } });
+  typed.nodes.input.value = '/model fast';
+  typed.nodes.input.oninput();
+  typed.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  // The person typed in the opened composer before the hand-off landed.
+  typed.context.composer = 'hello';
+  await typed.read("restoreDraft('a', 1)");
+  assert.equal(typed.context.composer, 'hello');
+  assert.equal(typed.nodes.input.value, '/model fast', 'the command stays in Quick reply');
+  assert.equal(typed.read('composerHandoff'), null);
 });
