@@ -32,6 +32,53 @@ pub(super) fn accept_live_history(live_history_enabled: &AtomicBool) {
     live_history_enabled.store(true, Ordering::Release);
 }
 
+/// Sends `session/load` and decides the replay boundary where its response sits
+/// in the connection's incoming message order.
+///
+/// The SDK's dispatch loop hands the next notification to its handler as soon
+/// as the response has been routed. A bridge that sends live updates right
+/// behind the response (Claude Code cycles that ran before the first prompt,
+/// for example) would therefore reach the notification handler before this
+/// session task resumed and flipped a flag. An ordered result callback runs
+/// inside the dispatch loop and holds it, so `ReplayCommit` and the flag change
+/// happen before any later notification is handled and every earlier one was
+/// handled as replay. The notification handler reads the flag; this callback
+/// is its only writer for `session/load`. A failed load decides nothing: the
+/// caller owns that error path.
+async fn load_at_replay_boundary(
+    connection: &ConnectionTo<Agent>,
+    request: LoadSessionRequest,
+    events: &mpsc::Sender<RuntimeEvent>,
+    native_children: bool,
+    live_history_enabled: &Arc<AtomicBool>,
+) -> std::result::Result<
+    <LoadSessionRequest as agent_client_protocol::JsonRpcRequest>::Response,
+    agent_client_protocol::Error,
+> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let events = events.clone();
+    let live_history_enabled = live_history_enabled.clone();
+    connection
+        .prepare_request(request)
+        .on_receiving_result(async move |result| {
+            if result.is_ok() {
+                if native_children {
+                    events
+                        .send(RuntimeEvent::NativeAgent {
+                            event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                        })
+                        .await
+                        .map_err(|_| relay_event_channel_error())?;
+                }
+                accept_live_history(&live_history_enabled);
+            }
+            // The session task may have gone away; the connection ends then.
+            let _ = result_tx.send(result);
+            Ok(())
+        })?;
+    result_rx.await.map_err(|_| relay_event_channel_error())?
+}
+
 /// How long after a session opens OpenCode needs before its tool registry has
 /// reloaded for the MCP servers it was given: its 100 ms debounce, doubled and
 /// rounded up.
@@ -73,7 +120,7 @@ pub(super) async fn serve_session(
     opened: Arc<Mutex<Option<OpenedSession>>>,
     agent_output_count: &AgentOutputCount,
     last_agent_message: &LastAgentMessage,
-    live_history_enabled: &AtomicBool,
+    live_history_enabled: &Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
@@ -293,7 +340,14 @@ pub(super) async fn serve_session(
         } else {
             let request = load_session_request(spec, &directories.accepted, session_id.clone());
             offered_mcp_servers = request.mcp_servers.len();
-            let loaded = connection.send_request(request).block_task().await;
+            let loaded = load_at_replay_boundary(
+                connection,
+                request,
+                events,
+                native_children,
+                live_history_enabled,
+            )
+            .await;
             spec.acp_activity.mark();
             loaded
                 .with_context(|| format!("load ACP session {existing}"))
@@ -308,18 +362,9 @@ pub(super) async fn serve_session(
         // the session. Replace such a native session only when Mjolnir's own
         // durable state also shows it was never used.
         let reloaded = match reloaded {
-            Ok(reloaded) => {
-                if native_children {
-                    emit_runtime_event(
-                        events,
-                        RuntimeEvent::NativeAgent {
-                            event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
-                        },
-                    )
-                    .await?;
-                }
-                Some(reloaded)
-            }
+            // The replay boundary, including its `ReplayCommit`, was already
+            // decided where the load response arrived.
+            Ok(reloaded) => Some(reloaded),
             Err(error) => {
                 if !harness_reports_missing_native_session(spec, &error) {
                     return Err(error);
@@ -370,9 +415,6 @@ pub(super) async fn serve_session(
                 {
                     goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
                 }
-                // The response is the boundary between provider replay and
-                // future live updates for this connection.
-                accept_live_history(live_history_enabled);
                 Some((session_id, config_options, modes))
             }
             None => None,
