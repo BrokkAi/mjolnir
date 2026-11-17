@@ -9,7 +9,19 @@ keeps them running after you close the terminal. You can move a session to
 another account, another harness, or a compatible target without starting over.
 Bare SSH sessions stay on their original host.
 
-By default Mjolnir sends recent prompt and reply text and help-search text to TypeSafe's hosted Jev classifier through a public proxy. When a sub-agent uses adaptive effort, it also sends the clipped task name and instructions plus the child model ID. `[jev] enabled = false` in `config.toml` stops all Jev requests ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
+By default Mjolnir sends classifier evidence to GLiDE (Fastino) through its hosted proxy. `[jev] enabled = false` in `config.toml` stops all classifier requests ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
+
+GitHub relevance sends every classification to the public proxy by default.
+Local inference is opt-in: set `local_inference = true` under `[github.watch]`
+in `config.toml`. When enabled, it downloads a pinned local model and native inference runtime
+when the first GitHub item needs classification, verifies their checksums, and caches them in the
+Mjolnir data directory. GLiDE handles classification while preparation runs or
+local scoring is unavailable. Native license texts are kept beside the cached
+runtime; no Python installation is required. GPU scoring uses DirectML on Windows,
+CoreML on Apple-silicon macOS, or CUDA on Linux x64. Linux CUDA requires the NVIDIA
+driver and CUDA 12/cuDNN 9 libraries installed on the host; otherwise scoring uses
+CPU. Windows requires the Microsoft Visual C++ Redistributable (x64); missing
+runtime DLLs produce a notice while GLiDE handles scoring. A GPU is retained only when its measured warm latency beats CPU.
 
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
@@ -52,16 +64,16 @@ away.
 - **Shared project memory.** Supported harnesses share synchronized project
   memory across sessions and targets. Muse currently cannot receive the
   injected memory tools; see the [harness limitations](https://mjolnir.brokk.ai/profiles/#harness-limitations).
-- **Adversarial review.** Choose end-of-turn or before-push review. Independent
+- **Adversarial review.** Review committed work before push. Independent
   reviewers, on a different provider when one is available, check the work and
   report actionable findings.
 - **Multi-repo projects.** Bundle several repositories so they provision,
   checkpoint, move, and restore together.
 - **Agent and editor integration.** Drive sessions through `mj new`, `mj prompt`,
   `mj message` and `mj wait`, the HTTP API, or `mj acp` for stdio ACP clients.
-- **Terminal, web, and desktop.** A full terminal dashboard, plus a
-  privacy-first web viewer you can reach from your phone over Tailscale, and a
-  desktop app. All three share the same live sessions.
+- **Terminal and web.** A full terminal dashboard, plus a
+  privacy-first web viewer you can reach from your phone over Tailscale.
+  Both share the same live sessions.
 
 ## Install
 
@@ -131,7 +143,7 @@ session end to end.
 - [Terminal](https://mjolnir.brokk.ai/terminal-surface/) and
   [web and desktop](https://mjolnir.brokk.ai/web-viewer/): controls and remote
   access.
-- [Turn review](https://mjolnir.brokk.ai/turn-review/),
+- [Code review](https://mjolnir.brokk.ai/turn-review/),
   [configuration](https://mjolnir.brokk.ai/configuration/),
   [CLI reference](https://mjolnir.brokk.ai/cli-reference/), and
   [security](https://mjolnir.brokk.ai/security/).

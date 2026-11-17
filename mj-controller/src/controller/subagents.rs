@@ -1,5 +1,6 @@
 //! Registration and ownership rules for child sessions on a parent's target.
 
+use mj_core::targets::SshTrafficClass;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -9,8 +10,13 @@ use mj_core::config::HarnessKind;
 use mj_core::state::{SessionRecord, SessionState, new_session_id};
 use mj_core::subagent::SubagentRecord;
 
+/// What the oracle is told before its first question. The handback variant
+/// names the tool only for a harness that gives it to children.
+pub(super) const ORACLE_INSTRUCTIONS: &str = "You are the oracle: a read-only advisor to another coding agent, the primary, which works in this workspace. The primary consults you before decisions it is unsure about. Each question includes the decision, the options and the evidence.\n\nDo not change anything. Do not edit, create or delete files in the workspace, do not change git state, and do not run builds, tests, installs or other commands that write files. Read files, search, and run read-only commands such as git log, git show, git diff and grep. You may write notes only in your report directory.\n\nCheck the primary's claims against the code. Answer with: your recommendation; the requirements the choice must satisfy and whether each option meets them; the evidence, with file:line references; what would fail if your recommendation were wrong; and what you could not verify. Say \"confirmed\", \"likely\" or \"unknown\" according to the evidence. Disagree with the primary when the evidence points the other way. If the question lacks what you need, say what is missing.\n\nSend each answer with the handback tool; Mjolnir delivers it to the primary. Later questions arrive as messages in this conversation, so you keep your earlier context.";
+
 #[derive(Debug, Clone)]
 pub struct RegisterSubagentRequest {
+    pub no_github_credentials: bool,
     pub kind: mj_core::subagent::SubagentKind,
     pub reviewer_launch: Option<mj_core::worker_launch::ReviewerLaunchConfig>,
     pub parent_session_id: String,
@@ -84,6 +90,7 @@ fn prepare_report_dir(
     exclude_in: Option<&str>,
 ) -> Result<String> {
     let command = mj_core::targets::command_on_locator(
+        SshTrafficClass::Control,
         backend,
         session_id,
         prepare_report_dir_argv(directory, exclude_in),
@@ -134,7 +141,7 @@ exit "$status"
 "#;
 
 /// A pre-close snapshot survives the cascade deleting the children's rows.
-pub(crate) struct SubagentReportCleanup {
+struct SubagentReportCleanup {
     backend: mj_core::targets::TargetLocator,
     session_id: String,
     root: String,
@@ -142,17 +149,6 @@ pub(crate) struct SubagentReportCleanup {
 }
 
 impl SubagentReportCleanup {
-    pub(crate) fn run(&self, executor: &impl mj_core::targets::CommandExecutor) {
-        if let Err(error) = self.execute(executor) {
-            tracing::warn!(
-                session_id = %self.session_id,
-                report_root = %self.root,
-                error = format!("{error:#}"),
-                "could not remove sub-agent report directories"
-            );
-        }
-    }
-
     fn execute(&self, executor: &impl mj_core::targets::CommandExecutor) -> Result<()> {
         validate_report_root(&self.root)?;
         for child in &self.child_ids {
@@ -170,6 +166,7 @@ impl SubagentReportCleanup {
         ];
         argv.extend(self.child_ids.iter().cloned());
         let command = mj_core::targets::command_on_locator(
+            SshTrafficClass::Control,
             &self.backend,
             &self.session_id,
             argv,
@@ -178,6 +175,34 @@ impl SubagentReportCleanup {
         super::execute_checked(executor, command)?;
         Ok(())
     }
+}
+
+pub(super) fn cleanup_owned_reports(
+    _authority: &super::environment::Reclamation,
+    backend: &mj_core::targets::TargetLocator,
+    session_id: &str,
+    reports: &[(String, String)],
+    executor: &impl mj_core::targets::CommandExecutor,
+) -> Result<()> {
+    for (child_id, directory) in reports {
+        let directory = Path::new(directory);
+        ensure!(
+            directory.file_name().and_then(|name| name.to_str()) == Some(child_id),
+            "environment report path does not name its child"
+        );
+        let root = directory
+            .parent()
+            .and_then(|path| path.to_str())
+            .context("environment report root is unavailable")?;
+        SubagentReportCleanup {
+            backend: backend.clone(),
+            session_id: session_id.to_owned(),
+            root: root.to_owned(),
+            child_ids: vec![child_id.clone()],
+        }
+        .execute(executor)?;
+    }
+    Ok(())
 }
 
 fn validate_report_root(root: &str) -> Result<()> {
@@ -198,131 +223,7 @@ fn validate_report_root(root: &str) -> Result<()> {
 }
 
 impl Controller {
-    /// Snapshot all relations before a daemon close/destroy cascades children.
-    pub(crate) fn subagent_report_cleanup(
-        &self,
-        parent_session_id: &str,
-    ) -> Result<Option<SubagentReportCleanup>> {
-        let parent = self
-            .state
-            .sessions
-            .get(parent_session_id)
-            .with_context(|| format!("unknown parent session {parent_session_id}"))?;
-        let child_ids: Vec<String> = self
-            .state
-            .subagents
-            .values()
-            .filter(|child| child.parent_session_id == parent_session_id)
-            .map(|child| child.child_session_id.clone())
-            .collect();
-        // Without children there is nothing to remove, so no target command.
-        if child_ids.is_empty() {
-            return Ok(None);
-        }
-        let Some(locator) = parent.target.as_ref() else {
-            return Ok(None);
-        };
-        let backend = super::backend::backend_locator(locator, parent, &self.config)?;
-        let checkout = self.state.checkout(parent_session_id)?;
-        let (root, _) = subagent_report_root(parent, &backend, &checkout);
-        Ok(Some(SubagentReportCleanup {
-            backend,
-            session_id: parent_session_id.to_owned(),
-            root,
-            child_ids,
-        }))
-    }
-
-    /// Only a child hook calls this, after its owning worker has stopped.
-    pub(super) fn remove_child_report_directory(
-        &self,
-        child_session_id: &str,
-        executor: &impl mj_core::targets::CommandExecutor,
-    ) {
-        let result = (|| -> Result<()> {
-            let Some(relation) = self.state.subagents.get(child_session_id) else {
-                return Ok(());
-            };
-            let child = self
-                .state
-                .sessions
-                .get(child_session_id)
-                .context("sub-agent session is missing")?;
-            let parent = self.state.sessions.get(&relation.parent_session_id);
-            let directory = crate::database::load_subagent_report(child_session_id)?.report_dir;
-            let root = if let Some(directory) = directory {
-                let path = Path::new(&directory);
-                ensure!(
-                    mj_core::target_path::is_absolute(path),
-                    "persisted report directory is not absolute"
-                );
-                ensure!(
-                    path.file_name().and_then(|name| name.to_str()) == Some(child_session_id),
-                    "persisted report directory does not name its child"
-                );
-                path.parent()
-                    .context("report directory has no root")?
-                    .to_str()
-                    .context("report root is not UTF-8")?
-                    .to_owned()
-            } else if let Some(parent) = parent {
-                let locator = parent
-                    .target
-                    .as_ref()
-                    .context("parent has no reachable report target")?;
-                let backend = super::backend::backend_locator(locator, parent, &self.config)?;
-                subagent_report_root(parent, &backend, &self.state.checkout(&parent.id)?).0
-            } else {
-                anyhow::bail!("child has no recorded report directory or live parent");
-            };
-            let mut last_error = None;
-            for session in std::iter::once(child).chain(parent) {
-                let Some(locator) = &session.target else {
-                    continue;
-                };
-                let attempt = (|| {
-                    let backend = super::backend::backend_locator(locator, session, &self.config)?;
-                    SubagentReportCleanup {
-                        backend,
-                        session_id: session.id.clone(),
-                        root: root.clone(),
-                        child_ids: vec![child_session_id.to_owned()],
-                    }
-                    .execute(executor)
-                })();
-                match attempt {
-                    Ok(()) => return Ok(()),
-                    Err(error) => {
-                        tracing::warn!(
-                            child_session_id,
-                            target_session_id = %session.id,
-                            error = format!("{error:#}"),
-                            "could not remove child reports through this target"
-                        );
-                        last_error = Some(error);
-                    }
-                }
-            }
-            Err(last_error.unwrap_or_else(|| {
-                anyhow::anyhow!("neither child nor parent has a reachable report target")
-            }))
-        })();
-        if let Err(error) = result {
-            tracing::warn!(
-                child_session_id,
-                error = format!("{error:#}"),
-                "could not remove the sub-agent report directory"
-            );
-        }
-    }
-
-    /// Create the directory that holds a parent's children's report
-    /// directories on the parent's target, and return its absolute path.
-    ///
-    /// It sits outside every repository: under the workspace root that a
-    /// bundle session's repositories are checked out below, or, for a bare
-    /// project whose workspace root is the user's own directory, inside the
-    /// project under a path its `info/exclude` lists.
+    /// Prepare the shared report directory before registering a child.
     pub fn prepare_subagent_report_root(
         &self,
         parent_session_id: &str,
@@ -374,6 +275,7 @@ impl Controller {
     ) -> Result<SubagentRecord> {
         let request_key = request.kind.request_key(&request.request_key);
         let reviewer = request.kind == mj_core::subagent::SubagentKind::Reviewer;
+        let oracle = request.kind == mj_core::subagent::SubagentKind::Oracle;
         if let Some(existing) =
             crate::database::lookup_subagent_request(&request.parent_session_id, &request_key)?
         {
@@ -397,12 +299,14 @@ impl Controller {
             .get(&request.parent_session_id)
             .with_context(|| format!("unknown parent session {}", request.parent_session_id))?
             .clone();
+        // Every top-level session has the message-only server that carries
+        // ask_oracle, so the oracle does not depend on delegation.
         ensure!(
-            reviewer || parent.harness_kind.supports_delegation_tools(),
+            reviewer || oracle || parent.harness_kind.supports_delegation_tools(),
             "{} sessions cannot spawn Mjolnir sub-agents",
             parent.harness_kind.display_name()
         );
-        if !reviewer {
+        if !reviewer && !oracle {
             ensure_parent_may_delegate(&parent)?;
         }
         ensure!(
@@ -423,7 +327,9 @@ impl Controller {
             })?;
         profile.ensure_ready(&request.profile_id)?;
         if profile.kind == HarnessKind::Muse {
-            let multiple_roots = !parent.additional_mounts.is_empty()
+            let multiple_roots = !mj_core::state::applied_container_settings(&parent)
+                .additional_mounts
+                .is_empty()
                 || (self
                     .state
                     .checkout(&parent.id)?
@@ -438,7 +344,7 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        if !reviewer {
+        if !reviewer && !oracle {
             self.ensure_subagent_slot_available(&parent.id, None)?;
         }
 
@@ -450,8 +356,17 @@ impl Controller {
         )?;
         let created_at = now();
         let session = SessionRecord {
+            oracle_choice: None,
+            oracle: false,
+            notifications_ignored: false,
             project: parent.project.clone(),
-            target_runtime: Some(parent.target_runtime_settings(&self.config)?.into_owned()),
+            target_runtime: Some(match &parent.target_runtime {
+                Some(runtime) => runtime.clone(),
+                None => parent
+                    .target_runtime_settings(&self.config)?
+                    .into_owned()
+                    .into(),
+            }),
             launch_base: None,
             launch_branch: None,
             checkout: None,
@@ -464,8 +379,6 @@ impl Controller {
             subagents: Some(mj_core::subagent::SubagentPolicy::None),
             create_managed_worktree: Some(false),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             // A child runs inside its parent's container, so it works in the
             // parent's workspace, including the legacy shared one.
             container_workspace: parent.container_workspace.clone(),
@@ -481,11 +394,18 @@ impl Controller {
             // A child works in its parent's tree and gets what its parent got.
             no_project_memory: parent.no_project_memory,
             no_github_events: parent.no_github_events,
+            no_github_credentials: parent.no_github_credentials
+                || request.no_github_credentials
+                || !self.config.github.session_credentials,
             target_template_id: parent.target_template_id.clone(),
-            resource_allocation: parent.resource_allocation.clone(),
-            additional_mounts: parent.additional_mounts.clone(),
+            resource_allocation: mj_core::state::applied_container_settings(&parent)
+                .resource_allocation
+                .cloned(),
+            additional_mounts: mj_core::state::applied_container_settings(&parent)
+                .additional_mounts
+                .to_vec(),
             state: SessionState::Provisioning,
-            target: Some(target),
+            target: Some(Box::new(target)),
             native_session_id: None,
             acp_session_title: None,
             session_title_override: Some(request.task_name.clone()),
@@ -494,6 +414,8 @@ impl Controller {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         };
@@ -506,9 +428,28 @@ impl Controller {
         let initial_prompt = match (handback_tool, &report_dir) {
             (true, Some(report_dir)) if reviewer => format!(
                 "You are a Mjolnir reviewer child. Your report directory is {report_dir}. Call handback with the complete rubric JSON (up to {} characters).\n\n{}",
-                mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS,
+                mj_core::subagent::SubagentKind::Reviewer.max_handback_chars(),
                 request.initial_prompt
             ),
+            (_, report_dir) if oracle => {
+                let instructions = if handback_tool {
+                    ORACLE_INSTRUCTIONS.to_owned()
+                } else {
+                    ORACLE_INSTRUCTIONS.replace(
+                        "Send each answer with the handback tool; Mjolnir delivers it to the primary.",
+                        "Send each answer as your last message; Mjolnir delivers it to the primary.",
+                    )
+                };
+                let directory_note = report_dir
+                    .as_ref()
+                    .map(|dir| format!("Your report directory is {dir}.\n\n"))
+                    .unwrap_or_default();
+                format!(
+                    "{directory_note}{instructions} Your answer may contain up to {} characters.\n\n{}",
+                    mj_core::subagent::SubagentKind::Oracle.max_handback_chars(),
+                    request.initial_prompt
+                )
+            }
             (true, Some(report_dir)) => format!(
                 "{}\n\n{}",
                 mj_core::subagent::handback_prompt_note(report_dir),
@@ -534,10 +475,12 @@ impl Controller {
             handback_tool,
         };
         let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
-        crate::database::register_subagent_with_startup(&session, &relation, startup)?;
-        if let Some(report_dir) = &report_dir {
-            crate::database::record_subagent_report_dir(&child_id, report_dir)?;
-        }
+        crate::database::register_subagent_with_startup(
+            &session,
+            &relation,
+            startup,
+            report_dir.as_deref(),
+        )?;
         self.state.sessions.insert(child_id, session);
         self.state
             .subagents
@@ -554,6 +497,9 @@ impl Controller {
     /// Every child whose worker may be holding processes in the parent's
     /// container counts, idle or not: those processes are what the cap
     /// protects (#1161). A parked, stopped, failed or lost child holds none.
+    ///
+    /// Only ordinary workers count. A reviewer or the oracle holds processes
+    /// but never uses a delegation slot.
     pub fn ensure_subagent_slot_available(
         &self,
         parent_session_id: &str,
@@ -561,13 +507,13 @@ impl Controller {
     ) -> Result<()> {
         let live = crate::database::list_subagents(parent_session_id)?
             .into_iter()
-            .filter(|child| child.kind != mj_core::subagent::SubagentKind::Reviewer)
+            .filter(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
             .filter(|child| Some(child.child_session_id.as_str()) != starting)
             .filter_map(|child| {
                 let session = self.state.sessions.get(&child.child_session_id)?;
                 session.state.has_live_worker().then(|| LiveSubagent {
                     child_session_id: child.child_session_id.clone(),
-                    title: session.listed_title().to_owned(),
+                    title: session.message_name(),
                     state: live_subagent_state(session),
                 })
             })
@@ -585,10 +531,10 @@ pub(crate) fn recover_registered_subagent_startup(
     relation: &SubagentRecord,
     fast_mode: bool,
 ) -> Result<()> {
-    if relation.kind == mj_core::subagent::SubagentKind::Worker
+    if relation.kind != mj_core::subagent::SubagentKind::Reviewer
         && crate::database::load_startup_group(
             &relation.child_session_id,
-            &format!("subagent-spawn-{}", relation.request_key),
+            &mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key),
         )?
         .is_empty()
     {
@@ -603,10 +549,10 @@ fn initial_startup_deliveries(
     relation: &SubagentRecord,
     fast_mode: bool,
 ) -> Result<Vec<crate::database::StartupDelivery>> {
-    if relation.kind != mj_core::subagent::SubagentKind::Worker {
+    if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
         return Ok(Vec::new());
     }
-    let group_id = format!("subagent-spawn-{}", relation.request_key);
+    let group_id = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
     crate::daemon::startup_followup::api_followup_steps(
         &group_id,
         crate::server::api::StartFollowup {
@@ -692,7 +638,10 @@ fn slot_refusal(live: &[LiveSubagent], maximum: usize) -> String {
 /// newest task, from what the store holds; see
 /// [`mj_core::subagent::has_handed_back`]. A session that is not a child, or
 /// that has never finished a turn, has not.
-pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
+pub fn subagent_has_handed_back(
+    child_session_id: &str,
+    liveness: &mj_core::subagent::Liveness,
+) -> Result<bool> {
     let Some(relation) = crate::database::load_subagent(child_session_id)? else {
         return Ok(false);
     };
@@ -714,6 +663,7 @@ pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
         &report,
         working,
         last_turn.as_ref(),
+        liveness,
         mj_core::clock::epoch_millis(),
     ))
 }
@@ -723,6 +673,7 @@ pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
 pub fn stopped_subagent(
     state: &mj_core::state::State,
     child_session_id: &str,
+    liveness: &mj_core::subagent::Liveness,
 ) -> Result<mj_core::subagent::StoppedSubagent> {
     let relation = state
         .subagents
@@ -731,8 +682,7 @@ pub fn stopped_subagent(
     let title = state
         .sessions
         .get(child_session_id)
-        .map_or(relation.task_name.as_str(), SessionRecord::listed_title)
-        .to_owned();
+        .map_or_else(|| relation.task_name.clone(), SessionRecord::message_name);
     let report_dir = crate::database::load_subagent_report(child_session_id)?.report_dir;
     let launch = crate::database::load_subagent(child_session_id)?
         .context("sub-agent launch record is missing")?;
@@ -740,7 +690,7 @@ pub fn stopped_subagent(
         child_session_id: child_session_id.to_owned(),
         title,
         task: mj_core::subagent::task_summary(&launch.initial_prompt, report_dir.as_deref()),
-        handed_back: subagent_has_handed_back(child_session_id)?,
+        handed_back: subagent_has_handed_back(child_session_id, liveness)?,
     })
 }
 
@@ -767,7 +717,8 @@ fn borrowed_locator(
         | TargetLocator::AppleContainer { borrowed_from, .. }
         | TargetLocator::SshPodman { borrowed_from, .. }
         | TargetLocator::SshDocker { borrowed_from, .. }
-        | TargetLocator::SshAppleContainer { borrowed_from, .. } => {
+        | TargetLocator::SshAppleContainer { borrowed_from, .. }
+        | TargetLocator::SshNitro { borrowed_from, .. } => {
             borrowed_from.as_deref().unwrap_or(parent_id)
         }
         _ => parent_id,
@@ -826,6 +777,13 @@ fn borrowed_locator(
         TargetLocator::SshAppleContainer {
             host, container_id, ..
         } => TargetLocator::SshAppleContainer {
+            host: host.clone(),
+            container_id: container_id.clone(),
+            borrowed_from: Some(container_owner.to_owned()),
+        },
+        TargetLocator::SshNitro {
+            host, container_id, ..
+        } => TargetLocator::SshNitro {
             host: host.clone(),
             container_id: container_id.clone(),
             borrowed_from: Some(container_owner.to_owned()),

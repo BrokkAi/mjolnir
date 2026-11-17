@@ -47,6 +47,29 @@ enum WorkerCommand {
     /// Move-only inventory and disk-backed workspace transfer utilities.
     #[command(hide = true)]
     MoveWorkspace,
+    /// Print `alive`, `starting` or `dead` for the worker that owns a root,
+    /// decided by the lock on its `worker.lock`.
+    #[command(hide = true)]
+    Liveness {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Print the pid of the worker holding a root's lock, or nothing.
+    #[command(hide = true)]
+    Holder {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Stop the worker that owns a root and every process it started, and
+    /// return only when its lock is free and none of them is left.
+    #[command(hide = true)]
+    Stop {
+        #[arg(long)]
+        root: PathBuf,
+        /// Kill at once instead of allowing the TERM grace.
+        #[arg(long)]
+        kill: bool,
+    },
     /// Print this worker's compatibility identity. The controller asks an
     /// image's worker this before linking a session to it.
     #[command(hide = true)]
@@ -94,6 +117,24 @@ enum WorkerCommand {
     RestoreCheckpoint {
         #[arg(long)]
         spec: PathBuf,
+        /// Restore only missing parent state; never modify checkout or child reports.
+        #[arg(long, conflicts_with = "missing_checkout")]
+        missing_parent: bool,
+        #[arg(long)]
+        missing_checkout: bool,
+        /// Current controller-owned queue/frontier, for partial parent recovery.
+        #[arg(long, requires = "missing_parent")]
+        relay_seed: Option<PathBuf>,
+    },
+    /// Journal queue discard while the worker is stopped, before any dispatch.
+    #[command(hide = true)]
+    DiscardQueuedPrompts {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        command_id: String,
     },
     /// Install one streamed resource directory on a remote target.
     InstallResource {
@@ -115,6 +156,11 @@ enum WorkerCommand {
         #[arg(long, value_parser = ["PostToolUse", "PostToolBatch"])]
         event: String,
     },
+    /// Exchange one mailbox lease request for a durable harness inbox.
+    MailboxRequest {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// Serve Mjolnir-owned delegation tools over MCP stdio.
     SubagentMcp {
         #[arg(long)]
@@ -133,8 +179,14 @@ enum WorkerCommand {
         /// spawn tool then offers no task type.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         subtle_subagents: bool,
-        #[arg(long)]
+        /// Accepted for configurations written by older workers; the review
+        /// tools now belong to the `--review-server` server.
+        #[arg(long, hide = true)]
         review_gate: bool,
+        /// Serve the before-push review tools as `mj-review` instead of the
+        /// delegation tools.
+        #[arg(long)]
+        review_server: bool,
     },
     /// Print a unified diff of the session's work in one repository.
     Diff {
@@ -324,22 +376,29 @@ fn bootstrap_login_environment(
                     &mut environment,
                     std::env::vars(),
                 );
-                if let WorkerCommand::Run { root, .. } = &args.command {
+                if let WorkerCommand::Run { root, .. } = &args.command
+                    && !launch.no_github_credentials
+                {
                     mj_worker::worker_runtime::seed_container_github_token(root, std::env::vars())?;
                 }
             }
             environment.extend(launch.target_environment);
+            if launch.no_github_credentials {
+                mj_core::credentials::remove_github_authentication_environment(&mut environment);
+            }
         }
         if let WorkerCommand::PushBranch { root, .. } = &args.command {
-            environment.extend(
-                WorkerLaunchConfig::read(&root.join("launch.json"))
-                    .with_context(|| {
-                        let guidance = mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
-                        format!("load branch export target settings; {guidance}")
-                    })?
-                    .target_environment,
-            );
-            mj_worker::worker_runtime::attach_session_git_environment(root, &mut environment)?;
+            let launch =
+                WorkerLaunchConfig::read(&root.join("launch.json")).with_context(|| {
+                    let guidance = mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
+                    format!("load branch export target settings; {guidance}")
+                })?;
+            environment.extend(launch.target_environment);
+            mj_worker::worker_runtime::attach_session_git_environment(
+                root,
+                &mut environment,
+                launch.no_github_credentials,
+            )?;
         }
         environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
         // The reliability lab's crash hooks run inside the worker after this
@@ -347,7 +406,7 @@ fn bootstrap_login_environment(
         // controls across; ordinary launcher variables must stay excluded.
         #[cfg(feature = "test-hooks")]
         for name in ["MJ_CHAOS_ISOLATED", "MJ_TEST_HOOK", "MJ_TEST_HOOK_DIR"] {
-            if let Some(value) = std::env::var(name).ok() {
+            if let Ok(value) = std::env::var(name) {
                 environment.insert(name.to_owned(), value);
             }
         }
@@ -386,8 +445,39 @@ fn bootstrap_login_environment(
     anyhow::bail!("target login environment requires a Unix worker")
 }
 
+/// `mj-worker microvm ...`: the Nitro Sandbox host engine and guest agent.
+/// They have their own command line (a Podman-compatible one), so they are
+/// dispatched before the worker's parser sees the arguments.
+#[cfg(not(target_os = "linux"))]
+fn run_microvm() -> Result<()> {
+    anyhow::bail!("mj-worker microvm runs only on Linux hosts")
+}
+
+#[cfg(target_os = "linux")]
+fn run_microvm() -> Result<()> {
+    install_stderr_logging()?;
+    let arguments: Vec<_> = std::env::args_os().skip(2).collect();
+    // Engine failures exit 125, as Podman's do.
+    let status = match mj_worker::microvm::main(arguments) {
+        Ok(status) => status,
+        Err(error) => {
+            mj_core::diagnostic_stderr!("Error: {error:#}");
+            125
+        }
+    };
+    std::process::exit(status);
+}
+
 fn main() -> Result<()> {
+    // First, before any thread or child: the harness and its tools inherit it.
+    mj_core::subprocess::raise_open_file_limit();
     std::hint::black_box(mj_core::worker_build::WORKER_BUILD_STAMP);
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|word| word == "microvm")
+    {
+        return run_microvm();
+    }
     // The standalone worker uses the same ring provider as the daemon.
     let _ = rustls::crypto::ring::default_provider().install_default();
     install_stderr_logging()?;
@@ -467,7 +557,7 @@ const WORKER_RUNTIME_THREADS: usize = 4;
 
 fn run_worker(cli: Cli, exit_root: Option<&Path>, owner: Option<&WorkerRootOwner>) -> Result<()> {
     if let Some(root) = exit_root {
-        record_startup_step(root, "login-environment");
+        record_startup_step(root, mj_core::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT);
     }
     bootstrap_login_environment(&cli, owner).context("initialize worker environment")?;
     if let Some(root) = exit_root {
@@ -512,6 +602,24 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             println!("{}", mj_worker::move_workspace::execute(command)?);
             Ok(())
         }
+        WorkerCommand::Liveness { root } => {
+            println!("{}", mj_worker::worker_stop::liveness(&root)?.token());
+            Ok(())
+        }
+        WorkerCommand::Holder { root } => {
+            if let Some(pid) = mj_worker::worker_stop::holder(&root)? {
+                println!("{pid}");
+            }
+            Ok(())
+        }
+        WorkerCommand::Stop { root, kill } => mj_worker::worker_stop::stop(
+            &root,
+            if kill {
+                std::time::Duration::ZERO
+            } else {
+                mj_worker::worker_stop::TERM_GRACE
+            },
+        ),
         WorkerCommand::BuildId => {
             println!("{}", mj_core::worker_build::WORKER_BUILD_ID);
             Ok(())
@@ -533,9 +641,29 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             println!("{}", serde_json::to_string(&checkpoint)?);
             Ok(())
         }
-        WorkerCommand::RestoreCheckpoint { spec } => {
-            mj_worker::checkpoint::restore_from_spec_file(&spec)
+        WorkerCommand::RestoreCheckpoint {
+            spec,
+            missing_parent,
+            missing_checkout,
+            relay_seed,
+        } => {
+            if missing_parent {
+                mj_worker::checkpoint::restore_missing_from_spec_file(&spec, relay_seed.as_deref())
+            } else if missing_checkout {
+                mj_worker::checkpoint::restore_checkout_from_spec_file(&spec)
+            } else {
+                mj_worker::checkpoint::restore_from_spec_file(&spec)
+            }
         }
+        WorkerCommand::DiscardQueuedPrompts {
+            root,
+            session_id,
+            command_id,
+        } => mj_worker::checkpoint::discard_queued_prompts_before_start(
+            &root,
+            &session_id,
+            &command_id,
+        ),
         WorkerCommand::InstallResource { destination } => {
             mj_checkpoint::resources::install_resource_stream(std::io::stdin(), &destination)
         }
@@ -546,6 +674,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::MailboxHook { socket, event } => {
             mj_worker::mailbox_hook::run(&socket, &event)
         }
+        WorkerCommand::MailboxRequest { socket } => mj_worker::mailbox_hook::request(&socket),
 
         WorkerCommand::SubagentMcp {
             socket,
@@ -553,17 +682,24 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             role,
             agent_mailboxes_enabled,
             subtle_subagents,
-            review_gate,
-        } => mj_worker::subagent_mcp::run_mcp_stdio(
-            &socket,
-            harness,
-            role,
-            mj_worker::subagent_mcp::ParentTools {
-                agent_mailboxes_enabled,
-                subtle_subagents,
-                review_gate,
-            },
-        ),
+            review_gate: _,
+            review_server,
+        } => {
+            if review_server {
+                mj_worker::subagent_mcp::run_review_mcp_stdio(&socket, harness, role)
+            } else {
+                mj_worker::subagent_mcp::run_mcp_stdio(
+                    &socket,
+                    harness,
+                    role,
+                    mj_worker::subagent_mcp::ParentTools {
+                        oracle: false,
+                        agent_mailboxes_enabled,
+                        subtle_subagents,
+                    },
+                )
+            }
+        }
         WorkerCommand::Diff {
             repository,
             base,
@@ -597,11 +733,16 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             } else {
                 mj_checkpoint::archive::FetchMode::Content
             };
-            write_stdout(
-                &mj_checkpoint::archive::fetch_session_path(&path, &roots, temp, mode)
-                    .map_err(export_error)?
-                    .encode()?,
+            let fetched = mj_checkpoint::archive::fetch_session_path(
+                &path,
+                &roots,
+                temp,
+                mode,
+                mj_checkpoint::archive::create_fetch_spool()?,
             )
+            .map_err(export_error)?;
+            mj_core::test_hooks::reach_test_hook("fetch_source_ready")?;
+            fetched.write_to(std::io::stdout().lock())
         }
         WorkerCommand::StoreFetch {
             session,
@@ -609,25 +750,20 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             directory,
             length,
         } => {
-            let bytes = mj_checkpoint::archive::read_session_file_input(std::io::stdin().lock())
-                .map_err(export_error)?;
-            anyhow::ensure!(
-                bytes.len() == length,
-                "incomplete fetch transfer: expected {length} bytes, received {}",
-                bytes.len()
-            );
-            let fetched = mj_checkpoint::archive::FetchedPath {
-                kind: if directory {
-                    mj_checkpoint::archive::FetchedKind::Directory
-                } else {
-                    mj_checkpoint::archive::FetchedKind::File
-                },
-                path: source,
-                bytes,
+            let kind = if directory {
+                mj_checkpoint::archive::FetchedKind::Directory
+            } else {
+                mj_checkpoint::archive::FetchedKind::File
             };
-            write_stdout(&serde_json::to_vec(
-                &fetched.save(&std::env::temp_dir(), &session)?,
-            )?)
+            let saved = mj_checkpoint::archive::FetchedPath::store(
+                kind,
+                source,
+                &std::env::temp_dir(),
+                &session,
+                length as u64,
+                std::io::stdin().lock(),
+            )?;
+            write_stdout(&serde_json::to_vec(&saved)?)
         }
         WorkerCommand::WriteFile {
             root,
@@ -838,13 +974,14 @@ mod tests {
         assert!(failed.downcast_ref::<ExportRefused>().is_none());
     }
 
+    // Hard-won: #1543: the receiving worker also capped fetched artifacts at 16 MiB.
     #[test]
-    fn fetch_storage_streams_the_maximum_file_and_refuses_truncated_input() {
+    fn fetch_storage_accepts_large_files_and_refuses_truncated_input() {
         use mj_core::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};
         const CHILD_ROOT: &str = "MJ_TEST_FETCH_STORAGE_ROOT";
         const SOURCE: &str = "/workspace/λ binary.dat";
         const SESSION: &str = "source-session";
-        const LENGTH: usize = mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize;
+        const LENGTH: usize = 17 * 1024 * 1024;
         if std::env::var_os(CHILD_ROOT).is_some() {
             tokio::runtime::Runtime::new()
                 .unwrap()
@@ -865,7 +1002,7 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let bytes: Vec<u8> = (0..LENGTH).map(|i| (i % 251) as u8).collect();
-        let name = "tests::fetch_storage_streams_the_maximum_file_and_refuses_truncated_input";
+        let name = "tests::fetch_storage_accepts_large_files_and_refuses_truncated_input";
         let mut command = CommandSpec::new(
             std::env::current_exe().unwrap().to_string_lossy(),
             ["--exact", name, "--nocapture", "--quiet"],
@@ -899,7 +1036,7 @@ mod tests {
                 .starts_with(root.path().join("mjolnir").join(SESSION))
         );
         assert_eq!(saved.source, SOURCE);
-        assert_eq!(saved.bytes, LENGTH);
+        assert_eq!(saved.bytes, LENGTH as u64);
         assert_eq!(std::fs::read(&saved.path).unwrap(), bytes);
         let truncated = command.with_sensitive_stdin(vec![0; 128 * 1024]);
         let output = execute(&truncated);

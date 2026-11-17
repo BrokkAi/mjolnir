@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::config::offers_attached_directories;
 
 fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &W) {
     let mut form = wizard.form().borrow_mut();
@@ -58,16 +59,15 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
         }
         WizardStep::Mounts => declare_mount_controls(&mut form, wizard.mounts()),
         WizardStep::Review => {
-            let can_attach = mount_history_host(
+            let can_attach = offers_attached_directories(
                 &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target())],
-            )
-            .is_some();
+            );
             if !wizard.mounts().mounts.is_empty() {
                 form.declare_with_enabled(
                     WizardControl::ReviewAttachments,
                     ControlKind::ChoiceList {
                         len: wizard.mounts().mounts.len(),
-                        selected: wizard.mounts().history_index,
+                        selected: wizard.mounts().selected_mount,
                     },
                     true,
                 );
@@ -136,10 +136,6 @@ fn declare_mount_controls(form: &mut Dialog<WizardControl>, mounts: &MountWizard
         mounts.source.control_kind(),
         true,
     );
-    form.set_field_uses_vertical_keys(
-        WizardControl::MountSource,
-        mounts.source.is_empty() && !mounts.history.is_empty(),
-    );
     form.declare_with_enabled(
         WizardControl::MountDestination,
         ControlKind::TextField,
@@ -155,6 +151,17 @@ fn declare_mount_controls(form: &mut Dialog<WizardControl>, mounts: &MountWizard
         ),
         true,
     );
+    let history_len = mounts.available_history().len();
+    if history_len > 0 {
+        form.declare_with_enabled(
+            WizardControl::MountHistory,
+            ControlKind::ChoiceList {
+                len: history_len,
+                selected: mounts.history_selection.min(history_len - 1),
+            },
+            true,
+        );
+    }
     form.declare_with_enabled(WizardControl::Cancel, ControlKind::Button, true);
     form.declare_with_enabled(WizardControl::Back, ControlKind::Button, true);
     form.declare_with_enabled(WizardControl::Add, ControlKind::Button, true);
@@ -216,7 +223,6 @@ impl DashboardState {
             Err(interaction) => interaction,
         };
         let action = wizard.route_extra_interaction(action);
-        let action = wizard.resource_editor_mut().instances.route(action);
         if let Some(interaction) = wizard.mounts_mut().access_combo.route(action) {
             return self.apply_wizard_interaction(wizard, interaction);
         }
@@ -259,29 +265,6 @@ impl DashboardState {
                 self.apply_wizard_field_edit(&mut wizard, id, edit);
                 self.keep(wizard)
             }
-            Interaction::ComboBoxCommit(WizardControl::ResourceInstance, index) => {
-                let id = nth_key(&self.config.targets, wizard.target());
-                let chosen = wizard
-                    .aws_options()
-                    .get(&id)
-                    .and_then(|options| options.get(index))
-                    .cloned();
-                if let Some(chosen) = chosen {
-                    let before = wizard.resource_editor().draft_values();
-                    wizard.form_mut().track_draft_part("resources", before);
-                    wizard.note_draft_change(self, DraftChange::ResourcesAdjusted);
-                    let (_, allocation, error) = wizard.sizing_mut();
-                    *allocation = Some(chosen.clone());
-                    *error = None;
-                    if let SessionResourceAllocation::AwsEc2 { instance_type, .. } = chosen {
-                        wizard.resource_editor_mut().instance_type = Some(instance_type);
-                    }
-                    let after = wizard.resource_editor().draft_values();
-                    wizard.form_mut().track_draft_part("resources", after);
-                }
-                self.keep(wizard)
-            }
-            Interaction::ComboBoxDismiss(WizardControl::ResourceInstance) => self.keep(wizard),
             Interaction::ComboBoxCommit(WizardControl::MountAccess, index) => {
                 wizard.note_draft_change(self, DraftChange::ReadOnlyToggled);
                 commit_mount_access(wizard.mounts_mut(), index);
@@ -315,12 +298,20 @@ impl DashboardState {
                 }
                 self.keep(wizard)
             }
+            Interaction::Select(WizardControl::MountHistory, selected) => {
+                let len = wizard.mounts().available_history().len();
+                if len > 0 {
+                    wizard.mounts_mut().history_selection = selected.min(len - 1);
+                    wizard.form_mut().focus(WizardControl::MountHistory);
+                }
+                self.keep(wizard)
+            }
             Interaction::Select(WizardControl::ReviewAttachments, selected) => {
                 let next = selected.min(wizard.mounts().mounts.len().saturating_sub(1));
                 let focused_elsewhere =
                     wizard.form().borrow().focused() != Some(WizardControl::ReviewAttachments);
-                if wizard.mounts().history_index != next || focused_elsewhere {
-                    wizard.mounts_mut().history_index = next;
+                if wizard.mounts().selected_mount != next || focused_elsewhere {
+                    wizard.mounts_mut().selected_mount = next;
                     wizard.form_mut().focus(WizardControl::ReviewAttachments);
                 }
                 self.keep(wizard)
@@ -364,25 +355,8 @@ impl DashboardState {
         self.apply_mount_field_edit(wizard.mounts_mut(), id, edit);
     }
 
-    /// Edits the attachment editor's two path fields. Up and Down walk the
-    /// source history when the source is empty, before the field itself sees
-    /// the key. An open completion popup takes those keys first, in the form.
+    /// Edits the attachment editor's two path fields.
     fn apply_mount_field_edit(&self, mounts: &mut MountWizard, id: WizardControl, edit: FieldEdit) {
-        if let FieldEdit::Key(key) = edit
-            && id == WizardControl::MountSource
-            && mounts.source.is_empty()
-            && !mounts.history.is_empty()
-            && matches!(key.code, KeyCode::Up | KeyCode::Down)
-        {
-            let delta = if key.code == KeyCode::Up { -1 } else { 1 };
-            let len = mounts.history.len();
-            move_index(&mut mounts.history_index, len, delta);
-            mounts.source = mounts.history[mounts.history_index]
-                .to_string_lossy()
-                .into_owned()
-                .into();
-            return;
-        }
         let input = match id {
             WizardControl::MountSource => &mut mounts.source,
             WizardControl::MountDestination => &mut mounts.destination,
@@ -403,15 +377,7 @@ impl DashboardState {
             self.cancel_modal();
             return DashboardAction::None;
         }
-        if id == WizardControl::ResourceInstance && wizard.step() == WizardStep::Target {
-            let selected = match target_resources(self, &wizard) {
-                Some(ResourcePicker::Ec2 { selected, .. }) => selected,
-                _ => return self.keep(wizard),
-            };
-            let mut wizard = wizard;
-            wizard.resource_editor_mut().instances.open(id, selected);
-            return self.keep(wizard);
-        }
+
         if wizard.step() == WizardStep::Mounts {
             return self.activate_wizard_mount(id, wizard);
         }
@@ -589,10 +555,9 @@ impl DashboardState {
             Ok(action) => return action,
             Err(wizard) => wizard,
         };
-        let can_attach = mount_history_host(
+        let can_attach = offers_attached_directories(
             &self.config.targets[&nth_key(&self.config.targets, wizard.target())],
-        )
-        .is_some();
+        );
         match id {
             WizardControl::ReviewAttachments => {
                 wizard.note_draft_change(self, DraftChange::AttachmentOpened);
@@ -655,6 +620,27 @@ impl DashboardState {
                 open_mount_access(wizard.mounts_mut());
                 self.keep(wizard)
             }
+            WizardControl::MountHistory => {
+                let source = wizard
+                    .mounts()
+                    .available_history()
+                    .get(wizard.mounts().history_selection)
+                    .map(|path| (*path).clone());
+                if let Some(source) = source {
+                    wizard.mounts_mut().source = source.to_string_lossy().into_owned().into();
+                    if wizard.mounts().destination.is_empty() {
+                        let destination = default_resource_destination(
+                            &self.config.targets[&target_template_id],
+                            &source,
+                            &wizard.mounts().mounts,
+                        );
+                        wizard.mounts_mut().destination =
+                            destination.to_string_lossy().into_owned().into();
+                    }
+                    return self.activate_wizard_mount(WizardControl::Add, wizard);
+                }
+                self.keep(wizard)
+            }
             WizardControl::MountDestination | WizardControl::Add => {
                 self.validate_wizard_mount(wizard, target_template_id)
             }
@@ -695,50 +681,5 @@ impl DashboardState {
             target_template_id,
             source,
         }
-    }
-
-    fn apply_wizard_aws_options<W: WizardDraft>(
-        &mut self,
-        mut wizard: W,
-        target_id: &str,
-        result: std::result::Result<Vec<SessionResourceAllocation>, String>,
-    ) {
-        if nth_key(&self.config.targets, wizard.target()) != target_id {
-            // Sizes for a target the draft is not on are cached and nothing
-            // else; a failure for such a target is not the draft's problem.
-            if let Ok(options) = result {
-                wizard.sizing_mut().0.insert(target_id.to_string(), options);
-                self.mode = wizard.into_mode();
-            }
-            return;
-        }
-        let previous = wizard.previous_allocation(self);
-        let selected_type =
-            wizard.resource_editor().instance_type.clone().or_else(|| {
-                match wizard.resource_allocation() {
-                    Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) => {
-                        Some(instance_type.clone())
-                    }
-                    _ => None,
-                }
-            });
-        let (aws_options, allocation, sizing_error) = wizard.sizing_mut();
-        apply_aws_options(
-            target_id,
-            result,
-            aws_options,
-            allocation,
-            sizing_error,
-            previous,
-            selected_type.as_deref(),
-        );
-        if let Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) =
-            wizard.resource_allocation()
-        {
-            let instance_type = instance_type.clone();
-            wizard.resource_editor_mut().instance_type = Some(instance_type);
-        }
-        wizard.resource_editor_mut().instances = ComboBoxState::default();
-        self.mode = wizard.into_mode();
     }
 }

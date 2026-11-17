@@ -1,0 +1,138 @@
+{
+  "id": "W164",
+  "title": "waiting candidate 25 f934ffcc",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "f934ffccd5938af3f9a7e6704f27cebd",
+    "session_title": "7947-map: taint findings and the query obligations they relied on",
+    "reply_position": 1109,
+    "captured_at": "2026-11-01T20:24:31.764Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:27",
+          "role": "assistant",
+          "text": "I’ll trace the taint finding path and its existing evidence carriers, then write the file and line map in the report directory. I’ll keep the checkout unchanged."
+        },
+        {
+          "id": "agent:87",
+          "role": "assistant",
+          "text": "The direct resolution answer becomes a `query_obligation` diagnostic at the definition lookup boundary, while the taint projection currently builds certainty and witnesses without reading that diagnostic. I’m checking whether the witness preserves enough identity to recover the specific answers it used."
+        },
+        {
+          "id": "agent:222",
+          "role": "assistant",
+          "text": "The solver witness retains program point and call site handles, but public witness projection reduces steps to locations and labels. The attribution seam is therefore before that projection; an answer lookup by displayed location alone would be ambiguous."
+        },
+        {
+          "id": "agent:280",
+          "role": "assistant",
+          "text": "Read-only transport map delivered to the parent. The checkout remains unchanged."
+        },
+        {
+          "id": "agent:328",
+          "role": "assistant",
+          "text": "I’ll read the coordinator constraints and reports first, then run the production Java and Go probes before drafting the design. I’ll keep any instrumentation outside the checkout or restore it with a diff check."
+        },
+        {
+          "id": "agent:766",
+          "role": "assistant",
+          "text": "The composition path has a usable pre-render derivation (`LabeledPath`), including call-bearing hops that `path_calls` currently skips. The ICFG path is harder: its chosen derivation can be truncated or discarded before the taint finding is assembled. I’m treating that as a design decision until the production probe shows which call evidence actually reaches the solver."
+        },
+        {
+          "id": "agent:972",
+          "role": "assistant",
+          "text": "The empirical build is still compiling the policy test target. The temporary probe logs the selected Java and Go native paths, the typed selected answer before display conversion, and the flattened dispatch diagnostics. I’ll use its result to state whether the no-JDK Java case actually produces a finding."
+        },
+        {
+          "id": "agent:1109",
+          "role": "assistant",
+          "text": "The design draft is written in the report directory. It names the typed carrier and cache keys, and flags one consequential choice: ICFG needs obligation evidence that survives discarded or clipped witness reconstruction, which appears to require per-derivation solver state. I’m waiting for the probe before finalizing Part A."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "The design draft is written in the report directory. It names the typed carrier and cache keys, and flags one consequential choice: ICFG needs obligation evidence that survives discarded or clipped witness reconstruction, which appears to require per-derivation solver state. I’m waiting for the probe before finalizing Part A.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 0
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-01T20:27:49.996Z",
+        "kind": "agent",
+        "text": "The test target is still building its analysis crates. The source trace confirms that `CallEvidence` is the earliest shared carrier for the typed value; its current `Default` derive would need an expl"
+      },
+      {
+        "at": "2026-11-01T20:28:58.645Z",
+        "kind": "agent",
+        "text": "The report now separates what existing derivations can transport from the ICFG case that lacks a complete retained proof. The remaining gate is empirical: the build has reached the policy dependencies"
+      },
+      {
+        "at": "2026-11-01T20:30:13.259Z",
+        "kind": "agent",
+        "text": "One source check changed the acceptance plan: on this head, taint and flow use `WholePolicyFamily` with zero policy units, so there is no taint unit to replay warm. I’ve recorded that concrete limit i"
+      },
+      {
+        "at": "2026-11-01T20:31:30.374Z",
+        "kind": "agent",
+        "text": "I found `JAVA_HOME` is set on this host, and the JVM dependency scanner can discover it by default. I’ll rerun the probe with `JAVA_HOME` and `BIFROST_JDK_HOME` removed so the “no JDK” result is valid"
+      },
+      {
+        "at": "2026-11-01T20:35:24.335Z",
+        "kind": "agent",
+        "text": "The Java result is now decisive: with checked-in JDK models but no JDK home, the existing command policy finds the flow on the default ICFG route, while dispatch reports external boundaries and never "
+      },
+      {
+        "at": "2026-11-01T20:37:30.816Z",
+        "kind": "agent",
+        "text": "The Go external-call control passes on the default ICFG route and enters native points: its selected answer has an empty typed ledger, then call relations flattens the diagnostic. The Go model-selecti"
+      }
+    ]
+  }
+}

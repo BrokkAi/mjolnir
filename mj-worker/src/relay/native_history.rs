@@ -136,7 +136,9 @@ impl NativeHistoryEvidence {
             | RelayObservation::HarnessTurnStarted { .. }
             | RelayObservation::PermissionAutoApproved { .. }
             | RelayObservation::ElicitationRequested { .. } => self.used = true,
-            RelayObservation::NativeAgent { .. }
+            RelayObservation::ManagedSubagentConfigured { .. }
+            | RelayObservation::WorkLivenessChanged { .. }
+            | RelayObservation::NativeAgent { .. }
             | RelayObservation::AgentInitialized { .. }
             | RelayObservation::SessionConfigured { .. }
             | RelayObservation::SessionModesConfigured { .. }
@@ -158,6 +160,8 @@ impl NativeHistoryEvidence {
             | RelayObservation::MailboxHookLeaseReturned { .. }
             | RelayObservation::MailboxEventsDelivered { .. }
             | RelayObservation::Closing
+            | RelayObservation::HandbackCheckStarted { .. }
+            | RelayObservation::QuestionTargetUpdated { .. }
             | RelayObservation::TurnAssessmentUpdated { .. }
             | RelayObservation::Closed => {}
         }
@@ -255,6 +259,7 @@ mod tests {
                     .record_command_completed(
                         "sent-work",
                         RelayCommandOutcome::Prompt {
+                            work_facts: None,
                             stop_reason: "end_turn".into(),
                             diagnostic: None,
                             usage: None,

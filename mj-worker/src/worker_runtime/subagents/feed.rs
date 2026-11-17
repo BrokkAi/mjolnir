@@ -11,6 +11,17 @@ pub(in crate::worker_runtime) struct SubagentFeed {
 }
 
 impl SubagentFeed {
+    /// Whether the queue holds a generation this connection has not been
+    /// given in full.
+    pub fn has_unpolled(&self, endpoint: &SubagentEndpoint) -> bool {
+        let generation = endpoint
+            .state
+            .lock()
+            .expect("sub-agent queue lock poisoned")
+            .generation;
+        self.known_generation != Some(generation)
+    }
+
     pub fn poll(
         &mut self,
         endpoint: Option<&SubagentEndpoint>,

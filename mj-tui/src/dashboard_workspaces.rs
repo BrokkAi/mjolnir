@@ -46,13 +46,18 @@ impl DashboardState {
     pub(crate) fn child_workspace_for(&self, child: &str) -> Option<ChildWorkspace> {
         Some(ChildWorkspace {
             parent_id: self.subagent_parent_for(child)?,
-            kind: self
-                .state
-                .subagents
-                .get(child)
-                .map_or(mj_core::subagent::SubagentKind::Worker, |relation| {
-                    relation.kind
-                }),
+            kind: self.state.subagents.get(child).map_or(
+                mj_core::subagent::SubagentKind::Worker,
+                |relation| {
+                    match relation.kind {
+                        // The oracle shows in the Sub-agents view.
+                        mj_core::subagent::SubagentKind::Oracle => {
+                            mj_core::subagent::SubagentKind::Worker
+                        }
+                        kind => kind,
+                    }
+                },
+            ),
         })
     }
 
@@ -275,7 +280,18 @@ impl DashboardState {
             self.clamp_selections();
             return;
         }
-        let workspace_focused = self.focus == Focus::Workspaces;
+        // Only the pending attention jump continues the traversal across tabs.
+        let attention_navigation = self.attention_navigation.take().filter(|navigation| {
+            self.pending_navigation
+                .as_ref()
+                .is_some_and(|pending| pending.session_id == navigation.session_id)
+                && self
+                    .state
+                    .sessions
+                    .get(&navigation.session_id)
+                    .is_some_and(|session| Some(&session.workspace_id) == workspace_id.as_ref())
+        });
+        let mut workspace_focused = self.focus == Focus::Workspaces;
         if let Some(current) = self.active_workspace_id.clone() {
             self.workspace_views
                 .insert(current, WorkspaceViewState::from_dashboard(self));
@@ -292,6 +308,7 @@ impl DashboardState {
         if let Some(workspace_id) = workspace_id {
             if let Some(view) = self.workspace_views.get(&workspace_id).cloned() {
                 self.sessions_scroll.set(view.sessions_scroll);
+                *self.sessions_wheel_scrolled_from.borrow_mut() = view.sessions_wheel_scrolled_from;
                 self.targets_scroll.set(view.targets_scroll);
                 self.quota_scroll.set(view.quota_scroll);
                 self.capacity_index = view.capacity_index;
@@ -304,6 +321,7 @@ impl DashboardState {
                 self.sessions_scroll.set(0);
                 self.targets_scroll.set(0);
                 self.quota_scroll.set(0);
+                self.sessions_wheel_scrolled_from.take();
                 self.capacity_index = 0;
                 self.quota_index = 0;
                 self.restore_workspace_pane_sizes(PaneSizes::default());
@@ -322,6 +340,7 @@ impl DashboardState {
             self.sessions_scroll.set(0);
             self.targets_scroll.set(0);
             self.quota_scroll.set(0);
+            self.sessions_wheel_scrolled_from.take();
             self.capacity_index = 0;
             self.quota_index = 0;
             self.restore_workspace_pane_sizes(PaneSizes::default());
@@ -334,9 +353,9 @@ impl DashboardState {
                 Some(record.workspace_id.as_str()) == self.active_workspace_id()
             }) {
                 if self
-                    .navigation_session
-                    .as_deref()
-                    .and_then(|child| self.state.subagents.get(child))
+                    .pending_navigation
+                    .as_ref()
+                    .and_then(|pending| self.state.subagents.get(&pending.session_id))
                     .is_some_and(|relation| {
                         relation.kind == mj_core::subagent::SubagentKind::Reviewer
                     })
@@ -345,24 +364,39 @@ impl DashboardState {
                 } else {
                     self.open_subagent_workspace(parent_id);
                 }
-                if let Some(session) = self.navigation_session.clone() {
-                    self.select_active_session(&session);
+                if let Some(pending) = self.pending_navigation.clone() {
+                    self.select_active_session(&pending.session_id);
                     self.clear_filter_hiding_selection();
                 }
             }
             self.navigation_subagent_parent = None;
-        } else if let Some(session) = self.navigation_session.clone()
-            && self.state.sessions.get(&session).is_some_and(|record| {
-                Some(record.workspace_id.as_str()) == self.active_workspace_id()
-            })
+        } else if let Some(pending) = self.pending_navigation.clone()
+            && self
+                .state
+                .sessions
+                .get(&pending.session_id)
+                .is_some_and(|record| {
+                    Some(record.workspace_id.as_str()) == self.active_workspace_id()
+                })
         {
-            self.select_active_session(&session);
+            if let Some(record) = self.state.sessions.get(&pending.session_id) {
+                let key = self.project_source(record).key;
+                self.collapsed_project_keys.remove(&key);
+            }
+            self.select_active_session(&pending.session_id);
             self.clear_filter_hiding_selection();
+            // A move that only selects the row lands on Sessions, wherever the
+            // focus was, so the row's own keys act on it.
+            if !pending.open {
+                self.focus = Focus::Sessions;
+                workspace_focused = false;
+            }
         }
         self.clamp_selections();
         if workspace_focused {
             self.focus = Focus::Workspaces;
         }
+        self.attention_navigation = attention_navigation;
     }
 
     /// Applies a controller-provided pane-size cache unless this client has
@@ -379,6 +413,7 @@ impl DashboardState {
             .entry(workspace_id.to_owned())
             .or_insert_with(|| WorkspaceViewState {
                 sessions_scroll: 0,
+                sessions_wheel_scrolled_from: None,
                 targets_scroll: 0,
                 quota_scroll: 0,
                 capacity_index: 0,
@@ -419,6 +454,7 @@ impl DashboardState {
         if !self.state.sessions.contains_key(session_id) && !unloaded_child {
             return;
         }
+        self.attention_navigation = None;
         let pane = self
             .pane_for_session(session_id)
             .unwrap_or(self.browse_pane());

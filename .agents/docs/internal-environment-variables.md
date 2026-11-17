@@ -59,14 +59,16 @@ Test-only hooks (`MJ_TEST_*`, `MJ_CHAOS_ISOLATED`) live behind the
 `test-hooks` cargo feature in `mj-core/src/test_hooks.rs` and are not part of
 the default build.
 
-Jev turn classification uses the public Cloudflare proxy by default.
-`TYPESAFE_API_KEY` selects direct TypeSafe requests instead. Shared lookup
-in `mj_core::activity::verdict::api_key` prefers a nonempty environment value,
-then the trimmed `$HOME/.secrets/typesafe_api_key` file. The daemon forwards its
-resolved key to workers through `target_environment`, including container and
-SSH targets. There is no configuration toggle. Without a key, workers send
-evidence without authentication to the hosted proxy. Without a confident
+Classifier requests go to GLiDE (Fastino) through the hosted proxy. Current builds do not use `TYPESAFE_API_KEY` or send requests to TypeSafe; legacy Jev routes remain available for older releases. Without a confident
 successful response, existing behavior is preserved. Requests contain bounded
 recent user and assistant text, tool titles and activity facts. Running-turn
 questions produce `awaiting_input`; completed replies awaiting background work
 publish process-local `Expecting` activity without blocking checkpoints.
+
+`MJ_SESSION_PROJECT_TOOLS_ROOTS` is the controller-authored JSON array of
+repository checkout paths for container targets only (including Nitro).
+`mj-worker/src/worker_runtime/project_tools.rs` owns its parser and removes it
+before harness launch; it enables the post-clone mise preparation step. It is
+an environment handoff rather than a new launch-config field because older
+workers deny unknown launch fields. An older worker ignores this variable and
+continues its existing preparation without installing project tools.

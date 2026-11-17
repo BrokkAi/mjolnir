@@ -1,10 +1,12 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Load the account's login exports, then interpret our script as POSIX sh.
 /// User shells such as zsh have reserved variables and different syntax.
 pub fn ssh_login_script(ssh: &SshTarget, script: &str) -> CommandSpec {
     let login_command = format!("exec /bin/sh -c {}", posix_quote(script));
     ssh_command(
+        SshTrafficClass::Control,
         ssh,
         [
             "sh",
@@ -48,6 +50,7 @@ pub fn bootstrap_probe_plan(
     validate_executable(harness.executable)?;
     let mut commands = vec![
         at_boundary(
+            SshTrafficClass::Control,
             boundary,
             std::iter::once(harness.executable)
                 .chain(harness.version_args.iter().copied())
@@ -59,17 +62,87 @@ pub fn bootstrap_probe_plan(
     if let Some(bridge) = harness.bridge_executable {
         validate_executable(bridge)?;
         commands.push(
-            at_boundary(boundary, vec![bridge.to_owned(), "--version".to_owned()])
-                .purpose("probe ACP bridge version"),
+            at_boundary(
+                SshTrafficClass::Control,
+                boundary,
+                vec![bridge.to_owned(), "--version".to_owned()],
+            )
+            .purpose("probe ACP bridge version"),
         );
     }
     commands.push(
-        at_boundary(boundary, vec!["git".to_owned(), "--version".to_owned()]).purpose("probe Git"),
+        at_boundary(
+            SshTrafficClass::Control,
+            boundary,
+            vec!["git".to_owned(), "--version".to_owned()],
+        )
+        .purpose("probe Git"),
     );
     Ok(CommandPlan {
         description: "probe reusable target tools".to_owned(),
         commands,
     })
+}
+
+/// Complete container creation before clone/profile staging can write HOME.
+/// Query as the configured container user, then create/chown as container root.
+/// This also handles images whose non-root user's home is missing.
+pub(crate) fn initialize_container_home(
+    locator: &TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    let (engine, container, ssh) = match locator {
+        TargetLocator::LocalPodman { container_id, .. }
+        | TargetLocator::LocalDocker { container_id, .. }
+        | TargetLocator::AppleContainer { container_id, .. } => (
+            locator.container_engine().expect("container target"),
+            container_id,
+            None,
+        ),
+        TargetLocator::SshPodman {
+            container_id, ssh, ..
+        }
+        | TargetLocator::SshDocker {
+            container_id, ssh, ..
+        }
+        | TargetLocator::SshAppleContainer {
+            container_id, ssh, ..
+        }
+        | TargetLocator::SshNitro {
+            container_id, ssh, ..
+        } => (
+            locator.container_engine().expect("container target"),
+            container_id,
+            Some(ssh),
+        ),
+        _ => return Ok(()),
+    };
+    let script = format!(
+        r#"set -eu
+mj_home_engine() {{ {} "$@"; }}
+container=$1
+owner=$(mj_home_engine exec "$container" sh -c 'printf "%s:%s" "$(id -u)" "$(id -g)"')
+# The slash sentinel preserves even a HOME ending with newlines through $().
+home=$(mj_home_engine exec "$container" sh -c 'printf "%s/" "${{HOME:?container HOME is unset}}"')
+home=${{home%/}}
+mj_home_engine exec --user 0 "$container" sh -c 'set -eu; mkdir -p -- "$1"; chown -- "$2" "$1"' mj-home "$home" "$owner"
+"#,
+        engine_shell_words(engine)
+    );
+    let command = CommandSpec::new("sh", ["-c", &script, "mj-container-home", container]);
+    let command = match ssh {
+        Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
+        None => command,
+    }
+    .purpose("initialize session container home")
+    .stage(ProvisionStage::Provisioning);
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status == 0,
+        "initialize session container home failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
 }
 
 /// Thin Linux Git bootstrap. Managed containers also receive GitHub CLI and
@@ -88,6 +161,7 @@ pub fn install_git_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
         description: "install missing Git".to_owned(),
         commands: vec![
             at_boundary(
+                SshTrafficClass::Control,
                 boundary,
                 vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
             )
@@ -105,6 +179,7 @@ pub(super) const BUNDLE_REPOSITORIES_PARALLEL_GROUP: u32 = 1;
 pub(crate) fn clone_commands(
     bundle: &ProjectBundleSpec,
     workspace: &str,
+    github_token: Option<&str>,
     wrap: impl Fn(Vec<String>) -> CommandSpec,
 ) -> Vec<CommandSpec> {
     let mut commands = vec![
@@ -122,12 +197,25 @@ pub(crate) fn clone_commands(
             .url
             .as_ref()
             .expect("validated network repository");
+        let wrap_fetch = |args: Vec<String>| {
+            if let Some(token) = github_token
+                && mj_core::remote_git::is_github_https_url(url)
+                && fetches_repository(&args)
+            {
+                let (args, input) = clone_with_github_token(args, token);
+                wrap(args).with_sensitive_stdin(input)
+            } else {
+                wrap(args)
+            }
+        };
         if let Some(cutoff) = &repository.history_cutoff {
             commands.extend(
                 cutoff_checkout_commands(&destination, url, repository, cutoff)
                     .into_iter()
                     .map(|(args, purpose)| {
-                        wrap(args).purpose(purpose).stage(ProvisionStage::Cloning)
+                        wrap_fetch(args)
+                            .purpose(purpose)
+                            .stage(ProvisionStage::Cloning)
                     }),
             );
             continue;
@@ -146,7 +234,7 @@ pub(crate) fn clone_commands(
         args.push(url.clone());
         args.push(destination);
         commands.push(
-            wrap(args)
+            wrap_fetch(args)
                 .purpose(format!("clone {}", repository.destination))
                 .stage(ProvisionStage::Cloning)
                 .parallel_group(BUNDLE_REPOSITORIES_PARALLEL_GROUP),
@@ -231,9 +319,8 @@ pub(super) fn fetches_repository(args: &[String]) -> bool {
     }
 }
 
-/// Run one `git clone` from [`clone_commands`] with a GitHub token that only
-/// that process sees. Bare hosts have no GitHub CLI login before the worker's
-/// credential sync, so a private HTTPS clone would otherwise prompt and fail.
+/// Run one checkout fetch with a GitHub token that only that process sees.
+/// This also provisions private repositories for workers without credentials.
 /// The token arrives on stdin, so it stays out of argv and Git configuration.
 pub(super) fn clone_with_github_token(args: Vec<String>, token: &str) -> (Vec<String>, Vec<u8>) {
     let mut wrapped = vec![
@@ -243,11 +330,8 @@ pub(super) fn clone_with_github_token(args: Vec<String>, token: &str) -> (Vec<St
             .to_owned(),
         "mj-github-token".to_owned(),
         "git".to_owned(),
-        "-c".to_owned(),
-        "credential.helper=".to_owned(),
-        "-c".to_owned(),
-        "credential.helper=!f() { if [ \"$1\" = get ]; then printf '%s\\n' username=x-access-token \"password=$GH_TOKEN\"; fi; }; f".to_owned(),
     ];
+    wrapped.extend(mj_core::remote_git::github_token_credential_config());
     debug_assert_eq!(args.first().map(String::as_str), Some("git"));
     wrapped.extend(args.into_iter().skip(1));
     let mut input = token.as_bytes().to_vec();
@@ -261,9 +345,13 @@ pub fn install_rsync_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
     CommandPlan {
         description: "install EC2 Move transport".into(),
         commands: vec![
-            at_boundary(boundary, vec!["sh".into(), "-c".into(), script.into()])
-                .purpose("install supported rsync")
-                .stage(ProvisionStage::Provisioning),
+            at_boundary(
+                SshTrafficClass::Control,
+                boundary,
+                vec!["sh".into(), "-c".into(), script.into()],
+            )
+            .purpose("install supported rsync")
+            .stage(ProvisionStage::Provisioning),
         ],
     }
 }

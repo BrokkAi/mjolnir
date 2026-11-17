@@ -695,6 +695,7 @@ fn golden_mailbox_delivery_transcript() {
                 number: 4623,
                 title: "Model Rust built-in macro values for CQ07".into(),
                 actor: "dana".into(),
+                recipient: mj_core::mailbox::LifecycleRecipient::Creator,
                 repo: None,
             },
         ),
@@ -708,6 +709,7 @@ fn golden_mailbox_delivery_transcript() {
                 number: 4623,
                 title: "Model Rust built-in macro values for CQ07".into(),
                 actor: "erin".into(),
+                recipient: mj_core::mailbox::LifecycleRecipient::Creator,
                 repo: None,
             },
         ),
@@ -721,6 +723,7 @@ fn golden_mailbox_delivery_transcript() {
                 number: 4624,
                 title: "PR without a known merger".into(),
                 actor: String::new(),
+                recipient: mj_core::mailbox::LifecycleRecipient::Creator,
                 repo: None,
             },
         ),
@@ -734,6 +737,7 @@ fn golden_mailbox_delivery_transcript() {
                 number: 4623,
                 title: "Model Rust built-in macro values for CQ07".into(),
                 actor: "frank".into(),
+                recipient: mj_core::mailbox::LifecycleRecipient::Creator,
                 repo: None,
             },
         ),
@@ -794,6 +798,20 @@ fn golden_mailbox_delivery_transcript() {
                     }))
                     .unwrap(),
                 ),
+            },
+        ),
+        mailbox_event(
+            "github:repo#4623:merged:interested",
+            "github",
+            false,
+            513,
+            MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::Merged,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                actor: "dana".into(),
+                recipient: mj_core::mailbox::LifecycleRecipient::Interested,
+                repo: None,
             },
         ),
     ];
@@ -1024,7 +1042,8 @@ fn mailbox_deliveries_reference_their_external_events_row() {
             false,
         ),
     ] {
-        let (ids, _) = historical_references(&[event(&session, observation.clone())]).unwrap();
+        let HistoricalReferences { ids, .. } =
+            historical_references(&[event(&session, observation.clone())]).unwrap();
         assert_eq!(ids.contains(&row_id), expected, "{observation:?}");
         assert!(
             ids.iter().all(|id| id != "system:mailbox:external-events"),
@@ -1275,6 +1294,32 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
     assert_eq!(turn.command_id, "prompt-2");
     assert_eq!(turn.steered_into.as_deref(), Some("prompt-1"));
 
+    // Hard-won: #1450 review: a queued prompt rejected under a steered turn marked the running prompt answered
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "prompt-3".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("third")],
+            },
+            created_at_ms: 31,
+        },
+    );
+    let third = session.applied_event_ordinal;
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandRejected {
+            reason: None,
+            command_id: "prompt-3".into(),
+            command: RelayCommandKind::Prompt,
+            message: "refused".into(),
+        },
+    );
+    let rejected = session.last_turn_outcome.clone().expect("the rejection");
+    assert!(rejected.answers(third));
+    assert!(!rejected.answers(first));
+    assert!(!rejected.answers(second));
+
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
@@ -1282,6 +1327,7 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
@@ -1296,6 +1342,85 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
     assert_eq!(outcome.accepted_ordinal, Some(second));
     assert!(second > first);
     assert_eq!(outcome.turn_start_position, Some(turn.turn_start_position));
+    assert!(outcome.answers(first));
+    assert!(outcome.answers(second));
+
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 35 },
+    );
+    let first_harness = session.applied_event_ordinal;
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: first_harness,
+                stop_reason: "end_turn".into(),
+                work_facts: None,
+            }),
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    assert!(session.last_turn_outcome.as_ref().unwrap().answers(second));
+
+    // Hard-won: #1450 review: a prompt removed from the queue counted as answered by a later harness turn
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 40 },
+    );
+    let start = session.applied_event_ordinal;
+    // Hard-won: #1450 review: a queued configuration change held back the answer for a removed prompt
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "set-config".into(),
+            command: RelayCommand::SetConfig {
+                key: "model".into(),
+                value: "gpt-9".into(),
+            },
+            created_at_ms: 40,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "removed".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("removed")],
+            },
+            created_at_ms: 41,
+        },
+    );
+    let removed = session.applied_event_ordinal;
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: Some(RelayCommandKind::RemoveQueuedPrompt),
+            command_id: "remove".into(),
+            outcome: RelayCommandOutcome::QueueChanged {
+                removed_command_ids: vec!["removed".into()],
+            },
+        },
+    );
+    assert!(!session.last_turn_outcome.as_ref().unwrap().answers(removed));
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: start,
+                stop_reason: "end_turn".into(),
+                work_facts: None,
+            }),
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    let outcome = session.last_turn_outcome.as_ref().unwrap();
+    assert!(outcome.answers(first));
+    assert!(outcome.answers(second));
+    assert!(outcome.answers(removed));
 }
 
 #[test]
@@ -1415,6 +1540,25 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
     apply_observation(
         &mut session,
         RelayObservation::CommandQueued {
+            command_id: "running".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("run")],
+            },
+            created_at_ms: 1,
+        },
+    );
+    let running = session.applied_event_ordinal;
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: "running".into(),
+            started_at_ms: 2,
+        },
+    );
+
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
             command_id: "prompt-1".into(),
             command: RelayCommand::Prompt {
                 prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
@@ -1434,9 +1578,11 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
         },
     );
 
-    assert!(session.active_turn.is_none());
+    assert!(session.active_turn.is_some());
     assert!(session.queued_prompts.is_empty());
     let outcome = session.last_turn_outcome.clone().expect("an outcome");
+    assert!(outcome.answers(accepted));
+    assert!(!outcome.answers(running));
     assert_eq!(outcome.accepted_ordinal, Some(accepted));
     assert_eq!(
         outcome.turn_start_position, None,
@@ -1487,6 +1633,7 @@ fn queued_prompts_keep_their_own_acceptance_ordinals_through_their_turns() {
                 command: None,
                 command_id: command_id.into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "EndTurn".into(),
                     usage: None,
@@ -1544,14 +1691,34 @@ fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
         "output inside the turn streams into a fresh item"
     );
 
-    apply_observation(
-        &mut session,
+    let settled = event(
+        &session,
         RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: 1,
+                stop_reason: "end_turn".into(),
+                work_facts: None,
+            }),
             origin: Some("task-notification".into()),
             prompt_in_flight: false,
         },
     );
+    let projected = project_relay_event(&session, &settled).unwrap();
+    assert!(
+        projected
+            .mutation
+            .api_events
+            .iter()
+            .any(|event| matches!(event, mj_core::storage::ApiEventData::TurnEnded { .. }))
+    );
+    apply_committed_projection_event(&mut session, &settled, projected.mutation).unwrap();
 
+    let outcome = session.last_turn_outcome.as_ref().unwrap();
+    assert_eq!(outcome.command_id, "harness-turn-1");
+    assert_eq!(outcome.turn_start_position, Some(1));
+    assert!(
+        matches!(&outcome.outcome, TurnOutcomeKind::Completed { stop_reason } if stop_reason == "end_turn")
+    );
     assert_eq!(session.execution, MaterializedExecutionState::Idle);
     assert!(
         !session.transcript.iter().any(|item| matches!(
@@ -1569,6 +1736,45 @@ fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
         mj_core::state::ProjectionWindow::of(&session).latest_turn_start_position,
         Some(1)
     );
+}
+
+// Hard-won: #1450 review: a Codex tail reused an older autonomous marker.
+#[test]
+fn native_tail_preserves_prompt_outcome_and_autonomous_error_is_retained() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 1 },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: 1,
+                stop_reason: "error".into(),
+                work_facts: None,
+            }),
+        },
+    );
+    assert!(
+        matches!(&session.last_turn_outcome.as_ref().unwrap().outcome, TurnOutcomeKind::Completed { stop_reason } if stop_reason == "error")
+    );
+    let mut prompt = session.last_turn_outcome.clone().unwrap();
+    prompt.command_id = "prompt".into();
+    prompt.accepted_ordinal = Some(3);
+    session.last_turn_outcome = Some(prompt);
+    let completed = session.last_turn_outcome.clone();
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            origin: Some("codex".into()),
+            prompt_in_flight: false,
+            autonomous: None,
+        },
+    );
+    assert_eq!(session.last_turn_outcome, completed);
 }
 
 #[test]
@@ -1589,6 +1795,7 @@ fn a_harness_turn_without_output_keeps_its_divider_and_stops_its_clock() {
     apply_observation(
         &mut session,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: Some("autonomous_task_ended".into()),
             prompt_in_flight: false,
         },
@@ -1640,6 +1847,7 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
     apply_observation(
         &mut session,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: Some("task-notification".into()),
             prompt_in_flight: true,
         },
@@ -1666,6 +1874,7 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -1699,6 +1908,7 @@ fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
             command: None,
             command_id: "initial-prompt".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -1719,11 +1929,92 @@ fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
     apply_observation(
         &mut session,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: Some("codex".into()),
             prompt_in_flight: false,
         },
     );
     assert_eq!(session.execution, MaterializedExecutionState::Idle);
+}
+
+// Hard-won: #1450 follow-up: a cancel during a Codex native tail ended an older harness turn
+#[test]
+fn cancelling_a_codex_native_tail_preserves_the_prompt_outcome() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 1 },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: 1,
+                stop_reason: "end_turn".into(),
+                work_facts: None,
+            }),
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "prompt".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("go")],
+            },
+            created_at_ms: 2,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: "prompt".into(),
+            started_at_ms: 3,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 4 },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
+            command_id: "prompt".into(),
+            outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        },
+    );
+    let outcome = session.last_turn_outcome.clone();
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: Some(mj_core::relay::RelayCommandKind::CancelTurn),
+            command_id: "cancel".into(),
+            outcome: RelayCommandOutcome::Cancelled,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: None,
+            origin: Some("codex".into()),
+            prompt_in_flight: false,
+        },
+    );
+    assert_eq!(session.last_turn_outcome, outcome);
+    assert!(!session.transcript.iter().any(|item| {
+        item.stable_id
+            .starts_with(mj_core::transcript::TURN_INTERRUPTED_ITEM_PREFIX)
+    }));
 }
 
 // Hard-won: 1389c545: worker restart left an open autonomous turn that canonical checkpoint export rejected.
@@ -1796,6 +2087,7 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -1891,6 +2183,7 @@ fn a_cancelled_turn_ends_with_an_interrupted_row() {
                 command: None,
                 command_id: "prompt".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     stop_reason: stop_reason.into(),
                     usage: None,
                     diagnostic: None,
@@ -1961,6 +2254,18 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
         .expect("the harness turn marker")
         .position;
     cancel(&mut session, "cancel-1");
+    assert_eq!(interrupted_rows(&session), 0);
+    assert!(session.last_turn_outcome.is_none());
+    let settle = RelayObservation::HarnessTurnSettled {
+        autonomous: Some(mj_core::relay::SettledHarnessTurn {
+            start_ordinal: started_at,
+            stop_reason: "cancelled".into(),
+            work_facts: None,
+        }),
+        origin: None,
+        prompt_in_flight: false,
+    };
+    apply_observation(&mut session, settle.clone());
     assert_eq!(interrupted_rows(&session), 1, "{:?}", session.transcript);
     let outcome = session.last_turn_outcome.as_ref().expect("a turn outcome");
     assert_eq!(
@@ -1972,6 +2277,12 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
         outcome.command_id,
         mj_core::continuation::harness_turn_id(started_at)
     );
+
+    assert_eq!(outcome.accepted_ordinal, None);
+    let cancelled = session.last_turn_outcome.clone();
+    apply_observation(&mut session, settle);
+    assert_eq!(session.last_turn_outcome, cancelled);
+    assert_eq!(interrupted_rows(&session), 1);
 
     // Nothing running: nothing to interrupt.
     let mut idle = MaterializedSession::empty("session");
@@ -2071,6 +2382,7 @@ fn streamed_chunks_are_one_unread_logical_agent_message() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -2216,6 +2528,7 @@ fn backward_relay_clock_never_regresses_transcript_change_times() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -2305,7 +2618,7 @@ fn terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit
     let record = &attached_terminal_outputs(&session.transcript[0])[0];
     assert!(record.truncated);
     assert!(record.output.len() <= 4 * 1024 * 1024);
-    assert!(output.ends_with(&record.output));
+    assert!(output.ends_with(record.output.text().as_ref()));
 
     // A daemon rebuilds projection ownership solely from the serialized session.
     session = serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
@@ -2318,7 +2631,12 @@ fn terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit
         json!({"terminal_exit": {"terminal_id": "term-1", "exit_code": 128, "signal": null}}),
     );
     let record = &attached_terminal_outputs(&session.transcript[0])[0];
-    assert!(record.output.ends_with("first failure\nlate failure\n"));
+    assert!(
+        record
+            .output
+            .text()
+            .ends_with("first failure\nlate failure\n")
+    );
     assert_eq!(record.exit_code, Some(128));
     assert!(record.truncated);
 
@@ -2331,7 +2649,7 @@ fn terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit
         }),
     );
     let record = &attached_terminal_outputs(&session.transcript[0])[0];
-    assert_eq!(record.output, "complete failure\n");
+    assert_eq!(record.output.text(), "complete failure\n");
     assert_eq!(record.exit_code, None);
     assert_eq!(record.signal.as_deref(), Some("SIGTERM"));
     assert!(!record.truncated);
@@ -2386,7 +2704,7 @@ fn resent_tool_call_keeps_identity_and_replaces_the_call_payload() {
     let TranscriptBody::Tool { call, .. } = &item.body else {
         panic!("re-sent tool call stayed a tool item");
     };
-    assert_eq!(call["title"], json!("read file again"));
+    assert_eq!(call.value()["title"], json!("read file again"));
 
     apply_committed_projection_event(&mut session, &resend, projected.mutation)
         .expect("the merged item passes the projection integrity checks");
@@ -2432,7 +2750,7 @@ fn tool_call_update_then_resent_tool_call_survives_the_projection() {
     let TranscriptBody::Tool { call, .. } = &item.body else {
         panic!("the item stayed a tool item");
     };
-    assert_eq!(call["title"], json!("shell (retried)"));
+    assert_eq!(call.value()["title"], json!("shell (retried)"));
 }
 
 /// A tool call whose only content is a terminal reference, the shape
@@ -2578,7 +2896,7 @@ fn late_fallback_claims_output_from_a_fast_terminal() {
     let TranscriptBody::Tool { call, .. } = &session.transcript[0].body else {
         panic!("the parked output became a fallback tool");
     };
-    let call: ToolCall = serde_json::from_value(call.clone()).unwrap();
+    let call: ToolCall = call.decode().unwrap();
     assert_eq!(call.status, ToolCallStatus::Completed);
 }
 
@@ -2626,7 +2944,7 @@ fn terminal_output_before_the_tool_call_attaches_when_the_call_arrives() {
     assert_eq!(session.transcript[0].stable_id, "tool:call-1");
     let outputs = attached_terminal_outputs(&session.transcript[0]);
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].output, "build finished\n");
+    assert_eq!(outputs[0].output.text(), "build finished\n");
 
     // Both orderings converge on the same tool body.
     let mut reversed = MaterializedSession::empty("session-1");
@@ -2678,7 +2996,7 @@ fn mismatched_raw_result_does_not_hide_a_genuine_orphan_failure() {
     assert!(session.transcript.iter().any(|item| matches!(
         &item.body,
         TranscriptBody::TerminalOutput { record }
-            if record.output == "orphan failure\n"
+            if record.output.text() == "orphan failure\n"
     )));
 }
 
@@ -2755,11 +3073,11 @@ fn wholesale_tool_call_update_keeps_the_attached_terminal_output() {
     assert_eq!(session.transcript.len(), 1);
     let outputs = attached_terminal_outputs(&session.transcript[0]);
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].output, "build finished\n");
+    assert_eq!(outputs[0].output.text(), "build finished\n");
     let TranscriptBody::Tool { call, .. } = &session.transcript[0].body else {
         panic!("the item stayed a tool item");
     };
-    assert_eq!(call["status"], json!("completed"));
+    assert_eq!(call.value()["status"], json!("completed"));
 }
 
 /// Grok Build names the terminal on a mid-flight update and then replaces
@@ -2794,7 +3112,7 @@ fn a_tool_call_that_dropped_its_terminal_reference_still_attaches_the_output() {
     assert_eq!(session.transcript[0].stable_id, "tool:call-1");
     let outputs = attached_terminal_outputs(&session.transcript[0]);
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].output, "build finished\n");
+    assert_eq!(outputs[0].output.text(), "build finished\n");
     let TranscriptBody::Tool {
         call,
         terminal_refs,
@@ -2805,7 +3123,7 @@ fn a_tool_call_that_dropped_its_terminal_reference_still_attaches_the_output() {
     };
     assert_eq!(terminal_refs, &["term-1".to_owned()]);
     assert_eq!(
-        tool_call_terminal_ids(call),
+        call.terminal_ids(),
         Vec::<String>::new(),
         "the final call really did drop the reference"
     );
@@ -3297,7 +3615,7 @@ fn windowed_current_turn_keeps_streaming_and_tool_updates_identical_to_full_hist
     let TranscriptBody::Tool { call, .. } = &tool.body else {
         panic!("tool")
     };
-    assert_eq!(call["status"], "completed");
+    assert_eq!(call.value()["status"], "completed");
 }
 
 // Hard-won: 32f1541e: checkpoint recovery failures exposed daemon bookkeeping IDs as transcript messages.
@@ -3347,6 +3665,7 @@ fn a_handback_reminder_is_shown_as_the_prompt_that_started_its_turn() {
             command: RelayCommand::HandbackReminder {
                 completed_command_id: "task".into(),
                 completed_ordinal: 36,
+                running: Vec::new(),
             },
             created_at_ms: 10,
         },
@@ -3425,7 +3744,7 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
         created_at_ms: 40,
         last_changed_at_ms: 40,
         body: TranscriptBody::Tool {
-            call: json!({
+            call: (json!({
                 "toolCallId": "call-1",
                 "title": "Read file",
                 "kind": "read",
@@ -3434,7 +3753,8 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
                 "rawInput": {"path": "README.md"},
                 "rawOutput": {"bytes": 42},
                 "_meta": {"provider": "test"}
-            }),
+            }))
+            .into(),
             terminal_outputs: vec![TerminalOutputRecord {
                 terminal_id: "term-1".into(),
                 output: "ok\n".into(),
@@ -3523,4 +3843,31 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
     assert_eq!(restored.transcript[0].position, 2);
     assert_eq!(restored.unread_agent_messages_after(1), 1);
     assert_eq!(restored, session);
+}
+
+// The controller reads an autonomous turn's work facts from the outcome this
+// projection builds; the settlement is their only source.
+#[test]
+fn an_autonomous_turn_settlement_carries_its_work_facts_into_the_outcome() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 35 },
+    );
+    let start = session.applied_event_ordinal;
+    let facts = mj_core::work_facts::WorkFacts::unavailable("under test");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: start,
+                stop_reason: "end_turn".into(),
+                work_facts: Some(Box::new(facts.clone())),
+            }),
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    let outcome = session.last_turn_outcome.as_ref().unwrap();
+    assert_eq!(outcome.work_facts.as_ref(), Some(&facts));
 }

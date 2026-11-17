@@ -1342,7 +1342,8 @@ mod tests {
             | HarnessKind::Grok
             | HarnessKind::Muse
             | HarnessKind::OpenCode
-            | HarnessKind::Dsh => &[],
+            | HarnessKind::Dsh
+            | HarnessKind::Antigravity => &[],
         }
     }
 

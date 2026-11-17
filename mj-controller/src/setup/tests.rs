@@ -10,17 +10,10 @@ fn an_api_key_codex_profile_is_authenticated_by_its_configuration_file() {
     let home = tempfile::tempdir().unwrap();
     let executor = FakeExecutor::succeeds();
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: [("ZAI_API_KEY".to_owned(), "key".to_owned())]
             .into_iter()
             .collect(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     assert!(
@@ -62,6 +55,29 @@ impl FakeExecutor {
 }
 
 impl CommandExecutor for FakeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let index = self.commands.borrow().len();
         self.commands.borrow_mut().push(command.clone());
@@ -88,6 +104,29 @@ impl RuntimeProbeExecutor {
 }
 
 impl CommandExecutor for RuntimeProbeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         if self.outputs.borrow().is_empty() {
@@ -162,7 +201,12 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
     );
 
     assert_eq!(homes.len(), 5);
-    assert!(homes.iter().all(|home| home.authenticated));
+    // On a Mac the Keychain is the only Claude login (#1491): a home holding
+    // just a `.credentials.json` is not signed in there.
+    for home in &homes {
+        let keychain_only = home.kind == HarnessKind::Claude && cfg!(target_os = "macos");
+        assert_eq!(home.authenticated, !keychain_only, "{home:?}");
+    }
     let codex_profiles = homes
         .iter()
         .filter(|home| home.path == codex)
@@ -183,7 +227,7 @@ fn an_installed_harness_is_offered_before_its_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let executor = FakeExecutor {
         commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 0, 1],
+        statuses: vec![1, 1, 1, 1, 1, 0, 1, 1],
     };
     let mut homes = Vec::new();
 
@@ -223,7 +267,7 @@ fn an_installed_dsh_is_offered_before_its_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let executor = FakeExecutor {
         commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 1, 0],
+        statuses: vec![1, 1, 1, 1, 1, 1, 0, 1],
     };
     let mut homes = Vec::new();
 
@@ -339,6 +383,8 @@ fn claude_keychain_marks_the_default_home_authenticated_without_a_marker() {
         commands[0].args,
         [
             "find-generic-password",
+            "-a",
+            &claude_keychain_account(),
             "-s",
             "Claude Code-credentials",
             "-w"
@@ -405,25 +451,12 @@ fn claude_credential_evidence_requires_a_nonempty_login_secret() {
     assert!(!claude_credentials_contain_login(b"not json"));
 }
 
+// Hard-won: f1af21f10: a relative-path remote was taken for GitHub owner/repo.
 #[test]
-fn github_origin_parser_accepts_standard_https_and_ssh_forms() {
-    for origin in [
-        "github.com:BrokkAi/hel",
-        "https://github.com/BrokkAi/hel.git",
-        "git@github.com:BrokkAi/hel.git",
-        "ssh://git@github.com/BrokkAi/hel.git",
-        "ssh://git@ssh.github.com:443/BrokkAi/hel.git",
-    ] {
-        assert_eq!(
-            github_repository_from_origin(origin),
-            Some(GithubRepository {
-                owner: "BrokkAi".into(),
-                repository: "hel".into(),
-            })
-        );
-    }
+fn a_relative_path_origin_is_not_a_github_repository() {
+    let executor = RuntimeProbeExecutor::new([ok(b"mirror/repo.git\n")]);
     assert_eq!(
-        github_repository_from_origin("https://example.com/hel"),
+        discover_github_repository(&executor, Path::new("/work/mirror")),
         None
     );
 }

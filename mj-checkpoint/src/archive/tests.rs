@@ -44,6 +44,11 @@ impl GitCommandRunner for CollectionGit {
                 )
             }
             Some("show-ref") => (1, Vec::new()),
+            // Only the checkout itself: no linked worktrees.
+            Some("worktree") => (
+                0,
+                format!("worktree {}\n", repository.display()).into_bytes(),
+            ),
             Some("rev-parse")
                 if arguments
                     .iter()
@@ -161,6 +166,7 @@ fn repository(id: &str) -> RepositorySnapshot {
         unstaged_patch: format!("unstaged-{id}").into_bytes(),
         untracked_tar: tar_with_file("scripts/tool.sh", b"#!/bin/sh\n", 0o755),
         operation_payloads: None,
+        linked_worktrees: Vec::new(),
     }
 }
 
@@ -322,7 +328,7 @@ pub(super) fn input() -> ArchiveInput {
         },
         native_artifacts: vec![NativeArtifact {
             relative_path: PathBuf::from("sessions/native-1/rollout.jsonl"),
-            data: b"native transcript".to_vec(),
+            data: (b"native transcript".to_vec()).into(),
             mode: 0o600,
         }],
         repositories: vec![repository("hel"), repository("worker")],
@@ -387,7 +393,7 @@ fn streaming_verification_does_not_retain_large_noncanonical_payloads() {
     archive_input.repositories.clear();
     archive_input.native_artifacts = vec![NativeArtifact {
         relative_path: PathBuf::from("sessions/native-1/large-rollout.jsonl"),
-        data: vec![b'x'; LARGE_PAYLOAD_BYTES],
+        data: (vec![b'x'; LARGE_PAYLOAD_BYTES]).into(),
         mode: 0o600,
     }];
 
@@ -408,6 +414,14 @@ fn streaming_verification_does_not_retain_large_noncanonical_payloads() {
             .len()
         + verified.archive_sha256.len();
     assert!(retained_metadata_bytes < LARGE_PAYLOAD_BYTES / 100);
+    // A preparation cancellation reaches readers cloned for parallel verification.
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let archive = open_archive_cancellable(&path, Some(cancelled.clone())).unwrap();
+    let mut parallel_reader = archive.clone();
+    cancelled.store(true, std::sync::atomic::Ordering::Release);
+    let mut entry = parallel_reader.by_index(0).unwrap();
+    assert!(entry.read_to_end(&mut Vec::new()).is_err());
+    assert!(verify_archive_streaming_cancellable(&path, cancelled).is_err());
 }
 
 const TEST_PART_BYTES: usize = 4096;
@@ -433,11 +447,12 @@ fn sharded_input() -> (ArchiveInput, Vec<u8>, Vec<u8>) {
         &b"untracked payload line\n".repeat(1_000),
         0o644,
     );
-    archive_input.native_artifacts[0].data = native.clone();
+    archive_input.native_artifacts[0].data = native.clone().into();
     archive_input.repositories[0].untracked_tar = untracked.clone();
     (archive_input, native, untracked)
 }
 
+// Hard-won: 4cc32efd0: last-part EOF checking preceded completion of earlier compression.
 #[test]
 fn oversized_payloads_shard_into_parts_and_read_back_whole() {
     let directory = tempfile::tempdir().unwrap();
@@ -495,6 +510,54 @@ fn oversized_payloads_shard_into_parts_and_read_back_whole() {
         "restore consumers only ever see whole payload paths"
     );
     assert!(verified.payloads.contains_key(native_path));
+
+    // Force the schedule where the last part finishes before the source grows
+    // and the earlier parts finish. Completion belongs to ordered assembly.
+    let source_path = directory.path().join("growing-native.jsonl");
+    fs::write(&source_path, native.repeat(4)).unwrap();
+    let mut file_input = archive_input.clone();
+    file_input.native_artifacts[0].data = NativeArtifactData::File(source_path.clone());
+    let (_, payloads) = prepare_archive_with_part_size(&file_input, TEST_PART_BYTES).unwrap();
+    let payload = payloads
+        .iter()
+        .find(|payload| payload.descriptor.path == native_path)
+        .unwrap();
+    let mut offset = 0;
+    let entries: Vec<_> = payload
+        .descriptor
+        .parts
+        .iter()
+        .map(|part| {
+            let entry = StreamEntry {
+                payload,
+                name: &part.path,
+                size: part.size,
+                digest: &part.sha256,
+                offset,
+            };
+            offset += part.size;
+            entry
+        })
+        .collect();
+    let mut compressed = Vec::new();
+    for entry in entries.iter().rev() {
+        compressed.push(Some(
+            compress_stream_entry(entry, directory.path()).unwrap(),
+        ));
+        if compressed.len() == 1 {
+            OpenOptions::new()
+                .append(true)
+                .open(&source_path)
+                .unwrap()
+                .write_all(b"late source append\n")
+                .unwrap();
+        }
+    }
+    compressed.reverse();
+    let mut output = File::create(directory.path().join("growing.hel.zip")).unwrap();
+    let mut writer = zip::ZipWriter::new(&mut output);
+    let error = append_stream_entries(&mut writer, &entries, compressed).unwrap_err();
+    assert!(format!("{error:#}").contains("payload source grew during export"));
 }
 
 #[test]
@@ -693,7 +756,7 @@ fn streaming_verification_parses_a_sharded_untracked_tar_for_safety() {
         TEST_PART_BYTES,
     );
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
 
     let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
@@ -735,7 +798,7 @@ fn streaming_verification_refuses_operation_state_that_is_not_git_operation_stat
         PAYLOAD_PART_BYTES,
     );
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
 
     let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
@@ -802,7 +865,7 @@ fn streaming_verification_refuses_working_tree_paths_inside_the_git_directory() 
         }
         let path = directory.path().join(format!("{tampered}.hel.zip"));
         let mut file = File::create(&path).unwrap();
-        write_zip(&mut file, &manifest, &payloads).unwrap();
+        write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
         drop(file);
 
         let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
@@ -828,7 +891,7 @@ fn sharded_manifests_reject_reordered_or_missing_parts() {
     descriptor.parts.swap(0, 1);
     let reordered = directory.path().join("reordered.hel.zip");
     let mut file = File::create(&reordered).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = format!("{:#}", verify_archive_streaming(&reordered).unwrap_err());
     assert!(error.contains("part 0 has unexpected path"), "{error}");
@@ -843,7 +906,7 @@ fn sharded_manifests_reject_reordered_or_missing_parts() {
     descriptor.parts.pop().unwrap();
     let truncated = directory.path().join("truncated.hel.zip");
     let mut file = File::create(&truncated).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = format!("{:#}", verify_archive_streaming(&truncated).unwrap_err());
     assert!(error.contains("parts cover"), "{error}");
@@ -906,7 +969,7 @@ fn readers_without_part_support_reject_sharded_archives() {
     manifest.schema_version = ARCHIVE_SCHEMA_VERSION;
     let downgraded = directory.path().join("downgraded.hel.zip");
     let mut file = File::create(&downgraded).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = format!("{:#}", read_archive_verified(&downgraded).unwrap_err());
     assert!(
@@ -1012,7 +1075,7 @@ fn streaming_verification_rejects_noncanonical_corruption() {
     let path = directory.path().join("corrupt-native.hel.zip");
     let mut archive_input = input();
     archive_input.repositories.clear();
-    archive_input.native_artifacts[0].data = b"native payload".to_vec();
+    archive_input.native_artifacts[0].data = b"native payload".to_vec().into();
     write_archive_atomic(&path, &archive_input).unwrap();
 
     let file = OpenOptions::new()
@@ -1097,13 +1160,14 @@ fn streaming_verification_parses_untracked_tar_for_safety() {
     payload.descriptor = descriptor.clone();
     payload.data = Cow::Owned(malicious);
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
 
     let error = verify_archive_streaming(&path).unwrap_err();
     assert!(format!("{error:#}").contains("inside a Git directory"));
 }
 
+// Hard-won: 0d7aa0f1e: streaming restore skipped the whole native digest before mutating targets.
 #[test]
 fn corruption_is_detected_by_payload_digest() {
     let directory = tempfile::tempdir().unwrap();
@@ -1125,6 +1189,64 @@ fn corruption_is_detected_by_payload_digest() {
     drop(file);
 
     assert!(read_archive_verified(&path).is_err());
+
+    // Keep every part intact but corrupt the whole native digest. Every
+    // selective reader must reject it before the caller can mutate a target.
+    let (archive_input, _, _) = sharded_input();
+    let (mut manifest, payloads) =
+        prepare_archive_with_part_size(&archive_input, TEST_PART_BYTES).unwrap();
+    let native = manifest
+        .payloads
+        .iter_mut()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+    assert!(!native.parts.is_empty());
+    native.sha256 = "0".repeat(64);
+    let relative = match &native.role {
+        PayloadRole::NativeArtifact { relative_path } => relative_path.clone(),
+        _ => unreachable!(),
+    };
+    let mut file = File::create(&path).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
+    drop(file);
+    for result in [
+        verify_archive_streaming(&path).map(|_| ()),
+        read_archive_repositories(&path).map(|_| ()),
+    ] {
+        assert!(format!("{:#}", result.unwrap_err()).contains("SHA-256 mismatch"));
+    }
+    let workspace = directory.path().join("workspace");
+    let home = directory.path().join("harness");
+    let relay = directory.path().join("relay");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(home.join(&relative).parent().unwrap()).unwrap();
+    fs::write(home.join(&relative), b"existing native state").unwrap();
+    fs::write(workspace.join("keep"), b"existing work").unwrap();
+    for restore_native in [false, true] {
+        let error = crate::checkpoint::restore_checkpoint(
+            &crate::checkpoint::CheckpointRestoreSpec {
+                report_root: None,
+                archive_path: path.clone(),
+                workspace_root: workspace.clone(),
+                relay_root: relay.clone(),
+                harness_home: home.clone(),
+                restore_repositories: true,
+                restore_native,
+                queue_policy: crate::checkpoint::QueueRestorePolicy::Discard,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("SHA-256 mismatch"));
+        assert_eq!(
+            fs::read(home.join(&relative)).unwrap(),
+            b"existing native state"
+        );
+        assert_eq!(fs::read(workspace.join("keep")).unwrap(), b"existing work");
+        assert!(!relay.exists());
+        assert!(!workspace.join("hel").exists());
+    }
 }
 
 #[test]
@@ -1136,7 +1258,7 @@ fn old_and_future_schemas_are_rejected_explicitly() {
         let (mut manifest, payloads) = prepare_archive(&archive_input).unwrap();
         manifest.schema_version = schema_version;
         let mut file = File::create(&path).unwrap();
-        write_zip(&mut file, &manifest, &payloads).unwrap();
+        write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
         drop(file);
 
         let error = read_archive_verified(&path).unwrap_err();
@@ -1429,8 +1551,14 @@ fn untracked_tar_preserves_executable_mode_and_safe_symlink() {
     let paths = b"scripts/tool\0scripts/current\0".to_vec();
     #[cfg(not(unix))]
     let paths = b"scripts/tool\0".to_vec();
-    let tar =
-        build_untracked_tar(source.path(), &paths, UntrackedFiles::Include, &|_| Ok(())).unwrap();
+    let tar = build_untracked_tar(
+        source.path(),
+        &paths,
+        UntrackedFiles::Include,
+        &Default::default(),
+        &|_| Ok(()),
+    )
+    .unwrap();
     validate_untracked_tar(&tar).unwrap();
 
     let destination = tempfile::tempdir().unwrap();
@@ -1464,12 +1592,18 @@ fn untracked_tar_progress_can_cancel_before_opening_the_next_file() {
     let paths = b"first.txt\0missing.txt\0";
     let seen = std::sync::Mutex::new(Vec::new());
 
-    let error = build_untracked_tar(source.path(), paths, UntrackedFiles::Include, &|progress| {
-        let GitSnapshotProgress::UntrackedFile { current, total, .. } = progress;
-        seen.lock().unwrap().push((current, total));
-        ensure!(current < 2, "cancelled by test");
-        Ok(())
-    })
+    let error = build_untracked_tar(
+        source.path(),
+        paths,
+        UntrackedFiles::Include,
+        &Default::default(),
+        &|progress| {
+            let GitSnapshotProgress::UntrackedFile { current, total, .. } = progress;
+            seen.lock().unwrap().push((current, total));
+            ensure!(current < 2, "cancelled by test");
+            Ok(())
+        },
+    )
     .unwrap_err();
 
     assert!(error.to_string().contains("cancelled by test"));
@@ -1787,6 +1921,11 @@ fn managed_clone_snapshot_restores_secondary_branch_and_full_stash_stack() {
     );
 }
 
+/// The scope name of a main worktree's session-start refs, and a private ref
+/// that names a bare tree or a tag rather than a commit.
+const MAIN_SCOPE: &str = "refs/mj/review-baseline";
+const NON_COMMIT_TIP: &str = "refs/mj/non-commit-tip";
+
 // Hard-won: 0fefbee48: review refs disappeared when a checkpoint moved its checkout.
 #[test]
 fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
@@ -1821,15 +1960,17 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
                 "refs/mj/reviewed/{}",
                 git_line(&source, &["rev-parse", "HEAD^{tree}"])
             );
+            let overridden = reviewed.replace("refs/mj/reviewed/", "refs/mj/overridden/");
             let start = format!(
                 "refs/mj/session-start/{}/{}",
                 digest_bytes(b"moving"),
-                digest_bytes(REVIEW_BASELINE_REF.as_bytes())
+                digest_bytes(MAIN_SCOPE.as_bytes())
             );
             for (name, object) in [
                 (reviewed.as_str(), &head),
+                (overridden.as_str(), &head),
                 (start.as_str(), &head),
-                (REVIEW_BASELINE_REF, &point),
+                (NON_COMMIT_TIP, &point),
             ] {
                 git(&source, &["update-ref", name, object]);
             }
@@ -1857,8 +1998,9 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
             for (name, object) in [
                 (reviewed.as_str(), &head),
+                (overridden.as_str(), &head),
                 (start.as_str(), &head),
-                (REVIEW_BASELINE_REF, &point),
+                (NON_COMMIT_TIP, &point),
             ] {
                 assert_eq!(git_line(&destination, &["rev-parse", name]), *object);
             }
@@ -1874,6 +2016,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             );
             let later = git_line(&destination, &["rev-parse", "HEAD"]);
             git(&destination, &["update-ref", &reviewed, &later]);
+            git(&destination, &["update-ref", &overridden, &later]);
             git(&destination, &["update-ref", &start, &later]);
             let other_start = format!("refs/mj/session-start/{}/other", digest_bytes(b"other"));
             git(&destination, &["update-ref", &other_start, &later]);
@@ -1890,7 +2033,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
                     },
                 )
                 .unwrap();
-                git(&destination, &["update-ref", REVIEW_BASELINE_REF, &newer]);
+                git(&destination, &["update-ref", NON_COMMIT_TIP, &newer]);
             }
             let mut conflicting = snapshot.clone();
             conflicting
@@ -1906,18 +2049,18 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             )
             .unwrap();
             assert_eq!(git_line(&destination, &["rev-parse", &reviewed]), later);
+            assert_eq!(git_line(&destination, &["rev-parse", &overridden]), later);
             assert_eq!(git_line(&destination, &["rev-parse", &start]), head);
             assert_eq!(git_line(&destination, &["rev-parse", &other_start]), later);
-            assert_eq!(
-                git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
-                point
-            );
+            // A tip the destination already holds is not replaced.
+            let tip = git_line(&destination, &["rev-parse", NON_COMMIT_TIP]);
+            assert_eq!(tip == point, !tagged, "{tip}");
         }
     }
 }
 
 #[test]
-fn review_refs_follow_the_session_between_worktree_names() {
+fn session_starts_and_explicit_review_bases_follow_worktree_names() {
     let directory = tempfile::tempdir().unwrap();
     let origin = directory.path().join("origin");
     initialize_repository(&origin);
@@ -1935,27 +2078,20 @@ fn review_refs_follow_the_session_between_worktree_names() {
             linked.to_str().unwrap(),
         ],
     );
-    let baseline = review_baseline_ref(&SystemGit, &linked).unwrap();
-    let tree = git_line(&linked, &["rev-parse", "HEAD^{tree}"]);
-    let point = record_review_point(
-        &SystemGit,
-        &linked,
-        &ReviewPoint {
-            tree,
-            head: Some(base.clone()),
-            reflog: None,
-            pending: Vec::new(),
-            session: Some("moving".into()),
-        },
-    )
-    .unwrap();
+    let scope = session_start_scope(&SystemGit, &linked).unwrap();
+    assert_eq!(scope, "refs/mj/worktrees/linked/review-baseline");
     let start = format!(
         "refs/mj/session-start/{}/{}",
         digest_bytes(b"moving"),
-        digest_bytes(baseline.as_bytes())
+        digest_bytes(scope.as_bytes())
     );
-    git(&linked, &["update-ref", &baseline, &point]);
     git(&linked, &["update-ref", &start, &base]);
+    commit_file(&linked, "reviewed.txt", b"reviewed\n", "reviewed");
+    let reviewed = git_line(&linked, &["rev-parse", "HEAD"]);
+    git(
+        &linked,
+        &["update-ref", &push_review_base_ref(&scope), &reviewed],
+    );
     let snapshot = collect_git_snapshot(
         &SystemGit,
         &linked,
@@ -1967,6 +2103,10 @@ fn review_refs_follow_the_session_between_worktree_names() {
         },
     )
     .unwrap();
+    assert_eq!(
+        snapshot.metadata.review_baseline_ref.as_deref(),
+        Some(scope.as_str())
+    );
     let destination = clone_repository(directory.path(), &origin, "destination");
     super::git::restore_git_snapshot_for_session(
         &SystemGit,
@@ -1976,32 +2116,228 @@ fn review_refs_follow_the_session_between_worktree_names() {
         false,
     )
     .unwrap();
-    assert_eq!(
-        git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
-        point
-    );
     let relocated_start = format!(
         "refs/mj/session-start/{}/{}",
         digest_bytes(b"moving"),
-        digest_bytes(REVIEW_BASELINE_REF.as_bytes())
+        digest_bytes(MAIN_SCOPE.as_bytes())
     );
     assert_eq!(
         git_line(&destination, &["rev-parse", &relocated_start]),
         base
     );
-    let foreign = record_review_point(
+    let relocated_base = push_review_base_ref(MAIN_SCOPE);
+    assert_eq!(
+        git_line(&destination, &["rev-parse", &relocated_base]),
+        reviewed
+    );
+    // A selection already made in the destination belongs to that worktree.
+    git(&destination, &["update-ref", &relocated_base, &base]);
+    restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
+    assert_eq!(
+        git_line(&destination, &["rev-parse", &relocated_base]),
+        base
+    );
+}
+
+// Hard-won: 38f041c03: a metadata-only capture whose only refs/mj ref was a dropped pin restored as a full snapshot.
+#[test]
+fn a_metadata_only_capture_without_review_refs_never_restores_contents() {
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("origin");
+    initialize_repository(&origin);
+    commit_file(&origin, "tracked", b"base\n", "base");
+    let source = clone_repository(directory.path(), &origin, "source");
+    let captured = git_line(&source, &["rev-parse", "HEAD"]);
+    let tree = git_line(&source, &["rev-parse", "HEAD^{tree}"]);
+    git(&source, &["update-ref", MAIN_SCOPE, &tree]);
+    let snapshot = collect_git_metadata_snapshot(
         &SystemGit,
-        &destination,
-        &ReviewPoint {
-            tree: git_line(&destination, &["rev-parse", "HEAD^{tree}"]),
-            head: Some(base),
-            reflog: None,
-            pending: Vec::new(),
-            session: Some("other".into()),
+        &source,
+        &GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::NoBundle,
+            origin_override: None,
         },
     )
     .unwrap();
-    git(&destination, &["update-ref", REVIEW_BASELINE_REF, &foreign]);
+    assert!(snapshot.metadata.saved_refs.is_empty());
+    assert!(snapshot.metadata.review_refs_metadata_only);
+
+    // The user keeps working; a restore with contents must not move them back.
+    commit_file(&source, "tracked", b"later\n", "later");
+    let later = git_line(&source, &["rev-parse", "HEAD"]);
+    assert_ne!(later, captured);
+    restore_git_snapshot(&SystemGit, &source, &snapshot).unwrap();
+    assert_eq!(git_line(&source, &["rev-parse", "HEAD"]), later);
+    assert_eq!(std::fs::read(source.join("tracked")).unwrap(), b"later\n");
+}
+
+// Hard-won: 0c78ec89f: capture and restore migrated, copied or wrote review baseline pins in the user's repository.
+#[test]
+fn capture_and_restore_leave_a_repositorys_old_review_pins_alone() {
+    for metadata_only in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let origin = directory.path().join("origin");
+        initialize_repository(&origin);
+        commit_file(&origin, "tracked", b"base\n", "base");
+        let head = git_line(&origin, &["rev-parse", "HEAD"]);
+        let source = clone_repository(directory.path(), &origin, "source");
+        let linked = directory.path().join("linked");
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "session",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let point = |session: &str| {
+            record_review_point(
+                &SystemGit,
+                &source,
+                &ReviewPoint {
+                    tree: git_line(&source, &["rev-parse", "HEAD^{tree}"]),
+                    head: Some(head.clone()),
+                    reflog: None,
+                    pending: Vec::new(),
+                    session: Some(session.into()),
+                },
+            )
+            .unwrap()
+        };
+        let current = point("moving");
+        let legacy = point("legacy");
+        let start = format!(
+            "refs/mj/session-start/{}/{}",
+            digest_bytes(b"moving"),
+            digest_bytes(MAIN_SCOPE.as_bytes())
+        );
+        // The pins an older release left, under both names, and a start that
+        // is live state.
+        let before = [
+            (MAIN_SCOPE, &current),
+            ("refs/mj/worktrees/linked/review-baseline", &current),
+            ("refs/hel/review-baseline", &legacy),
+            ("refs/hel/worktrees/linked/review-baseline", &legacy),
+            (start.as_str(), &head),
+        ];
+        for (name, object) in before {
+            git(&source, &["update-ref", name, object]);
+        }
+        let refs = |repository: &Path| {
+            git_line(
+                repository,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            )
+        };
+        let before_capture = refs(&source);
+        let spec = GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::CloneFrom(head.clone()),
+            origin_override: None,
+        };
+
+        let snapshot = if metadata_only {
+            collect_git_metadata_snapshot(&SystemGit, &source, &spec)
+        } else {
+            collect_git_snapshot(&SystemGit, &source, &spec)
+        }
+        .unwrap();
+
+        assert_eq!(
+            refs(&source),
+            before_capture,
+            "capture wrote to the repository"
+        );
+        assert!(snapshot.metadata.saved_refs.contains_key(&start));
+        assert!(
+            snapshot
+                .metadata
+                .saved_refs
+                .keys()
+                .all(|name| !name.contains("review-baseline")),
+            "a pin was carried: {:?}",
+            snapshot.metadata.saved_refs
+        );
+        let destination = if metadata_only {
+            source.clone()
+        } else {
+            clone_repository(directory.path(), &origin, "restored")
+        };
+        let before_restore = refs(&destination);
+        super::git::restore_git_snapshot_for_session(
+            &SystemGit,
+            &destination,
+            &snapshot,
+            Some("moving"),
+            true,
+        )
+        .unwrap();
+        let after_restore = refs(&destination);
+        if metadata_only {
+            assert_eq!(
+                after_restore, before_restore,
+                "restore wrote to the repository"
+            );
+        } else {
+            assert_eq!(
+                after_restore
+                    .lines()
+                    .filter(|line| line.contains("review-baseline"))
+                    .count(),
+                0,
+                "restore wrote a pin into the destination"
+            );
+            assert_eq!(git_line(&destination, &["rev-parse", &start]), head);
+        }
+    }
+}
+
+// Hard-won: 0c78ec89f: an old checkpoint that carried a review baseline pin must still restore without writing it.
+#[test]
+fn an_old_checkpoint_carrying_a_review_baseline_pin_restores_without_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("origin");
+    initialize_repository(&origin);
+    commit_file(&origin, "tracked", b"base\n", "base");
+    let head = git_line(&origin, &["rev-parse", "HEAD"]);
+    let source = clone_repository(directory.path(), &origin, "source");
+    let start = format!(
+        "refs/mj/session-start/{}/{}",
+        digest_bytes(b"moving"),
+        digest_bytes(MAIN_SCOPE.as_bytes())
+    );
+    git(&source, &["update-ref", &start, &head]);
+    let mut snapshot = collect_git_snapshot(
+        &SystemGit,
+        &source,
+        &GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::CloneFrom(head.clone()),
+            origin_override: None,
+        },
+    )
+    .unwrap();
+    // What an older release wrote: the pin among the saved refs, whose object
+    // may have been garbage-collected since.
+    let missing = "0".repeat(40);
+    snapshot
+        .metadata
+        .saved_refs
+        .insert(MAIN_SCOPE.to_owned(), missing.clone());
+    snapshot.metadata.saved_refs.insert(
+        "refs/mj/worktrees/linked/review-baseline".to_owned(),
+        missing,
+    );
+    snapshot.metadata.review_baseline_ref = Some(MAIN_SCOPE.to_owned());
+
+    let destination = clone_repository(directory.path(), &origin, "restored");
     super::git::restore_git_snapshot_for_session(
         &SystemGit,
         &destination,
@@ -2010,9 +2346,18 @@ fn review_refs_follow_the_session_between_worktree_names() {
         true,
     )
     .unwrap();
+
+    assert_eq!(git_line(&destination, &["rev-parse", &start]), head);
     assert_eq!(
-        git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
-        foreign
+        git_line(
+            &destination,
+            &[
+                "for-each-ref",
+                "refs/mj/review-baseline",
+                "refs/mj/worktrees"
+            ]
+        ),
+        ""
     );
 }
 
@@ -2285,11 +2630,10 @@ fn nested_worktree_checkpoint_names_the_directory_and_explicit_scratch_exclusion
     initialize_repository(source.path());
     commit_file(source.path(), "tracked.txt", b"base\n", "base");
     let base = git_line(source.path(), &["rev-parse", "HEAD"]);
+    // An independent clone is a different repository: its work cannot travel
+    // in this one's snapshot. (A linked worktree of this repository can.)
     let nested = ".mj/csharp-parity/bin-src";
-    git(
-        source.path(),
-        &["worktree", "add", "--detach", nested, "HEAD"],
-    );
+    git(source.path(), &["clone", "--no-hardlinks", ".", nested]);
     fs::write(
         source.path().join(nested).join("valuable.txt"),
         b"nested work\n",
@@ -2418,6 +2762,7 @@ fn system_git_round_trip_restores_commits_index_worktree_and_untracked() {
     }
 }
 
+// Hard-won: #1542: adding base retention must preserve pinless legacy archive restores.
 #[test]
 fn remote_workspace_restore_keeps_published_history_push_urls_and_dirty_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -2532,6 +2877,13 @@ fn remote_workspace_restore_keeps_published_history_push_urls_and_dirty_state() 
     );
     assert_eq!(git_line(&destination, &["config", "mj.baseCommit"]), base);
     assert_eq!(
+        git_line(
+            &destination,
+            &["rev-parse", mj_core::targets::HistoryCutoff::BASE_REF]
+        ),
+        base
+    );
+    assert_eq!(
         git_line(&destination, &["config", "push.default"]),
         "current"
     );
@@ -2561,6 +2913,72 @@ fn remote_workspace_restore_keeps_published_history_push_urls_and_dirty_state() 
     assert!(!repeated.committed_bundle.is_empty());
     assert_eq!(repeated.staged_patch, snapshot.staged_patch);
     assert_eq!(repeated.unstaged_patch, snapshot.unstaged_patch);
+    // A pre-retention archive can restore HEAD while its unrelated launch
+    // commit is no longer available at origin or in the archived delta.
+    let abandoned = clone_repository(directory.path(), &origin, "old-launch");
+    commit_file(
+        &abandoned,
+        "abandoned.txt",
+        b"old launch\n",
+        "abandoned launch base",
+    );
+    let missing_base = git_line(&abandoned, &["rev-parse", "HEAD"]);
+    let mut legacy_snapshot = snapshot.clone();
+    legacy_snapshot.metadata.base_commit = missing_base.clone();
+    assert!(legacy_snapshot.metadata.saved_refs.is_empty());
+    let mut legacy_input = input();
+    legacy_input.bundle.primary_repository = "repo".into();
+    legacy_input.repositories = vec![legacy_snapshot];
+    let legacy_archive = directory.path().join("old-workspace.hel.zip");
+    write_archive_atomic(&legacy_archive, &legacy_input).unwrap();
+    let legacy_workspace = directory.path().join("legacy-restored");
+    fs::create_dir_all(&legacy_workspace).unwrap();
+    let legacy_destination = clone_repository(&legacy_workspace, &origin, "repo");
+    let missing = SystemGit
+        .run(
+            &legacy_destination,
+            &GitCommand {
+                arguments: vec![
+                    "rev-parse".into(),
+                    "--verify".into(),
+                    "--quiet".into(),
+                    format!("{missing_base}^{{commit}}").into(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(missing.status, 1);
+    crate::checkpoint::restore_repositories(&legacy_archive, &legacy_workspace, &SystemGit)
+        .unwrap();
+    assert_eq!(git_line(&legacy_destination, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        git_line(&legacy_destination, &["config", "mj.baseCommit"]),
+        missing_base
+    );
+    assert_eq!(
+        git_line(&legacy_destination, &["config", "mj.remoteWorkspace"]),
+        "true"
+    );
+    assert_eq!(
+        fs::read(legacy_destination.join("dirty.txt")).unwrap(),
+        large
+    );
+    let absent_ref = SystemGit
+        .run(
+            &legacy_destination,
+            &GitCommand {
+                arguments: vec![
+                    "show-ref".into(),
+                    "--verify".into(),
+                    "--quiet".into(),
+                    mj_core::targets::HistoryCutoff::BASE_REF.into(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(absent_ref.status, 1);
 }
 
 /// Enough text that the capture's patch crosses the 64 KiB pipe buffer a
@@ -3077,7 +3495,7 @@ fn archive_round_trip_preserves_clear_boundary_and_requires_context_schema() {
     manifest.schema_version = ARCHIVE_SCHEMA_VERSION_CONTEXT;
     let downgraded = directory.path().join("message-downgraded.hel.zip");
     let mut file = File::create(&downgraded).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = read_archive_verified(&downgraded).unwrap_err();
     assert!(format!("{error:#}").contains("message transcript entries require archive schema 9"));

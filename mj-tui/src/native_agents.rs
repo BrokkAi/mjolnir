@@ -115,7 +115,6 @@ impl DashboardState {
                 self.native_agents.remove(&id);
                 self.session_details.remove(&id);
                 self.project_sources.remove(&id);
-                self.viewed_failures.remove(&id);
                 continue;
             };
             self.native_by_parent

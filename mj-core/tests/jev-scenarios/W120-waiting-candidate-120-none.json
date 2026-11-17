@@ -1,0 +1,182 @@
+{
+  "id": "W120",
+  "title": "Waiting candidate 120 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "09979692f468b637499b811a9c056c84",
+    "session_title": "eval22 3507 luna",
+    "reply_position": 2777,
+    "captured_at": "2026-09-23T22:15:32.507Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3507: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 971393a3af610f82db95fb8e031da15b0c66bf72\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitations, and any separately actionable findings.\n6. A draft GitHub approach comment, 5 to 12 plain-language sentences.\n\n# Issue\n\nIssue #3507: C++: exact non-virtual member calls retain unproven dispatch in effect walks\n\nWhile validating #3493 at base `a6cb9de6cd8e432dd2f670eb8fd31f70828d56eb`, independent implementations found that an exact C++ member call retains unproven dispatch even after every workspace callee has a canonical procedure key. This independently blocks #3458.\n\nIn candidate `9c66e27d690b4a2eb089631d283f6dd8d770ea36`, the fixture chain `shop.total -> shop.record_audit -> shop.AuditClient.send` carries the reviewed leaf effect and no longer reports `callee_unkeyable`, but the `client.send(order_id)` site still has `dispatch_outcome: unproven`, `target_count: 1`, and open coverage. The same dispatch status was observed at the base. Other reproductions use bare same-owner or explicit-this calls with the same result.\n\n`crates/bifrost-cpp/src/raii.rs` conservatively retains uncertainty for virtual or member-call syntax. Establish the structured conditions under which a non-virtual member target is exhaustive, preserving uncertainty for genuinely open virtual dispatch. Test direct, explicit-this, and cross-file member chains, plus an unresolved/virtual near miss, through the production effect relation. Do not infer exactness from one candidate alone.\n\nEvidence: `tests/suite_issues/issue_3493_c_cpp_callable_modifiers.rs` in the candidate above; the original reports and bundle are retained in the benchmark evidence for #3493. No candidate currently fixes the dispatch limitation.\n\n"
+        },
+        {
+          "id": "agent:29",
+          "role": "assistant",
+          "text": "I’ll verify the checkout is clean first, fetch `origin`, then move to the authorized detached base before reading the repository guidance or investigating the issue. I’ll keep all work in this container and commit the finished fix on that detached HEAD."
+        },
+        {
+          "id": "agent:99",
+          "role": "assistant",
+          "text": "The checkout was clean, `origin` fetched successfully, and HEAD is now detached at the requested base. I’m loading the repository’s actual instructions and the architecture and Rust-testing guidance that apply to the C++ effect-walk change."
+        },
+        {
+          "id": "agent:180",
+          "role": "assistant",
+          "text": "The base is `971393a3af610f82db95fb8e031da15b0c66bf72`. The relevant contracts say dispatch proof must come from structured resolver evidence, ambiguity or incomplete search must stay visible, and temporary-project analyzer tests should use the shared inline harness. I’m finishing the routed guidance, then I’ll reproduce the issue through the production effect relation and inspect the C++ resolver path."
+        },
+        {
+          "id": "agent:344",
+          "role": "assistant",
+          "text": "The existing `#3493` regression already proves the keyed cross-file effect chain and leaves one precise gap: C++ member-call dispatch is still `unproven`. The root cause sits in the C++ RAII call classifier, which currently proves only unqualified free-function calls. I’m tracing how that per-file AST fact feeds effect-walk coverage so the fix can establish exactness without treating a lone candidate as exhaustive."
+        },
+        {
+          "id": "agent:1019",
+          "role": "assistant",
+          "text": "The gap is in the semantic call lowering: it marks every member-shaped call as potentially virtual, even when the C++ declaration structure proves a unique non-virtual member and there is no base class that could introduce another virtual target. I’ll first strengthen the existing production-effect regression and add direct, `this`, cross-file, virtual, and unresolved call-site cases; I’ll run that regression on the unchanged implementation before making the fix."
+        },
+        {
+          "id": "agent:1152",
+          "role": "assistant",
+          "text": "The baseline run is compiling the workspace from a cold Cargo cache, so it has not reached the regression assertion yet. The new tests now inspect both `procedure_effects` and the public `dispatch_outcome` row, including its target count and completeness; the virtual case explicitly expects an open one-target result."
+        },
+        {
+          "id": "agent:1242",
+          "role": "assistant",
+          "text": "The cold build has reached `brokk-bifrost-analysis` and is still active without errors. Once it finishes, I’ll use its failure output as the before-fix evidence, then implement the shared structural proof and rerun the same regression."
+        },
+        {
+          "id": "agent:1310",
+          "role": "assistant",
+          "text": "The test binary is still building; the active `rustc` process confirms this is build time, not a hung test. I’m letting this first compile complete because its artifacts will make the fix and subsequent suite runs much faster."
+        },
+        {
+          "id": "agent:1651",
+          "role": "assistant",
+          "text": "The shared dispatch resolver already has the right safety gate: it clears a dynamic-dispatch gap only when the complete retained target set is structurally closed. C++ semantic procedures currently leave that property at its default, so even a one-target non-virtual call remains open. I’m checking the routed persistence guidance now, because the C++ declaration metadata that can supply this proof is persisted and must stay correct for inherited virtual methods as well."
+        },
+        {
+          "id": "agent:1770",
+          "role": "assistant",
+          "text": "The regression fixture is in place, and I’m waiting for its pre-fix run to finish compiling so we can capture the current failure before changing production code. The checkout remains on the authorized detached base; I’ll then wire C++’s structured dispatch metadata into the existing closed-target proof and run the routed suites."
+        },
+        {
+          "id": "agent:1850",
+          "role": "assistant",
+          "text": "The pre-fix production-effect test now fails as reported: the reviewed leaf effect and full witness are present, but coverage is `open`. That isolates the bug to proof of dispatch exhaustiveness rather than missing effect propagation. I’m now tracing the exact declaration ranges and persisted callable metadata used by C++ so the fix preserves open dispatch for inherited and virtual methods."
+        },
+        {
+          "id": "agent:2107",
+          "role": "assistant",
+          "text": "The structured declaration facts already distinguish direct `virtual`/`override` methods, but out-of-line definitions can lose that context: their syntax tree contains the qualified definition, not the class declaration. I’m checking the existing C++ declaration reconciliation path so the semantic proof can inherit openness from the exact matching header declaration, while keeping overloads and unresolved calls conservative."
+        },
+        {
+          "id": "agent:2497",
+          "role": "assistant",
+          "text": "The implementation now uses the existing C++ signature facts for each exact procedure range, and merges an open fact from a visible matching declaration into out-of-line definitions. Members in classes with bases are conservatively open because inherited virtual methods can omit both modifiers; direct non-virtual methods in classes without bases remain eligible for exhaustive dispatch. Regression cases now cover reference-receiver calls, cross-file `this` and bare calls, explicit virtual calls, inherited virtual overrides, and unresolved calls."
+        },
+        {
+          "id": "agent:2680",
+          "role": "assistant",
+          "text": "The first post-fix build is compiling the changed C++ declaration and analysis crates. The epoch now explicitly invalidates persisted C++ metadata, and the production tests also exercise a derived class whose override omits `virtual` and `override`, including its separate header and definition."
+        },
+        {
+          "id": "agent:2777",
+          "role": "assistant",
+          "text": "This compile is waiting on the repository’s shared `mbx` build-cache lock; I verified the wrapper is blocked on that lock and left the build configuration and targets untouched. The change is still in the first validation pass; I’m letting the authorized build proceed and will address any compiler or regression failures it reports."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "-> shop.AuditClient.send` carries the reviewed leaf effect and no longer reports `callee_unkeyable`, but the `client.send(order_id)` site still has `dispatch_outcome: unproven`, `target_count: 1`, and open coverage. The same dispatch status was observed at the base. Other reproductions use bare same-owner or explicit-this calls with the same result.\n\n`crates/bifrost-cpp/src/raii.rs` conservatively retains uncertainty for virtual or member-call syntax. Establish the structured conditions under which a non-virtual member target is exhaustive, preserving uncertainty for genuinely open virtual dispatch. Test direct, explicit-this, and cross-file member chains, plus an unresolved/virtual near miss, through the production effect relation. Do not infer exactness from one candidate alone.\n\nEvidence: `tests/suite_issues/issue_3493_c_cpp_callable_modifiers.rs` in the candidate above; the original reports and bundle are retained in the benchmark evidence for #3493. No candidate currently fixes the dispatch limitation.\n\n",
+    "assistant_text_tail": "This compile is waiting on the repository’s shared `mbx` build-cache lock; I verified the wrapper is blocked on that lock and left the build configuration and targets untouched. The change is still in the first validation pass; I’m letting the authorized build proceed and will address any compiler or regression failures it reports.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 1019,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "pository’s shared `mbx` build-cache lock; I verified the wrapper is blocked on that lock and left the build configuration and targets untouched. The change is still in the first validation pass; I’m letting the authorized build proceed and will address any compiler or regression failures it reports."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-23T22:26:16.772Z",
+        "kind": "agent",
+        "text": "I found a second contributor to effect coverage: the RAII preflight treats every member-call expression as possibly materializing a temporary, even when dispatch is closed and the declared return and "
+      },
+      {
+        "at": "2026-09-23T22:37:36.183Z",
+        "kind": "agent",
+        "text": "The RAII regression tests now confirm the intended boundary: unique non-virtual direct, explicit-`this`, and same-owner calls with trivial signatures pass; overloads, explicit/inherited virtual calls,"
+      },
+      {
+        "at": "2026-09-23T22:40:06.440Z",
+        "kind": "agent",
+        "text": "The implementation now covers both sides of the dispatch proof: C++ declaration metadata and the RAII call-site analysis that feeds effect coverage. I’m checking the current production issue-suite run"
+      },
+      {
+        "at": "2026-09-23T22:40:54.280Z",
+        "kind": "agent",
+        "text": "The issue-suite run now confirms the declarations and canonical procedure keys, but effect coverage is still open for the direct member witness, and two new fixtures do not yet resolve the modeled lea"
+      },
+      {
+        "at": "2026-09-23T22:44:20.653Z",
+        "kind": "agent",
+        "text": "The new diagnostics show the direct `client.send` site has exactly one target, but the semantic dispatch proof still stays unproven. That narrows the main path to the target’s persisted dispatch prope"
+      },
+      {
+        "at": "2026-09-23T22:45:14.860Z",
+        "kind": "agent",
+        "text": "The instrumentation build is still compiling the analysis crate; the shared Cargo cache has caused a few minutes of compile latency in this container, so I’m polling in short intervals and leaving the"
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+#!/bin/bash
+# Installed at /usr/local/bin/sbx-tap. Used by the sandbox-N unit: ExecStartPre=sbx-tap up N / ExecStopPost=sbx-tap down N
+set -eu
+case $1 in
+  up)   ip link show tap$2 >/dev/null 2>&1 || ip tuntap add dev tap$2 mode tap
+        ip addr replace 10.77.$2.1/30 dev tap$2; ip link set tap$2 up;;
+  down) ip link del tap$2 2>/dev/null || true;;
+esac

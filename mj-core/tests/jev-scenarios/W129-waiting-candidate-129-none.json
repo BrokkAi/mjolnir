@@ -1,0 +1,211 @@
+{
+  "id": "W129",
+  "title": "Waiting candidate 129 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "f8b13c54b7bef072f120dde80111445b",
+    "session_title": "eval46 6018 terramax",
+    "reply_position": 8913,
+    "captured_at": "2026-10-26T23:19:30.792Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #6018: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). Direct unresolved contract questions to the series lead.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 2df91bfb592bda73a747d4f56668d616a0c32cb1\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls, report the evidence to the judge.\nDo not bypass the mbx cargo shim, redirect target/, set CARGO_TARGET_DIR,\nor change shared cache settings.\n\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories\n[... 2341 bytes omitted from the middle of this message ...]\nhat operation still holds the writer connection and selection mutex.\n\n**Found by** #5658 milestone 3 slice D (branch `5658-m3d-shared-reverse-executor`). The slice added genuine single-connection, writer-only variants of `incoming_call_recheck_keeps_budget_stopped_sites_unproven` and `reverse_macro_generated_callers_equal_across_worker_counts`.\n\n**The defect predates #5658.** With C2a's exact `rust_reverse_rows.rs` and `rust_reverse_rows/retained.rs` restored (40b653f5c7), the same forced-writer cases deadlock, and neither blocked stack contains the new shared executor:\n- Macro confirmation blocks at the old `rust_reverse_rows.rs` ~3756 while publishing a capsule.\n- Incoming projection blocks while reading definition parents in `RustReverseProjection::project_references` (~312/~320).\n\nThe existing tests pass only because they use pooled readers.\n\n**Mechanism.** The selected inventory owns a non-optional `ReaderGuard`. Its `Writer` variant owns the connection and the selection mutex guards. `with_rust_row_reverse_queries` calls the projection while it still holds that inventory, and the projection's `parent_of` and definition enumeration take the same mutex again.\n\n**Fix options**, each needing a design decision:\n- an authority-preserving suspend and resume of the selected owner (`SelectedResolutionMountInventory` / `ReaderGuard`);\n- moving the projection out of the live selected-owner callback.\n\nPrewarming or reordering reads only hides the defect.\n\n**Impact.** Unknown in production; it affects any request that falls back to writer-only execution, for example when pooled readers are unavailable.\n\nPart of #5658.\n\n\n---\nComment by jbellis:\nOne more property for whoever fixes this (from the JVM/Go owner's review of #6019): the writer-only lock acquisition (`rust_reverse_rows.rs` ~2558) does not observe the cancellation token. So today the deadlock is bounded only by the nextest per-test limit, not by request cancellation or deadlines. The fix should make that acquisition cancellable as well as removing the re-entry.\n"
+        },
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I’ll first verify the checkout is clean and detached at the requested commit, then read the repository guidance and reproduce the writer-only failures before implementing the fix."
+        },
+        {
+          "id": "agent:63",
+          "role": "assistant",
+          "text": "The checkout is clean and detached at the requested base, `2df91bfb592bda73a747d4f56668d616a0c32cb1`. I’m reading the local instructions and tracing how the selected operation owns its connection and selection authority."
+        },
+        {
+          "id": "agent:244",
+          "role": "assistant",
+          "text": "The issue’s two existing regressions exercise real reverse queries and compare the single-connection results with pooled readers. I’ve enabled them and am running them against the unchanged implementation to establish the failure before changing the locking."
+        },
+        {
+          "id": "agent:487",
+          "role": "assistant",
+          "text": "The initial build is compiling the workspace dependencies. The code confirms two distinct re-entries: projection calls back into ordinary analyzer reads, while macro confirmation publishes through the writer that the selected operation already holds. I’m checking how to preserve the operation’s temporary selection across both paths."
+        },
+        {
+          "id": "agent:1060",
+          "role": "assistant",
+          "text": "The selected operation keeps connection-local temporary tables and request-scoped identities, so simply dropping and reopening it would risk changing the authority behind a result. I’m tracing the existing freshness checks and concurrent access paths before choosing where the writer can safely be released."
+        },
+        {
+          "id": "agent:1614",
+          "role": "assistant",
+          "text": "Both enabled regressions reproduce the defect on the base: each hit its configured 30-second timeout, while their pooled baselines are exercised within the same tests. The fix needs to keep the selected tables and identities intact, and reject the result as stale if another selected operation replaces them during a temporary release."
+        },
+        {
+          "id": "agent:2317",
+          "role": "assistant",
+          "text": "The base failures are confirmed. I’ve also found that callers can perform analyzer reads between reverse-query calls, so I’m moving the writer ownership boundary around each selected query rather than special-casing just the two projection functions. This keeps the same selected inventory for binding rechecks while allowing the surrounding callback to read the store."
+        },
+        {
+          "id": "agent:3021",
+          "role": "assistant",
+          "text": "The writer is now released for the whole consumer callback and reacquired only for selected queries. A generation check detects replacement of the connection-local selection, and the original workspace selection is restored and revalidated before any further query or result publication. I’ve also added a deterministic cancellation test and am compiling the first integrated run."
+        },
+        {
+          "id": "agent:3271",
+          "role": "assistant",
+          "text": "The cancellation test now waits until the opener has actually blocked on the writer before cancelling it. I’ve also added an adversarial case where a nested selected query replaces the suspended owner’s temporary selection; the outer query must report stale and a later query must still work."
+        },
+        {
+          "id": "agent:3626",
+          "role": "assistant",
+          "text": "The first integrated run now passes the incoming-call witness and the nested-owner authority test; the macro witness is still running. During review I found that the ordinary reader’s cached workspace selection also needs to be synchronized when the writer is released, so I’m correcting that before the broader validation."
+        },
+        {
+          "id": "agent:4682",
+          "role": "assistant",
+          "text": "Both original witnesses passed in the first fixed run, including the macro comparison across worker counts. I’m rerunning them with the workspace-selection correction and the new store-level tests, then I’ll run the requested Rust suites and workspace Clippy."
+        },
+        {
+          "id": "agent:5303",
+          "role": "assistant",
+          "text": "The selection-metadata correction is in place. The focused rebuild is exercising five cases: the two original witnesses, nested-owner replacement, workspace-selection restoration, and cancellation while the writer is held."
+        },
+        {
+          "id": "agent:5350",
+          "role": "assistant",
+          "text": "All five focused tests pass on the revised implementation. The original writer-only witnesses now match pooled results, and the new tests verify cancellation, restoration after ordinary reads, and rejection of a replaced selection. I’m starting the required crate, Rust integration, and workspace lint checks."
+        },
+        {
+          "id": "agent:5811",
+          "role": "assistant",
+          "text": "The broader crate run has started 1,901 tests, with nextest using its default concurrency. The Rust usage and issue suites and the all-features workspace Clippy build are also running; formatting and pack-drift checks are underway."
+        },
+        {
+          "id": "agent:5968",
+          "role": "assistant",
+          "text": "Formatting and the pack-authoring drift check pass. The broader checks are still running; the crate run includes the full analysis library and the affected store and Rust-analysis libraries."
+        },
+        {
+          "id": "agent:6097",
+          "role": "assistant",
+          "text": "The all-targets Clippy run found one test that accessed the inventory’s old public connection field directly. I’m updating that test to use the existing connection accessor, then I’ll rerun Clippy and its affected validation."
+        },
+        {
+          "id": "agent:6424",
+          "role": "assistant",
+          "text": "The full affected library run passed: 1,901 tests across the store, Rust analysis, and analysis crates. The Clippy-only test access has been corrected, and I’ve restarted the workspace lint plus the specific JVM selection test that uses it."
+        },
+        {
+          "id": "agent:6866",
+          "role": "assistant",
+          "text": "The default-feature analysis Clippy check and final formatting check pass. The Rust integration binaries are still compiling, and the restarted all-features Clippy and the JVM selection regression are queued or running."
+        },
+        {
+          "id": "agent:7104",
+          "role": "assistant",
+          "text": "The all-features workspace Clippy rerun passed. The required Cargo shim also reported that its automatic cache GC removed 13 target directories; I did not invoke GC or change its settings. I’ll report that wrapper output along with the remaining test results."
+        },
+        {
+          "id": "agent:7159",
+          "role": "assistant",
+          "text": "The workspace Clippy rerun and default-feature analysis Clippy both pass. The remaining Rust integration build is still active, and the JVM selection test is waiting for the build directory; I’m keeping both running until they finish."
+        },
+        {
+          "id": "agent:7389",
+          "role": "assistant",
+          "text": "The Rust integration build has finished and is running 261 Rust-selected tests across the usage and issue suites. The JVM selection regression has moved on from the build lock and is compiling its test binary."
+        },
+        {
+          "id": "agent:7726",
+          "role": "assistant",
+          "text": "The Rust usage and issue tests are now running without reported failures so far. The JVM regression is still compiling against its separate test configuration; no test concurrency limit has been added."
+        },
+        {
+          "id": "agent:7865",
+          "role": "assistant",
+          "text": "All 261 Rust-selected usage and issue tests passed. The only remaining check is the JVM selection test affected by the accessor change; the workspace Clippy rerun has already passed."
+        },
+        {
+          "id": "agent:8486",
+          "role": "assistant",
+          "text": "The JVM test build is progressing through the language-analysis crates. I clarified a comment on the shared cancellation handler while that build was compiling; mbx reported that it would not cache the affected compiler result because the input changed. The edit changes no executable code."
+        },
+        {
+          "id": "agent:8723",
+          "role": "assistant",
+          "text": "The Rust integration suite finished with 261 of 261 selected tests passing. The final JVM test binary is still compiling; the other requested checks are complete."
+        },
+        {
+          "id": "agent:8767",
+          "role": "assistant",
+          "text": "The JVM selection regression passed too, so all requested validation is complete. I’m closing the temporary plan and committing the final documentation clarification, then I’ll report the full hashes, commands, and the automatic cache-GC incident."
+        },
+        {
+          "id": "agent:8913",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\n### 1. Confirmed cause\n\nIn single-connection mode, the selected inventory held the writer connection and selection mutexes while reverse projection called analyzer reads that tried to acquire them again. Macro confirmation also tried to publish through the already-held writer. The selected writer checkout used a blocking lock that did not observe cancellation.\n\n### 2. Changes and reasons\n\nThe reverse callback now releases the writer between selected queries while retaining the operation’s identities and installed selection. Before resuming, it restores and revalidates the workspace selection. If another selected operation replaced the temporary tables, the original operation returns a stale outcome.\n\nMacro capsules now publish through the already-owned writer. Selected writer acquisition and resumption poll the cancellation token. No persisted facts or extraction epochs changed.\n\nBase: `2df91bfb592bda73a747d4f56668d616a0c32cb1`  \nImplementation: `952985671cdb5da1bca7c771988a8fdbc82c75b8`  \nFinal: `6834f683a9afe099c840aa6635aedd30d01b83e6`\n\n### 3. Validation commands and results\n\nEvery nextest command below used this prefix:\n\n```sh\nenv JAVA_HOME= BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 BIFROST_OPEN_PACKS_DISABLE=\"${BIFROST_OPEN_PACKS_DISABLE-1}\" eatmydata\n```\n\n- `cargo nextest run --max-fail 100 -p brokk-bifrost-rust-analysis --lib -E 'test(writer_only)'` — on the base, both enabled witnesses timed out at 30 seconds.\n- `cargo nextest run --max-fail 100 -p brokk-bifrost-store -p brokk-bifrost-rust-analysis --lib -E 'test(writer_only) | test(suspended_writer)'` — 5 passed.\n- `cargo nextest run --max-fail 100 --status-level fail --final-status-level fail -p brokk-bifrost-store -p brokk-bifrost-rust-analysis -p brokk-bifrost-analysis --lib` — 1,901 passed; 17 skipped.\n- `cargo nextest run --max-fail 100 --status-level fail --final-status-level fail -p brokk-bifrost --test suite_usages --test suite_issues -E 'test(rust)'` — 261 passed; 3,233 filtered out.\n- `cargo nextest run --max-fail 100 -p brokk-bifrost-tools --lib -E 'test(named_manifest_counts_round_trip_in_family_order)'` — 1 passed.\n\nBoth Clippy commands used `env JAVA_HOME= BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1`:\n\n- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — passed on rerun after correcting a test’s access to the inventory connection.\n- `cargo clippy --lib -p brokk-bifrost-analysis -- -D warnings` — passed.\n\n`cargo fmt --all -- --check`, a separate `rustfmt --check` of the final comment-only edit, `node scripts/check-pack-authoring-drift.mjs`, and `git diff --check 2df91bfb592bda73a747d4f56668d616a0c32cb1 --` passed.\n\n### 4. Before/after witness evidence\n\nBoth named writer-only witnesses timed out on the base and passed after the fix. The 12-file macro fixture retained at least 12 reverse edges and performed at least 12 binding rechecks; its one-worker and four-worker results matched the pooled baseline. The incoming-call fixture retained all three sites in complete, receiver-budget-stopped, and time-budget-stopped runs; stopped sites remained unproven.\n\nAdditional tests verified cancellation while another thread held the writer, restoration after an ordinary workspace read, and rejection of a replaced selected owner. The issue named no external repository witness, so validation used its checked-in fixtures.\n\n### 5. Status, limitations, and findings\n\n`git status --short` is empty.\n\nThe required Cargo shim unexpectedly ran automatic shared-cache GC. It reported removing 13 target directories, releasing 242.2 GiB, and evicting 2,369 objects and 931 action results. I did not invoke GC manually or change cache settings; its output did not identify the directories’ owners.\n\nDuring the JVM test build, I changed a cancellation-handler comment. mbx declined to cache the affected compiler result because its input changed during compilation. The edit changed no executable code; the JVM test passed and the final comment was format-checked.\n\n### 6. Draft GitHub approach comment\n\nWriter-only reverse queries could deadlock because they held the sole writer while projection or macro publication tried to acquire it again. The reverse callback now releases the writer between selected queries while keeping the same operation and its identities. It restores and checks the selected workspace before further queries and before returning a result. If another selected operation replaces the temporary selection, the original operation reports a stale result. Macro capsules publish through the writer already held by the operation. A cancelled request can also stop waiting for the writer. The two previously ignored writer-only tests now match pooled results, including the macro and budget-stopped incoming-call cases. Additional tests cover cancellation, workspace restoration, and nested selection replacement."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "rse_queries` calls the projection while it still holds that inventory, and the projection's `parent_of` and definition enumeration take the same mutex again.\n\n**Fix options**, each needing a design decision:\n- an authority-preserving suspend and resume of the selected owner (`SelectedResolutionMountInventory` / `ReaderGuard`);\n- moving the projection out of the live selected-owner callback.\n\nPrewarming or reordering reads only hides the defect.\n\n**Impact.** Unknown in production; it affects any request that falls back to writer-only execution, for example when pooled readers are unavailable.\n\nPart of #5658.\n\n\n---\nComment by jbellis:\nOne more property for whoever fixes this (from the JVM/Go owner's review of #6019): the writer-only lock acquisition (`rust_reverse_rows.rs` ~2558) does not observe the cancellation token. So today the deadlock is bounded only by the nextest per-test limit, not by request cancellation or deadlines. The fix should make that acquisition cancellable as well as removing the re-entry.\n",
+    "assistant_text_tail": "t 12 reverse edges and performed at least 12 binding rechecks; its one-worker and four-worker results matched the pooled baseline. The incoming-call fixture retained all three sites in complete, receiver-budget-stopped, and time-budget-stopped runs; stopped sites remained unproven.\n\nAdditional tests verified cancellation while another thread held the writer, restoration after an ordinary workspace read, and rejection of a replaced selected owner. The issue named no external repository witness, so validation used its checked-in fixtures.\n\n### 5. Status, limitations, and findings\n\n`git status --short` is empty.\n\nThe required Cargo shim unexpectedly ran automatic shared-cache GC. It reported removing 13 target directories, releasing 242.2 GiB, and evicting 2,369 objects and 931 action results. I did not invoke GC manually or change cache settings; its output did not identify the directories’ owners.\n\nDuring the JVM test build, I changed a cancellation-handler comment. mbx declined to cache the affected compiler result because its input changed during compilation. The edit changed no executable code; the JVM test passed and the final comment was format-checked.\n\n### 6. Draft GitHub approach comment\n\nWriter-only reverse queries could deadlock because they held the sole writer while projection or macro publication tried to acquire it again. The reverse callback now releases the writer between selected queries while keeping the same operation and its identities. It restores and checks the selected workspace before further queries and before returning a result. If another selected operation replaces the temporary selection, the original operation reports a stale result. Macro capsules publish through the writer already held by the operation. A cancelled request can also stop waiting for the writer. The two previously ignored writer-only tests now match pooled results, including the macro and budget-stopped incoming-call cases. Additional tests cover cancellation, workspace restoration, and nested selection replacement.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "by the operation. A cancelled request can also stop waiting for the writer. The two previously ignored writer-only tests now match pooled results, including the macro and budget-stopped incoming-call cases. Additional tests cover cancellation, workspace restoration, and nested selection replacement."
+  },
+  "context": {
+    "after": []
+  }
+}

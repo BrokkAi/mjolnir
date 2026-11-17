@@ -31,10 +31,18 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 108;
+const SCHEMA_VERSION: i64 = 137;
+
+pub(crate) mod web_push;
+pub(crate) use web_push::*;
+
+mod environments;
+pub(crate) use environments::*;
 
 mod session_move;
 pub use session_move::*;
+mod session_create;
+pub(crate) use session_create::*;
 mod session_restart;
 pub(crate) use session_restart::*;
 mod github_watch;
@@ -120,3 +128,5 @@ pub(crate) fn is_busy_error(error: &anyhow::Error) -> bool {
         )
     })
 }
+
+mod container_size;

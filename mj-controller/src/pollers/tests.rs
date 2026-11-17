@@ -13,6 +13,11 @@ fn an_unchanged_session_is_recognised_without_reading_its_transcript() {
         "an identical snapshot was treated as a change, so it would be re-read"
     );
 
+    // Config can change attention without changing any worker projection fact.
+    let mut repair = runtime.clone();
+    repair.attention = mj_core::attention::SessionAttention::Failed;
+    assert!(!published.matches(&repair));
+
     // Anything a viewer would notice has to defeat the skip.
     let advanced = runtime_view("session-1", 43, "digest-43");
     assert!(
@@ -44,6 +49,8 @@ fn runtime_view(
     projection_digest: &str,
 ) -> crate::daemon::RuntimeSessionView {
     crate::daemon::RuntimeSessionView {
+        attention: Default::default(),
+        policy_config_keys: Vec::new(),
         session_id: session_id.to_owned(),
         projection_ordinal,
         projection_digest: projection_digest.to_owned(),
@@ -54,6 +61,7 @@ fn runtime_view(
     }
 }
 use super::*;
+use mj_core::config::Config;
 
 fn podman_controller(state: SessionState) -> Controller {
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -61,15 +69,10 @@ fn podman_controller(state: SessionState) -> Controller {
     config.profiles.insert(
         "codex".into(),
         mj_core::config::HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: PathBuf::from("/home/dev/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                PathBuf::from("/home/dev/.codex"),
+            )
         },
     );
     config.targets.insert(
@@ -104,6 +107,9 @@ fn podman_controller(state: SessionState) -> Controller {
     app_state.sessions.insert(
         session_id.into(),
         mj_core::state::SessionRecord {
+            oracle_choice: None,
+            oracle: true,
+            notifications_ignored: false,
             project: None,
             target_runtime: None,
             launch_base: None,
@@ -116,8 +122,6 @@ fn podman_controller(state: SessionState) -> Controller {
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             id: session_id.into(),
             title: "poll target".into(),
             harness_kind: mj_core::config::HarnessKind::Codex,
@@ -128,15 +132,16 @@ fn podman_controller(state: SessionState) -> Controller {
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             target_template_id: "podman".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),
             state,
-            target: Some(mj_core::state::TargetLocator::LocalPodman {
+            target: Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
                 borrowed_from: None,
                 container_id: "a".repeat(64),
                 workspace_storage: Default::default(),
-            }),
+            })),
             native_session_id: None,
             acp_session_title: None,
             session_title_override: None,
@@ -145,6 +150,8 @@ fn podman_controller(state: SessionState) -> Controller {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         },
@@ -406,12 +413,15 @@ fn probeless_request(id: &str) -> QuotaRefreshRequest {
             host: "example.invalid".into(),
             api_key: "key".into(),
         }),
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
 
 fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
     crate::quota::ProfileQuota {
+        paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: id.into(),
         harness: mj_core::config::HarnessKind::Codex,
@@ -429,6 +439,7 @@ fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
         error: None,
         refreshed_at_epoch_seconds: epoch_seconds() - age_seconds,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -438,12 +449,41 @@ fn poller_with_store(
     tokio::sync::watch::Sender<QuotaRefreshBatch>,
     tokio::sync::mpsc::Receiver<QuotaUpdate>,
 ) {
-    spawn_quota_refresher(Arc::new(move |request: &QuotaRefreshRequest| {
-        stored
-            .iter()
-            .find(|report| report.profile_id == request.profile_id)
-            .cloned()
-    }))
+    poller_with_launcher(stored, crate::claude_usage::ClaudeLauncher::Managed)
+}
+
+/// [`poller_with_store`] whose Claude grant renewals run `launcher`, so a test
+/// never reaches the managed Claude Code installation.
+fn poller_with_launcher(
+    stored: Vec<crate::quota::ProfileQuota>,
+    launcher: crate::claude_usage::ClaudeLauncher,
+) -> (
+    tokio::sync::watch::Sender<QuotaRefreshBatch>,
+    tokio::sync::mpsc::Receiver<QuotaUpdate>,
+) {
+    spawn_quota_refresher_with(
+        Arc::new(move |request: &QuotaRefreshRequest| {
+            stored
+                .iter()
+                .find(|report| report.profile_id == request.profile_id)
+                .cloned()
+        }),
+        launcher,
+    )
+}
+
+/// The renewal program of a [`renewable_claude_profile`] in `directory`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn fake_claude(directory: &std::path::Path) -> crate::claude_usage::ClaudeLauncher {
+    crate::claude_usage::ClaudeLauncher::Program(directory.join("bin/claude"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_gate_renewal(directory: &std::path::Path) -> GrantRenewal {
+    GrantRenewal {
+        launcher: fake_claude(directory),
+        gate: crate::upgrade::gate().clone(),
+    }
 }
 
 fn batch(generation: u64, refresh: bool, ids: &[&str]) -> QuotaRefreshBatch {
@@ -451,18 +491,39 @@ fn batch(generation: u64, refresh: bool, ids: &[&str]) -> QuotaRefreshBatch {
         generation,
         refresh,
         profiles: ids.iter().map(|id| probeless_request(id)).collect(),
+        extra: Vec::new(),
+        grants: Vec::new(),
+        rejected_logins: Default::default(),
+        forced_probes: Default::default(),
     }
 }
 
 async fn next_update(updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>) -> QuotaUpdate {
-    tokio::time::timeout(Duration::from_secs(20), updates.recv())
-        .await
-        .expect("an update arrives")
-        .expect("the poller runs")
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let update = updates.recv().await.expect("the poller runs");
+            // These assertions concern usage probes, which are independent
+            // of credential delivery notices.
+            if !matches!(update, QuotaUpdate::ClaudeGrant { .. }) {
+                return update;
+            }
+        }
+    })
+    .await
+    .expect("an update arrives")
 }
 
 async fn assert_quiet(updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>) {
-    if let Ok(update) = tokio::time::timeout(Duration::from_millis(300), updates.recv()).await {
+    let unexpected = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            let update = updates.recv().await.expect("the poller runs");
+            if !matches!(update, QuotaUpdate::ClaudeGrant { .. }) {
+                return update;
+            }
+        }
+    })
+    .await;
+    if let Ok(update) = unexpected {
         panic!("expected no probe, got {update:?}");
     }
 }
@@ -531,6 +592,67 @@ async fn a_reload_probes_only_the_profile_it_added() {
 }
 
 #[tokio::test]
+async fn extra_profiles_are_probed_once_and_never_on_the_batch_schedule() {
+    let (profiles, mut updates) = poller_with_store(vec![]);
+    let mut with_extra = batch(1, false, &["a"]);
+    with_extra.extra = vec![probeless_request("extra")];
+    profiles.send_replace(with_extra);
+    // The batch cycle runs first, then the extra's one-shot probe.
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 1 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
+
+    // A batch change does not re-probe an extra it already answered.
+    let mut same = batch(2, false, &["a"]);
+    same.extra = vec![probeless_request("extra")];
+    profiles.send_replace(same);
+    assert_quiet(&mut updates).await;
+
+    // A forced refresh re-reads it, and a changed identity is a new question.
+    let mut forced = batch(3, true, &["a"]);
+    forced.extra = vec![probeless_request("extra")];
+    profiles.send_replace(forced);
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 3 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+
+    let mut changed = probeless_request("extra");
+    changed.codex_source =
+        crate::quota::CodexQuotaSource::Provider(crate::quota::ProviderCredential {
+            id: "other".into(),
+            host: "example.invalid".into(),
+            api_key: "key2".into(),
+        });
+    let mut next = batch(4, false, &["a"]);
+    next.extra = vec![changed];
+    profiles.send_replace(next);
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
+}
+
+async fn next_update_report(updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>) -> String {
+    let QuotaUpdate::Report(outcome) = next_update(updates).await else {
+        panic!("expected a report");
+    };
+    outcome.report.profile_id
+}
+
+#[tokio::test]
 async fn an_explicit_refresh_probes_every_profile_even_when_fresh() {
     let (profiles, mut updates) = poller_with_store(vec![stored_report("a", 60)]);
     profiles.send_replace(batch(1, false, &["a"]));
@@ -551,6 +673,95 @@ async fn an_explicit_refresh_probes_every_profile_even_when_fresh() {
         next_update(&mut updates).await,
         QuotaUpdate::Finished { generation: 2 }
     ));
+}
+
+/// A named refresh probes even a fresh report, and a forced extra answers
+/// again. The pulse is consumed once: the next batch change re-probes nothing.
+#[tokio::test]
+async fn a_forced_profile_probe_answers_now_and_only_once() {
+    let (profiles, mut updates) = poller_with_store(vec![stored_report("a", 60)]);
+    profiles.send_replace(batch(1, false, &["a"]));
+    // The fresh stored report is published without a probe.
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Report(_)
+    ));
+    assert_quiet(&mut updates).await;
+
+    let forced_map: std::collections::BTreeMap<String, u64> =
+        [("a".to_owned(), 1), ("extra".to_owned(), 1)]
+            .into_iter()
+            .collect();
+    let mut forced = batch(2, false, &["a"]);
+    forced.extra = vec![probeless_request("extra")];
+    forced.forced_probes = forced_map.clone();
+    profiles.send_replace(forced);
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 2 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
+
+    // A batch carrying the same requests again — one a coalesced channel
+    // never delivered — answers nothing twice.
+    let mut quiet = batch(3, false, &["a"]);
+    quiet.extra = vec![probeless_request("extra")];
+    quiet.forced_probes = forced_map;
+    profiles.send_replace(quiet);
+    assert_quiet(&mut updates).await;
+
+    // A new request for the same profiles is a new sequence and answers again.
+    let mut again = batch(4, false, &["a"]);
+    again.extra = vec![probeless_request("extra")];
+    again.forced_probes = [("a".to_owned(), 2), ("extra".to_owned(), 2)]
+        .into_iter()
+        .collect();
+    profiles.send_replace(again);
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "a");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 4 }
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
+}
+
+#[test]
+fn a_short_hold_on_an_old_reading_waits_a_full_interval_from_the_refused_attempt() {
+    // The good reading is long past its interval; the provider's hold (60 s)
+    // is over a minute after the refused attempt. Scheduling on the hold
+    // would re-probe every minute for as long as the provider keeps refusing.
+    let interval = QUOTA_REFRESH_INTERVAL.as_secs();
+    let now = epoch_seconds();
+    let good = stored_report("a", interval + 3_600);
+    let (until, next_check) =
+        crate::quota::refused_check_schedule(now, Some(Duration::from_secs(30)));
+    let mut refused = stored_report("a", 0);
+    refused.windows.clear();
+    refused.error = Some("rate limited".into());
+    refused.refreshed_at_epoch_seconds = now;
+    refused.rate_limited_until_epoch_seconds = Some(until);
+    refused.next_check_at_epoch_seconds = Some(next_check);
+    // What the poller publishes: the old good reading, with the refusal's schedule.
+    let held = crate::quota::hold_report(Some(&good), refused);
+    assert_eq!(
+        held.refreshed_at_epoch_seconds,
+        good.refreshed_at_epoch_seconds
+    );
+    assert_eq!(next_probe_at(Some(&held)), now + interval);
+    // The hold stays the provider's own; a forced probe is allowed past it.
+    assert!(super::quota::on_hold(Some(&held), now));
+    assert!(!super::quota::on_hold(Some(&held), now + 61));
 }
 
 #[tokio::test]
@@ -594,6 +805,568 @@ async fn a_held_profile_is_not_probed_by_the_schedule_or_by_a_refresh() {
         next_update(&mut updates).await,
         QuotaUpdate::Finished { generation: 2 }
     ));
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+const EIGHT_HOURS_MS: i64 = 8 * 3_600_000;
+#[cfg(all(unix, not(target_os = "macos")))]
+const ONE_HOUR_MS: i64 = 3_600_000;
+
+/// A stand-in for `claude auth login` in `directory/bin` that exchanges the
+/// refresh token it is given for a login lasting `renewed_lifetime_ms` (the real
+/// command grants 8 h), numbering its tokens so each renewal needs the last one,
+/// and a profile home whose login expires in `expires_in_ms` (an hour is inside
+/// the 4 h lead).
+/// Returns the request for that profile and its credential file.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn renewable_claude_profile(
+    directory: &std::path::Path,
+    id: &str,
+    renewed_lifetime_ms: i64,
+    expires_in_ms: i64,
+) -> (QuotaRefreshRequest, PathBuf) {
+    let bin = directory.join("bin");
+    let home = directory.join(format!("home-{id}"));
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let claude = bin.join("claude");
+    if !claude.exists() {
+        mj_core::test_hooks::install_fake_command(
+            &bin,
+            "claude",
+            &format!(
+                r#"#!/bin/sh
+n=$(cat "$CLAUDE_CONFIG_DIR/renewals" 2>/dev/null || echo 0)
+n=$((n + 1))
+test "$CLAUDE_CODE_OAUTH_REFRESH_TOKEN" = "refresh-$n" || exit 3
+echo "$n" > "$CLAUDE_CONFIG_DIR/renewals"
+expires=$(( $(date +%s) * 1000 + {renewed_lifetime_ms} ))
+printf '{{"claudeAiOauth":{{"accessToken":"access-%s","refreshToken":"refresh-%s","expiresAt":%s,"scopes":["user:inference"]}}}}' "$((n + 1))" "$((n + 1))" "$expires" > "$CLAUDE_CONFIG_DIR/.credentials.json.new"
+mv "$CLAUDE_CONFIG_DIR/.credentials.json.new" "$CLAUDE_CONFIG_DIR/.credentials.json"
+"#
+            ),
+        );
+    }
+    let credentials = home.join(".credentials.json");
+    let expires_in_an_hour = mj_core::clock::epoch_millis() + expires_in_ms;
+    std::fs::write(
+        &credentials,
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"access-1","refreshToken":"refresh-1","expiresAt":{expires_in_an_hour},"scopes":["user:inference"]}}}}"#
+        ),
+    )
+    .unwrap();
+    let request = QuotaRefreshRequest {
+        profile_id: id.into(),
+        harness: mj_core::config::HarnessKind::Claude,
+        auth_scheme: mj_core::config::AuthScheme::NativeLogin,
+        source_home: home,
+        environment: [(
+            "PATH".to_owned(),
+            format!("{}:/usr/bin:/bin", bin.display()),
+        )]
+        .into(),
+        cwd: PathBuf::from("."),
+        codex_source: crate::quota::CodexQuotaSource::UsagePriced {
+            provider: String::new(),
+        },
+        opencode_usage_priced: false,
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
+    };
+    (request, credentials)
+}
+
+// Hard-won: #1529: an unexpired refused login waited hours for its scheduled renewal.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_refused_unexpired_claude_login_wakes_both_daemons_and_is_exchanged_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, 7 * ONE_HOUR_MS);
+    let (batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
+        extra: Vec::new(),
+        grants: vec![request.clone()],
+        ..Default::default()
+    });
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let (sender, updates) = tokio::sync::mpsc::channel(32);
+        spawn_claude_grant_refresher(
+            receiver.clone(),
+            QUOTA_REFRESH_INTERVAL,
+            open_gate_renewal(directory.path()),
+            Some(sender),
+        );
+        results.push(updates);
+    }
+    // Both tasks are sleeping on a seven-hour unexpired login.
+    for updates in &mut results {
+        assert_quiet(updates).await;
+    }
+    assert!(!credentials.with_file_name("renewals").exists());
+    let rejected = mj_core::credentials::claude_access_token_fingerprint(
+        &std::fs::read(&credentials).unwrap(),
+    )
+    .unwrap();
+    batches.send_modify(|batch| {
+        batch
+            .rejected_logins
+            .insert(request.profile_id.clone(), [rejected.clone()].into());
+    });
+    for updates in &mut results {
+        let update = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(update, QuotaUpdate::ClaudeGrant {
+            check: crate::quota::ClaudeGrantCheck::Renewed { .. } | crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: Some(_) },
+            rejected_logins: ref fingerprints, ..
+        } if fingerprints.contains(&rejected)),
+            "{update:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(credentials.with_file_name("renewals"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+    // A delayed repeat of the same refusal wakes the loops but may not spend
+    // the replacement token, even across two daemon instances.
+    batches.send_modify(|_| {});
+    for updates in &mut results {
+        let update = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                update,
+                QuotaUpdate::ClaudeGrant {
+                    check: crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: Some(_) },
+                    ..
+                }
+            ),
+            "{update:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(credentials.with_file_name("renewals"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+}
+
+// Hard-won: #1529: failed automatic renewal was invisible and a changed login had no immediate delivery.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_refused_claude_login_reports_failed_renewal_then_delivers_a_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, 7 * ONE_HOUR_MS);
+    mj_core::test_hooks::install_fake_command(&directory.path().join("bin"), "claude", "exit 2\n");
+    let rejected = mj_core::credentials::claude_access_token_fingerprint(
+        &std::fs::read(&credentials).unwrap(),
+    )
+    .unwrap();
+    let (batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
+        extra: Vec::new(),
+        grants: vec![request.clone()],
+        rejected_logins: [(request.profile_id.clone(), [rejected].into())].into(),
+        ..Default::default()
+    });
+    let (sender, mut updates) = tokio::sync::mpsc::channel(32);
+    spawn_claude_grant_refresher(
+        receiver,
+        QUOTA_REFRESH_INTERVAL,
+        open_gate_renewal(directory.path()),
+        Some(sender),
+    );
+    let update = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let QuotaUpdate::ClaudeGrant { check, .. } = update else {
+        panic!("{update:?}");
+    };
+    assert_eq!(check, crate::quota::ClaudeGrantCheck::Failed);
+    let mut publication = crate::quota::QuotaReportPublication {
+        cache_identity: request.cache_identity(),
+        report: None,
+        login_error: None,
+    };
+    assert!(publication.observe_claude_grant("claude1", check, true));
+    assert!(
+        publication
+            .effective_report("claude1")
+            .unwrap()
+            .error
+            .as_deref()
+            .is_some()
+    );
+    // A successful usage probe cannot erase a failed renewal.
+    publication.report = Some(stored_report("claude1", 0));
+    assert!(
+        publication
+            .effective_report("claude1")
+            .unwrap()
+            .error
+            .as_deref()
+            .is_some()
+    );
+    // An older session's refusal can arrive after the current login failed.
+    // Retain both identities so the old report cannot hide this refusal.
+    batches.send_modify(|batch| {
+        batch
+            .rejected_logins
+            .get_mut("claude1")
+            .unwrap()
+            .insert("older-access-token".into());
+    });
+    let update = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            update,
+            QuotaUpdate::ClaudeGrant {
+                check: crate::quota::ClaudeGrantCheck::Failed,
+                ..
+            }
+        ),
+        "{update:?}"
+    );
+    let replacement = std::fs::read_to_string(&credentials)
+        .unwrap()
+        .replace("access-1", "manual-login");
+    std::fs::write(&credentials, replacement).unwrap();
+    batches.send_modify(|_| {});
+    let update = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let QuotaUpdate::ClaudeGrant { check, .. } = update else {
+        panic!("{update:?}");
+    };
+    assert!(matches!(
+        check,
+        crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: Some(_) }
+    ));
+    assert!(publication.observe_claude_grant("claude1", check, true));
+    assert!(
+        publication
+            .effective_report("claude1")
+            .unwrap()
+            .error
+            .as_deref()
+            .is_none()
+    );
+    assert!(
+        !credentials.with_file_name("renewals").exists(),
+        "a replacement is delivered without another refresh"
+    );
+}
+
+/// #1490: the daemon renews a Claude grant when under half of its 8 h access
+/// token remains, even while the usage API holds the profile's probes, and
+/// also for a disabled profile that only has live sessions (`grants`), because
+/// session copies hold no refresh token and cannot do it themselves.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_held_claude_profile_still_renews_its_grant_early() {
+    let directory = tempfile::tempdir().unwrap();
+    let (held_request, held_credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, ONE_HOUR_MS);
+    let (grant_only, grant_only_credentials) =
+        renewable_claude_profile(directory.path(), "claude2", EIGHT_HOURS_MS, ONE_HOUR_MS);
+
+    let mut held = stored_report("claude1", QUOTA_REFRESH_INTERVAL.as_secs() + 600);
+    held.harness = mj_core::config::HarnessKind::Claude;
+    held.rate_limited_until_epoch_seconds = Some(epoch_seconds() + 3_600);
+    let (profiles, mut updates) =
+        poller_with_launcher(vec![held.clone()], fake_claude(directory.path()));
+    profiles.send_replace(QuotaRefreshBatch {
+        generation: 1,
+        refresh: false,
+        profiles: vec![held_request],
+        extra: Vec::new(),
+        grants: vec![grant_only],
+        rejected_logins: Default::default(),
+        forced_probes: Default::default(),
+    });
+    // The held report is published and the usage API is not asked.
+    let QuotaUpdate::Report(outcome) = next_update(&mut updates).await else {
+        panic!("the held report is published");
+    };
+    assert_eq!(outcome.report, held);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    for credentials in [&held_credentials, &grant_only_credentials] {
+        while std::fs::read_to_string(credentials)
+            .unwrap()
+            .contains("access-1")
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the grant was not renewed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            std::fs::read_to_string(credentials)
+                .unwrap()
+                .contains("refresh-2")
+        );
+    }
+    // The grant-only profile is never probed or published.
+    assert_quiet(&mut updates).await;
+}
+
+/// #1490 review: with no enabled profile to drive probe wakeups (only a
+/// grant-only one), the poller still wakes for each renewal. The stand-in
+/// grants a login due again within seconds, so the second renewal shows the
+/// schedule survived the first.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn the_poller_wakes_for_every_renewal_with_only_grant_only_profiles() {
+    let directory = tempfile::tempdir().unwrap();
+    // Due again 3 s after each renewal: expiry = lead + 3 s.
+    let lifetime =
+        i64::try_from(crate::claude_usage::GRANT_REFRESH_LEAD.as_millis()).unwrap() + 3_000;
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", lifetime, ONE_HOUR_MS);
+    let (profiles, mut updates) = poller_with_launcher(Vec::new(), fake_claude(directory.path()));
+    profiles.send_replace(QuotaRefreshBatch {
+        generation: 1,
+        refresh: false,
+        profiles: Vec::new(),
+        extra: Vec::new(),
+        grants: vec![request],
+        rejected_logins: Default::default(),
+        forced_probes: Default::default(),
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    for renewal in ["access-2", "access-3"] {
+        while !std::fs::read_to_string(&credentials)
+            .unwrap()
+            .contains(renewal)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the poller did not wake for {renewal}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    assert_quiet(&mut updates).await;
+}
+
+/// #1490 review: once `claude auth login` has started it runs to its end even
+/// when the caller is dropped (daemon shutdown, a cancelled task): Anthropic
+/// has spent the refresh token by then, and a kill before the new login is
+/// written would lose the grant.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_started_claude_login_exchange_survives_its_caller_being_dropped() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    // A slow exchange: announces itself, then takes a second to persist.
+    let bin = directory.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        r#"#!/bin/sh
+touch "$CLAUDE_CONFIG_DIR/started"
+sleep 1
+printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","expiresAt":%s,"scopes":["user:inference"]}}' "$(( $(date +%s) * 1000 + 28800000 ))" > "$CLAUDE_CONFIG_DIR/.credentials.json"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, ONE_HOUR_MS);
+    let started = credentials.with_file_name("started");
+    let launcher = fake_claude(directory.path());
+    let gate = crate::upgrade::gate().clone();
+    let caller = tokio::spawn(async move {
+        crate::quota::refresh_claude_grant(
+            &request,
+            mj_core::clock::epoch_millis(),
+            &launcher,
+            &gate,
+            &Default::default(),
+        )
+        .await
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !started.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exchange never started"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    caller.abort();
+    while std::fs::read_to_string(&credentials)
+        .unwrap()
+        .contains("access-1")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exchange was cut short with the caller"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// #1490 review: a renewal that has not begun is skipped while a daemon
+/// handoff waits (its admission is refused), so the handoff is never held for
+/// one and a refresh-token exchange is never cut short by it. The next daemon
+/// decides again from the file.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_due_claude_renewal_is_skipped_while_a_handoff_waits() {
+    let directory = tempfile::tempdir().unwrap();
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, ONE_HOUR_MS);
+    let gate = Arc::new(crate::upgrade::Gate::default());
+    // Control work is running and a handoff asks to close: the gate drains.
+    let running = gate.enter("session lifecycle").unwrap();
+    assert!(!gate.try_close());
+    let (_batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
+        generation: 1,
+        refresh: false,
+        profiles: Vec::new(),
+        extra: Vec::new(),
+        grants: vec![request],
+        rejected_logins: Default::default(),
+        forced_probes: Default::default(),
+    });
+    spawn_claude_grant_refresher(
+        receiver,
+        Duration::from_millis(300),
+        GrantRenewal {
+            launcher: fake_claude(directory.path()),
+            gate: gate.clone(),
+        },
+        None,
+    );
+    // Several rechecks pass; none starts the exchange.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        std::fs::read_to_string(&credentials)
+            .unwrap()
+            .contains("access-1"),
+        "a renewal started while a handoff was waiting"
+    );
+    assert!(
+        !credentials.with_file_name("renewals").exists(),
+        "the renewal program ran"
+    );
+    drop(running);
+}
+
+/// #1490 review: a profile reconfigured under the same ID (another home) is
+/// renewed at once under its new home, not after the old home's schedule.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_reconfigured_claude_profile_is_renewed_under_its_new_home_at_once() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    // The old home is not due for hours, so its task sleeps a full interval.
+    let (old_home, old_credentials) =
+        renewable_claude_profile(first.path(), "claude1", EIGHT_HOURS_MS, 7 * ONE_HOUR_MS);
+    let (new_home, new_credentials) =
+        renewable_claude_profile(second.path(), "claude1", EIGHT_HOURS_MS, ONE_HOUR_MS);
+    let (profiles, _updates) = poller_with_launcher(Vec::new(), fake_claude(first.path()));
+    let batch = |request| QuotaRefreshBatch {
+        generation: 1,
+        refresh: false,
+        profiles: Vec::new(),
+        // Grant-only, so the poller never asks the usage API about it.
+        extra: Vec::new(),
+        grants: vec![request],
+        rejected_logins: Default::default(),
+        forced_probes: Default::default(),
+    };
+    profiles.send_replace(batch(old_home));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    profiles.send_replace(batch(new_home));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while std::fs::read_to_string(&new_credentials)
+        .unwrap()
+        .contains("access-1")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the new home kept the old home's schedule"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        std::fs::read_to_string(&old_credentials)
+            .unwrap()
+            .contains("access-1")
+    );
+}
+
+/// #1490 review: a login file replaced behind the poller's back (`mj login`
+/// with a sooner-expiring login) is read again within one recheck interval;
+/// no deadline is cached across it.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_replaced_claude_login_with_a_sooner_expiry_is_renewed_within_a_recheck_interval() {
+    let directory = tempfile::tempdir().unwrap();
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, 7 * ONE_HOUR_MS);
+    let (batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
+        generation: 1,
+        refresh: false,
+        profiles: vec![request],
+        extra: Vec::new(),
+        grants: Vec::new(),
+        rejected_logins: Default::default(),
+        forced_probes: Default::default(),
+    });
+    spawn_claude_grant_refresher(
+        receiver,
+        Duration::from_secs(1),
+        open_gate_renewal(directory.path()),
+        None,
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        std::fs::read_to_string(&credentials)
+            .unwrap()
+            .contains("access-1"),
+        "not due yet"
+    );
+
+    let soon = mj_core::clock::epoch_millis() + ONE_HOUR_MS;
+    std::fs::write(
+        &credentials,
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"access-1","refreshToken":"refresh-1","expiresAt":{soon},"scopes":["user:inference"]}}}}"#
+        ),
+    )
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while std::fs::read_to_string(&credentials)
+        .unwrap()
+        .contains("access-1")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the replaced login kept its old deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(batches);
 }
 
 #[test]
@@ -660,6 +1433,7 @@ fn golden_aws_capacity_aggregates_real_probe_rows_and_rejects_overflow() {
     );
 
     let usage = |memory_total_bytes, logical_cores, disk_total_bytes| DeploymentCapacityUsage {
+        memory_pool: false,
         cpu_percent: None,
         memory_used_bytes: 0,
         memory_total_bytes,
@@ -700,26 +1474,32 @@ struct CapacityPollerFixture {
     triggers: tokio::sync::mpsc::Sender<()>,
     updates: tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
     started: tokio::sync::mpsc::UnboundedReceiver<PendingCapacityProbe>,
+    requested: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacityPollerFixture {
     fn new() -> Self {
         let (started_tx, started) = tokio::sync::mpsc::unbounded_channel();
-        let (targets, triggers, updates) = spawn_capacity_poller_with(move |target| {
-            let started_tx = started_tx.clone();
-            async move {
-                let (finish, result) = tokio::sync::oneshot::channel();
-                started_tx
-                    .send(PendingCapacityProbe { target, finish })
-                    .unwrap();
-                result.await.context("test probe completion dropped")?
-            }
-        });
+        let requested = Arc::<std::sync::atomic::AtomicU64>::default();
+        let (targets, triggers, updates) = spawn_capacity_poller_with(
+            move |target| {
+                let started_tx = started_tx.clone();
+                async move {
+                    let (finish, result) = tokio::sync::oneshot::channel();
+                    started_tx
+                        .send(PendingCapacityProbe { target, finish })
+                        .unwrap();
+                    result.await.context("test probe completion dropped")?
+                }
+            },
+            requested.clone(),
+        );
         Self {
             targets,
             triggers,
             updates,
             started,
+            requested,
         }
     }
 
@@ -743,6 +1523,32 @@ fn capacity_target(id: &str) -> DeploymentCapacityTarget {
         local_storage_paths: Vec::new(),
         probe_error: None,
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_request_is_answered_only_by_a_probe_that_started_after_it() {
+    let mut fixture = CapacityPollerFixture::new();
+    fixture.targets.send_replace(vec![capacity_target("local")]);
+    // A scheduled probe is already running when the request arrives.
+    let running = fixture.started.recv().await.unwrap();
+    fixture
+        .requested
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    fixture.triggers.send(()).await.unwrap();
+    running.finish.send(Ok(None)).unwrap();
+    // Its result began before the request, so it does not answer it.
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 0);
+    // The poller probes again at once, and that probe answers the request.
+    fixture
+        .started
+        .recv()
+        .await
+        .unwrap()
+        .finish
+        .send(Ok(None))
+        .unwrap();
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
+    fixture.assert_no_start().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -861,12 +1667,15 @@ async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_disc
 #[tokio::test]
 async fn capacity_probe_panics_are_reported_and_do_not_prevent_retry() {
     let first = AtomicBool::new(true);
-    let (targets, triggers, mut updates) = spawn_capacity_poller_with(move |_| {
-        if first.swap(false, Ordering::SeqCst) {
-            panic!("test capacity probe panic");
-        }
-        async { Ok(None) }
-    });
+    let (targets, triggers, mut updates) = spawn_capacity_poller_with(
+        move |_| {
+            if first.swap(false, Ordering::SeqCst) {
+                panic!("test capacity probe panic");
+            }
+            async { Ok(None) }
+        },
+        Arc::default(),
+    );
     targets.send_replace(vec![capacity_target("local")]);
     let failure = updates.recv().await.unwrap();
     assert_eq!(failure.target_id, "local");
@@ -981,6 +1790,7 @@ async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
         // Dropping finish_tx on a test failure also releases this thread.
         finish_rx.recv().context("test sample was cancelled")?;
         Ok(DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(10),
             memory_used_bytes: 1,
             memory_total_bytes: 2,
@@ -1007,74 +1817,77 @@ async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
     );
 }
 
+// Hard-won: #1547: a cooldown held an authentication failure until the profile had been renewed, so the decision mistook the renewal for a refusal.
 #[test]
-fn a_new_credential_signal_waits_out_the_cooldown_without_being_lost() {
-    let signal = |ordinal, reason| CredentialSyncSignal { ordinal, reason };
+fn an_authentication_failure_is_handled_at_once_but_an_empty_response_waits_out_the_cooldown() {
+    let signal = |ordinal, reason, token: Option<&str>| CredentialSyncSignal {
+        ordinal,
+        reason,
+        login_fingerprint: token.map(str::to_owned),
+    };
     let mut tracker = CredentialSyncSignalTracker::default();
     let started = Instant::now();
     tracker.observe(
         "session",
         "work",
-        signal(41, CredentialSyncReason::AuthenticationFailure),
+        signal(41, CredentialSyncReason::AuthenticationFailure, Some("old")),
     );
     assert_eq!(
         tracker.drain_due(started),
         vec![(
             "session".into(),
             "work".into(),
-            CredentialSyncReason::AuthenticationFailure
+            CredentialSyncReason::AuthenticationFailure,
+            Some("old".into())
         )]
+    );
+
+    // A second failure inside the old cooldown is still handled at once.
+    tracker.observe(
+        "session",
+        "work",
+        signal(42, CredentialSyncReason::AuthenticationFailure, None),
+    );
+    assert_eq!(
+        tracker.drain_due(started + Duration::from_secs(1)),
+        vec![(
+            "session".into(),
+            "work".into(),
+            CredentialSyncReason::AuthenticationFailure,
+            None
+        )]
+    );
+    // An observation already handled is not handled twice.
+    tracker.observe(
+        "session",
+        "work",
+        signal(42, CredentialSyncReason::AuthenticationFailure, None),
+    );
+    assert!(
+        tracker
+            .drain_due(started + Duration::from_secs(2))
+            .is_empty()
     );
 
     tracker.observe(
         "session",
-        "work",
-        signal(42, CredentialSyncReason::AuthenticationFailure),
+        "new-profile",
+        signal(43, CredentialSyncReason::EmptyPromptResponse, None),
     );
     assert!(
         tracker
             .drain_due(started + Duration::from_secs(60))
             .is_empty()
     );
-    tracker.observe(
-        "session",
-        "new-profile",
-        signal(43, CredentialSyncReason::EmptyPromptResponse),
-    );
-    assert_eq!(tracker.pending["session"].signal.ordinal, 43);
-
     // No repeated observation is needed: the loop timer drains the sticky
     // failure once its cooldown expires.
     assert_eq!(
-        tracker.drain_due(started + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
+        tracker.drain_due(started + Duration::from_secs(1) + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
         vec![(
             "session".into(),
             "new-profile".into(),
-            CredentialSyncReason::EmptyPromptResponse
-        )]
-    );
-    tracker.observe(
-        "session",
-        "new-profile",
-        signal(43, CredentialSyncReason::EmptyPromptResponse),
-    );
-    assert!(
-        tracker
-            .drain_due(started + (IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN * 2))
-            .is_empty()
-    );
-
-    tracker.observe(
-        "other",
-        "personal",
-        signal(1, CredentialSyncReason::AuthenticationFailure),
-    );
-    assert_eq!(
-        tracker.drain_due(started + Duration::from_secs(60)),
-        vec![(
-            "other".into(),
-            "personal".into(),
-            CredentialSyncReason::AuthenticationFailure
+            CredentialSyncReason::EmptyPromptResponse,
+            None
         )]
     );
 }
@@ -1097,14 +1910,17 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             kind.id().into(),
             mj_core::config::HarnessProfile {
                 enabled: true,
-                kind,
-                home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
+                claude_permission_mode: None,
+                aws: None,
+                ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
         );
         controller.config.targets.insert(
@@ -1134,9 +1950,9 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
         std::fs::create_dir_all(worker_root.join("profile")).unwrap();
         let session = controller.state.sessions.get_mut(&session_id).unwrap();
         session.target_template_id = "local-bare".into();
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let on_this_machine = credential_sync_targets(&controller);
         assert_eq!(on_this_machine.len(), 1, "{kind:?}");
@@ -1192,14 +2008,17 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
             kind.id().into(),
             mj_core::config::HarnessProfile {
                 enabled: true,
-                kind,
-                home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
+                claude_permission_mode: None,
+                aws: None,
+                ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
         );
         controller.config.targets.insert(
@@ -1217,9 +2036,9 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
         session.harness_kind = kind;
         session.last_profile = kind.id().into();
         session.target_template_id = "local-bare".into();
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let staged_login = mj_core::config::harness_authentication_marker(kind, &staged);
         std::fs::write(&staged_login, "{}").unwrap();
@@ -1254,15 +2073,10 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
     controller.config.profiles.insert(
         "codex4".into(),
         mj_core::config::HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: home.path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_path_buf(),
+            )
         },
     );
     controller.config.targets.insert(
@@ -1301,15 +2115,15 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
     let mut parent = controller.state.sessions.remove(parent_id).unwrap();
     parent.harness_kind = mj_core::config::HarnessKind::Claude;
     parent.target_template_id = "morannon-podman".into();
-    parent.target = Some(on_morannon(None, &parent_container));
+    parent.target = Some(Box::new(on_morannon(None, &parent_container)));
     let mut child = parent.clone();
     child.id = child_id.into();
     child.harness_kind = mj_core::config::HarnessKind::Codex;
     child.last_profile = "codex4".into();
-    child.target = Some(on_morannon(Some(parent_id), &parent_container));
+    child.target = Some(Box::new(on_morannon(Some(parent_id), &parent_container)));
     let mut sibling = child.clone();
     sibling.id = sibling_id.into();
-    sibling.target = Some(on_morannon(None, &"d".repeat(64)));
+    sibling.target = Some(Box::new(on_morannon(None, &"d".repeat(64))));
     for session in [parent, child, sibling] {
         controller
             .state
@@ -1399,12 +2213,17 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
+            step_failures: Vec::new(),
         }],
+        partial: false,
     };
 
     let claude = CredentialSyncNotices::default()
@@ -1429,9 +2248,13 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
     // The advice also reaches a failed reconciliation, not only a clean one.
     let failed = CredentialSyncResult {
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err("worker proxy disconnected".into()),
+            step_failures: Vec::new(),
         }],
+        partial: false,
         ..result
     };
     let claude_failure = CredentialSyncNotices::default()
@@ -1452,12 +2275,17 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::EmptyPromptResponse,
+            login_fingerprint: None,
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            step_failures: Vec::new(),
         }],
+        partial: false,
     };
     let notice = CredentialSyncNotices::default()
         .notice(&result, None, &State::default())
@@ -1476,9 +2304,11 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
         failure: Some("controller credential file is unreadable".into()),
         outcomes: Vec::new(),
+        partial: false,
     };
     let leveled = CredentialSyncNotices::default()
         .leveled_notice(&result, None, &State::default())
@@ -1500,9 +2330,13 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         trigger: None,
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err(detail.to_owned()),
+            step_failures: Vec::new(),
         }],
+        partial: false,
     };
     let mut notices = CredentialSyncNotices::default();
 
@@ -1539,15 +2373,101 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         trigger: None,
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            step_failures: Vec::new(),
         }],
+        partial: false,
     };
     assert_eq!(notices.notice(&healthy, None, &State::default()), None);
     assert!(
         notices
             .notice(&failed("container is gone"), None, &State::default())
             .is_some()
+    );
+}
+
+#[test]
+fn a_result_clears_only_the_failures_of_the_steps_it_checked() {
+    use mj_core::credentials::{
+        CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult, StepFailure, SyncStep,
+    };
+
+    let result = |partial: bool, step_failures: Vec<StepFailure>| CredentialSyncResult {
+        profile_id: "work".into(),
+        trigger: None,
+        failure: None,
+        outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
+            current_access_token: None,
+            session_id: "018f9dd2-a3b4".into(),
+            outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            step_failures,
+        }],
+        partial,
+    };
+    let failure = |step, detail: &str| {
+        vec![StepFailure {
+            step,
+            detail: detail.into(),
+        }]
+    };
+    // The session's own AWS renewal reports (a partial result); the profile's
+    // pass reports the login (a full one).
+    let aws_failed = || result(true, failure(SyncStep::Aws, "AWS credentials: refused"));
+    let aws_fine = || result(true, Vec::new());
+    let login_failed = || {
+        result(
+            false,
+            failure(SyncStep::HarnessLogin, "harness login: refused"),
+        )
+    };
+    let login_fine = || result(false, Vec::new());
+    let mut notices = CredentialSyncNotices::default();
+    let state = State::default();
+
+    assert!(notices.notice(&aws_failed(), None, &state).is_some());
+    assert!(notices.notice(&login_failed(), None, &state).is_some());
+
+    // The AWS success ends the AWS failure only: the login failure is not
+    // reported again, and a recurrence of the AWS one is.
+    assert_eq!(notices.notice(&aws_fine(), None, &state), None);
+    assert_eq!(notices.notice(&login_failed(), None, &state), None);
+    assert!(notices.notice(&aws_failed(), None, &state).is_some());
+
+    // The login success ends the login failure only.
+    assert_eq!(notices.notice(&login_fine(), None, &state), None);
+    assert_eq!(notices.notice(&aws_failed(), None, &state), None);
+    assert!(notices.notice(&login_failed(), None, &state).is_some());
+
+    // Two steps failing in one pass are both said, in one notice.
+    let mut two_steps = login_failed();
+    two_steps.outcomes[0].step_failures.push(StepFailure {
+        step: SyncStep::Skills,
+        detail: "skills: archive unreadable".into(),
+    });
+    let said = CredentialSyncNotices::default()
+        .notice(&two_steps, None, &state)
+        .unwrap();
+    assert!(
+        said.contains("harness login: refused") && said.contains("skills: archive unreadable"),
+        "{said}"
+    );
+
+    // Two failures of one step are both said.
+    let mut both = aws_failed();
+    both.outcomes[0].step_failures.push(StepFailure {
+        step: SyncStep::Aws,
+        detail: "AWS credentials withdrawal: worker too old".into(),
+    });
+    let said = CredentialSyncNotices::default()
+        .notice(&both, None, &state)
+        .unwrap();
+    assert!(
+        said.contains("AWS credentials: refused") && said.contains("worker too old"),
+        "{said}"
     );
 }
 
@@ -1561,6 +2481,7 @@ fn a_repeated_whole_sync_failure_is_reported_once_per_profile() {
         trigger: None,
         failure: Some("controller home is unreadable".into()),
         outcomes: Vec::new(),
+        partial: false,
     };
     let mut notices = CredentialSyncNotices::default();
 
@@ -1598,6 +2519,132 @@ impl RefreshReports {
     }
 }
 
+// Hard-won: #1358: the image refresher restarted an Apple container service the user had stopped
+// Hard-won: #1476: Apple image refreshes omitted cleanup and accumulated 128 GB of old data.
+#[test]
+fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_it() {
+    struct AppleExecutor {
+        service_running: bool,
+        failed_command: Option<&'static str>,
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for AppleExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let line = format!("{} {}", command.program, command.args.join(" "));
+            let stopped = line == "container system status" && !self.service_running;
+            let failed = self.failed_command == Some(line.as_str());
+            self.commands.lock().unwrap().push(line);
+            Ok(CommandOutput {
+                status: i32::from(stopped || failed),
+                stdout: b"sha256:1111\n".to_vec(),
+                stderr: if failed {
+                    b"image store unavailable".to_vec()
+                } else {
+                    Vec::new()
+                },
+            })
+        }
+    }
+
+    let refresh = || {
+        crate::targets::image_refresh(
+            crate::targets::ImageHost::AppleContainer,
+            "ghcr.io/example/dev:latest",
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed")
+    };
+    let reports = RefreshReports::default();
+
+    let stopped = AppleExecutor {
+        service_running: false,
+        failed_command: None,
+        commands: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        refresh_one_host(refresh(), &stopped, &reports.record()),
+        None
+    );
+    assert_eq!(
+        *stopped.commands.lock().unwrap(),
+        ["container system status"],
+        "a stopped service is observed, never started, and nothing is pulled"
+    );
+    assert!(reports.taken().is_empty());
+
+    let running = AppleExecutor {
+        service_running: true,
+        failed_command: None,
+        commands: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        refresh_one_host(refresh(), &running, &reports.record()),
+        Some((
+            "apple container".to_owned(),
+            "ghcr.io/example/dev:latest".to_owned(),
+            None
+        ))
+    );
+    let commands = running.commands.lock().unwrap();
+    assert_eq!(
+        *commands,
+        [
+            "container system status",
+            "container image inspect ghcr.io/example/dev:latest",
+            "container image pull ghcr.io/example/dev:latest",
+            "container image inspect ghcr.io/example/dev:latest",
+            "container image prune",
+        ],
+        "a successful pull must reclaim orphaned data without deleting tagged preloads"
+    );
+    drop(commands);
+
+    for failed_command in [
+        "container image pull ghcr.io/example/dev:latest",
+        "container image prune",
+    ] {
+        let failing = AppleExecutor {
+            service_running: true,
+            failed_command: Some(failed_command),
+            commands: std::sync::Mutex::new(Vec::new()),
+        };
+        let (_, _, error) = refresh_one_host(refresh(), &failing, &reports.record())
+            .expect("the failure is returned for the daemon to report");
+        assert!(error.unwrap().contains("image store unavailable"));
+        let commands = failing.commands.lock().unwrap();
+        assert_eq!(
+            commands.last().map(String::as_str),
+            Some(failed_command),
+            "a failed download must not proceed to cleanup"
+        );
+    }
+}
+
 /// A background refresh is a chore, not a launch. One host that cannot
 /// reach its registry must not cost the other hosts their pull, and the
 /// failure has to say which host, which image, and what the engine
@@ -1611,6 +2658,29 @@ fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
     }
 
     impl CommandExecutor for FailingPullExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands
                 .lock()
@@ -1727,6 +2797,29 @@ fn a_missing_image_is_pulled_once_and_not_again_when_present() {
     }
 
     impl CommandExecutor for FirstPullExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.args.clone());
             if command.args.first().map(String::as_str) == Some("pull") {
@@ -1925,16 +3018,21 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             trigger: Some(CredentialSyncCause {
                 session_id: session_id.into(),
                 reason,
+                login_fingerprint: None,
             }),
             failure: failure.map(str::to_owned),
             outcomes: outcome
                 .map(|outcome| {
                     vec![CredentialSyncOutcome {
+                        unchanged_login: None,
+                        current_access_token: None,
                         session_id: session_id.into(),
                         outcome,
+                        step_failures: Vec::new(),
                     }]
                 })
                 .unwrap_or_default(),
+            partial: false,
         };
     let results = [
         triggered(
@@ -1972,9 +3070,13 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             trigger: None,
             failure: None,
             outcomes: vec![CredentialSyncOutcome {
+                unchanged_login: None,
+                current_access_token: None,
                 session_id: session_id.into(),
                 outcome: Err("worker proxy disconnected".into()),
+                step_failures: Vec::new(),
             }],
+            partial: false,
         },
     ];
     for result in &results {
@@ -2011,11 +3113,11 @@ fn credential_sync_rejects_targets_captured_before_parking_or_replacement() {
         .sessions
         .get_mut(&target.session_id)
         .unwrap()
-        .target = Some(mj_core::state::TargetLocator::LocalPodman {
+        .target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: "b".repeat(64),
         workspace_storage: Default::default(),
-    });
+    }));
     assert!(!credential_sync_target_is_current(replaced, &target));
 }
 
@@ -2031,9 +3133,11 @@ fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
             trigger: Some(CredentialSyncCause {
                 session_id: "parked-child".into(),
                 reason,
+                login_fingerprint: None,
             }),
             failure: None,
             outcomes: Vec::new(),
+            partial: false,
         };
         assert!(
             CredentialSyncNotices::default()
@@ -2054,6 +3158,7 @@ async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
     let channels = spawn_remote_session_manager().unwrap();
     let wait = Duration::from_secs(1);
     let view = || ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: true,
         error: None,
@@ -2095,4 +3200,110 @@ async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
         .wait_for_session("session-1", wait)
         .await
         .unwrap();
+}
+
+// Hard-won: c2d74db67: the refresher's first look could run while daemon startup was still starting Apple's container service, read it as stopped, and skip a whole interval.
+#[tokio::test(start_paused = true)]
+async fn only_the_apple_container_refresh_waits_for_its_startup() {
+    let refresh = |host| {
+        crate::targets::image_refresh(
+            host,
+            "ghcr.io/example/dev:latest",
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed")
+    };
+    let settled = tokio_util::sync::CancellationToken::new();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let ran = |name: &'static str| move |_| Some((name.to_owned(), String::new(), None));
+    let apple = tokio::spawn(refresh_host_after_startup(
+        refresh(crate::targets::ImageHost::AppleContainer),
+        settled.clone(),
+        cancellation.clone(),
+        ran("apple"),
+    ));
+    // A slow Apple start holds no other host's refresh.
+    let docker = refresh_host_after_startup(
+        refresh(crate::targets::ImageHost::LocalDocker),
+        settled.clone(),
+        cancellation.clone(),
+        ran("docker"),
+    )
+    .await;
+    assert_eq!(docker.map(|(host, ..)| host).as_deref(), Some("docker"));
+
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert!(
+        !apple.is_finished(),
+        "the Apple refresh looked before startup finished"
+    );
+    settled.cancel();
+    let apple = apple.await.unwrap();
+    assert_eq!(apple.map(|(host, ..)| host).as_deref(), Some("apple"));
+}
+
+#[test]
+fn a_result_about_one_sessions_aws_renewal_does_not_end_other_sessions_failures() {
+    use mj_core::credentials::{
+        CredentialSyncOutcome, CredentialSyncResult, StepFailure, SyncStep,
+    };
+
+    let outcome = |session: &str, detail: Option<&str>| CredentialSyncOutcome {
+        unchanged_login: None,
+        current_access_token: None,
+        session_id: session.into(),
+        outcome: Ok(Vec::new()),
+        step_failures: detail
+            .map(|detail| StepFailure {
+                step: SyncStep::Aws,
+                detail: detail.to_owned(),
+            })
+            .into_iter()
+            .collect(),
+    };
+    let result = |partial, outcomes| CredentialSyncResult {
+        profile_id: "work".into(),
+        trigger: None,
+        failure: None,
+        outcomes,
+        partial,
+    };
+    let mut notices = CredentialSyncNotices::default();
+    // The first session sorts before the second, so if its failure were forgotten it
+    // would be the notice's first new message.
+    let both_failing = || {
+        result(
+            false,
+            vec![
+                outcome("0-first-session", Some("container is gone")),
+                outcome("a-second-session", Some("worker is gone")),
+            ],
+        )
+    };
+    assert!(
+        notices
+            .notice(&both_failing(), None, &State::default())
+            .is_some()
+    );
+    assert_eq!(
+        notices.notice(&both_failing(), None, &State::default()),
+        None
+    );
+
+    // The second session's AWS renewal succeeds. That ends its failure and says nothing
+    // about the first's, which must not be announced again.
+    assert_eq!(
+        notices.notice(
+            &result(true, vec![outcome("a-second-session", None)]),
+            None,
+            &State::default()
+        ),
+        None
+    );
+    let again = notices
+        .notice(&both_failing(), None, &State::default())
+        .unwrap();
+    assert!(again.contains("a-second"), "{again}");
+    assert!(!again.contains("0-first-"), "{again}");
 }

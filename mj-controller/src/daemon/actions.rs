@@ -8,6 +8,38 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
+        DaemonAction::LoginTerminal { .. } => {
+            bail!("login requires a dedicated terminal connection")
+        }
+        action @ (DaemonAction::PreviewBuildCache { .. }
+        | DaemonAction::InstallMbx { .. }
+        | DaemonAction::CheckpointArchiveSizes { .. }
+        | DaemonAction::TestTarget { .. }
+        | DaemonAction::DiscoverSetup { .. }
+        | DaemonAction::CheckAvailability
+        | DaemonAction::ProfileLoginStatuses
+        | DaemonAction::PreflightNewSession { .. }
+        | DaemonAction::ValidateProjectDirectory { .. }
+        | DaemonAction::CompletePath { .. }
+        | DaemonAction::CheckProjectDirectories { .. }
+        | DaemonAction::DiscoverProjects { .. }
+        | DaemonAction::ResolveContainerPath { .. }
+        | DaemonAction::ResolveSetupPath { .. }
+        | DaemonAction::ValidateMountSource { .. }
+        | DaemonAction::ValidateSessionMounts { .. }) => {
+            super::machine::execute(action, state, Arc::new(AtomicBool::new(false))).await
+        }
+        DaemonAction::UploadChunk { .. } => bail!("upload fragment outside upload transport"),
+        DaemonAction::InstallAttachment { .. } | DaemonAction::TranscribeAudio { .. } => {
+            bail!("blob action outside connection transport")
+        }
+        DaemonAction::TranscriptionAvailable { preferred_profile } => {
+            let config = state.with_config(Clone::clone);
+            let available =
+                blocking(move || Ok(transcription_auth(&config, &preferred_profile).is_some()))
+                    .await?;
+            Ok(DaemonReply::TranscriptionAvailable(available))
+        }
         DaemonAction::RecordOperatorActivity => {
             state.record_operator_activity().await;
             Ok(DaemonReply::Done)
@@ -23,6 +55,9 @@ pub(super) async fn handle_action(
         DaemonAction::SetOperatorAway { away } => {
             state.set_operator_away(away).await?;
             Ok(DaemonReply::Done)
+        }
+        DaemonAction::ProveIdentity { .. } => {
+            unreachable!("identity proof is served before authentication")
         }
         DaemonAction::Ping => Ok(DaemonReply::Pong),
         // Each blocker carries its count and age, so the waiting client can say
@@ -64,17 +99,20 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::FirstRunSetup(report))
         }
         DaemonAction::RunDoctor => {
-            let errors = blocking(|| {
-                let executor = crate::targets::ProcessExecutor;
+            // Not `blocking`: the doctor only reads, so it takes no upgrade
+            // admission, and a handoff abandons it instead of waiting for it.
+            let errors = tokio::task::spawn_blocking(|| {
+                let executor = crate::doctor::probe_executor();
                 let checks = crate::doctor::run_with_config_path(
                     &mj_core::config::config_path(),
                     &executor,
                     crate::doctor::current_apple_platform(&executor),
                     crate::doctor::DoctorOptions { smoke: false },
                 );
-                Ok(crate::setup::actionable_errors(&checks))
+                crate::setup::actionable_errors(&checks)
             })
-            .await?;
+            .await
+            .context("daemon doctor task panicked")?;
             Ok(DaemonReply::DoctorErrors(errors))
         }
         DaemonAction::NewSessionRemoteRepairs {
@@ -124,6 +162,13 @@ pub(super) async fn handle_action(
                 phone_status: state.phone_status(),
             }))
         }
+        DaemonAction::ApiCredential => Ok(DaemonReply::ApiCredential(
+            state
+                .api_credential
+                .get()
+                .context("the HTTP API credential is not ready")?
+                .clone(),
+        )),
         DaemonAction::WebViewerAccess => {
             Ok(DaemonReply::WebViewerAccess(state.web_viewer.access()))
         }
@@ -194,6 +239,29 @@ pub(super) async fn handle_action(
                     .collect(),
             ))
         }
+        DaemonAction::ListWorkspaceDrafts => {
+            let drafts = blocking(crate::database::list_all_detached_drafts).await?;
+            let mut grouped: Vec<WorkspaceDrafts> = Vec::new();
+            for draft in drafts {
+                let preview = DraftPreview {
+                    id: draft.id,
+                    session_id: draft.session_id,
+                    source: draft.source,
+                    owner_pid: draft.owner_pid,
+                    saved_at: draft.saved_at,
+                };
+                match grouped.last_mut() {
+                    Some(group) if group.workspace_id == draft.workspace_id => {
+                        group.drafts.push(preview);
+                    }
+                    _ => grouped.push(WorkspaceDrafts {
+                        workspace_id: draft.workspace_id,
+                        drafts: vec![preview],
+                    }),
+                }
+            }
+            Ok(DaemonReply::WorkspaceDrafts(grouped))
+        }
         DaemonAction::CreateWorkspace { name } => {
             // Two setup selectors can both have observed an empty workspace
             // list. The daemon operation is create-or-get so both attach to
@@ -225,11 +293,6 @@ pub(super) async fn handle_action(
             state.close_workspace(workspace_id).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::NodeConnect { .. } => {
-            bail!(
-                "a node connection is taken over by the connection loop, not handled as a request"
-            )
-        }
         DaemonAction::Attach { client_id } => {
             state.attachments().insert(
                 client_id,
@@ -243,6 +306,10 @@ pub(super) async fn handle_action(
         DaemonAction::Detach { client_id } => {
             state.attachments().remove(&client_id);
             Ok(DaemonReply::Done)
+        }
+        DaemonAction::DismissNotification { session_id, target } => {
+            let ordinal = state.dismiss_notification(session_id, target).await?;
+            Ok(DaemonReply::Ordinal(ordinal))
         }
         DaemonAction::PersistReadReceipt {
             client_id,
@@ -261,33 +328,22 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::Ordinal(frontier))
         }
-        DaemonAction::PersistDetachedSessionState {
+        DaemonAction::PersistTerminalDraft {
             client_id,
-            workspace_id,
             session_id,
-            through,
             owner_pid,
+            revision,
             draft,
         } => {
             blocking(move || {
-                let receipt = crate::database::persist_read_receipt(
-                    &client_id,
-                    &workspace_id,
-                    &session_id,
-                    through,
-                )
-                .map(|_| ());
-                // Draft durability is independent of receipt validity. A
-                // stale or malformed receipt must never discard typed text.
-                let saved_draft = crate::database::save_detached_session_draft(
-                    &workspace_id,
+                crate::database::save_terminal_draft(
                     &session_id,
                     &client_id,
                     owner_pid,
+                    revision,
                     draft,
                 )
-                .map(|_| ());
-                receipt.and(saved_draft)
+                .map(|_| ())
             })
             .await?;
             Ok(DaemonReply::Done)
@@ -309,6 +365,50 @@ pub(super) async fn handle_action(
                     "abandoned prompt history could not be stored"
                 );
             }
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::SaveSpinnerStyle { style } => {
+            // Hold the configuration owner through persistence and publication:
+            // an acknowledged save must be visible to the next dashboard.
+            let mut inactivity = state.config_mutation.lock().await;
+            let config = blocking(move || {
+                Config::update(|config| {
+                    config.spinner = style;
+                    Ok(())
+                })
+                .map(|(config, ())| config)
+            })
+            .await?;
+            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+            state
+                .review_config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(&config.review);
+            state.owner().install_config(config);
+            state.publish_revision();
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::SetQuotaPreferences { prefer } => {
+            // Hold the configuration owner through persistence and publication:
+            // an acknowledged save must be visible to the next dashboard.
+            let mut inactivity = state.config_mutation.lock().await;
+            let config = blocking(move || {
+                Config::update(|config| {
+                    config.quota.prefer = prefer;
+                    Ok(())
+                })
+                .map(|(config, ())| config)
+            })
+            .await?;
+            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+            state
+                .review_config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(&config.review);
+            state.owner().install_config(config);
+            state.publish_revision();
             Ok(DaemonReply::Done)
         }
         DaemonAction::SaveSidebarSize { size } => {
@@ -348,28 +448,7 @@ pub(super) async fn handle_action(
             blocking(move || crate::database::save_workspace_layout(&workspace_id, layout)).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::PersistImportedSession { session, bundle } => {
-            blocking(move || {
-                if let Some(imported) = bundle {
-                    let ImportedBundle { bundle_id, bundle } = imported;
-                    Config::update(|config| {
-                        if let Some(existing) = config.bundles.get(&bundle_id) {
-                            anyhow::ensure!(
-                                existing == &bundle,
-                                "bundle {bundle_id:?} changed during import; retry the import"
-                            );
-                        } else {
-                            config.bundles.insert(bundle_id.clone(), bundle);
-                        }
-                        Ok(())
-                    })?;
-                }
-                crate::import::persist_imported_session_locally(&session)
-            })
-            .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
-        }
+        DaemonAction::ImportSession { .. } => bail!("blob action outside connection transport"),
         DaemonAction::SessionProjectSource { session_id } => {
             let controller = state.with_controller(|controller| crate::controller::Controller {
                 config: controller.config.clone(),
@@ -391,6 +470,17 @@ pub(super) async fn handle_action(
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::Text(title))
         }
+        DaemonAction::SetSessionNotificationsIgnored {
+            session_id,
+            ignored,
+        } => {
+            blocking(move || {
+                Controller::load()?.set_session_notifications_ignored(&session_id, ignored)
+            })
+            .await?;
+            refresh_runtime_controller(state).await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::SetSessionWorkspace {
             session_id,
             workspace_id,
@@ -406,8 +496,7 @@ pub(super) async fn handle_action(
         }
         DaemonAction::SetSessionContainerSettings {
             session_id,
-            cpus,
-            memory,
+            resource_allocation,
             mounts,
             mount_history,
         } => {
@@ -415,11 +504,13 @@ pub(super) async fn handle_action(
                 !crate::controller::move_session::move_owns_session(&session_id),
                 "session is moving; change container settings after Move finishes"
             );
+            state
+                .validate_container_settings_size(&session_id, resource_allocation.as_ref())
+                .await?;
             blocking(move || {
                 Controller::load()?.update_session_container_settings(
                     &session_id,
-                    cpus,
-                    memory,
+                    resource_allocation,
                     mounts,
                     mount_history,
                     &crate::targets::ProcessExecutor,
@@ -694,8 +785,37 @@ pub(super) async fn handle_action(
                 .go_startup_session(&workspace_id, last_session_id.as_deref())
                 .map(Box::new),
         )),
+        DaemonAction::HostCapacity => Ok(DaemonReply::HostCapacity(
+            state
+                .capacity_feed()
+                .context("the daemon capacity service is not running")?
+                .host_rows(),
+        )),
         DaemonAction::RefreshQuota => {
             state.request_quota_refresh()?;
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::ProbeQuotaProfiles {
+            profile_ids,
+            forced,
+        } => {
+            let config = state.owner().controller().config.clone();
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let runtime = crate::quota::QuotaRuntimeConfig::of(&config);
+            let mut requests = Vec::new();
+            for id in &profile_ids {
+                let profile = config
+                    .profiles
+                    .get(id)
+                    .with_context(|| format!("no profile named {id:?} is configured"))?;
+                requests.push(crate::quota::QuotaRefreshRequest::for_profile(
+                    id,
+                    profile,
+                    cwd.clone(),
+                    runtime.clone(),
+                ));
+            }
+            state.probe_quota_profiles(requests, forced)?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::RenameProfile { old_id, new_id } => {
@@ -733,17 +853,7 @@ pub(super) async fn handle_action(
                 let values = values
                     .as_array()
                     .context("serialized prompt content is not an array")?;
-                let text = mj_core::transcript::materialized_content_text(values);
-                let bundle_id = state
-                    .owner()
-                    .controller()
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .with_context(|| format!("unknown session {session_id}"))?
-                    .bundle_id
-                    .clone();
-                Some((bundle_id, text))
+                Some(mj_core::transcript::materialized_content_text(values))
             } else {
                 None
             };
@@ -756,6 +866,19 @@ pub(super) async fn handle_action(
                 .wait_for_session(&session_id, Duration::from_secs(5))
                 .await?;
             let session_id = session.session_id().to_owned();
+            // History is written before the session sees the prompt; see
+            // `record_user_prompt`.
+            if let Some(text) = history {
+                let history_id = session_id.clone();
+                let history_command = command_id.clone();
+                if let Err(error) = blocking(move || {
+                    crate::database::record_user_prompt(&history_id, &history_command, &text)
+                })
+                .await
+                {
+                    tracing::warn!(%error, "prompt history could not be stored");
+                }
+            }
             let ordinal = session.submit(command_id, command).await?;
             if let Some(expected) = inherited_draft {
                 let persisted_id = session_id.clone();
@@ -775,14 +898,6 @@ pub(super) async fn handle_action(
                     }
                 });
                 state.publish_revision();
-            }
-            if let Some((bundle_id, text)) = history
-                && let Err(error) = blocking(move || {
-                    crate::database::record_prompt(&session_id, &bundle_id, ordinal, None, &text)
-                })
-                .await
-            {
-                tracing::warn!(%error, "prompt was accepted but its history could not be stored");
             }
             Ok(DaemonReply::Ordinal(ordinal))
         }
@@ -873,7 +988,7 @@ pub(super) async fn handle_action(
         DaemonAction::StartTurnReview { session_id } => {
             state
                 .review_host()
-                .start(&session_id, true)
+                .start(&session_id)
                 .await
                 .map_err(|refusal| anyhow!("{refusal}"))?;
             state.publish_revision();
@@ -948,6 +1063,22 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::StartSessionLifecycle(request) => {
+            match state.start_session_lifecycle(request).await {
+                Ok(receipt) => Ok(DaemonReply::LifecycleAccepted(receipt)),
+                Err(error)
+                    if Refusal::of(&error).is_some_and(|refusal| {
+                        refusal.code() == Some(crate::upgrade::HANDOFF_REFUSAL_CODE)
+                    }) =>
+                {
+                    // Only unaccepted lifecycle admission carries this code.
+                    // The client retries its original request and selections.
+                    Ok(DaemonReply::UpgradePending)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        DaemonAction::WaitSessionLifecycle(receipt) => state.wait_session_lifecycle(receipt).await,
         DaemonAction::SuspendSession {
             session_id,
             acknowledge_unpublished_work,
@@ -985,8 +1116,10 @@ pub(super) async fn handle_action(
             state.start_create_session(request).await?,
         ))),
         DaemonAction::WaitCreateSession { session_id } => {
-            state.wait_create_session(&session_id).await?;
-            Ok(DaemonReply::Done)
+            match state.wait_create_outcome(&session_id).await {
+                crate::daemon::create::CreateWait::Finished => Ok(DaemonReply::Done),
+                crate::daemon::create::CreateWait::Failed(error) => Err(error),
+            }
         }
         DaemonAction::ResumeSession(request) => {
             state.resume_session(request).await?;
@@ -1062,8 +1195,10 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::Stop => {
-            // Stopping, not handing off: the node goes with this daemon.
-            crate::node_registry::registry().dismiss_node_on_exit();
+            if cancellation.is_cancelled() {
+                return Ok(DaemonReply::Done);
+            }
+            crate::upgrade::gate().begin_draining();
             // A destroy in flight was acknowledged as accepted and nothing
             // about it is durable, so the stop waits for it, up to a bound
             // (#1191). The reply does not wait.
@@ -1086,6 +1221,17 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<crate::upgrade::Work>> {
+    if let DaemonAction::PreflightNewSession { request } = action
+        && !request.remote_repairs.is_empty()
+    {
+        return crate::upgrade::activity("new-session preflight remote repairs").map(Some);
+    }
+    if matches!(action, DaemonAction::SaveSpinnerStyle { .. }) {
+        return crate::upgrade::activity("spinner style setting").map(Some);
+    }
+    if matches!(action, DaemonAction::DismissNotification { .. }) {
+        return crate::upgrade::activity("notification dismissal").map(Some);
+    }
     if matches!(action, DaemonAction::SaveSidebarSize { .. }) {
         return crate::upgrade::activity("sidebar size setting").map(Some);
     }
@@ -1095,15 +1241,23 @@ pub(super) fn upgrade_request_activity(
     if matches!(action, DaemonAction::SetOperatorAway { .. }) {
         return crate::upgrade::activity("operator away setting").map(Some);
     }
+    if matches!(action, DaemonAction::LoginTerminal { .. })
+        || action.is_cancellable_machine_action()
+    {
+        return Ok(None);
+    }
     if matches!(
         action,
-        DaemonAction::RecordOperatorActivity
-            // A draining daemon still needs its node to finish the bounded
-            // work the handoff waits for.
-            | DaemonAction::NodeConnect { .. }
+        DaemonAction::TranscribeAudio { .. }
+            | DaemonAction::RecordOperatorActivity
+            | DaemonAction::ProveIdentity { .. }
             | DaemonAction::Ping
             | DaemonAction::Identity
             | DaemonAction::Configuration
+            | DaemonAction::WaitSessionLifecycle(_)
+            // Answered from durable state, so it holds no daemon work and a
+            // handoff does not wait for it; the client asks again.
+            | DaemonAction::WaitCreateSession { .. }
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
@@ -1114,6 +1268,9 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::SubagentOptions { .. }
             | DaemonAction::WarmProfileCapabilities { .. }
             | DaemonAction::ProjectCatalog { .. }
+            | DaemonAction::ImportSession { .. }
+            // Read-only and repeatable; the client reports an interrupted run.
+            | DaemonAction::RunDoctor
     ) {
         Ok(None)
     } else {
@@ -1190,5 +1347,105 @@ mod missing_target_compat_tests {
         assert_eq!(stored.state, SessionState::Running);
         assert_eq!(stored.updated_at, session.updated_at);
         assert_eq!(stored.last_error, None);
+    }
+}
+
+/// Credential selection lives on the machine owning the profiles.
+pub(super) fn transcription_auth(
+    config: &mj_core::config::Config,
+    preferred: &str,
+) -> Option<PathBuf> {
+    available_auth(auth_paths(config, preferred))
+}
+
+/// Find candidate Codex subscription auth files, preferring the session's
+/// current profile and then sorting all remaining profile IDs.
+fn auth_paths(config: &mj_core::config::Config, preferred: &str) -> Vec<PathBuf> {
+    let mut profiles = config
+        .profiles
+        .iter()
+        .filter(|(_, profile)| profile.kind == mj_core::config::HarnessKind::Codex)
+        .collect::<Vec<_>>();
+    profiles.sort_by_key(|(id, _)| (*id != preferred, *id));
+    profiles
+        .into_iter()
+        .map(|(_, profile)| profile.home.join(profile.kind.credential_file_name()))
+        .collect()
+}
+
+/// Return the first auth file containing complete ChatGPT-subscription OAuth
+/// tokens. API-key auth files are deliberately skipped.
+fn available_auth(paths: Vec<PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().find(
+        |path| match anvil_client::codex_auth::read_auth_dot_json_at(path) {
+            Ok(Some(auth)) => auth.tokens.is_some_and(|tokens| {
+                !tokens.access_token.trim().is_empty()
+                    && !tokens.refresh_token.trim().is_empty()
+                    && !tokens.account_id.trim().is_empty()
+            }),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%error, "could not inspect Codex dictation credentials");
+                false
+            }
+        },
+    )
+}
+
+impl RuntimeState {
+    pub(crate) async fn dismiss_notification(
+        &self,
+        session_id: String,
+        target: mj_core::attention::NotificationDismissal,
+    ) -> Result<u64> {
+        let runtime = self.runtime_publication()?;
+        if matches!(
+            target,
+            mj_core::attention::NotificationDismissal::Question(_)
+                | mj_core::attention::NotificationDismissal::Failure(_)
+        ) && runtime.metadata.notification_dismissals.get(&session_id) != Some(&target)
+        {
+            return Err(mj_core::refusal::Refusal::precondition(
+                "notification is no longer current",
+            )
+            .into());
+        }
+        let (through, command_ordinal) = match target {
+            mj_core::attention::NotificationDismissal::Failure(failure) => {
+                blocking(move || crate::database::dismiss_recorded_failure(&session_id, failure))
+                    .await?;
+                return Ok(0);
+            }
+            mj_core::attention::NotificationDismissal::Question(question) => {
+                let through = question.completed_ordinal;
+                let ordinal = self
+                    .session_manager
+                    .session(&session_id)
+                    .await?
+                    .submit(
+                        format!("dismiss-question-{through}"),
+                        RelayCommand::DismissQuestion { question },
+                    )
+                    .await?;
+                (through, Some(ordinal))
+            }
+            mj_core::attention::NotificationDismissal::ReadThrough(through) => (through, None),
+        };
+        let workspace_id = runtime
+            .records
+            .get(&session_id)
+            .context("session missing")?
+            .workspace_id
+            .clone();
+        let frontier = blocking(move || {
+            crate::database::persist_read_receipt(
+                "notification-dismissal",
+                &workspace_id,
+                &session_id,
+                through,
+            )
+        })
+        .await?;
+        Ok(command_ordinal.unwrap_or(frontier))
     }
 }

@@ -1,8 +1,9 @@
 //! What the dashboard does with the work its key handling asks for.
 //!
-//! Every arm here either updates UI state directly or starts a background job;
-//! none of them block the loop.
+//! Every arm here either updates UI state directly or starts a background job,
+//! including `SetupLogin`, whose terminal connection runs in a background task.
 
+use mj_client::daemon::{DaemonAction as MachineAction, DaemonReply as MachineReply};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -11,25 +12,24 @@ use mj_core::config::is_bare_project_target;
 use mj_core::state::{MoveSelection, MoveSessionRequest};
 
 use mj_controller::controller::ResumeRepositorySourceReceipt;
-use mj_controller::review_settings::ReviewDiscoveryRequest;
-use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::WebViewerAccess;
 use mj_tui::{DashboardAction, SessionOperationKind};
 
 use crate::daemon;
 use crate::dashboard::io::{
     ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate, LifecycleOperationRequest,
-    ResumeRepositoryPreflightApply, config_only_controller, report, spawn_async_job,
-    spawn_cancellable_io, spawn_cancellable_io_with_token, spawn_clipboard_read,
-    spawn_config_rename, spawn_create_bundle, spawn_dashboard_change_workspace,
-    spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
-    spawn_lifecycle_operation, spawn_remove_bundle, spawn_review_settings_discovery,
-    spawn_workspace_close, spawn_workspace_close_cancel, spawn_workspace_create,
-    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
+    ResumeRepositoryPreflightApply, report, spawn_async_job, spawn_cancellable_io,
+    spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
+    spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
+    spawn_dashboard_create_session, spawn_dashboard_notifications_ignored, spawn_dashboard_rename,
+    spawn_lifecycle_operation, spawn_quota_preferences_save, spawn_quota_probe_request,
+    spawn_remove_bundle, spawn_workspace_close, spawn_workspace_close_cancel,
+    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
+    spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
-use crate::pollers::{LifecycleSuccess, spawn_aws_resource_options_resolution};
+use crate::pollers::LifecycleSuccess;
 use crate::short_id;
 
 struct MbxInstallCompletion {
@@ -90,18 +90,21 @@ fn start_suspension(
     spawn_lifecycle_operation(
         request,
         context.critical_operations.clone(),
-        move |_cancelled| {
+        move |_cancelled, admission| {
             mj_core::runtime::block_on(async {
                 let mut client = daemon::connect_or_start().await?;
-                if ignore_nested_repositories {
-                    client
-                        .ignore_nested_repositories_and_suspend(session_id)
-                        .await
-                } else {
-                    client
-                        .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
-                        .await
-                }
+                let receipt = admission
+                    .submit(
+                        &mut client,
+                        daemon::SessionLifecycleRequest::Suspend {
+                            session_id,
+                            acknowledge_unpublished_work,
+                            ignore_nested_repositories,
+                        },
+                    )
+                    .await?;
+                client.wait_session_lifecycle(receipt).await?;
+                Ok::<_, anyhow::Error>(())
             })??;
             Ok(LifecycleSuccess::Closed)
         },
@@ -288,34 +291,47 @@ pub(crate) async fn apply_dashboard_action(
             });
         }
         DashboardAction::OpenSubagents { parent_id } => context.open_subagents(parent_id),
-        DashboardAction::DismissQuestion {
-            session_id,
-            question,
-        } => {
-            let result_session = session_id.clone();
-            let result_question = question.clone();
-            spawn_async_job(
-                Some(context.critical_operations.clone()),
-                "question dismissal",
-                context.dashboard_io_tx.clone(),
-                std::time::Duration::from_secs(30),
-                async move {
-                    let mut client = daemon::connect_existing().await?;
-                    client
-                        .submit_session_command(
-                            session_id,
-                            format!("dismiss-question-{}", question.completed_ordinal),
-                            mj_core::relay::RelayCommand::DismissQuestion { question },
-                            None,
+        action @ DashboardAction::DismissNotification { .. } => {
+            spawn_notification_dismissal(context, action)
+        }
+        DashboardAction::DismissNotifications { dismissals } => {
+            // Every dismissal is sent at once with its own deadline, so a slow
+            // session cannot discard the others' results; all come back in
+            // one update.
+            let guard = context.critical_operations.begin("notification dismissals");
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let results = futures::future::join_all(dismissals.into_iter().map(
+                    |(session_id, target)| async move {
+                        let deadline = std::time::Duration::from_secs(30);
+                        let result = match tokio::time::timeout(
+                            deadline,
+                            request_notification_dismissal(session_id.clone(), target.clone()),
                         )
                         .await
-                },
-                move |result| DashboardIoUpdate::QuestionDismissed {
-                    session_id: result_session,
-                    question: result_question,
-                    result,
-                },
-            );
+                        {
+                            Ok(result) => result.map_err(|error| format!("{error:#}")),
+                            Err(_) => Err(format!(
+                                "the daemon did not acknowledge the dismissal within {} seconds; it may still complete",
+                                deadline.as_secs()
+                            )),
+                        };
+                        (session_id, target, result)
+                    },
+                ))
+                .await;
+                for (session_id, _, result) in &results {
+                    if let Err(error) = result {
+                        tracing::error!(session_id, %error, "notification dismissal was not confirmed");
+                    }
+                }
+                if let Err(error) =
+                    updates.send(DashboardIoUpdate::NotificationsDismissed { results })
+                {
+                    tracing::warn!(%error, "notification dismissal results receiver closed");
+                }
+                drop(guard);
+            });
         }
         DashboardAction::InterruptAll { targets } => {
             let updates = context.dashboard_io_tx.clone();
@@ -418,7 +434,6 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::ResolveContainerPath { session_id, source } => {
             let input_context = context.dashboard.path_input_context();
-            let controller = config_only_controller(context.controller.config.clone());
             let target_id = context
                 .controller
                 .state
@@ -431,14 +446,15 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "resolving attached directory",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    controller.resolve_input_path(
-                        &target_id,
-                        std::path::Path::new(&source),
-                        &executor,
-                    )
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ResolveContainerPath {
+                        target_id,
+                        source: source.into(),
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::ResolvedPath(path) => Ok(path),
+                    reply => anyhow::bail!("unexpected path reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::ContainerPathResolved {
                     context: input_context,
@@ -459,14 +475,15 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "resolving setup path",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    mj_controller::controller::resolve_machine_input_path(
-                        &machine,
-                        std::path::Path::new(&requested),
-                        &executor,
-                    )
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ResolveSetupPath {
+                        machine: *machine,
+                        source: requested.into(),
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::ResolvedPath(path) => Ok(path),
+                    reply => anyhow::bail!("unexpected setup path reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::SetupPathResolved {
                     generation,
@@ -489,17 +506,12 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "previewing the build cache",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    // Several host commands, one of which may be an SSH
-                    // round trip each.
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(60));
-                    let result =
-                        mj_controller::controller::preview_build_cache(&machine, &executor)?;
-                    let install_mbx_available = result.as_ref().is_some_and(|preview| {
-                        mj_controller::controller::mbx_install_kind(preview).is_some()
-                    });
-                    Ok((result, install_mbx_available))
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::PreviewBuildCache { machine: *machine },
+                    cancelled,
+                )? {
+                    MachineReply::BuildCachePreview(preview, available) => Ok((preview, available)),
+                    reply => anyhow::bail!("unexpected build cache reply: {reply:?}"),
                 },
                 move |result| match result {
                     Ok((result, install_mbx_available)) => DashboardIoUpdate::BuildCachePreviewed {
@@ -529,59 +541,38 @@ pub(crate) async fn apply_dashboard_action(
             {
                 return Ok(());
             }
-            let operation_label = format!("installing mbx on machine {machine_id}");
+            let tracker = context.critical_operations.clone();
             spawn_cancellable_io_with_token(
-                context.critical_operations.clone(),
-                operation_label,
+                tracker,
+                "installing mbx",
                 context.dashboard_io_tx.clone(),
                 move |cancelled| {
-                    let install_executor = CancellableProcessExecutor::new(cancelled.clone())
-                        .with_deadline(std::time::Duration::from_secs(240));
-                    let install_result = mj_controller::controller::install_mbx(
-                        &machine,
-                        &install_executor,
+                    let install_result = super::io::machine_request(
+                        MachineAction::InstallMbx {
+                            machine: *machine.clone(),
+                        },
+                        cancelled.clone(),
                     )
-                    .map(|result| {
-                        let verb = match result.kind {
-                            mj_controller::controller::MbxInstallKind::Install => "Installed",
-                            mj_controller::controller::MbxInstallKind::Upgrade => "Upgraded",
-                        };
-                        let profile = if result.profile_changed {
-                            format!("updated {}", result.profile_file)
-                        } else {
-                            format!(
-                                "left {} unchanged because its marked PATH block already exists",
-                                result.profile_file
-                            )
-                        };
-                        let mut message = format!(
-                            "{verb} mbx at {} (version {}). {profile}. New login shells will pick up the PATH change.",
-                            result.program.display(),
-                            result.version
-                        );
-                        if let Some(warning) = result.profile_warning {
-                            message.push(' ');
-                            message.push_str(&warning);
-                        }
-                        if let Some(path_line) = result.manual_path_line {
-                            message.push(' ');
-                            message.push_str(&path_line);
-                        }
-                        message
+                    .and_then(|reply| match reply {
+                        MachineReply::MbxInstalled(message) => Ok(message),
+                        reply => anyhow::bail!("unexpected mbx install reply: {reply:?}"),
                     })
-                    .map_err(|error| format!("{error:#}"));
-                    let preview_executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(60));
-                    let preview_result =
-                        mj_controller::controller::preview_build_cache(&machine, &preview_executor)
-                            .map_err(|error| format!("{error:#}"));
-                    let install_mbx_available = preview_result
-                        .as_ref()
-                        .ok()
-                        .and_then(Option::as_ref)
-                        .is_some_and(|preview| {
-                            mj_controller::controller::mbx_install_kind(preview).is_some()
-                        });
+                    .map_err(|error| {
+                        format!("mbx installation interrupted — run Install again: {error:#}")
+                    });
+                    let (preview_result, install_mbx_available) = match super::io::machine_request(
+                        MachineAction::PreviewBuildCache { machine: *machine },
+                        cancelled,
+                    ) {
+                        Ok(MachineReply::BuildCachePreview(preview, available)) => {
+                            (Ok(preview), available)
+                        }
+                        Ok(reply) => (
+                            Err(format!("unexpected build cache reply: {reply:?}")),
+                            false,
+                        ),
+                        Err(error) => (Err(format!("{error:#}")), false),
+                    };
                     Ok(MbxInstallCompletion {
                         install_result,
                         preview_result,
@@ -613,11 +604,10 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             // Walks the sessions directory, so it belongs in the blocking
             // pool; a stale answer is dropped by its days value.
-            spawn_cancellable_io_with_token(
-                context.critical_operations.clone(),
+            super::io::spawn_io(
                 "estimating archive space",
                 context.dashboard_io_tx.clone(),
-                move |_cancelled| {
+                move || {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
@@ -637,9 +627,6 @@ pub(crate) async fn apply_dashboard_action(
             original,
             updated,
         } => {
-            if let Some(cancelled) = context.review_discovery_cancel.take() {
-                cancelled.store(true, Ordering::Release);
-            }
             super::io::spawn_setup_save(
                 generation,
                 original,
@@ -655,9 +642,6 @@ pub(crate) async fn apply_dashboard_action(
             updated,
             profile_id,
         } => {
-            if let Some(cancelled) = context.review_discovery_cancel.take() {
-                cancelled.store(true, Ordering::Release);
-            }
             super::io::spawn_setup_save(
                 generation,
                 original,
@@ -673,40 +657,20 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::SetupLogin {
             generation,
             profile_id,
-        } => {
-            let result = run_setup_login(context, &profile_id).await;
-            context
-                .dashboard
-                .setup_login_finished(generation, &profile_id, result);
-        }
-        DashboardAction::DiscoverReviewSettings {
-            generation,
-            profile_id,
-            model,
-        } => {
-            if let Some(cancelled) = context.review_discovery_cancel.take() {
-                cancelled.store(true, Ordering::Release);
-            }
-            let request = ReviewDiscoveryRequest {
-                profile: profile_id,
-                model,
-            };
-            context.review_discovery_cancel = Some(spawn_review_settings_discovery(
-                context.review_capabilities.clone(),
-                request,
+        } => match super::login_terminal::ActiveLogin::start(&profile_id, generation) {
+            Ok(login) => context.login = Some(login),
+            Err(error) => context.dashboard.setup_login_finished(
                 generation,
-                context.dashboard_io_tx.clone(),
-                context.critical_operations.clone(),
-            ));
-        }
-        DashboardAction::CancelReviewSettingsDiscovery => {
-            if let Some(cancelled) = context.review_discovery_cancel.take() {
-                cancelled.store(true, Ordering::Release);
-            }
-        }
+                &profile_id,
+                Err(format!("{error:#}")),
+            ),
+        },
         // One key refreshes both panes, so it runs both requests rather than
         // leaving the user to focus each pane in turn.
         DashboardAction::RefreshAll => {
+            // Revisit unanswered archive paths even when the dialog's rows did not change.
+            context.checkpoint_archive_records.clear();
+            context.controller_changed = true;
             context.request_quota_refresh();
             context.request_capacity_refresh();
             context.dashboard.set_notice(QUOTA_REFRESH_NOTICE);
@@ -799,15 +763,14 @@ pub(crate) async fn apply_dashboard_action(
                     context.critical_operations.clone(),
                     label,
                     context.dashboard_io_tx.clone(),
-                    move |_| match std::fs::metadata(&path) {
-                        Ok(metadata) => Ok(Some(metadata.is_dir())),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            Ok(Some(false))
+                    move |cancelled| match super::io::machine_request(
+                        MachineAction::CheckProjectDirectories { paths: vec![path] },
+                        cancelled,
+                    )? {
+                        MachineReply::ProjectDirectories(paths) => {
+                            Ok(paths.first().map(|(_, exists)| *exists))
                         }
-                        Err(error) => {
-                            Err(anyhow::Error::new(error)
-                                .context(format!("read {}", path.display())))
-                        }
+                        reply => anyhow::bail!("unexpected directory reply: {reply:?}"),
                     },
                     move |checked| DashboardIoUpdate::ProjectDirectory {
                         path: reported,
@@ -817,19 +780,17 @@ pub(crate) async fn apply_dashboard_action(
             }
         }
         DashboardAction::TestTarget { target_id } => {
-            let config = context.controller.config.clone();
             let reported_id = target_id.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 format!("testing target {target_id}"),
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    if cancelled.load(Ordering::Acquire) {
-                        anyhow::bail!("target test cancelled");
-                    }
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(15));
-                    config_only_controller(config).test_target(&target_id, &executor)
+                move |cancelled| match crate::dashboard::io::machine_request(
+                    MachineAction::TestTarget { target_id },
+                    cancelled,
+                )? {
+                    MachineReply::Done => Ok(()),
+                    reply => bail!("unexpected target test reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::TargetTest {
                     target_id: reported_id,
@@ -948,6 +909,7 @@ pub(crate) async fn apply_dashboard_action(
                         display_title,
                     },
                     DashboardImportSafety {
+                        project_root: None,
                         create_managed_worktree: None,
                         accepted: false,
                     },
@@ -955,17 +917,17 @@ pub(crate) async fn apply_dashboard_action(
             }
         }
         DashboardAction::CancelImport => {
-            if let Some(active) = context.active_import.take() {
+            if let Some(active) = context.active_import.as_ref() {
                 active.cancelled.store(true, Ordering::Release);
-                context.dashboard.finish_import();
                 context
                     .dashboard
-                    .set_notice("Import cancellation requested; no Mjolnir state will be changed.");
+                    .update_import_progress(1, None, "Cancelling upload…".into());
             }
         }
         DashboardAction::ConfirmImportBundle {
             create_managed_worktree,
             accepted,
+            project_root,
         } => {
             let Some(pending) = context.pending_import.take() else {
                 context.dashboard.finish_import();
@@ -983,6 +945,7 @@ pub(crate) async fn apply_dashboard_action(
                         pending,
                         DashboardImportSafety {
                             create_managed_worktree,
+                            project_root: Some(project_root),
                             accepted: true,
                         },
                     );
@@ -1005,7 +968,10 @@ pub(crate) async fn apply_dashboard_action(
                 .filter(|session| session.draft_input == prompt.payload.encode_draft())
                 .map(|session| session.draft_input.clone());
             context.startup_prompts.enqueue(
-                session_id,
+                super::io::NamedSession {
+                    name: super::io::session_notice_name(&context.controller.state, &session_id),
+                    id: session_id,
+                },
                 prompt,
                 inherited_draft,
                 context.dashboard_io_tx.clone(),
@@ -1014,7 +980,10 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::WithdrawStartupPrompt { session_id, prompt } => {
             context.startup_prompts.withdraw(
-                session_id,
+                super::io::NamedSession {
+                    name: super::io::session_notice_name(&context.controller.state, &session_id),
+                    id: session_id,
+                },
                 prompt,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -1022,12 +991,51 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::RenameSession { session_id, title } => {
             context.dashboard.set_notice("Renaming session…");
+            let session_name = context.session_notice_name(&session_id);
             spawn_dashboard_rename(
                 session_id,
+                &session_name,
                 title,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
+        }
+        DashboardAction::SetSessionNotificationsIgnored {
+            session_id,
+            ignored,
+        } => {
+            let session_name = context.session_notice_name(&session_id);
+            spawn_dashboard_notifications_ignored(
+                session_id,
+                &session_name,
+                ignored,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::PreferLoadBalancingProfile { profile_id } => {
+            // The most recently preferred profile wins among quota-equals.
+            let mut prefer = context.controller.config.quota.prefer.clone();
+            prefer.retain(|id| *id != profile_id);
+            prefer.insert(0, profile_id);
+            spawn_quota_preferences_save(
+                prefer,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::ClearLoadBalancingPreferences => {
+            spawn_quota_preferences_save(
+                Vec::new(),
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::ProbeQuotaProfile { profile_id } => {
+            context
+                .dashboard
+                .set_notice(format!("Refreshing {profile_id}'s quota…"));
+            spawn_quota_probe_request(profile_id, context.dashboard_io_tx.clone());
         }
         DashboardAction::ChangeWorkspace {
             session_id,
@@ -1035,8 +1043,10 @@ pub(crate) async fn apply_dashboard_action(
             workspace_name,
         } => {
             context.dashboard.set_notice("Moving session…");
+            let session_name = context.session_notice_name(&session_id);
             spawn_dashboard_change_workspace(
                 session_id,
+                &session_name,
                 workspace_id,
                 workspace_name,
                 context.dashboard_io_tx.clone(),
@@ -1045,22 +1055,22 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::SaveContainerSettings {
             session_id,
-            cpus,
-            memory,
+            resource_allocation,
             additional_mounts,
             mount_history,
         } => {
             context
                 .dashboard
                 .set_notice("Saving container size and mounts…");
+            let session_name = context.session_notice_name(&session_id);
             spawn_dashboard_container_settings(
                 ContainerSettingsRequest {
                     session_id,
-                    cpus,
-                    memory,
+                    resource_allocation,
                     additional_mounts,
                     mount_history,
                 },
+                &session_name,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
@@ -1073,10 +1083,12 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "finding projects",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(15));
-                    mj_controller::project_picker::discover(&request, &executor)
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::DiscoverProjects { request },
+                    cancelled,
+                )? {
+                    MachineReply::ProjectDiscovery(result) => Ok(result),
+                    reply => anyhow::bail!("unexpected discovery reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::ProjectDiscovery {
                     context: picker_context,
@@ -1087,23 +1099,21 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::CompletePath { host, kind, prefix } => {
             let input_context = context.dashboard.path_input_context();
-            let config = context.controller.config.clone();
             let prefix_for_work = prefix.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "completing path",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    // A completion is worth only a short wait: the person is
-                    // still typing while it runs.
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(5));
-                    config_only_controller(config).complete_path(
-                        &host,
-                        &prefix_for_work,
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::CompletePath {
+                        host,
+                        prefix: prefix_for_work,
                         kind,
-                        &executor,
-                    )
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::PathCompletion(result) => Ok(result),
+                    reply => anyhow::bail!("unexpected completion reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::PathCompletions {
                     context: input_context,
@@ -1119,24 +1129,20 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let input_context = context.dashboard.path_input_context();
             context.dashboard.set_notice("Checking attached directory…");
-            let config = context.controller.config.clone();
             let requested = source.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "validating attached directory",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    let controller = config_only_controller(config);
-                    let path = controller.resolve_input_path(
-                        &target_template_id,
-                        std::path::Path::new(&requested),
-                        &executor,
-                    )?;
-                    let forced =
-                        controller.validate_mount_source(&target_template_id, &path, &executor)?;
-                    Ok((path, forced))
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ValidateMountSource {
+                        target_id: target_template_id,
+                        source: requested.into(),
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::MountValidation(path, forced) => Ok((path, forced)),
+                    reply => anyhow::bail!("unexpected mount reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::MountValidation {
                     context: input_context,
@@ -1155,27 +1161,19 @@ pub(crate) async fn apply_dashboard_action(
                 .dashboard
                 .set_notice("Checking attached directories…");
             let generation = context.dashboard.session_preflight_generation();
-            let config = context.controller.config.clone();
             spawn_cancellable_io(
                 context.critical_operations.clone(),
                 "validating session directories",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let controller = config_only_controller(config);
-                    let executor = CancellableProcessExecutor::new(cancelled);
-                    for mount in mounts {
-                        if let Err(error) = controller.validate_mount_source(
-                            &target_template_id,
-                            std::path::Path::new(&mount.source),
-                            &executor,
-                        ) {
-                            return Ok(Some((
-                                mount.source.to_string_lossy().into_owned(),
-                                format!("{error:#}"),
-                            )));
-                        }
-                    }
-                    Ok(None)
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ValidateSessionMounts {
+                        target_id: target_template_id,
+                        mounts,
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::SessionMountValidation(result) => Ok(result),
+                    reply => anyhow::bail!("unexpected mounts reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::SessionMountValidation {
                     generation,
@@ -1201,7 +1199,10 @@ pub(crate) async fn apply_dashboard_action(
             let generation = context.dashboard.session_preflight_generation();
             spawn_cancellable_io(
                 context.critical_operations.clone(),
-                format!("updating repository for {}", short_id(&session_id)),
+                format!(
+                    "updating repository for {}",
+                    context.session_notice_name(&session_id)
+                ),
                 context.dashboard_io_tx.clone(),
                 move |_cancelled| {
                     let preflight = mj_core::runtime::block_on(async {
@@ -1230,29 +1231,26 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let input_context = context.dashboard.path_input_context();
             context.dashboard.set_notice("Checking project directory…");
-            let config = context.controller.config.clone();
             let requested = directory.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "validating project directory",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    let controller = config_only_controller(config);
-                    let result = controller.preflight_new_session(
-                        "",
-                        &target_template_id,
-                        Some(std::path::Path::new(&requested)),
-                        &executor,
-                    )?;
-                    Ok((
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ValidateProjectDirectory {
+                        target_id: target_template_id,
+                        directory: requested.into(),
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::NewSessionPreflight(result) => Ok((
                         result
                             .project_directory
                             .context("bare preflight returned no directory")?,
                         result.managed_worktree,
-                        result.review_turns_off,
-                    ))
+                        result.review_notice.is_some(),
+                    )),
+                    reply => anyhow::bail!("unexpected project preflight reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::ProjectValidation {
                     context: input_context,
@@ -1328,6 +1326,9 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::UpgradeContainer(request) => {
             let updates = context.dashboard_io_tx.clone();
+            let guard = context
+                .critical_operations
+                .begin("submitting container upgrade");
             tokio::spawn(async move {
                 let result = async {
                     daemon::connect_or_start()
@@ -1337,6 +1338,7 @@ pub(crate) async fn apply_dashboard_action(
                 }
                 .await
                 .map_err(|e: anyhow::Error| format!("{e:#}"));
+                drop(guard);
                 report(
                     "queueing container upgrade",
                     &updates,
@@ -1357,11 +1359,19 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
-                        dispatch_restart(&mut daemon, session_id, acknowledge_container_recreation)
-                            .await
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Restart {
+                                    session_id,
+                                    acknowledge_container_recreation,
+                                },
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::Resumed {
                         profile_id: session.last_profile,
@@ -1436,14 +1446,22 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |cancelled| {
+                move |cancelled, admission| {
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
-                        let operation = daemon.move_session(MoveSessionRequest {
-                            preparation,
-                            queue,
-                            acknowledge_interruption: true,
-                        });
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Move(Box::new(
+                                    MoveSessionRequest {
+                                        preparation,
+                                        queue,
+                                        acknowledge_interruption: true,
+                                    },
+                                )),
+                            )
+                            .await?;
+                        let operation = daemon.wait_session_lifecycle(receipt);
                         let mut operation = Box::pin(operation);
                         let wait_for_cancel = async {
                             loop {
@@ -1467,6 +1485,7 @@ pub(crate) async fn apply_dashboard_action(
                                 bail!("move cancellation requested for {session_id}");
                             }
                         };
+                        let outcome = lifecycle_move_outcome(outcome)?;
                         if matches!(outcome.outcome.as_str(), "failed" | "cancelled") {
                             bail!(
                                 "move {}: {}",
@@ -1508,7 +1527,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |cancelled| {
+                move |cancelled, admission| {
                     let selection = operation.selection.clone();
                     let queue = Some(operation.queue);
                     let operation_id = operation.operation_id.clone();
@@ -1530,7 +1549,13 @@ pub(crate) async fn apply_dashboard_action(
                             queue,
                             acknowledge_interruption: true,
                         };
-                        let mut move_future = Box::pin(daemon.move_session(request));
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Move(Box::new(request)),
+                            )
+                            .await?;
+                        let mut move_future = Box::pin(daemon.wait_session_lifecycle(receipt));
                         let wait_for_cancel = async {
                             loop {
                                 if cancelled.load(Ordering::Acquire) {
@@ -1553,6 +1578,7 @@ pub(crate) async fn apply_dashboard_action(
                                 bail!("move cancellation requested for {session_id}");
                             }
                         };
+                        let outcome = lifecycle_move_outcome(outcome)?;
                         if matches!(outcome.outcome.as_str(), "failed" | "cancelled") {
                             bail!(
                                 "move retry {} (operation {}): {}",
@@ -1591,9 +1617,7 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::IgnoreNestedRepositoriesAndSuspend { session_id } => {
             start_suspension(context, session_id, true, true);
         }
-        DashboardAction::ResolveAwsResourceOptions {
-            target_template_ids,
-        } => context.resolve_aws_resource_options(target_template_ids),
+
         DashboardAction::CreateBundle { sources } => {
             context.dashboard.set_notice("Preparing project…");
             spawn_create_bundle(
@@ -1619,12 +1643,19 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .discard_since_checkpoint(session_id, checkpoint)
-                            .await
+                        let mut daemon = daemon::connect_or_start().await?;
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Discard {
+                                    session_id,
+                                    checkpoint,
+                                },
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::ForceStopped)
                 },
@@ -1640,12 +1671,19 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .destroy_stopped_session(session_id, delete_branch)
-                            .await
+                        let mut daemon = daemon::connect_or_start().await?;
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::DestroyStopped {
+                                    session_id,
+                                    delete_branch,
+                                },
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::DestroyedStopped)
                 },
@@ -1661,12 +1699,19 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .force_destroy_session(session_id, delete_branch)
-                            .await
+                        let mut daemon = daemon::connect_or_start().await?;
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::ForceDestroy {
+                                    session_id,
+                                    delete_branch,
+                                },
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::ForceDestroyed)
                 },
@@ -1710,6 +1755,8 @@ pub(crate) async fn apply_dashboard_action(
 pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: DashboardAction) {
     let DashboardAction::MoveSession {
         subagents,
+        oracle,
+        oracle_choice,
         workspace_selection,
         session_id,
         profile_id,
@@ -1729,6 +1776,8 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
             let mut daemon = daemon::connect_or_start().await?;
             daemon
                 .prepare_move_session(MoveSelection {
+                    oracle,
+                    oracle_choice,
                     subagents,
                     workspace: workspace_selection,
                     session_id: session_id.clone(),
@@ -1776,11 +1825,10 @@ pub(crate) fn start_resume_repository_preflight(
     context
         .dashboard
         .set_notice("Checking checkpoint repository history…");
-    spawn_cancellable_io(
-        context.critical_operations.clone(),
-        format!("checking repositories for {}", short_id(&session_id)),
+    super::io::spawn_io(
+        "checking checkpoint repositories",
         context.dashboard_io_tx.clone(),
-        move |_cancelled| {
+        move || {
             let preflight = mj_core::runtime::block_on(async {
                 daemon::connect_or_start()
                     .await?
@@ -1829,9 +1877,24 @@ pub(crate) fn start_create_session_preflight(
         start_session_launch(context, launch);
         return;
     }
-    let config = context.controller.config.clone();
-    let bundle_id = bundle_id.clone();
-    let target_id = target_template_id.clone();
+    let DashboardAction::CreateSession {
+        profile_id,
+        workspace_id,
+        additional_mounts,
+        ..
+    } = &launch
+    else {
+        unreachable!()
+    };
+    let request = mj_client::daemon::NewSessionPreflightRequest {
+        profile_id: profile_id.clone(),
+        workspace_id: workspace_id.clone(),
+        bundle_id: bundle_id.clone(),
+        target_id: target_template_id.clone(),
+        project_directory: None,
+        additional_mounts: additional_mounts.clone(),
+        remote_repairs: Vec::new(),
+    };
     let generation = context.dashboard.session_preflight_generation();
     context.cancel_session_preflight();
     context.dashboard.begin_remote_session_preflight(generation);
@@ -1839,12 +1902,14 @@ pub(crate) fn start_create_session_preflight(
         context.critical_operations.clone(),
         "resolving session repositories",
         context.dashboard_io_tx.clone(),
-        move |cancelled| {
-            let executor = CancellableProcessExecutor::new(cancelled)
-                .with_deadline(std::time::Duration::from_secs(30));
-            config_only_controller(config)
-                .preflight_new_session(&bundle_id, &target_id, None, &executor)
-                .map(super::io::RemotePreflightOutcome::from)
+        move |cancelled| match super::io::machine_request(
+            MachineAction::PreflightNewSession { request },
+            cancelled,
+        )? {
+            MachineReply::NewSessionPreflight(result) => {
+                Ok(super::io::RemotePreflightOutcome::from(result))
+            }
+            reply => anyhow::bail!("unexpected new-session preflight reply: {reply:?}"),
         },
         move |result| DashboardIoUpdate::RemotePreflight {
             generation,
@@ -1896,7 +1961,9 @@ fn start_session_launch_with_repository_preflight(
     match action {
         action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
-            context.dashboard.set_notice("Preparing session launch…");
+            context
+                .dashboard
+                .set_notice(action.annotate_launch_notice("Preparing session launch…".to_owned()));
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,
@@ -1932,21 +1999,27 @@ fn start_session_launch_with_repository_preflight(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .resume_session(daemon::ResumeSessionRequest {
-                                session_id: session_id.clone(),
-                                workspace_id,
-                                profile_id: profile_id.clone(),
-                                target_template_id: target_template_id.clone(),
-                                additional_mounts: Some(additional_mounts),
-                                resource_allocation,
-                                discard_queue,
-                                repository_preflight,
-                            })
-                            .await
+                        let mut daemon = daemon::connect_or_start().await?;
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Resume(Box::new(
+                                    daemon::ResumeSessionRequest {
+                                        session_id: session_id.clone(),
+                                        workspace_id,
+                                        profile_id: profile_id.clone(),
+                                        target_template_id: target_template_id.clone(),
+                                        additional_mounts: Some(additional_mounts),
+                                        resource_allocation,
+                                        discard_queue,
+                                        repository_preflight,
+                                    },
+                                )),
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::Resumed {
                         profile_id,
@@ -2023,26 +2096,10 @@ impl DashboardContext {
         );
         LifecycleOperationRequest {
             session_id: session_id.to_owned(),
+            session_name: self.session_notice_name(session_id),
             kind,
             cancelled,
             updates: self.lifecycle_updates_tx.clone(),
-        }
-    }
-
-    /// Resolves the instance sizes a deployment target offers, once per target.
-    pub(crate) fn resolve_aws_resource_options(&mut self, target_template_ids: Vec<String>) {
-        for target_template_id in target_template_ids {
-            if self
-                .resolving_aws_resource_options
-                .insert(target_template_id.clone())
-            {
-                spawn_aws_resource_options_resolution(
-                    self.controller.config.clone(),
-                    target_template_id,
-                    self.aws_resource_options_tx.clone(),
-                    self.critical_operations.clone(),
-                );
-            }
         }
     }
 }
@@ -2233,6 +2290,36 @@ async fn interrupt_all(targets: &mj_tui::InterruptAllTargets) -> Vec<(String, St
     failures
 }
 
+fn lifecycle_move_outcome(reply: daemon::DaemonReply) -> Result<mj_core::state::MoveOutcome> {
+    match reply {
+        daemon::DaemonReply::MoveOutcome(outcome) => Ok(outcome),
+        _ => bail!("daemon returned an unexpected move reply"),
+    }
+}
+
+pub(crate) fn spawn_notification_dismissal(
+    context: &mut DashboardContext,
+    action: DashboardAction,
+) {
+    if let DashboardAction::DismissNotification { session_id, target } = action {
+        let result_session = session_id.clone();
+        let result_target = target.clone();
+        spawn_async_job(
+            Some(context.critical_operations.clone()),
+            "notification dismissal",
+            context.dashboard_io_tx.clone(),
+            std::time::Duration::from_secs(30),
+            request_notification_dismissal(session_id, target),
+            move |result| DashboardIoUpdate::NotificationDismissed {
+                session_id: result_session,
+                target: result_target,
+                result,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
 async fn dispatch_restart(
     daemon: &mut daemon::DaemonClient,
     session_id: String,
@@ -2243,54 +2330,19 @@ async fn dispatch_restart(
         .await
 }
 
-/// Run `mj login` for one profile with the dashboard's terminal handed over.
-///
-/// The interactive child must own standard input for browser and device-code
-/// prompts, so the event stream is dropped before the child starts and the
-/// terminal is restored on every path, including a failed spawn.
-async fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Result<(), String> {
-    let executable =
-        std::env::current_exe().map_err(|error| format!("find the mj executable: {error}"))?;
-    // The event stream must be gone before the child owns stdin. Crossterm
-    // stops its reader thread when the stream is dropped, so releasing the
-    // last handle here (rather than after the child) is what makes the
-    // handover safe.
-    let events = context.events.take();
-    drop(events);
-    if let Err(error) = context.terminal.suspend() {
-        context.events = Some(crossterm::event::EventStream::new());
-        return Err(format!("{error:#}"));
-    }
-    let profile = profile_id.to_owned();
-    // Ctrl+C belongs to the login child, not to the dashboard's shutdown
-    // coordinator, while the terminal is handed over.
-    let _interrupts = mj_controller::termination::suppress_interrupts();
-    // The interactive child cannot run on a runtime worker. The dashboard
-    // waits for the handover, but the Tokio worker remains available for the
-    // daemon's other tasks.
-    let joined = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(executable)
-            .args(["login", "--profile", &profile])
-            .status()
-    })
-    .await;
-    // Restore the terminal on every path: a failed spawn or a panicking child
-    // must not leave the dashboard on the primary screen with no input.
-    let resumed = context.terminal.resume();
-    context.events = Some(crossterm::event::EventStream::new());
-    if let Err(error) = resumed {
-        context.request_shutdown();
-        return Err(format!("{error:#}"));
-    }
-    let status = joined
-        .map_err(|error| format!("sign-in task failed: {error}"))?
-        .map_err(|error| format!("could not start `mj login --profile {profile_id}`: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "`mj login --profile {profile_id}` exited with {status}; rerun it from a shell for the full output"
-        ))
+/// Asks the daemon to dismiss one session's notification; the single and the
+/// workspace-wide dismissal both send it.
+async fn request_notification_dismissal(
+    session_id: String,
+    target: mj_core::attention::NotificationDismissal,
+) -> Result<u64> {
+    let mut client = daemon::connect_existing().await?;
+    match client
+        .request(mj_client::daemon::DaemonAction::DismissNotification { session_id, target })
+        .await?
+    {
+        mj_client::daemon::DaemonReply::Ordinal(ordinal) => Ok(ordinal),
+        reply => anyhow::bail!("unexpected dismissal reply: {reply:?}"),
     }
 }
 

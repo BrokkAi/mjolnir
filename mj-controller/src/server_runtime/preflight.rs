@@ -1,7 +1,7 @@
 use super::*;
 
 /// Cancel the shared subprocess executor when its request owner goes away.
-pub(super) struct ProcessCancellationGuard(pub(super) Arc<AtomicBool>);
+pub(crate) struct ProcessCancellationGuard(pub(crate) Arc<AtomicBool>);
 
 impl Drop for ProcessCancellationGuard {
     fn drop(&mut self) {
@@ -23,13 +23,12 @@ pub(super) fn run_new_preflight(
     target_id: String,
     project_directory: Option<PathBuf>,
 ) -> Result<crate::server::PreflightNew> {
-    run_new_preflight_with_cancellation(
+    run_new_preflight_with_executor(
         config,
         bundle_id,
         target_id,
         project_directory,
-        Arc::new(AtomicBool::new(false)),
-        Vec::new(),
+        &CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))),
     )
 }
 
@@ -194,29 +193,7 @@ pub(super) fn run_resume_preflight(
     }
 }
 
-pub(super) fn run_new_preflight_with_cancellation(
-    config: Config,
-    bundle_id: String,
-    target_id: String,
-    project_directory: Option<PathBuf>,
-    cancelled: Arc<AtomicBool>,
-    remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
-) -> Result<crate::server::PreflightNew> {
-    let executor =
-        CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-    if !remote_repairs.is_empty() {
-        let target = config.targets.get(&target_id).context("unknown target")?;
-        anyhow::ensure!(
-            !is_bare_project_target(target) && project_directory.is_none(),
-            "remote repair requires an isolated target"
-        );
-        let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
-        mj_core::local_git::apply_repository_remote_repairs(bundle, &remote_repairs, &executor)?;
-    }
-    run_new_preflight_with_executor(config, bundle_id, target_id, project_directory, &executor)
-}
-
-pub(super) fn run_new_preflight_with_executor(
+pub(crate) fn run_new_preflight_with_executor(
     config: Config,
     bundle_id: String,
     target_id: String,
@@ -250,3 +227,72 @@ pub(super) fn run_new_preflight_with_executor(
             .then(|| mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF.to_owned()),
     })
 }
+
+/// Full launch interpretation for HTTP and authenticated control requests.
+pub(crate) fn preflight_new_request(
+    config: Config,
+    request: mj_client::daemon::NewSessionPreflightRequest,
+    executor: CancellableProcessExecutor,
+) -> Result<crate::server::PreflightNew> {
+    let snapshot = crate::server::ViewerSnapshot::from_config_state(
+        &config,
+        &mj_core::state::State::default(),
+        0,
+    );
+    crate::server::validate_new_preflight(&request, &snapshot).map_err(anyhow::Error::msg)?;
+    validate_new_mounts(
+        &config,
+        &request.target_id,
+        &request.additional_mounts,
+        &executor,
+    )
+    .map_err(|error| error.context(InvalidNewMount))?;
+    if !request.remote_repairs.is_empty() {
+        let target = config
+            .targets
+            .get(&request.target_id)
+            .context("unknown target")?;
+        anyhow::ensure!(
+            !is_bare_project_target(target) && request.project_directory.is_none(),
+            "remote repair requires an isolated target"
+        );
+        let bundle = config
+            .bundles
+            .get(&request.bundle_id)
+            .context("unknown bundle")?;
+        mj_core::local_git::apply_repository_remote_repairs(
+            bundle,
+            &request.remote_repairs,
+            &executor,
+        )?;
+    }
+    run_new_preflight_with_executor(
+        config,
+        request.bundle_id,
+        request.target_id,
+        request.project_directory,
+        &executor,
+    )
+}
+
+pub(super) fn validate_new_mounts(
+    config: &Config,
+    target_id: &str,
+    mounts: &[crate::targets::AdditionalMount],
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    let controller = config_only_controller(config.clone());
+    for mount in mounts {
+        controller.validate_mount_source(target_id, &mount.source, executor)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(super) struct InvalidNewMount;
+impl std::fmt::Display for InvalidNewMount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("attached directory validation failed")
+    }
+}
+impl std::error::Error for InvalidNewMount {}

@@ -79,7 +79,18 @@ impl TurnContext {
             .decision_log
             .clone()
     }
-    pub fn reset(&self, prompt: &str) {
+    /// Start a turn. `user_prompt_tail` carries the prompt only when the
+    /// person wrote it: a prompt Mjolnir submitted (a mailbox wake, a child
+    /// report, a continuation, a parent's message to a child) is not the
+    /// person's latest request, and Jev scored those turns better without it
+    /// (.agents/docs/jev-still-open-20261106.md).
+    pub fn reset(&self, command_id: Option<&str>, prompt: &str) {
+        let user_prompt_tail =
+            if mj_core::continuation::is_user_authored_message(command_id, prompt) {
+                tail(prompt, USER_PROMPT_BYTES)
+            } else {
+                String::new()
+            };
         let mut state = self.0.lock().expect("turn context lock poisoned");
         let generation = state.generation.wrapping_add(1);
         *state = TurnContextState {
@@ -87,7 +98,7 @@ impl TurnContext {
             parent_activity: Some(std::time::Instant::now()),
             decision_log: state.decision_log.clone(),
             authorization: state.authorization.clone(),
-            user_prompt_tail: tail(prompt, USER_PROMPT_BYTES),
+            user_prompt_tail,
             background_commands: state.background_commands,
             queued_commands: state.queued_commands,
             background_inventory: std::mem::take(&mut state.background_inventory),
@@ -115,7 +126,7 @@ impl TurnContext {
                 steering: Some(_), ..
             } => {
                 if let Some(prompt) = prompt {
-                    self.reset(prompt);
+                    self.reset(delivered_prompt_command_id(observation), prompt);
                     self.0
                         .lock()
                         .expect("turn context lock poisoned")
@@ -133,7 +144,7 @@ impl TurnContext {
             } => {
                 self.observe_terminal(&mj_core::transcript::TerminalOutputRecord {
                     terminal_id: terminal_id.clone(),
-                    output: output.clone(),
+                    output: output.clone().into(),
                     truncated: *truncated,
                     exit_code: *exit_code,
                     signal: signal.clone(),
@@ -314,13 +325,12 @@ impl TurnContext {
             .filter(|e| e.role == crate::summary::SummaryRole::Tool)
             .take(IN_FLIGHT_TOOLS)
             .map(|e| mj_core::activity::verdict::ToolOutcome {
-                name: tail(
+                name: tool_title(
                     e.tool
                         .as_ref()
                         .and_then(|t| t.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or(&e.text),
-                    TOOL_TITLE_BYTES,
                 ),
                 status: e
                     .tool
@@ -331,7 +341,7 @@ impl TurnContext {
                     .to_owned(),
             })
             .collect();
-        let mut evidence = TurnEvidence {
+        TurnEvidence {
             authorization: None,
             final_tool_calls,
             background: Vec::new(),
@@ -345,15 +355,13 @@ impl TurnContext {
                 .iter()
                 .take(IN_FLIGHT_TOOLS)
                 .map(|tool| ToolEvidence {
-                    title: tail(
-                        &state
+                    title: tool_title(
+                        state
                             .summary
                             .entries
                             .iter()
                             .find(|e| e.id == tool.tool_call_id)
-                            .map(|e| e.text.clone())
-                            .unwrap_or_else(|| "unknown tool".into()),
-                        TOOL_TITLE_BYTES,
+                            .map_or("unknown tool", |e| e.text.as_str()),
                     ),
                     running_s: now_ms.saturating_sub(tool.started_at_ms).max(0) as u64 / 1000,
                 })
@@ -368,13 +376,7 @@ impl TurnContext {
                 state.assistant_text_tail.clone()
             },
             completion: None,
-        };
-        let mut limit = 48 * 1024;
-        while limit > 0 && !mj_core::activity::verdict::request_fits(&evidence) {
-            limit /= 2;
-            evidence.transcript_summary = summary.render(limit);
         }
-        evidence
     }
 }
 
@@ -385,7 +387,9 @@ fn complete_message(state: &mut TurnContextState) {
     state.message_id = None;
 }
 
-fn tail(text: &str, maximum_bytes: usize) -> String {
+/// The last `maximum_bytes` of `text`, cut at a character boundary: the tail
+/// every turn classifier receives.
+pub fn tail(text: &str, maximum_bytes: usize) -> String {
     let start = text.floor_char_boundary(text.len().saturating_sub(maximum_bytes));
     let mut value = text[start..].to_owned();
     mj_core::transcript::truncate_string_start(&mut value, maximum_bytes);
@@ -408,7 +412,7 @@ mod tests {
     #[test]
     fn diagnostic_logging_does_not_change_evidence_or_generation_and_survives_reset() {
         let context = TurnContext::default();
-        context.reset("Implement the parser");
+        context.reset(None, "Implement the parser");
         let generation = context.generation();
         let before = serde_json::to_value(context.evidence(
             HarnessKind::Codex,
@@ -433,7 +437,7 @@ mod tests {
             .unwrap(),
             before
         );
-        context.reset("New work");
+        context.reset(None, "New work");
         assert!(context.decision_log().is_some());
     }
 
@@ -524,7 +528,7 @@ mod tests {
     #[test]
     fn evidence_caps_utf8_text_tools_and_durations() {
         let context = TurnContext::default();
-        context.reset(&"é".repeat(20_000));
+        context.reset(None, &"é".repeat(20_000));
         context.observe(&message("first", &"🦀".repeat(20_000)));
         let first = context.evidence(
             HarnessKind::Claude,
@@ -573,7 +577,7 @@ mod tests {
     #[test]
     fn message_boundaries_and_prompt_reset_do_not_mix_answers() {
         let context = TurnContext::default();
-        context.reset("First prompt");
+        context.reset(None, "First prompt");
         context.observe(&message("one", "Old answer"));
         context.observe(&message("two", "New "));
         context.observe(&message("two", "answer?"));
@@ -595,7 +599,7 @@ mod tests {
         assert_ne!(context.generation(), generation);
         assert_eq!(context.counts(), (1, 2));
         let generation = context.generation();
-        context.reset("Second prompt");
+        context.reset(None, "Second prompt");
         assert_eq!(context.counts(), (1, 2));
         assert_ne!(context.generation(), generation);
         let evidence = context.evidence(
@@ -607,5 +611,14 @@ mod tests {
         assert_eq!(evidence.user_prompt_tail, "Second prompt");
         assert!(evidence.assistant_text_tail.is_empty());
         assert!(!evidence.transcript_summary.contains("<user>"));
+        // A prompt Mjolnir submitted is not the person's latest request.
+        context.reset(Some("mailbox-wake-1"), "A child finished its task.");
+        let evidence = context.evidence(
+            HarnessKind::Claude,
+            TurnPhase::Running,
+            &ActivityFacts::default(),
+            0,
+        );
+        assert!(evidence.user_prompt_tail.is_empty());
     }
 }

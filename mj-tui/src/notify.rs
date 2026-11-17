@@ -13,20 +13,6 @@ use mj_core::config::NotifyMode;
 
 use crate::{AttentionLevel, DashboardState};
 
-/// A failure shown in this terminal. A changed error or a recovered session
-/// starts a new notice; viewing an error does not change its underlying state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ViewedFailure {
-    state: mj_core::state::SessionState,
-    message: Option<String>,
-}
-
-impl ViewedFailure {
-    pub(crate) fn matches(&self, session: &mj_core::state::SessionRecord) -> bool {
-        self.state == session.state && self.message == session.last_error
-    }
-}
-
 /// One thing worth interrupting the person for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notification {
@@ -40,52 +26,53 @@ pub struct Notification {
 }
 
 /// One stretch of a session needing a person at one level, and whether it
-/// has been reported yet.
+/// has been reported yet. A form that opens during the stretch starts a new
+/// one, so a second request does not hide behind a first one already seen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttentionEpisode {
     level: AttentionLevel,
+    /// The open forms this episode covers.
+    forms: std::collections::BTreeSet<String>,
     since_ms: u64,
     reported: bool,
 }
 
 impl DashboardState {
     pub(crate) fn attention_notice_level(&self, session_id: &str) -> AttentionLevel {
-        let level = self.attention_level(session_id);
-        if level == AttentionLevel::Failed
-            && self.viewed_failures.get(session_id).is_some_and(|seen| {
-                self.state
-                    .sessions
-                    .get(session_id)
-                    .is_some_and(|session| seen.matches(session))
-            })
+        self.attention_level(session_id)
+    }
+
+    pub(crate) fn failure_drawn(&mut self, session_id: &str) {
+        if !self.modal_open()
+            && matches!(
+                self.notification_dismissal_target(session_id),
+                Some(mj_core::attention::NotificationDismissal::Failure(_))
+            )
         {
-            AttentionLevel::Inactive
-        } else {
-            level
+            self.rendered_failure_dismissals
+                .insert(session_id.to_owned());
         }
     }
 
-    /// Remember only failures whose explanation was actually drawn, not rows
-    /// merely selected behind a modal or while the terminal is too small.
-    pub(crate) fn failure_drawn(&mut self, session_id: &str) {
-        if self.modal_open() {
-            return;
-        }
-        if let Some(session) = self.state.sessions.get(session_id) {
-            self.drawn_failures.insert(
-                session_id.to_owned(),
-                ViewedFailure {
-                    state: session.state,
-                    message: session.last_error.clone(),
-                },
-            );
-        }
+    /// Drain only failures actually drawn; the host submits these through the
+    /// same supervised action as an explicit notification dismissal.
+    pub fn take_drawn_failure_dismissals(&mut self) -> Vec<crate::DashboardAction> {
+        std::mem::take(&mut self.rendered_failure_dismissals)
+            .into_iter()
+            .filter_map(|id| self.begin_dismiss_notification_for(&id))
+            .collect()
     }
 
     /// The notifications due at `now_ms`, each reported exactly once per
     /// episode. Sessions the person is already looking at are marked as
     /// reported without a notification, so switching away later does not
     /// ring for a question they have seen.
+    ///
+    /// Each session's episode follows its own state. A sub-agent child has no
+    /// row of its own, so a child holding an open form has its own episode,
+    /// seen only in the child's conversation, and its notification names the
+    /// parent's row and the child. Two children, or a child and its parent,
+    /// therefore each ring once.
     pub fn notification_events(&mut self, now_ms: u64) -> Vec<Notification> {
         let delay_ms = self.config.notify.delay_seconds.saturating_mul(1000);
         let enabled = self.config.notify.mode != NotifyMode::Off;
@@ -94,30 +81,74 @@ impl DashboardState {
         let mut due = Vec::new();
         episodes.retain(|id, _| self.state.sessions.contains_key(id));
         for id in self.state.sessions.keys() {
-            if self.state.is_subagent_session(id) {
+            // An ignored session's attention still renders in its row; it
+            // simply never starts or keeps an episode that interrupts.
+            if self
+                .state
+                .sessions
+                .get(id)
+                .is_some_and(|session| session.notifications_ignored)
+            {
+                episodes.remove(id);
                 continue;
             }
-            let level = self.attention_notice_level(id);
+            let parent = self
+                .state
+                .subagents
+                .get(id)
+                .map(|child| child.parent_session_id.as_str());
+            let level = match parent {
+                Some(_)
+                    if self.form_holders.get(id) == Some(id)
+                        && self.attention_level(id) == AttentionLevel::Waiting =>
+                {
+                    AttentionLevel::Waiting
+                }
+                Some(_) => AttentionLevel::Inactive,
+                // A descendant form owns its episode and names this row.
+                // The daemon also promotes the row, which must not ring twice.
+                None if self.waiting_child_of(id).is_some() => AttentionLevel::Inactive,
+                None => self.attention_level(id),
+            };
             if !level.needs_person() {
                 episodes.remove(id);
                 continue;
             }
+            let forms: std::collections::BTreeSet<String> = self
+                .session_details
+                .get(id)
+                .map(|detail| {
+                    detail
+                        .pending_elicitations
+                        .iter()
+                        .map(|request| request.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
             let episode = episodes.entry(id.clone()).or_insert(AttentionEpisode {
                 level,
+                forms: Default::default(),
                 since_ms: now_ms,
                 reported: false,
             });
-            if episode.level != level {
+            if episode.level != level || !forms.is_subset(&episode.forms) {
                 *episode = AttentionEpisode {
                     level,
+                    forms,
                     since_ms: now_ms,
                     reported: false,
                 };
+            } else {
+                // Forget answered forms, so a harness that reuses an id
+                // later still starts a new episode.
+                episode.forms = forms;
             }
             if episode.reported {
                 continue;
             }
-            if visible.as_deref() == Some(id.as_str()) {
+            // An open conversation shows only its first form, so being on
+            // screen sees an episode only when it covers one form.
+            if visible.as_deref() == Some(id.as_str()) && episode.forms.len() <= 1 {
                 episode.reported = true;
                 continue;
             }
@@ -128,14 +159,41 @@ impl DashboardState {
             if !enabled {
                 continue;
             }
-            let Some(session) = self.state.sessions.get(id) else {
+            // A child's reviewer has no row either; name the top-level one.
+            let mut row = id.as_str();
+            let mut steps = 0;
+            while let Some(relation) = self.state.subagents.get(row)
+                && steps < self.state.sessions.len()
+            {
+                row = relation.parent_session_id.as_str();
+                steps += 1;
+            }
+            let Some(session) = self.state.sessions.get(row) else {
                 continue;
             };
+            let body = match (parent, self.session_details.get(id)) {
+                (Some(_), Some(detail)) => format!(
+                    "{} \"{}\": {}",
+                    match self.state.subagents.get(id).map(|relation| relation.kind) {
+                        Some(mj_core::subagent::SubagentKind::Reviewer) => "Reviewer",
+                        _ => "Sub-agent",
+                    },
+                    self.state
+                        .sessions
+                        .get(id)
+                        .map_or(id.as_str(), |child| child.listed_title()),
+                    detail
+                        .pending_elicitations
+                        .last()
+                        .map_or("", |request| request.message.as_str())
+                ),
+                _ => self.notification_body(id, level),
+            };
             due.push(Notification {
-                session_id: id.clone(),
+                session_id: row.to_owned(),
                 session_title: session.listed_title().to_owned(),
                 level,
-                body: self.notification_body(id, level),
+                body,
             });
         }
         self.attention_episodes = episodes;
@@ -148,7 +206,7 @@ impl DashboardState {
         let detail = self.session_details.get(session_id);
         let text = match level {
             AttentionLevel::Waiting => detail
-                .and_then(|detail| detail.pending_elicitations.first())
+                .and_then(|detail| detail.pending_elicitations.last())
                 .map(|request| request.message.clone())
                 .or_else(|| {
                     self.session_review(session_id)
@@ -156,12 +214,24 @@ impl DashboardState {
                         .map(str::to_owned)
                 })
                 .or_else(|| {
-                    detail
-                        .and_then(|detail| detail.last_agent_message.as_deref())
-                        .filter(|text| !text.trim().is_empty())
-                        .map(str::to_owned)
+                    let detail = detail?;
+                    let target = detail.question_message.as_deref()?;
+                    mj_core::transcript::materialized_agent_message_text(
+                        detail.projection.transcript.iter().map(AsRef::as_ref),
+                        target,
+                    )
+                })
+                .or_else(|| {
+                    let detail = detail?;
+                    (!detail.supports_open_request)
+                        .then(|| detail.last_agent_message.as_deref().map(str::to_owned))
+                        .flatten()
                 })
                 .unwrap_or_else(|| "Waiting for your input".to_owned()),
+            AttentionLevel::Important => detail
+                .and_then(|detail| detail.last_agent_message.as_deref())
+                .map(str::to_owned)
+                .unwrap_or_else(|| "Important update".to_owned()),
             AttentionLevel::Failed => self
                 .state
                 .sessions
@@ -267,9 +337,21 @@ impl DashboardState {
             && !self.pane_session_is_suspended(session_id)
     }
 
-    /// Empties the pane that held a suspended session, instead of attaching
-    /// to a session with no worker, and says so. The host saves the layout.
+    /// Lets a pane go of a suspended session instead of attaching to a
+    /// session with no worker. The host cancels the attach and saves the
+    /// layout.
+    ///
+    /// Browse shows the selection, so it keeps a stopped row that is still
+    /// listed because its failure needs a person: emptying it would clear the
+    /// selection the row's keys act on. Any other suspended session has left
+    /// the list, and Browse just empties. A pinned pane empties and says so.
     pub fn release_suspended_pane(&mut self, pane: crate::tile_layout::PaneId, session_id: &str) {
+        if pane == self.browse_pane() {
+            if !self.stopped_notification_row(session_id) {
+                self.set_pane_session(pane, None);
+            }
+            return;
+        }
         self.set_pane_session(pane, None);
         let name = self.session_notice_name(session_id);
         self.say_suspended_session_was_unpinned(&name);
@@ -285,18 +367,15 @@ impl DashboardState {
         ));
     }
 
+    /// "Session" and the shared notice name, cut to fit a notice. See
+    /// [`mj_core::state::State::session_notice_name`].
     pub(crate) fn session_notice_name(&self, session_id: &str) -> String {
-        self.state.sessions.get(session_id).map_or_else(
-            || format!("Session {}", &session_id[..session_id.len().min(8)]),
-            |session| {
-                format!(
-                    "Session {}",
-                    crate::fit_session_name(
-                        crate::render::session_name(session),
-                        crate::NOTICE_NAME_CELLS
-                    )
-                )
-            },
+        format!(
+            "Session {}",
+            crate::fit_session_name(
+                &self.state.session_notice_name(session_id),
+                crate::NOTICE_NAME_CELLS
+            )
         )
     }
 
@@ -310,13 +389,25 @@ impl DashboardState {
         }
         // Questions, unreachable workers and failures each get their own
         // word, most urgent first: "waiting" means a question for a person.
-        let (mut failed, mut unreachable, mut waiting, mut unread) = (0, 0, 0, 0);
+        let (mut failed, mut unreachable, mut waiting, mut important, mut unread) = (0, 0, 0, 0, 0);
         for entry in self.attention_queue() {
+            // Ignored sessions still render their state in the list; the
+            // title is an interruption channel, so they are not in it.
+            if self
+                .state
+                .sessions
+                .get(&entry.session_id)
+                .is_some_and(|session| session.notifications_ignored)
+            {
+                continue;
+            }
             match entry.level {
                 AttentionLevel::Failed => failed += 1,
                 AttentionLevel::Unreachable => unreachable += 1,
                 AttentionLevel::Waiting => waiting += 1,
-                _ => unread += 1,
+                AttentionLevel::Important => important += 1,
+                AttentionLevel::Unread => unread += 1,
+                _ => {}
             }
         }
         let mut title = String::from("mj");
@@ -324,6 +415,7 @@ impl DashboardState {
             (failed, "failed"),
             (unreachable, "unreachable"),
             (waiting, "waiting"),
+            (important, "important"),
             (unread, "unread"),
         ] {
             if count > 0 {
@@ -367,6 +459,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                last_oracle_choices: Default::default(),
                 operator_presence: Default::default(),
                 last_subagent_policies: Default::default(),
                 subagents: Default::default(),
@@ -385,10 +478,60 @@ mod tests {
         let done = dashboard.session_details.get_mut("done").unwrap();
         done.unread_agent_messages = 1;
         done.last_agent_message = Some("All tests pass now.\nSecond line".into());
+        dashboard.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([
+            (
+                "asks".into(),
+                mj_core::attention::SessionAttention::NeedsInput,
+            ),
+            ("done".into(), mj_core::attention::SessionAttention::Unread),
+        ]));
         dashboard.set_current_session(None);
         dashboard
     }
 
+    #[test]
+    fn retained_question_notification_uses_original_message_after_later_reply() {
+        let mut dashboard = dashboard();
+        let detail = dashboard.session_details.get_mut("asks").unwrap();
+        detail.pending_elicitations.clear();
+        detail.supports_open_request = true;
+        detail.question_message = Some("agent:original".into());
+        detail.last_agent_message = Some("The background build finished".into());
+        detail.projection.transcript.push(std::sync::Arc::new(mj_core::state::TranscriptItem {
+            stable_id: "agent:original".into(), position: 1, latest_content_event_ordinal: None,
+            created_at_ms: 1, last_changed_at_ms: 1,
+            body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":"Keep the old format?"}})], streaming: false },
+        }));
+        detail.question_message = None;
+        assert_eq!(
+            dashboard.notification_body("asks", AttentionLevel::Waiting),
+            "Waiting for your input"
+        );
+        dashboard
+            .session_details
+            .get_mut("asks")
+            .unwrap()
+            .supports_open_request = false;
+        assert_eq!(
+            dashboard.notification_body("asks", AttentionLevel::Waiting),
+            "The background build finished"
+        );
+        let detail = dashboard.session_details.get_mut("asks").unwrap();
+        detail.supports_open_request = true;
+        detail.question_message = Some("agent:original".into());
+        assert!(dashboard.notification_events(0).is_empty());
+        let notices = dashboard.notification_events(2000);
+        assert_eq!(
+            notices
+                .iter()
+                .find(|notice| notice.session_id == "asks")
+                .unwrap()
+                .body,
+            "Keep the old format?"
+        );
+    }
+
+    // Hard-won: 92684ad3b: interruption after read output stopped producing an unread notification.
     #[test]
     fn a_new_question_notifies_once_after_the_delay() {
         let mut dashboard = dashboard();
@@ -423,6 +566,41 @@ mod tests {
         let again = dashboard.notification_events(63_000);
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].session_id, "asks");
+        dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Idle);
+        assert!(dashboard.notification_events(64_000).is_empty());
+        dashboard
+            .state
+            .sessions
+            .get_mut("done")
+            .unwrap()
+            .viewed_through_event_ordinal = 2;
+        let mut interrupted = crate::test_support::materialized_session_for(
+            "done",
+            vec![crate::test_support::agent_message(2, "Read output")],
+        );
+        interrupted.applied_event_ordinal = 3;
+        interrupted.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            command_id: "interrupted".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(1),
+            completed_ordinal: 3,
+            completed_at_ms: 3,
+            outcome: mj_core::state::TurnOutcomeKind::Interrupted {
+                message: "Stopped".into(),
+                reason: None,
+            },
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            work_facts: None,
+        });
+        dashboard.apply_materialized_session(&interrupted);
+        dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Unread);
+        assert!(dashboard.notification_events(65_000).is_empty());
+        let interrupted = dashboard.notification_events(67_000);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].level, AttentionLevel::Unread);
+        assert_eq!(interrupted[0].body, "Work was interrupted");
     }
 
     #[test]
@@ -466,6 +644,12 @@ mod tests {
         );
         dashboard.state.sessions.get_mut("done").unwrap().state =
             mj_core::state::SessionState::Disconnected;
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &["done"],
+            mj_core::attention::SessionAttention::Unreachable,
+        );
+
         assert_eq!(
             dashboard.terminal_title().as_deref(),
             Some("mj · 1 unreachable · 1 waiting")
@@ -480,7 +664,7 @@ mod tests {
     #[test]
     fn an_unreachable_worker_is_reported_plainly_and_withdrawn_on_recovery() {
         let mut dashboard = dashboard();
-        let title = dashboard.state.sessions["done"].display_title().to_owned();
+        let title = dashboard.state.sessions["done"].listed_title().to_owned();
         dashboard.report_session_unreachable("done");
         let notice = dashboard.notice().unwrap();
         assert_eq!(
@@ -532,6 +716,38 @@ mod tests {
         assert_eq!(
             dashboard.notice().as_deref(),
             Some("The daemon found a missing target.")
+        );
+    }
+
+    #[test]
+    fn an_ignored_session_never_notifies_or_counts_in_the_title() {
+        let mut dashboard = dashboard();
+        // Prime the episodes before the delay, as an ordinary quiet pass does.
+        assert!(dashboard.notification_events(0).is_empty());
+        dashboard
+            .state
+            .sessions
+            .get_mut("asks")
+            .unwrap()
+            .notifications_ignored = true;
+        let due = dashboard.notification_events(2_000);
+        assert_eq!(due.len(), 1, "{due:?}");
+        assert_eq!(due[0].session_id, "done");
+        let title = dashboard.terminal_title().unwrap();
+        assert!(!title.contains("waiting"), "{title}");
+        assert!(title.contains("1 unread"), "{title}");
+        // Unignoring starts its episode fresh, so it still notifies once.
+        dashboard
+            .state
+            .sessions
+            .get_mut("asks")
+            .unwrap()
+            .notifications_ignored = false;
+        assert!(dashboard.notification_events(2_500).is_empty());
+        let due = dashboard.notification_events(4_500);
+        assert!(
+            due.iter().any(|notice| notice.session_id == "asks"),
+            "{due:?}"
         );
     }
 }

@@ -1,0 +1,211 @@
+{
+  "id": "L2410",
+  "title": "checkpoint cleanup status",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "e8566ee44d5a562c41deb74d72243980",
+    "session_title": "mjolnir via claude",
+    "reply_position": 1932,
+    "captured_at": "2026-10-22T14:05:29.234Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "pull, then tell me how we should fix #1331"
+        },
+        {
+          "id": "user:556",
+          "role": "user",
+          "text": "good but set the limit at 64MB/maxchildcount, and rm it entirely on suspend/destroy, then push; manually clean up existing trees on this host and precision-3260 (containerized on morannon will die w the session i assume)"
+        },
+        {
+          "id": "user:576",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nDelete when: Both\nCleanup: Match the new rule (Recommended)"
+        },
+        {
+          "id": "agent:612",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The per-child limit is `64 MiB / [subagents] max_concurrent`. I added it to `mj-core/src/subagent.rs` as `MAX_CHECKPOINT_REPORT_BYTES` and `max_child_report_bytes()`, so the handback check and the checkpoint bound use one number. With your 16-child setting that is 4 MiB per child. With the code default of 6 it is about 10.7 MiB.\n- Deleting on parent suspend is safe only after the checkpoint is captured. Restore then puts the captured copy back, keeping any file that already exists. I gave the lifecycle child that ordering as a hard rule: if the code cannot meet it, the child must report back, not find a workaround.\n- Bare projects share one `.mj/agents` root across sessions in the same checkout. So \"remove it entirely\" is implemented as \"remove this parent's children's directories, then the root if it is empty\".\n`─────────────────────────────────────────────────`\n\nFour children are running on disjoint files:\n\n1. **Handback limit:** refuse a handback when the child's report directory is over the limit. Also adds new text about the limit, and the `close` tool will say that close deletes the directory.\n2. **Checkpoint notice:** a checkpoint that leaves reports out now records a transcript notice. A failed capture will name the actual error, not the report warning. This child also checks two open questions: does a child's checkpoint also carry its siblings' reports, and are `.mj/agents` roots captured at all?\n3. **Lifecycle deletion:** suspending or destroying a child deletes its directory. Suspending or destroying a parent deletes its children's directories, only after the parent's checkpoint is captured.\n4. **Cleanup inventory (read-only):** a list of what to delete on this host and on precision-3260, using the new rule, plus scripts that I will review before running anything.\n\nI am waiting for their reports. After that I will review the combined change, commit, push, and then run the reviewed cleanup."
+        },
+        {
+          "id": "agent:786",
+          "role": "assistant",
+          "text": "The lifecycle child found one unsafe point. The low-level `Controller::suspend_session_controlled` can stop a Podman container while child processes are still running, and after that no command can reach the files inside it. I chose to delete only in the daemon paths, where the parent's checkpoint is already saved, the children are already stopped, and the parent's target can still be reached. The low-level path stays as it is, and in-place restarts are excluded. That decision is sent, and the child is implementing it. Three other children are still running. I am waiting for their reports."
+        },
+        {
+          "id": "agent:874",
+          "role": "assistant",
+          "text": "Meanwhile I'll review the inventory, since the cleanup depends on it."
+        },
+        {
+          "id": "agent:1009",
+          "role": "assistant",
+          "text": "Local cleanup is done. Now precision-3260: 119 directories, 15.7 GB. Before deleting, I re-check each one's state."
+        },
+        {
+          "id": "agent:1039",
+          "role": "assistant",
+          "text": "Manual cleanup is finished on both hosts:\n\n- **This host:** I deleted 273 report directories (about 34.6 GB) and removed the report roots that became empty. Two of the directories contained container-owned files, so I deleted those with `podman unshare`. I kept 51 directories, because they belong to running or parked children whose parents are still running.\n- **precision-3260:** I deleted 118 directories (about 15.7 GB). I kept the 3 that belong to live children of session `0090c97b…`.\n\nI re-checked every directory against the daemon database just before deleting it.\n\nThree things for you to look at:\n- `bifrost3/.mj/agents/4de92831…` holds **82 GB**. Its child is parked under a parent that is still running (`0305d10c…`), so the rule kept it. Closing that child will free the space once the new code is installed.\n- On precision-3260, `bifrost-fuzz/.mj/agents/` still holds 7 log files sitting directly in the root, and a directory with a 31-character name. Neither is a child report directory, so I did not touch them.\n- The three implementation children were interrupted partway through; I did not cause this. I told each one to continue, and all three are running again. The checkpoint child found something the code does not handle: reports under `.mj/agents` in bare projects were never captured in checkpoints. Since we now delete them on parent suspend, they must be captured, so I approved passing each child's report directory to the capture step explicitly.\n\nI'm waiting for the three implementation reports. Then I'll review the combined diff, commit and push."
+        },
+        {
+          "id": "agent:1230",
+          "role": "assistant",
+          "text": "All three implementation children are running again. When they hand back, I will review the combined diff, run the affected crate tests once on the integrated tree, then commit and push."
+        },
+        {
+          "id": "agent:1275",
+          "role": "assistant",
+          "text": "I reviewed the handback-limit slice and accepted it.\n\n- **How the limit reaches the check:** the controller writes the child's report directory and its limit into the existing environment map in `launch.json`. The child's MCP server reads that file from beside its socket. That works the same way for every harness.\n- **The check:** if the directory is over the limit, the handback is refused. The refusal message gives the total, the limit and the ten largest files.\n- **Text changes:** the `close` tool description now says that closing a child deletes its report directory.\n- **Validation:** the child reports that the tests and clippy pass for mj-core, mj-worker and the affected controller tests.\n\nI'm waiting for the checkpoint and lifecycle children."
+        },
+        {
+          "id": "agent:1402",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The issue said some failure messages contained only the report warning. The checkpoint child found that this was not true: those failures are multi-line log entries, and the real `Error:` and `Caused by:` lines follow the warning on lines without the usual log prefix. The fix to the summary still helps: it puts the error chain on one line, so it is no longer easy to overlook.\n- Capture used to scan one shared report root, so each child's checkpoint carried all of its siblings' reports, and `.mj/agents` in bare projects was never captured. The controller now passes the exact list of this parent's children's report directories to capture. That one list fixes both problems and respects other sessions' children in a shared root.\n`─────────────────────────────────────────────────`\n\nI accepted the checkpoint slice with my two changes: recording the notice can no longer fail a checkpoint, and the duplicate check looks only at the live view of the transcript. I am waiting for the lifecycle child, and then I will build and test the combined tree."
+        },
+        {
+          "id": "agent:1546",
+          "role": "assistant",
+          "text": "While validation runs, I'm reviewing the daemon close and destroy changes."
+        },
+        {
+          "id": "agent:1594",
+          "role": "assistant",
+          "text": "The capture and restore changes look correct. The child's directory name is the archive prefix, older specs keep the old behavior, and restore refuses a target outside the workspace or under a symlinked ancestor. I'm waiting for the validation child's results."
+        },
+        {
+          "id": "user:1620",
+          "role": "user",
+          "text": "install after merge+push pls"
+        },
+        {
+          "id": "agent:1629",
+          "role": "assistant",
+          "text": "Understood: after the validation passes, I will commit, merge with `origin/master`, push, then run `scripts/install.sh`. After that I will check that the daemon hands off to the new build. I am still waiting for the validation results."
+        },
+        {
+          "id": "agent:1746",
+          "role": "assistant",
+          "text": "Pushed as `67dbeeed0`, and #1331 closed automatically. Before installing, I check whether another session has already installed a build that this tree does not contain."
+        },
+        {
+          "id": "agent:1787",
+          "role": "assistant",
+          "text": "The install build is running in the background. When it finishes, I will run an ordinary `mj` command from the new build to trigger the daemon handoff. Then I will check `daemon.json` and the newest daemon log until one daemon on the new build has stayed up for a minute."
+        },
+        {
+          "id": "agent:1817",
+          "role": "assistant",
+          "text": "Installed `mj 2.53.0+67dbeeed0`. This is a new release, not only a new commit. To trigger the daemon handoff, I am running an ordinary command from the new build."
+        },
+        {
+          "id": "agent:1848",
+          "role": "assistant",
+          "text": "The handoff happened right away: `daemon.json` now shows process 418500 running `2.53.0+67dbeeed0`. I am watching for 75 seconds to make sure one daemon stays up instead of restarting in a loop."
+        },
+        {
+          "id": "agent:1932",
+          "role": "assistant",
+          "text": "The fix for #1331 is committed, pushed and installed. The daemon is running the new build, and the old report directories are cleaned up on this host and on precision-3260.\n\n**Commit and install**\n- The fix is commit `607275fde`. I merged it with `origin/master` and pushed `67dbeeed0`; #1331 closed automatically.\n- `scripts/install.sh` installed `mj 2.53.0+67dbeeed0`. The daemon switched to it as soon as I ran a command from the new build, and one daemon (process 418500) stayed up through a 75-second check.\n\n**What changed**\n- **Size limit:** a child cannot hand back while its report directory holds more than 64 MiB divided by `max_concurrent`. That is 4 MiB per child at your setting of 16. The refusal lists the largest files.\n- **Deletion:**\n  - Closing or destroying a child deletes its report directory.\n  - Suspending or destroying a parent deletes all its children's directories, after the parent's checkpoint is saved.\n  - A shared `.mj/agents` folder is removed only when it is empty.\n  - The `close` tool description now tells the parent to read the files it needs before closing.\n- **What a checkpoint carries:** each parent's checkpoint now holds exactly its own children's report directories. Two problems this fixed:\n  - Each child's checkpoint used to carry all its siblings' reports.\n  - Reports in bare-project `.mj/agents` folders were never saved, so they would have been lost once parent suspend started deleting them.\n- **Notice:** when a checkpoint has to leave reports out, the conversation shows a notice with the count and size. Recording it can never make a checkpoint fail.\n- **Failure messages:** a failed checkpoint now shows the real error on one line. The issue's guess that the report warning hid the real cause was wrong: the cause was on the following lines of the same log entry.\n- **Not changed:** the low-level suspend path and in-place restarts do not delete anything. On the low-level path, a Podman container can be stopped while children are still writing, after which the files cannot be reached. No production code uses that path.\n\n**Validation:** clippy and the core, checkpoint and worker test suites pass. The full controller suite had 2,049 passed and 1 failed: `a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the_cancel` timed out once and passed on two reruns, so it looks like a timing flake. I reran clippy and the worker's sub-agent tests after the merge, and they pass.\n\n**Cleanup**\n- This host: deleted 278 directories, about 35 GB. That includes the directories of this session's own closed children.\n- precision-3260: deleted 118 directories, about 15.7 GB.\n- I kept every directory whose child is running or parked under a parent that is still running.\n\n**Needs your attention**\n- **82 GB still in use:** `bifrost3/.mj/agents/4de92831…` belongs to a parked child of a parent that is still running, so the rule kept it. Closing that child will delete it now.\n- **Leftover files on precision-3260:** `bifrost-fuzz/.mj/agents/` holds 7 log files directly in the folder, plus a folder with a 31-character name. They are not child report folders, so I left them.\n- **Checkpoints still failing for two sessions:** after the install, `054dfa07…` and `c4ff1d5f…` fail to checkpoint with `unsupported untracked file type at …/.mj/lanes/…`. The issue already listed this as a separate problem, and this change did not cause it.\n\n`★ Insight ─────────────────────────────────────`\n- Dividing the 64 MiB checkpoint budget by `max_concurrent` only keeps live children inside one checkpoint if closed children's directories are deleted. That is why the size limit and the deletion on close belong together.\n- The halfway \"interrupted\" reports from the children came from the host restarting at 13:12Z and 13:26Z, not from the children themselves. Resuming each child from the working tree was enough.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "install after merge+push pls",
+    "assistant_text_tail": "n code uses that path.\n\n**Validation:** clippy and the core, checkpoint and worker test suites pass. The full controller suite had 2,049 passed and 1 failed: `a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the_cancel` timed out once and passed on two reruns, so it looks like a timing flake. I reran clippy and the worker's sub-agent tests after the merge, and they pass.\n\n**Cleanup**\n- This host: deleted 278 directories, about 35 GB. That includes the directories of this session's own closed children.\n- precision-3260: deleted 118 directories, about 15.7 GB.\n- I kept every directory whose child is running or parked under a parent that is still running.\n\n**Needs your attention**\n- **82 GB still in use:** `bifrost3/.mj/agents/4de92831…` belongs to a parked child of a parent that is still running, so the rule kept it. Closing that child will delete it now.\n- **Leftover files on precision-3260:** `bifrost-fuzz/.mj/agents/` holds 7 log files directly in the folder, plus a folder with a 31-character name. They are not child report folders, so I left them.\n- **Checkpoints still failing for two sessions:** after the install, `054dfa07…` and `c4ff1d5f…` fail to checkpoint with `unsupported untracked file type at …/.mj/lanes/…`. The issue already listed this as a separate problem, and this change did not cause it.\n\n`★ Insight ─────────────────────────────────────`\n- Dividing the 64 MiB checkpoint budget by `max_concurrent` only keeps live children inside one checkpoint if closed children's directories are deleted. That is why the size limit and the deletion on close belong together.\n- The halfway \"interrupted\" reports from the children came from the host restarting at 13:12Z and 13:26Z, not from the children themselves. Resuming each child from the working tree was enough.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      1932
+    ],
+    "user_position": 1620,
+    "input_rationale": "The requested merge, push and install are done. Under 'Needs your attention' the reply leaves a parked child (82 GB) that only the user or its parent can close, and leftover files on precision-3260 for the user to judge. The next user message closes the child.",
+    "label": "required_final",
+    "triggers": [
+      "Needs you"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "user_action",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:1932"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-22T14:05:38.416Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-22T15:46:39.907Z",
+        "kind": "user",
+        "text": "go ahead and close the parked child (i thought parked = closed, more or less?)"
+      },
+      {
+        "at": "2026-10-22T15:48:15.843Z",
+        "kind": "agent",
+        "text": "The child is closed. Its 77 GB report directory is gone, and the new code deleted it, not me. The daemon log shows `purpose=remove sub-agent report directories … duration_ms=4661 succeeded=true` at 15"
+      },
+      {
+        "at": "2026-10-22T15:52:00.574Z",
+        "kind": "user",
+        "text": "what does parked correspond to infra-wise, like what state is native harness in"
+      },
+      {
+        "at": "2026-10-22T15:52:30.664Z",
+        "kind": "agent",
+        "text": "A parked child has **no processes at all**: the worker and the native harness under it (`codex-acp`, `claude`, and so on) are stopped. Everything it needs to come back is still on the target's disk, u"
+      },
+      {
+        "at": "2026-10-23T10:36:53.580Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

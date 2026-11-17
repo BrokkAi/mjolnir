@@ -1,0 +1,592 @@
+{
+  "id": "W139",
+  "title": "Waiting candidate 139 none",
+  "category": "waiting-on-automation",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "5f40b42e1a27a1671b6e2026ef9210d4",
+    "session_title": "eval37 3794 haikumax",
+    "reply_position": 3298,
+    "captured_at": "2026-10-09T17:41:53.359Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3794: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 53e61919ae07e44c7603e755b9b14e1f29fade7f\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the reposi\n[... 1852 bytes omitted from the middle of this message ...]\nic the file, the site's byte range and kind, the Go construct, and the fact relation that names the site. Then add a reduced-source regression that runs through Go extraction and lowering, and follow the repository's epoch rules if the facts Go emits change. Run `-p brokk-bifrost-go --lib`, `-p brokk-bifrost-analysis --lib`, `-p brokk-bifrost-core --lib`, `--test suite_analyzers`, `--test suite_issues` and `--test suite_usages` filtered to Go, and `--test suite_persistence`.\n\n# Issue\n\nIssue #3794: Analyzer panics on grpc-go: resolution site has no positioned identifier (typed_fact_lowering.rs:3472)\n\nThe analyzer panics on grpc-go during a policy run:\n\n```\nthread 'bifrost-parse-32' panicked at crates/bifrost-analysis/src/analyzer/resolution/typed_fact_lowering.rs:3472:32:\nsite 643 has no positioned identifier\n```\n\nThe panic is the `unwrap_or_else(|| panic!(\"site {site} has no positioned identifier\"))` in `identifier()`: a resolution site reaches typed fact lowering without a positioned identifier fact.\n\n## Reproduce\n\nSeen at d7447cba4 (origin/master after the 2771 landing, plus Go race changes that do not touch `resolution/` or `store/`), on four runs: grpc-go-1316-bytes-received and grpc-go-1667-subconns-map, buggy and fixed revisions, from the #2904 benchmark. grpc-go buggy commit for 1667: `1e1a47f0f28f70686674869a7dee0f1096d86919` (https://github.com/grpc/grpc-go).\n\n```\nbifrost_benchmark go-race run --manifest benchmark/go-data-races/targets.toml --case grpc-go-1667-subconns-map --output <dir>\n```\n\nThe case applies a small authored test harness (`benchmark/go-data-races/harnesses/grpc-go-1667-subconns-map/harness_test.go`) before analysis; the panic may also occur without it (not checked). Full stderr: `/tmp/go-d7447-measure/grpc-go-1667-subconns-map/*-policy.stderr`.\n\nThe same grpc-go cases ran to completion without a panic at 1683f0dc6 (2026-09-30), before the 2771 landing.\n\nExpected: no panic. If the site legitimately lacks an identifier, the lowering should report an incomplete fact instead of panicking.\n\n"
+        },
+        {
+          "id": "agent:1231",
+          "role": "assistant",
+          "text": "The build is still active, so I'll confirm the running compiler is making progress and not stalled before waiting further."
+        },
+        {
+          "id": "agent:1247",
+          "role": "assistant",
+          "text": "The compiler is running under the mbx wrapper and the log is advancing, so the build is not stalled. Continuing the wait."
+        },
+        {
+          "id": "agent:1264",
+          "role": "assistant",
+          "text": "While the build finishes, I'll look up the CLI's `policy` usage and its flags, so the four-revision runs can start the moment the binary exists."
+        },
+        {
+          "id": "agent:1280",
+          "role": "assistant",
+          "text": "The CLI's policy entry point is `bifrost scan` with `--root`, `--policy`, and `--format`. I'll read its dispatch and the pack-acquisition path it runs first, since that can need network access the sandbox may not have."
+        },
+        {
+          "id": "agent:1312",
+          "role": "assistant",
+          "text": "`bifrost scan <path> --format json` runs the built-in policies over a repository, which matches the benchmark's \"policy run\". I have the exact invocation now, so I'll wait for the binary."
+        },
+        {
+          "id": "agent:1342",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1355",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1365",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1375",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1385",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1396",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1406",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1417",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1427",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1438",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1448",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1458",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1468",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:1489",
+          "role": "assistant",
+          "text": "The build is still compiling the analysis crate, and the monitors expired because their 5-minute default is shorter than the build. I'll re-arm the wait with the 30-minute maximum so it can see the build finish."
+        },
+        {
+          "id": "agent:1510",
+          "role": "assistant",
+          "text": "The debug build finished (exit 0, 15m 31s), so `target/debug/bifrost` should exist now. Before running the four revisions I need to know where the CLI writes its analyzer cache, so each revision gets a fresh one."
+        },
+        {
+          "id": "agent:1534",
+          "role": "assistant",
+          "text": "`BIFROST_CACHE_DIR` redirects the store, so I'll give each revision its own cache under `/workspace/cache`. Running the first revision, 1667 buggy, with `RUST_BACKTRACE=1`."
+        },
+        {
+          "id": "agent:1553",
+          "role": "assistant",
+          "text": "The scan exited 0 in under two seconds and evaluated no rules, so it never reached the analyzer. I need the policy path that actually builds the Go analyzer, so I'll find where that \"no rule packs are active\" message comes from."
+        },
+        {
+          "id": "agent:1580",
+          "role": "assistant",
+          "text": "`scan` ships no built-in rule packs in this build, so it returns before any analyzer is built. The policy path that does build the analyzer is in `run_inner`. I'll check the CLI's own help to find a command that indexes a repository."
+        },
+        {
+          "id": "agent:1604",
+          "role": "assistant",
+          "text": "The help shows two routes that build the analyzer: a policy invocation (`--policy` with `--policy-file`) and one-shot `--tool`. I'll try the `search_symbols` tool first, since it needs no policy syntax and should build the Go workspace."
+        },
+        {
+          "id": "agent:1635",
+          "role": "assistant",
+          "text": "`search_symbols` returned cleanly, but it reads only the declaration index, not the resolution facts. I'll use a usage-scanning tool, which needs the resolution lowering. Checking its arguments."
+        },
+        {
+          "id": "agent:1663",
+          "role": "assistant",
+          "text": "The usage tools are `scan_usages_by_location`, `scan_usages_by_reference`, and `usage_graph`. A whole-workspace `usage_graph` should lower resolution facts for every file, so I'll check its arguments."
+        },
+        {
+          "id": "agent:1684",
+          "role": "assistant",
+          "text": "`usage_graph` with no `paths` makes every workspace declaration a root, so it resolves the whole Go workspace. Running it on 1667 buggy with backtraces."
+        },
+        {
+          "id": "agent:1702",
+          "role": "assistant",
+          "text": "`usage_graph` completed on 1667 buggy with exit 0, no panic, and empty stderr. So this path does not reproduce it. The brief describes a policy run, so I'll copy a minimal `.rqlp` policy from the repository and run it through `--policy --policy-file`."
+        },
+        {
+          "id": "agent:1729",
+          "role": "assistant",
+          "text": "There are 800 `.rqlp` files. I'll read a small one to copy the syntax."
+        },
+        {
+          "id": "agent:1742",
+          "role": "assistant",
+          "text": "That example is a taint policy, heavier than I need. I'll find the simplest analysis form in the fixtures (a plain RQL query rule, if one exists)."
+        },
+        {
+          "id": "agent:1765",
+          "role": "assistant",
+          "text": "The `match` analysis type is the common simple form. I'll print one example."
+        },
+        {
+          "id": "agent:1778",
+          "role": "assistant",
+          "text": "I'll write a Go `match` policy over calls. Before that, `usage_graph` ran clean, so I need to know what gates the typed lowering. I'll find its callers and any environment gate."
+        },
+        {
+          "id": "agent:1803",
+          "role": "assistant",
+          "text": "`mod.rs` calls `lower_typed_resolution_facts_with_identities` at lines 1022 and 1042. I'll read that entry point to learn when a blob's typed facts are produced."
+        },
+        {
+          "id": "agent:1822",
+          "role": "assistant",
+          "text": "`lower_resolution_facts_for_selection` runs all three lowerings for one blob. I'll find who calls it and whether a flag gates that call."
+        },
+        {
+          "id": "agent:1839",
+          "role": "assistant",
+          "text": "The production caller is `store/resolution_prepare.rs`. I'll read the enclosing function names and the nearby gating to see what triggers the preparation."
+        },
+        {
+          "id": "agent:1857",
+          "role": "assistant",
+          "text": "All of those callers are in `#[cfg(test)]` modules, so production reaches the lowering through another path. I'll list the non-test callers."
+        },
+        {
+          "id": "agent:1874",
+          "role": "assistant",
+          "text": "Two production callers remain: `store/resolution.rs:2481` and `store/resolution_operation.rs:3576`. I'll read their enclosing functions and the condition that reaches them."
+        },
+        {
+          "id": "agent:1890",
+          "role": "assistant",
+          "text": "Those two sites are a test and a Rust macro-overlay helper, so the Go production path must call the typed lowering directly. I'll find its production callers."
+        },
+        {
+          "id": "agent:1910",
+          "role": "assistant",
+          "text": "Production reaches the typed lowering through the policy and store pipeline, not through the `--tool` path I tried. The simplest faithful reproduction is a policy run. I'll write a minimal Go `match` policy into each grpc worktree's `.bifrost/policies`, which is outside the bifrost checkout and not committed."
+        },
+        {
+          "id": "user:1948",
+          "role": "user",
+          "text": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background commands are as you left them. Continue from where you stopped; the brief's rules and reporting format are unchanged.\n"
+        },
+        {
+          "id": "agent:1951",
+          "role": "assistant",
+          "text": "Continuing. The policy run went to the background as `bkyouaiox`, so I'll check its output file and the evidence directory."
+        },
+        {
+          "id": "agent:1965",
+          "role": "assistant",
+          "text": "The policy run has no exit file yet. I'll check whether the process is still alive and how long it has been running."
+        },
+        {
+          "id": "agent:1978",
+          "role": "assistant",
+          "text": "The process is alive, at 625% CPU and 832 MB RSS after 49 seconds, so it is doing work. I'll wait on its exit file rather than poll."
+        },
+        {
+          "id": "agent:1994",
+          "role": "assistant",
+          "text": "While that runs, I'll place the same policy file in the other three grpc-go worktrees, so each revision gets an identical run."
+        },
+        {
+          "id": "agent:2028",
+          "role": "assistant",
+          "text": "The run is still going at 57 seconds and 857 MB, with the 280-second timeout as the backstop. Waiting for it to finish."
+        },
+        {
+          "id": "agent:2060",
+          "role": "assistant",
+          "text": "The run is still in progress, and the `timeout 280` wrapper will end it within about five minutes. Waiting on the exit file."
+        },
+        {
+          "id": "agent:2080",
+          "role": "assistant",
+          "text": "The run is still going. Waiting on the exit file again."
+        },
+        {
+          "id": "agent:2089",
+          "role": "assistant",
+          "text": "The policy run exited with status 2. The monitor fired several times for the same exit, so no more waits are pending. Reading the stderr for the panic."
+        },
+        {
+          "id": "agent:2103",
+          "role": "assistant",
+          "text": "This is not a panic. The policy engine reported an incomplete or invalid evaluation and pointed to the emitted report. I'll read that JSON report."
+        },
+        {
+          "id": "agent:2123",
+          "role": "assistant",
+          "text": "The `(call)` match ran over all Go call sites without a panic. It stopped at a result limit, so it never touched the resolution lowering. I'll check the cache database from the earlier `usage_graph` run for resolution rows, to see whether typed lowering actually ran on 1667 buggy."
+        },
+        {
+          "id": "agent:2152",
+          "role": "assistant",
+          "text": "Python's `sqlite3` module is available. I'll list the resolution-related tables and their row counts in the `usage_graph` cache and the policy-run cache."
+        },
+        {
+          "id": "agent:2169",
+          "role": "assistant",
+          "text": "The cache has full resolution data for all 161 Go blobs. Typed lowering therefore ran on 1667 buggy during the plain `search_symbols` index build, and it did not panic. The panic in the issue must depend on something this run lacks. Before deciding, I'll index the other three pinned revisions the same way, in one background sequence."
+        },
+        {
+          "id": "agent:2202",
+          "role": "assistant",
+          "text": "The three remaining revisions are indexing in the background. I'll wait on their completion marker."
+        },
+        {
+          "id": "agent:2215",
+          "role": "assistant",
+          "text": "While the grpc runs finish, I'll check a production path I flagged earlier. The only non-test caller of the per-blob lowering is `prepare_selected_macro_reference_overlay_in_scope`, which sounds Rust-specific, so I'll read its doc comment and call site."
+        },
+        {
+          "id": "agent:2243",
+          "role": "assistant",
+          "text": "That path is Rust-only, so it is not the Go route. Since the production Go lowering has to come from somewhere, I'll search for the function name without the call parenthesis, which would catch a function-pointer or re-export use."
+        },
+        {
+          "id": "agent:2266",
+          "role": "assistant",
+          "text": "`fact_lowering.rs:1353` is a non-test caller I had not seen, inside a function that also calls the lexical lowering. I'll read that function's header and body."
+        },
+        {
+          "id": "agent:2288",
+          "role": "assistant",
+          "text": "`lower_for_test` is test-only. The production per-blob path must return a `LoweredResolutionFactsWithIdentityCatalog` by some other name, so I'll search for that return type in non-test code."
+        },
+        {
+          "id": "agent:2307",
+          "role": "assistant",
+          "text": "The production producer should be in `store/resolution_stage.rs` or `store/resolution_publication.rs`. I'll search those for their lowering calls."
+        },
+        {
+          "id": "agent:2323",
+          "role": "assistant",
+          "text": "Neither file calls a lowering function. The remaining production candidate is `remount.rs:1437`, so I'll identify its enclosing function and check whether it is test-only."
+        },
+        {
+          "id": "agent:2340",
+          "role": "assistant",
+          "text": "That is test code too. The earlier grep was capped at 20 lines and returned exactly 20, so production callers may have been cut off. I'll re-run the search with no cap and list every file."
+        },
+        {
+          "id": "agent:2360",
+          "role": "assistant",
+          "text": "Several production files appear here that I had not checked, including `store/resolution_typed.rs`, `resolution/engine.rs`, and `resolution/selected_context.rs`. I'll list each call with its enclosing function."
+        },
+        {
+          "id": "agent:2381",
+          "role": "assistant",
+          "text": "The one production-looking caller, `mod.rs:11203`, sits inside a `#[cfg(test)]` module, so the production per-blob path must run through a route I have not traced yet. That is secondary. What matters now is whether the other three revisions panic on plain indexing, so I'll wait for those results."
+        },
+        {
+          "id": "agent:2422",
+          "role": "assistant",
+          "text": "The 1667 fixed index is still running, about a minute per revision. Waiting for all three."
+        },
+        {
+          "id": "agent:2462",
+          "role": "assistant",
+          "text": "The 1667 fixed index is still running at a little over a minute. Meanwhile I'll check whether the base's own ancestry already mentions this issue or the positioned-identifier message. I'm restricting the search to `HEAD`, so only ancestors of the base are read."
+        },
+        {
+          "id": "agent:2489",
+          "role": "assistant",
+          "text": "The base's ancestry has `e506e7991b` \"Keep Go resolution facts aligned with positioned identifiers\". It is an ancestor of the base, so reading it is permitted. I'll look at its scope and date. The reproduction still decides whether the bug is live at the base."
+        },
+        {
+          "id": "agent:2515",
+          "role": "assistant",
+          "text": "`e506e7991b` (2026-10-03) fixes #4284 and #4285, which concern Go calls with a computed callee that has no positioned identifier. That matches the shape of this panic, so the base may already contain a fix. The index results decide it, so I'll wait for them."
+        },
+        {
+          "id": "agent:2546",
+          "role": "assistant",
+          "text": "The 1667 fixed revision exited 0 with no panic. The 1316 buggy run is in progress."
+        },
+        {
+          "id": "agent:2576",
+          "role": "assistant",
+          "text": "Polling is wasting turns. I'll try a bounded foreground wait on the completion marker, which should return in at most four minutes."
+        },
+        {
+          "id": "agent:2592",
+          "role": "assistant",
+          "text": "All four revisions exit 0 with no panic on the plain index build at this base. Before I accept that, I need to confirm the validator that panics is actually run on every blob in this build, so a clean run is meaningful."
+        },
+        {
+          "id": "agent:2615",
+          "role": "assistant",
+          "text": "The duplicate notifications all say the same thing: the four revisions exit 0 with no panic on the default index build. The validator does run for every lowered blob, since it is called unconditionally at `typed_fact_lowering.rs:2819`. The ancestor commit `e506e7991b` is the likely reason. I'll read its diff to see which old code path produced a call with an identifier-less callee."
+        },
+        {
+          "id": "agent:2650",
+          "role": "assistant",
+          "text": "That diff gives the pre-fix shape. Before `e506e7991b`, a multi-result call whose callee is an `UnsupportedExpression` (an IIFE, a factory call, or an index callee) still pushed a `TargetCallableResultType` binding projection that names the callee. The fix skips that projection. The `:=` form is fixed, but other multi-result forms may still push it. I'll probe those variants at the base on tiny Go projects, which takes seconds compared with the grpc runs."
+        },
+        {
+          "id": "agent:2710",
+          "role": "assistant",
+          "text": "Running the seven probes at the base, each with its own cache and backtraces enabled."
+        },
+        {
+          "id": "agent:2724",
+          "role": "assistant",
+          "text": "Every probe exits 0, including the IIFE control that the commit fixed. Before I trust a clean result, I need to confirm the lowering actually ran on these tiny projects, so I'll check the probe caches for resolution rows."
+        },
+        {
+          "id": "agent:2748",
+          "role": "assistant",
+          "text": "The probe caches have lowered sites and binding projections, so the clean results are real. To know which consumer would panic on an identifier-less callee, I'll find where binding projections are read in the typed and untyped lowering."
+        },
+        {
+          "id": "user:2772",
+          "role": "user",
+          "text": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background commands are as you left them. Continue from where you stopped; the brief's rules and reporting format are unchanged.\n"
+        },
+        {
+          "id": "agent:2775",
+          "role": "assistant",
+          "text": "The judge notes the interruption was a usage-window reset and asks me to continue under the same brief. Picking up where I stopped: I was finding which lowering consumer reads a binding projection's `reference` and would panic when that callee has no identifier."
+        },
+        {
+          "id": "agent:2801",
+          "role": "assistant",
+          "text": "Binding projections are read at lines 3122-3199 and around 4901-4916. I'll read the second block, which has a `callable_value_reference` check, and look for any identifier lookup on the projection's reference."
+        },
+        {
+          "id": "agent:2819",
+          "role": "assistant",
+          "text": "`validate_projection` calls `index.reference_identifier(fact.reference)` for every binding projection, so any projection whose reference is an identifier-less callee panics there. That places the consumer in `typed_fact_lowering.rs`, as the issue says. Next I'll list every Go emitter that pushes a binding projection, to see whether any other one can name an unpositioned site."
+        },
+        {
+          "id": "agent:2848",
+          "role": "assistant",
+          "text": "Line 5346 is a second `TargetCallableResultType` push, in a different function from the one the commit guarded. I'll read that function to see whether its callee can be an identifier-less site."
+        },
+        {
+          "id": "agent:2877",
+          "role": "assistant",
+          "text": "All three callee arms of `finish_ambiguous_generic_instantiation` use positioned sites, so that push is safe. I'll check the other projection emitters at 4040, 4675-4730, and 5663 the same way."
+        },
+        {
+          "id": "agent:2900",
+          "role": "assistant",
+          "text": "These emitters all use `add_identifier_site`, so their references are positioned. The commit guards the only unpositioned case, and the base has no other unguarded one that I can find. To confirm the cause with evidence, I need the pre-fix behaviour. I'll check which crates depend on `bifrost-go`, to estimate how much a temporary revert of its `resolution.rs` would force to rebuild."
+        },
+        {
+          "id": "agent:2938",
+          "role": "assistant",
+          "text": "`bifrost-analysis` depends on `bifrost-go`, so changing the Go emitter rebuilds the analysis crate. The regression test has to run Go extraction and then lowering, so I'll look at the existing Go lowering test harness in the analysis crate and reuse its helpers."
+        },
+        {
+          "id": "agent:2963",
+          "role": "assistant",
+          "text": "That harness builds whole operation fixtures, which is more than this test needs. I'll look for a direct Go source-to-facts entry point in the Go crate, or a test helper that returns `FileResolutionFacts` for Go."
+        },
+        {
+          "id": "agent:2991",
+          "role": "assistant",
+          "text": "The shared `parsed_operation_source_state` helper runs Go extraction and is the right base for the regression test. Before writing it, I need the exact pre-fix behaviour on the real grpc-go revisions. I'll reproduce that by temporarily removing the one guard, and adding a diagnostic in `validate_projection` that prints the site. Both edits are temporary, and I'll restore the files afterwards. First I'll read the guarded block to edit it exactly."
+        },
+        {
+          "id": "agent:3028",
+          "role": "assistant",
+          "text": "This block is the shared multi-result path, so the removed guard covers the `:=`, `var`, and assignment forms alike. I'll save the base binary first, since the experiment build will overwrite it. Then I'll apply the two temporary edits, using exact-match replacement with a count check."
+        },
+        {
+          "id": "agent:3056",
+          "role": "assistant",
+          "text": "The experiment edits are in place and marked as modified. Building the pre-fix experiment CLI in the background."
+        },
+        {
+          "id": "agent:3071",
+          "role": "assistant",
+          "text": "While the build runs, I'll prepare the regression test as a draft outside the tree and only move it in after the build finishes, so the build keeps a consistent source snapshot. First I need to see how the store module registers its Go test modules and what `super::*` exposes."
+        },
+        {
+          "id": "agent:3108",
+          "role": "assistant",
+          "text": "The Go spelling and member test files are not registered in these two spots, so I'll search the whole analysis crate for how they are included."
+        },
+        {
+          "id": "agent:3124",
+          "role": "assistant",
+          "text": "The Go store tests are registered inside `resolution_operation_tests.rs` as child modules, which can reach that file's private `parsed_operation_source_state` helper. I'll follow that pattern. I also need the test dependencies and the fact types the assertions will use."
+        },
+        {
+          "id": "agent:3150",
+          "role": "assistant",
+          "text": "The fact fields are as expected: `ResolutionGapFact { site, kind }` and `ResolutionCallFact` with `callee` and `extra_result_slots`. The analysis crate is compiling now, so I'll wait for the pre-fix build to exit."
+        },
+        {
+          "id": "agent:3173",
+          "role": "assistant",
+          "text": "While the build runs, I'll check how `hardwon` is imported in the analysis crate, so the draft test uses the same form."
+        },
+        {
+          "id": "agent:3186",
+          "role": "assistant",
+          "text": "`hardwon` comes from the dev-dependency `brokk-bifrost-test-macros`, so the draft can use it directly. Waiting for the build."
+        },
+        {
+          "id": "agent:3214",
+          "role": "assistant",
+          "text": "The build is still linking. While it finishes, I'll write one script that runs the probes and the four grpc-go revisions against a given binary, with fresh caches, so the pre-fix and base runs are identical."
+        },
+        {
+          "id": "user:3246",
+          "role": "user",
+          "text": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background commands are as you left them. Continue from where you stopped; the brief's rules and reporting format are unchanged.\n"
+        },
+        {
+          "id": "agent:3249",
+          "role": "assistant",
+          "text": "Continuing from the pre-fix experiment build. I'll check whether it has exited before doing anything else."
+        },
+        {
+          "id": "agent:3261",
+          "role": "assistant",
+          "text": "The analysis crate is still compiling with the experiment edits in place. Waiting for the build to exit."
+        },
+        {
+          "id": "agent:3298",
+          "role": "assistant",
+          "text": "Only the analysis crate's compiler is running, which is the long step. Waiting on the exit marker."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background commands are as you left them. Continue from where you stopped; the brief's rules and reporting format are unchanged.\n",
+    "assistant_text_tail": "Only the analysis crate's compiler is running, which is the long step. Waiting on the exit marker.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 3246,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "Only the analysis crate's compiler is running, which is the long step. Waiting on the exit marker."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-09T17:43:48.197Z",
+        "kind": "user",
+        "text": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background comma"
+      },
+      {
+        "at": "2026-10-09T17:43:50.610Z",
+        "kind": "agent",
+        "text": "Continuing. The pre-fix experiment build is still compiling the analysis crate, and the experiment edits are still in the working tree. I'll check the build and the tree state first."
+      },
+      {
+        "at": "2026-10-09T17:43:54.327Z",
+        "kind": "agent",
+        "text": "The analysis compile has been running about ten minutes, which is normal for this crate. The earlier monitors will report when the exit marker appears, so I'll block on one more."
+      },
+      {
+        "at": "2026-10-09T17:47:54.275Z",
+        "kind": "agent",
+        "text": "The build is still running. While it finishes, I'll write the regression test draft outside the tree, so the build keeps a stable source snapshot. The draft follows the commit's own three shapes and a"
+      },
+      {
+        "at": "2026-10-09T17:51:44.132Z",
+        "kind": "agent",
+        "text": "The analysis crate has finished, and the dependent crates are compiling now. Waiting for the link."
+      },
+      {
+        "at": "2026-10-09T17:54:10.987Z",
+        "kind": "agent",
+        "text": "The pre-fix experiment build finished with exit 0. I'll save its binary, restore the two experiment files to HEAD so the tree is clean again, and start the probe and grpc-go matrix on the pre-fix bina"
+      }
+    ]
+  }
+}

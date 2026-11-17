@@ -16,8 +16,9 @@ use serde_json::Value;
 use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec};
 
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
-const REFRESH_LOCK_WAIT: Duration = Duration::from_secs(10);
+/// How long macOS lets Claude Code's own `/usage` run. It is the bound the
+/// whole check ran under before the login exchange stopped sharing it.
+const CLI_USAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 // The reset-grant endpoint uses the CLI surface to determine eligibility.
 const USAGE_USER_AGENT: &str = "claude-cli/2.1.283 (external, cli)";
@@ -27,6 +28,8 @@ pub(crate) const LOGIN_EXPIRED: &str = "login expired";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeUsageReport {
+    pub monthly_price_usd: Option<u32>,
+    pub paid_credits: Option<mj_client::quota::PaidCredits>,
     pub banked_resets: Option<u64>,
     pub five_hour: Option<ClaudeUsageWindow>,
     pub week: Option<ClaudeUsageWindow>,
@@ -85,14 +88,176 @@ pub async fn query(
     environment: HashMap<String, String>,
     container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let executor = Arc::new(CancellableProcessExecutor::with_timeout(
-        USAGE_TIMEOUT + REFRESH_LOCK_WAIT + REFRESH_TIMEOUT,
-    ));
-    let _cancel = executor.cancel_on_drop();
     if cfg!(target_os = "macos") {
-        return query_cli_with(environment, executor).await;
+        let executor = Arc::new(CancellableProcessExecutor::with_timeout(CLI_USAGE_TIMEOUT));
+        let _cancel = executor.cancel_on_drop();
+        let mut report = query_cli_with(environment, executor.clone()).await?;
+        let source = LoginSource::Keychain {
+            lock_marker: home.join(".credentials.json"),
+            security: executor,
+        };
+        match source.read().await {
+            Ok(credentials) => report.monthly_price_usd = monthly_price_usd(&credentials),
+            Err(error) => tracing::warn!(%error, "Claude subscription price unavailable"),
+        }
+        return Ok(report);
     }
-    query_with_runtime(home, environment, USAGE_URL, executor, container).await
+    // The login exchange runs under no deadline of mj's and survives this
+    // future being dropped: see `run_claude_refresh`.
+    let executor = Arc::new(crate::targets::ProcessExecutor);
+    query_with_runtime(
+        home,
+        environment,
+        USAGE_URL,
+        executor,
+        container,
+        ClaudeLauncher::Managed,
+    )
+    .await
+}
+
+/// The program a host check starts.
+fn claude_program() -> &'static str {
+    if cfg!(windows) {
+        "claude.cmd"
+    } else {
+        "claude"
+    }
+}
+
+/// Where a host renewal gets its `claude`.
+#[derive(Debug, Clone)]
+pub(crate) enum ClaudeLauncher {
+    /// The pinned Claude Code Mjolnir installs and sessions run, from the same
+    /// resolver `mj login` uses. Mjolnir installs no Claude Code on Windows,
+    /// where the person's own `claude.cmd` on the profile's `PATH` is the only
+    /// one there is.
+    Managed,
+    /// A program chosen by the caller (tests).
+    #[cfg(test)]
+    Program(PathBuf),
+}
+
+/// The person's own `claude` on the profile's `PATH`, where Mjolnir has no
+/// installation of Claude Code to offer.
+#[cfg(not(unix))]
+fn host_claude_on_path(environment: &HashMap<String, String>) -> Option<PathBuf> {
+    let path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    mj_core::program_path::find_executable_on_path(claude_program(), path.as_deref())
+}
+
+/// What keeps a managed Claude Code installed while a renewal runs it.
+/// Mjolnir installs none on Windows, so there is nothing to hold there.
+#[cfg(unix)]
+type Installation = mj_core::harness_install::Located;
+#[cfg(not(unix))]
+type Installation = std::convert::Infallible;
+
+/// The `claude` a host renewal runs, and what keeps it installed meanwhile.
+struct ClaudeProgram {
+    command: PathBuf,
+    environment: HashMap<String, String>,
+    _installation: Option<Installation>,
+}
+
+impl ClaudeLauncher {
+    /// Whether this host can run Claude Code through this launcher: always where
+    /// Mjolnir installs it (Unix), and where it does not (Windows) when the
+    /// person's own `claude.cmd` is on the profile's `PATH`. Quota runtime
+    /// `auto` falls back to a container exactly when this is false.
+    pub(crate) fn host_can_run(&self, environment: &HashMap<String, String>) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Program(_) => true,
+            #[cfg(unix)]
+            Self::Managed => {
+                let _ = environment;
+                true
+            }
+            #[cfg(not(unix))]
+            Self::Managed => host_claude_on_path(environment).is_some(),
+        }
+    }
+
+    /// Resolve the program, installing the pinned Claude Code when this host
+    /// has none yet. A failure says why no `claude` can run, so it is
+    /// reported on every renewal that needs it.
+    async fn locate(
+        &self,
+        environment: &HashMap<String, String>,
+    ) -> Result<ClaudeProgram, ClaudeUsageError> {
+        match self {
+            #[cfg(test)]
+            Self::Program(command) => Ok(ClaudeProgram {
+                command: command.clone(),
+                environment: HashMap::new(),
+                _installation: None,
+            }),
+            #[cfg(unix)]
+            Self::Managed => {
+                let execution_policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
+                let (command, args) = mj_core::harness_runtime::fallback_launch(
+                    mj_core::config::HarnessKind::Claude,
+                    execution_policy,
+                );
+                let search = std::env::vars_os()
+                    .filter_map(|(name, value)| {
+                        Some((name.into_string().ok()?, value.into_string().ok()?))
+                    })
+                    .chain(environment.clone())
+                    .collect();
+                let located = mj_core::harness_install::locate(
+                    mj_core::placement::local_harness_runtime(),
+                    mj_core::config::HarnessKind::Claude,
+                    execution_policy,
+                    std::path::Path::new(&command),
+                    &args,
+                    &search,
+                )
+                .await
+                .map_err(|error| {
+                    ClaudeUsageError::Refresh(format!("no Claude Code to run: {error:#}"))
+                })?;
+                let command = located.cli_entrypoint.clone().ok_or_else(|| {
+                    ClaudeUsageError::Refresh(
+                        "no Claude Code to run: the installation names no claude program".into(),
+                    )
+                })?;
+                Ok(ClaudeProgram {
+                    command,
+                    environment: located.environment.clone().into_iter().collect(),
+                    _installation: Some(located),
+                })
+            }
+            #[cfg(not(unix))]
+            Self::Managed => host_claude_on_path(environment)
+                .map(|command| ClaudeProgram {
+                    command,
+                    environment: HashMap::new(),
+                    _installation: None,
+                })
+                .ok_or_else(|| {
+                    ClaudeUsageError::Refresh(format!(
+                        "no Claude Code to run: Mjolnir installs none on this platform and {} is not on PATH",
+                        claude_program()
+                    ))
+                }),
+        }
+    }
+}
+
+/// Admit one login renewal, which the daemon's handoff waits for once it has
+/// begun: Anthropic spends the refresh token before `claude auth login`
+/// persists the new one, so the exchange must not be cut short. Refused while
+/// a handoff is waiting; the next daemon redoes the renewal from the file.
+fn admit_renewal(
+    gate: &Arc<crate::upgrade::Gate>,
+) -> Result<crate::upgrade::Work, ClaudeUsageError> {
+    gate.enter_unless_draining("Claude login renewal")
+        .map_err(|error| ClaudeUsageError::Refresh(format!("{error:#}")))
 }
 
 /// Read the quota out of Claude Code's own `/usage` output.
@@ -138,7 +303,15 @@ async fn query_with(
     usage_url: &str,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    query_with_runtime(home, environment, usage_url, executor, None).await
+    query_with_runtime(
+        home,
+        environment,
+        usage_url,
+        executor,
+        None,
+        ClaudeLauncher::Program(PathBuf::from("claude")),
+    )
+    .await
 }
 
 async fn query_with_runtime(
@@ -147,6 +320,7 @@ async fn query_with_runtime(
     usage_url: &str,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     container: Option<crate::quota_runtime::ContainerCheck>,
+    launcher: ClaudeLauncher,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     let client = reqwest::Client::builder()
         .timeout(USAGE_TIMEOUT)
@@ -154,7 +328,7 @@ async fn query_with_runtime(
         .map_err(|error| ClaudeUsageError::Query(error.to_string()))?;
     let credentials = read_credentials(&home).await?;
     match oauth_access_token(&credentials, mj_core::clock::epoch_millis()) {
-        Ok(token) => match query_api(&client, usage_url, token).await {
+        Ok(token) => match query_api(&client, usage_url, token, &credentials).await {
             Err(ClaudeUsageError::LoginExpired) if oauth_has_refresh_token(&credentials) => {
                 refresh_and_retry(
                     &client,
@@ -163,7 +337,10 @@ async fn query_with_runtime(
                     environment,
                     executor,
                     Some(token.to_owned()),
-                    container,
+                    RenewalRuntime {
+                        container,
+                        launcher,
+                    },
                 )
                 .await
             }
@@ -177,7 +354,10 @@ async fn query_with_runtime(
                 environment,
                 executor,
                 None,
-                container,
+                RenewalRuntime {
+                    container,
+                    launcher,
+                },
             )
             .await
         }
@@ -196,22 +376,50 @@ async fn query_api(
     client: &reqwest::Client,
     usage_url: &str,
     token: &str,
+    credentials: &Value,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let response = client
-        .get(usage_url)
-        .query(&[("cedar_ember", "1"), ("skip_spend", "1")])
+    let mut url = reqwest::Url::parse(usage_url)
+        .map_err(|error| ClaudeUsageError::Query(error.to_string()))?;
+    url.query_pairs_mut().append_pair("cedar_ember", "1");
+    let payload = query_oauth_json(client, url, token, USAGE_TIMEOUT, None).await?;
+    let mut report = parse_api_usage(&payload).ok_or(ClaudeUsageError::Parse)?;
+    report.monthly_price_usd = monthly_price_usd(credentials);
+    if let Some(extra) = payload
+        .get("extra_usage")
+        .filter(|extra| extra.get("is_enabled").and_then(Value::as_bool) == Some(true))
+    {
+        match query_paid_credits(client, usage_url, token, extra).await {
+            Ok(credits) => report.paid_credits = Some(credits),
+            Err(error) => tracing::warn!(%error, "Claude paid-credit balance unavailable"),
+        }
+    }
+    Ok(report)
+}
+
+async fn query_oauth_json(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+    token: &str,
+    timeout: Duration,
+    organization: Option<&str>,
+) -> Result<Value, ClaudeUsageError> {
+    let mut request = client
+        .get(url)
+        .timeout(timeout)
         .header(reqwest::header::USER_AGENT, USAGE_USER_AGENT)
         .bearer_auth(token)
         .header("anthropic-beta", "oauth-2025-04-20")
-        .send()
-        .await
-        .map_err(|error| {
-            if error.is_timeout() {
-                ClaudeUsageError::TimedOut
-            } else {
-                ClaudeUsageError::Query(error.to_string())
-            }
-        })?;
+        .header("anthropic-version", "2023-06-01");
+    if let Some(organization) = organization {
+        request = request.header("x-organization-uuid", organization);
+    }
+    let response = request.send().await.map_err(|error| {
+        if error.is_timeout() {
+            ClaudeUsageError::TimedOut
+        } else {
+            ClaudeUsageError::Query(error.to_string())
+        }
+    })?;
     if matches!(response.status().as_u16(), 401 | 403) {
         return Err(ClaudeUsageError::LoginExpired);
     }
@@ -226,11 +434,74 @@ async fn query_api(
             response.status()
         )));
     }
-    let payload: Value = response
+    response
         .json()
         .await
-        .map_err(|error| ClaudeUsageError::Query(error.to_string()))?;
-    parse_api_usage(&payload).ok_or(ClaudeUsageError::Parse)
+        .map_err(|error| ClaudeUsageError::Query(error.to_string()))
+}
+
+async fn query_paid_credits(
+    client: &reqwest::Client,
+    usage_url: &str,
+    token: &str,
+    extra: &Value,
+) -> Result<mj_client::quota::PaidCredits, ClaudeUsageError> {
+    let invalid = || ClaudeUsageError::Query("invalid paid-credit balance or spending cap".into());
+    let mut url = reqwest::Url::parse(usage_url).map_err(|_| invalid())?;
+    url.set_path("/api/oauth/profile");
+    url.set_query(None);
+    let profile =
+        query_oauth_json(client, url.clone(), token, Duration::from_secs(5), None).await?;
+    let organization = profile
+        .pointer("/organization/uuid")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(invalid)?;
+    url.set_path("/api/oauth/organizations/");
+    url.path_segments_mut()
+        .map_err(|_| invalid())?
+        .pop_if_empty()
+        .push(organization)
+        .push("prepaid")
+        .push("credits");
+    let wallet = query_oauth_json(
+        client,
+        url,
+        token,
+        Duration::from_secs(5),
+        Some(organization),
+    )
+    .await?;
+    let mut balance = wallet
+        .get("amount")
+        .and_then(Value::as_f64)
+        .ok_or_else(invalid)?;
+    if let Some(limit) = extra.get("monthly_limit").filter(|value| !value.is_null()) {
+        let limit = limit.as_f64().ok_or_else(invalid)?;
+        let used = extra
+            .get("used_credits")
+            .and_then(Value::as_f64)
+            .ok_or_else(invalid)?;
+        balance = balance.min(limit - used);
+    } else if extra.get("monthly_limit").is_none() {
+        return Err(invalid());
+    }
+    if let (Some(spend), Some(funds)) = (
+        extra.get("currency").and_then(Value::as_str),
+        wallet.get("currency").and_then(Value::as_str),
+    ) && !spend.eq_ignore_ascii_case(funds)
+    {
+        return Err(ClaudeUsageError::Query(
+            "paid-credit currencies disagree".into(),
+        ));
+    }
+    mj_client::quota::PaidCredits::limited(balance).ok_or_else(invalid)
+}
+
+/// Where a renewal runs `claude`: in a quota container, or the host's program.
+struct RenewalRuntime {
+    container: Option<crate::quota_runtime::ContainerCheck>,
+    launcher: ClaudeLauncher,
 }
 
 async fn refresh_and_retry(
@@ -240,52 +511,294 @@ async fn refresh_and_retry(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     rejected_token: Option<String>,
-    container: Option<crate::quota_runtime::ContainerCheck>,
+    runtime: RenewalRuntime,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    // Claude 2.1.312 takes these two proper-lockfile directory locks during
-    // its own refresh. auth login's explicit exchange does not take them.
-    let canonical_home = tokio::fs::canonicalize(&home)
-        .await
-        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
-    let mut legacy_path = canonical_home.as_os_str().to_os_string();
-    legacy_path.push(".lock");
-    let mut locks = Vec::new();
-    let deadline = tokio::time::Instant::now() + REFRESH_LOCK_WAIT;
-    for path in [
-        canonical_home.join(".oauth_refresh.lock"),
-        PathBuf::from(legacy_path),
-    ] {
-        locks.push(
-            crate::oauth_lock::OAuthRefreshLock::acquire(
-                path,
-                deadline.saturating_duration_since(tokio::time::Instant::now()),
-                Duration::from_secs(60),
-                Duration::from_secs(5),
-            )
-            .await
-            .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?,
-        );
-    }
+    let RenewalRuntime {
+        container,
+        launcher,
+    } = runtime;
+    let program = match &container {
+        Some(_) => None,
+        None => Some(launcher.locate(&environment).await?),
+    };
+    // Held until the renewal has persisted the new login, even if this
+    // future is dropped (see `run_claude_refresh`).
+    let admission = admit_renewal(crate::upgrade::gate())?;
+    let source = LoginSource::File { home: home.clone() };
+    let locks = source.lock().await?;
     let active = read_credentials(&home).await?;
     if let Ok(token) = oauth_access_token(&active, mj_core::clock::epoch_millis())
         && rejected_token.as_deref() != Some(token)
     {
         drop(locks);
-        return query_api(client, usage_url, token).await;
+        return query_api(client, usage_url, token, &active).await;
     }
+    let credentials = renew_locked(
+        active,
+        &source,
+        environment,
+        executor,
+        Renewal {
+            _locks: locks,
+            _admission: admission,
+            program,
+        },
+        container,
+    )
+    .await?;
+    let token = oauth_access_token(&credentials, mj_core::clock::epoch_millis())
+        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
+    query_api(client, usage_url, token, &credentials).await
+}
+
+/// Claude access tokens last 8 hours (observed: `expiresAt` is the issue time
+/// plus 8 h). The daemon refreshes when less than half of that remains, which
+/// leaves every session copy, none of which can refresh, 4 hours of valid token
+/// while no daemon runs (#1490).
+pub(crate) const GRANT_REFRESH_LEAD: Duration = Duration::from_secs(4 * 60 * 60);
+
+/// When a login expiring at `expires_at_ms` is due for renewal.
+pub(crate) fn grant_due_at(expires_at_ms: i64) -> i64 {
+    let lead_ms = i64::try_from(GRANT_REFRESH_LEAD.as_millis()).unwrap_or(i64::MAX);
+    expires_at_ms.saturating_sub(lead_ms)
+}
+
+/// What [`refresh_grant_if_due`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrantRefresh {
+    /// Nothing to refresh: no login here, or it carries no refresh token.
+    NotRefreshable,
+    /// Enough lifetime remains. The login becomes due at this epoch time.
+    Current { due_at_ms: i64 },
+    /// Due, but a daemon handoff is waiting. The renewal did not start; the
+    /// next daemon decides again from the file.
+    Deferred,
+    /// The login was renewed, by this call or by another daemon that held the
+    /// native lock first. `expires_at_ms` is the new expiry.
+    Renewed {
+        by_this_call: bool,
+        expires_at_ms: Option<i64>,
+    },
+}
+
+pub(crate) struct GrantRefreshTrigger<'a> {
+    pub now_ms: i64,
+    /// Identity of the access token used by the authentication-failed turn.
+    pub rejected_logins: &'a std::collections::BTreeSet<String>,
+}
+
+/// Renew the profile's login when refused or when less than
+/// [`GRANT_REFRESH_LEAD`] remains, under the native locks with a reread, so only
+/// one of several daemons sharing the home exchanges the refresh token. This
+/// is the grant's only refresher: copies handed to harnesses carry no refresh
+/// token. The decision does not consult the usage API's rate-limit hold, which
+/// covers usage requests only.
+pub(crate) async fn refresh_grant_if_due(
+    source: LoginSource,
+    environment: HashMap<String, String>,
+    executor: Arc<dyn CommandExecutor + Send + Sync>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
+    launcher: &ClaudeLauncher,
+    gate: &Arc<crate::upgrade::Gate>,
+    trigger: GrantRefreshTrigger<'_>,
+) -> Result<GrantRefresh, ClaudeUsageError> {
+    let GrantRefreshTrigger {
+        now_ms,
+        rejected_logins,
+    } = trigger;
+    let due_at = |credentials: &Value| -> Option<i64> {
+        if !oauth_has_refresh_token(credentials) {
+            return None;
+        }
+        Some(grant_due_at(oauth_expires_at(
+            credentials.get("claudeAiOauth")?,
+        )?))
+    };
+    let credentials = match source.read().await {
+        Ok(credentials) => credentials,
+        Err(ClaudeUsageError::NotSignedIn) => return Ok(GrantRefresh::NotRefreshable),
+        Err(error) => return Err(error),
+    };
+    let refused = |credentials: &Value| {
+        oauth_access_token(credentials, now_ms)
+            .ok()
+            .is_some_and(|token| {
+                rejected_logins.contains(&mj_core::credentials::credential_fingerprint(
+                    token.as_bytes(),
+                ))
+            })
+    };
+    let Some(due_at_ms) = due_at(&credentials) else {
+        return Ok(GrantRefresh::NotRefreshable);
+    };
+    if due_at_ms > now_ms && !refused(&credentials) {
+        return Ok(GrantRefresh::Current { due_at_ms });
+    }
+    // Due. Find a runnable `claude` first: with none, say so on every attempt
+    // rather than strip copies nothing can renew.
+    let program = match &container {
+        Some(_) => None,
+        None => Some(launcher.locate(&environment).await?),
+    };
+    // Admission covers the exchange only, from here until the new login is
+    // persisted (it moves into the subprocess's thread with the locks). A
+    // waiting handoff is not delayed by a renewal that has not begun.
+    let admission = match admit_renewal(gate) {
+        Ok(admission) => admission,
+        Err(error) => {
+            tracing::debug!(%error, "deferring the Claude login renewal until after the daemon handoff");
+            return Ok(GrantRefresh::Deferred);
+        }
+    };
+    let locks = source.lock().await?;
+    let active = source.read().await?;
+    match due_at(&active) {
+        None => return Ok(GrantRefresh::NotRefreshable),
+        Some(due_at_ms) if due_at_ms > now_ms && !refused(&active) => {
+            // Another daemon or Claude Code renewed it while this one waited.
+            let expires_at_ms = active.get("claudeAiOauth").and_then(oauth_expires_at);
+            return Ok(GrantRefresh::Renewed {
+                by_this_call: false,
+                expires_at_ms,
+            });
+        }
+        Some(_) => {}
+    }
+    let renewal = Renewal {
+        _locks: locks,
+        _admission: admission,
+        program,
+    };
+    let renewed = renew_locked(active, &source, environment, executor, renewal, container).await?;
+    Ok(GrantRefresh::Renewed {
+        by_this_call: true,
+        expires_at_ms: renewed.get("claudeAiOauth").and_then(oauth_expires_at),
+    })
+}
+
+/// Where the login a renewal works on is kept, and how Claude Code is told to
+/// find it. Built from [`mj_core::config::HarnessKind::login_store`].
+#[derive(Clone)]
+pub(crate) enum LoginSource {
+    /// `<home>/.credentials.json`, with `CLAUDE_CONFIG_DIR` pointing at `home`.
+    File { home: PathBuf },
+    /// The macOS Keychain item every profile shares. `claude auth login` must
+    /// run with `CLAUDE_CONFIG_DIR` unset, which is the only way it writes
+    /// that item. `lock_marker` is the credential file under `~/.claude`
+    /// whose directory carries the locks Claude Code itself takes; `security`
+    /// reads the item.
+    Keychain {
+        lock_marker: PathBuf,
+        security: Arc<dyn CommandExecutor + Send + Sync>,
+    },
+}
+
+impl LoginSource {
+    /// Take the native refresh locks every writer of this login takes.
+    async fn lock(&self) -> Result<mj_core::credentials::CredentialWriteGuard, ClaudeUsageError> {
+        let marker = match self {
+            Self::File { home } => home.join(".credentials.json"),
+            Self::Keychain { lock_marker, .. } => lock_marker.clone(),
+        };
+        mj_core::credentials::CredentialWriteGuard::acquire(
+            mj_core::config::HarnessKind::Claude,
+            &marker,
+        )
+        .await
+        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))
+    }
+
+    /// The login as it is now. A Keychain that cannot be read is an error,
+    /// never "not signed in": a renewal spends the refresh token, and one
+    /// started on a login that merely could not be read would lose the grant.
+    async fn read(&self) -> Result<Value, ClaudeUsageError> {
+        match self {
+            Self::File { home } => read_credentials(home).await,
+            Self::Keychain { security, .. } => {
+                let security = Arc::clone(security);
+                let login = tokio::task::spawn_blocking(move || {
+                    crate::setup::read_claude_keychain_login(&*security)
+                })
+                .await
+                .map_err(|error| ClaudeUsageError::Refresh(format!("worker failed: {error}")))?
+                .map_err(|error| ClaudeUsageError::Refresh(format!("{error:#}")))?;
+                match login {
+                    crate::setup::KeychainLogin::Missing => Err(ClaudeUsageError::NotSignedIn),
+                    crate::setup::KeychainLogin::Unreadable { status } => {
+                        Err(ClaudeUsageError::Refresh(format!(
+                            "the macOS Keychain could not be read (security exited with status {status}); unlock it and the renewal will be retried"
+                        )))
+                    }
+                    crate::setup::KeychainLogin::Present(bytes) => {
+                        serde_json::from_slice(&bytes).map_err(|_| ClaudeUsageError::NotSignedIn)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set the variables `claude auth login` needs to find this login.
+    fn configure_environment(&self, environment: &mut HashMap<String, String>) {
+        match self {
+            Self::File { home } => {
+                environment.insert(
+                    "CLAUDE_CONFIG_DIR".into(),
+                    home.to_string_lossy().into_owned(),
+                );
+            }
+            Self::Keychain { .. } => {
+                environment.remove("CLAUDE_CONFIG_DIR");
+            }
+        }
+    }
+
+    /// Point a Keychain renewal at the item the daemon reads and writes. An
+    /// inherited `CLAUDE_CONFIG_DIR` would rename the item, and a `USER` from
+    /// the profile's environment would change its account (Claude Code names
+    /// the account after `USER`): either way the renewed login would land
+    /// where nothing reads it, after the old refresh token was spent.
+    fn confine_command(&self, command: &mut CommandSpec) {
+        if matches!(self, Self::Keychain { .. }) {
+            command.env.remove("CLAUDE_CONFIG_DIR");
+            command.env_remove.push("CLAUDE_CONFIG_DIR".into());
+            command.env_remove.retain(|name| name != "USER");
+            command
+                .env
+                .insert("USER".into(), crate::setup::claude_keychain_account());
+        }
+    }
+}
+
+/// What one login renewal holds from before its first lock until the child
+/// has exited: the native locks, the handoff admission, and the installation
+/// of the `claude` it runs.
+struct Renewal {
+    _locks: mj_core::credentials::CredentialWriteGuard,
+    _admission: crate::upgrade::Work,
+    program: Option<ClaudeProgram>,
+}
+
+/// Run `claude auth login` with the stored refresh token while the caller
+/// holds the native locks, and return the credentials it left. Fails when the
+/// access token did not change.
+async fn renew_locked(
+    active: Value,
+    source: &LoginSource,
+    mut environment: HashMap<String, String>,
+    executor: Arc<dyn CommandExecutor + Send + Sync>,
+    renewal: Renewal,
+    container: Option<crate::quota_runtime::ContainerCheck>,
+) -> Result<Value, ClaudeUsageError> {
     let before = active
         .pointer("/claudeAiOauth/accessToken")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let mut environment = environment;
-    environment.insert(
-        "CLAUDE_CONFIG_DIR".into(),
-        home.to_string_lossy().into_owned(),
-    );
-    let refresh_error = run_claude_refresh(active, environment, executor, locks, container)
-        .await
-        .err();
-    let credentials = match read_credentials(&home).await {
+    source.configure_environment(&mut environment);
+    let refresh_error =
+        run_claude_refresh(active, source, environment, executor, renewal, container)
+            .await
+            .err();
+    let credentials = match source.read().await {
         Ok(credentials) => credentials,
         Err(error) => return Err(refresh_error.unwrap_or(error)),
     };
@@ -304,7 +817,7 @@ async fn refresh_and_retry(
             ClaudeUsageError::Refresh("Claude auth login did not renew the access token".to_owned())
         }));
     }
-    query_api(client, usage_url, token).await
+    Ok(credentials)
 }
 
 /// On macOS, read Claude's quota through its Keychain-aware CLI.
@@ -314,11 +827,7 @@ async fn run_claude_usage(
     purpose: &'static str,
 ) -> Result<CommandOutput, String> {
     let mut command = CommandSpec::new(
-        if cfg!(windows) {
-            "claude.cmd"
-        } else {
-            "claude"
-        },
+        claude_program(),
         ["-p", "/usage", "--no-session-persistence"],
     )
     .purpose(purpose);
@@ -331,9 +840,10 @@ async fn run_claude_usage(
 
 async fn run_claude_refresh(
     credentials: Value,
+    source: &LoginSource,
     mut environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
-    locks: Vec<crate::oauth_lock::OAuthRefreshLock>,
+    renewal: Renewal,
     container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<(), ClaudeUsageError> {
     let oauth = &credentials["claudeAiOauth"];
@@ -359,18 +869,27 @@ async fn run_claude_refresh(
     );
     let (mut command, quota_container) = match &container {
         None => {
+            let program = renewal
+                .program
+                .as_ref()
+                .ok_or_else(|| ClaudeUsageError::Refresh("no Claude Code to run".into()))?;
             let mut command = CommandSpec::new(
-                if cfg!(windows) {
-                    "claude.cmd"
-                } else {
-                    "claude"
-                },
+                mj_core::target_path::text(&program.command),
                 ["auth", "login"],
             );
+            command.env.extend(program.environment.clone());
             command.env.extend(environment);
+            source.confine_command(&mut command);
             (command, None)
         }
         Some(check) => {
+            if matches!(source, LoginSource::Keychain { .. }) {
+                // The image cannot write the host's Keychain.
+                return Err(ClaudeUsageError::Refresh(
+                    "a login held in the macOS Keychain can only be renewed by Claude Code on this Mac"
+                        .into(),
+                ));
+            }
             check
                 .runtime
                 .ensure_image_async()
@@ -389,10 +908,19 @@ async fn run_claude_refresh(
     };
     command.purpose = "refresh Claude login".to_owned();
     command.sensitive_output = true;
+    // Once the child starts it runs to its own end. Anthropic spends the
+    // refresh token on the first request, so a kill (a mj deadline, or the
+    // caller being dropped) before the new login is written loses the grant.
+    // Claude Code bounds its own network steps: the token request
+    // (`fn(30000, ...)` in `Npe`, CC 2.1.321) and the profile lookup after it
+    // (`fn(1e4, ...)`) each time out. The executor therefore has no deadline
+    // and no cancellation, and the lock wait is counted apart
+    // (`CLAUDE_REFRESH_LOCK_WAIT`).
     let output = tokio::task::spawn_blocking(move || {
-        // Keep the leases until the executor has reaped its child, even if
-        // the async caller is cancelled while this thread is still running.
-        let _locks = locks;
+        // Keep the locks, the installation and the handoff admission until
+        // the executor has reaped its child, even if the async caller is
+        // cancelled while this thread is still running.
+        let _renewal = renewal;
         executor.execute(&command)
     })
     .await;
@@ -409,11 +937,51 @@ fn successful_refresh_output(output: CommandOutput) -> Result<(), ClaudeUsageErr
     if output.status == 0 {
         Ok(())
     } else {
+        let category = [output.stderr.as_slice(), output.stdout.as_slice()]
+            .into_iter()
+            .find_map(claude_refresh_failure_category);
+        let detail = category
+            .map(|category| format!(": {category}"))
+            .unwrap_or_default();
         Err(ClaudeUsageError::Refresh(format!(
-            "Claude auth login exited with status {}",
-            output.status
+            "Claude auth login exited with status {}{detail}",
+            output.status,
         )))
     }
+}
+
+fn claude_refresh_failure_category(bytes: &[u8]) -> Option<&'static str> {
+    // Native auth login prints `Login failed: ${error.message}`. Axios can
+    // also dump request bodies containing tokens: never return captured text.
+    // Match complete status messages so token text or e.g. 4010 is not a status.
+    for line in String::from_utf8_lossy(bytes).lines().map(str::trim) {
+        let message = line
+            .strip_prefix("Login failed: ")
+            .or_else(|| line.strip_prefix("AxiosError: "));
+        match message {
+            Some("Request failed with status code 400") => return Some("HTTP 400 rejection"),
+            Some("Request failed with status code 401") => return Some("HTTP 401 rejection"),
+            Some("Request failed with status code 403") => return Some("HTTP 403 rejection"),
+            Some(message)
+                if message.starts_with("getaddrinfo ENOTFOUND ")
+                    || message.starts_with("getaddrinfo EAI_AGAIN ") =>
+            {
+                return Some("DNS lookup failure");
+            }
+            Some(message) if message.starts_with("connect ECONNREFUSED ") => {
+                return Some("network connection refused");
+            }
+            _ => {}
+        }
+        // Native auth login appends this fixed warning after a post-exchange
+        // policy refusal. The surrounding organization details stay private.
+        if line
+            == "The refresh token in CLAUDE_CODE_OAUTH_REFRESH_TOKEN was used for this attempt and cannot be used again; issue a new one to retry."
+        {
+            return Some("native sign-in policy refusal after token exchange");
+        }
+    }
+    None
 }
 
 fn oauth_access_token(credentials: &Value, now_ms: i64) -> Result<&str, ClaudeUsageError> {
@@ -444,6 +1012,20 @@ fn oauth_has_refresh_token(credentials: &Value) -> bool {
         .pointer("/claudeAiOauth/refreshToken")
         .and_then(Value::as_str)
         .is_some_and(|token| !token.is_empty())
+}
+
+/// Monthly list prices, deliberately independent of the advertised usage
+/// multipliers: Max's weekly allowance does not scale with its five-hour one.
+fn monthly_price_usd(credentials: &Value) -> Option<u32> {
+    match credentials
+        .pointer("/claudeAiOauth/rateLimitTier")?
+        .as_str()?
+    {
+        "default_claude_max_5x" => Some(100),
+        "default_claude_max_20x" => Some(200),
+        "default_claude_pro" => Some(20),
+        _ => None,
+    }
 }
 
 fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
@@ -500,7 +1082,16 @@ fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
         }
     }
 
-    (five_hour.is_some() || week.is_some() || !scoped_weeks.is_empty()).then(|| ClaudeUsageReport {
+    (five_hour.is_some()
+        || week.is_some()
+        || !scoped_weeks.is_empty()
+        || payload
+            .pointer("/extra_usage/is_enabled")
+            .and_then(Value::as_bool)
+            == Some(true))
+    .then(|| ClaudeUsageReport {
+        monthly_price_usd: None,
+        paid_credits: None,
         banked_resets: parse_banked_resets(payload, mj_core::clock::epoch_millis() / 1000),
         five_hour,
         week,
@@ -608,6 +1199,8 @@ fn parse_cli_usage(output: &str) -> Option<ClaudeUsageReport> {
 
     (five_hour.is_some() || week.is_some() || !scoped_weeks.is_empty()).then_some(
         ClaudeUsageReport {
+            paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             five_hour,
             week,
@@ -833,6 +1426,83 @@ Last 7d · 5966 requests · 78 sessions
         );
     }
 
+    // Hard-won: #1485: discarded native failures hid the reason while raw Axios output can expose tokens.
+    #[test]
+    fn refresh_failure_categories_never_disclose_native_output() {
+        let cases = [
+            (
+                "Login failed: Request failed with status code 400",
+                ": HTTP 400 rejection",
+            ),
+            (
+                "AxiosError: Request failed with status code 401",
+                ": HTTP 401 rejection",
+            ),
+            (
+                "Login failed: Request failed with status code 403",
+                ": HTTP 403 rejection",
+            ),
+            (
+                "Login failed: getaddrinfo ENOTFOUND private.example",
+                ": DNS lookup failure",
+            ),
+            (
+                "Login failed: getaddrinfo EAI_AGAIN private.example",
+                ": DNS lookup failure",
+            ),
+            (
+                "Login failed: connect ECONNREFUSED 127.0.0.1:8443",
+                ": network connection refused",
+            ),
+            (
+                "Private organization refused sign-in\nThe refresh token in CLAUDE_CODE_OAUTH_REFRESH_TOKEN was used for this attempt and cannot be used again; issue a new one to retry.",
+                ": native sign-in policy refusal after token exchange",
+            ),
+            ("Login failed: Request failed with status code 4010", ""),
+            ("Login failed: provider sent private response 401", ""),
+            ("Login failed: unknown private failure", ""),
+            ("Login failed: Request failed with status code 500", ""),
+        ];
+        for (message, category) in cases {
+            // Simulate Axios's token-bearing request dump and independent
+            // stdout, including arbitrary bytes that must never be echoed.
+            let mut stderr = format!(
+                "{message}\nconfig: {{data: '{{\"refresh_token\":\"SECRET_REFRESH\"}}', headers: {{Authorization: 'Bearer SECRET_ACCESS'}}}}\n"
+            )
+            .into_bytes();
+            stderr.extend_from_slice(b"\xffFAILED_STDERR_SENTINEL");
+            for stderr_first in [true, false] {
+                let sentinel = b"FAILED_STDOUT_SENTINEL".to_vec();
+                let (stdout, stderr) = if stderr_first {
+                    (sentinel, stderr.clone())
+                } else {
+                    (stderr.clone(), sentinel)
+                };
+                let error = successful_refresh_output(CommandOutput {
+                    status: 7,
+                    stdout,
+                    stderr,
+                })
+                .unwrap_err();
+                assert_eq!(
+                    error,
+                    ClaudeUsageError::Refresh(format!(
+                        "Claude auth login exited with status 7{category}"
+                    )),
+                    "classification must return only fixed text for {message:?}"
+                );
+            }
+        }
+        assert!(
+            successful_refresh_output(CommandOutput {
+                status: 0,
+                stdout: b"Login failed: Request failed with status code 401".to_vec(),
+                stderr: b"SECRET_SUCCESS_SENTINEL".to_vec(),
+            })
+            .is_ok()
+        );
+    }
+
     #[derive(Clone)]
     struct RefreshExecutor {
         home: PathBuf,
@@ -842,6 +1512,29 @@ Last 7d · 5966 requests · 78 sessions
     }
 
     impl CommandExecutor for RefreshExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
             assert_eq!(command.args, ["auth", "login"]);
             assert_eq!(
@@ -879,7 +1572,7 @@ Last 7d · 5966 requests · 78 sessions
         headers: HeaderMap,
     ) -> (StatusCode, Json<Value>) {
         assert_eq!(query.get("cedar_ember").map(String::as_str), Some("1"));
-        assert_eq!(query.get("skip_spend").map(String::as_str), Some("1"));
+        assert!(!query.contains_key("skip_spend"));
         assert_eq!(
             headers.get(reqwest::header::USER_AGENT).unwrap(),
             USAGE_USER_AGENT
@@ -934,6 +1627,59 @@ Last 7d · 5966 requests · 78 sessions
             oauth["refreshToken"] = Value::String(refresh.to_owned());
         }
         serde_json::json!({"claudeAiOauth": oauth})
+    }
+
+    #[tokio::test]
+    async fn paid_usage_reads_wallet_and_respects_enabled_status_and_spending_cap() {
+        use mj_client::quota::PaidCredits;
+        for (funds, cap, spent, enabled, wallet_status, expected) in [
+            (1200, Some(2000), 500, true, StatusCode::OK, Some(1200.0)),
+            (5000, Some(2000), 500, true, StatusCode::OK, Some(1500.0)),
+            (5000, Some(2000), 2100, true, StatusCode::OK, Some(0.0)),
+            (5000, None, 500, true, StatusCode::OK, Some(5000.0)),
+            (0, Some(2000), 500, true, StatusCode::OK, Some(0.0)),
+            (5000, Some(2000), 500, false, StatusCode::OK, None),
+            (5000, Some(2000), 500, true, StatusCode::FORBIDDEN, None),
+        ] {
+            let wallet_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let reads = wallet_reads.clone();
+            let app = Router::new()
+                .route("/usage", get(move || async move { Json(serde_json::json!({
+                    "five_hour": {"utilization": 100},
+                    "extra_usage": {"is_enabled": enabled, "monthly_limit": cap, "used_credits": spent, "currency": "USD"}
+                })) }))
+                .route("/api/oauth/profile", get(|headers: HeaderMap| async move {
+                    assert_eq!(headers["authorization"], "Bearer test-token");
+                    Json(serde_json::json!({"organization": {"uuid": "test-org"}}))
+                }))
+                .route("/api/oauth/organizations/test-org/prepaid/credits", get(move |headers: HeaderMap| {
+                    let reads = reads.clone();
+                    async move {
+                        reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        assert_eq!(headers["authorization"], "Bearer test-token");
+                        assert_eq!(headers["x-organization-uuid"], "test-org");
+                        (wallet_status, Json(serde_json::json!({"amount": funds, "currency": "USD"})))
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let report = query_api(
+                &reqwest::Client::new(),
+                &format!("http://{address}/usage"),
+                "test-token",
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+            task.abort();
+            assert_eq!(report.five_hour.unwrap().remaining_percent, 0);
+            assert_eq!(report.paid_credits, expected.and_then(PaidCredits::limited));
+            assert_eq!(
+                wallet_reads.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(enabled)
+            );
+        }
     }
 
     async fn usage_status_only(
@@ -1003,13 +1749,15 @@ Last 7d · 5966 requests · 78 sessions
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".credentials.json");
         let mut old = credentials("old", Some("refresh"), 1);
+        old["claudeAiOauth"]["rateLimitTier"] = "default_claude_max_5x".into();
         old["claudeAiOauth"]["clientId"] = "custom-client".into();
         std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
-        let fresh = credentials(
+        let mut fresh = credentials(
             "fresh",
             Some("rotated"),
             mj_core::clock::epoch_millis() + 60_000,
         );
+        fresh["claudeAiOauth"]["rateLimitTier"] = "default_claude_max_20x".into();
         let commands = Arc::new(Mutex::new(Vec::new()));
         let executor = RefreshExecutor {
             home: home.path().to_path_buf(),
@@ -1032,6 +1780,7 @@ Last 7d · 5966 requests · 78 sessions
         .await
         .unwrap();
 
+        assert_eq!(report.monthly_price_usd, Some(200));
         assert_eq!(report.banked_resets, Some(1));
         assert_eq!(report.five_hour.unwrap().remaining_percent, 75);
         let commands = commands.lock().unwrap();
@@ -1095,6 +1844,29 @@ Last 7d · 5966 requests · 78 sessions
     }
 
     impl CommandExecutor for BlockedRefreshExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
             if let Some(started) = self.started.lock().unwrap().take() {
                 let _ = started.send(());
@@ -1299,38 +2071,47 @@ Last 7d · 5966 requests · 78 sessions
     #[tokio::test]
     async fn valid_credentials_query_authoritative_usage_without_launching_claude() {
         let home = tempfile::tempdir().unwrap();
-        std::fs::write(
-            home.path().join(".credentials.json"),
-            serde_json::to_vec(&credentials(
-                "current",
-                Some("refresh"),
-                mj_core::clock::epoch_millis() + 60_000,
-            ))
-            .unwrap(),
-        )
-        .unwrap();
         let commands = Arc::new(Mutex::new(Vec::new()));
-        let executor = RefreshExecutor {
+        let executor = Arc::new(RefreshExecutor {
             home: home.path().to_path_buf(),
             replacement: None,
             status: 0,
             commands: commands.clone(),
-        };
+        });
         let (usage_url, server_state, server) = spawn_usage_server(false).await;
-
-        query_with(
-            home.path().to_path_buf(),
-            HashMap::new(),
-            &usage_url,
-            Arc::new(executor),
-        )
-        .await
-        .unwrap();
-
+        // Real OAuth tier metadata must survive the HTTP query, including a
+        // plan change between polls. Unknown plans must not invent a price.
+        for (tier, expected) in [
+            ("default_claude_max_5x", Some(100)),
+            ("default_claude_max_20x", Some(200)),
+            ("default_claude_pro", Some(20)),
+            ("future-plan", None),
+        ] {
+            let mut login = credentials(
+                "current",
+                Some("refresh"),
+                mj_core::clock::epoch_millis() + 60_000,
+            );
+            login["claudeAiOauth"]["rateLimitTier"] = tier.into();
+            std::fs::write(
+                home.path().join(".credentials.json"),
+                serde_json::to_vec(&login).unwrap(),
+            )
+            .unwrap();
+            let report = query_with(
+                home.path().to_path_buf(),
+                HashMap::new(),
+                &usage_url,
+                executor.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.monthly_price_usd, expected);
+        }
         assert!(commands.lock().unwrap().is_empty());
         assert_eq!(
             server_state.authorizations.lock().unwrap().as_slice(),
-            ["Bearer current"]
+            ["Bearer current"; 4]
         );
         server.abort();
     }
@@ -1436,5 +2217,269 @@ Last 7d · 5966 requests · 78 sessions
             oauth_access_token(&credentials, 1_999).expect("token"),
             "sk-ant-oat01-test"
         );
+    }
+    /// A macOS Keychain and the `claude` that writes it, in one fake: `security`
+    /// answers with the stored login, `claude auth login` swaps in the renewed
+    /// one. It checks what a Keychain renewal must look like to Claude Code:
+    /// no `CLAUDE_CONFIG_DIR`, and the `~/.claude` locks held.
+    struct FakeMac {
+        login: Mutex<Option<Value>>,
+        security_status: i32,
+        renewed: Value,
+        /// The directory Claude Code takes its refresh locks under.
+        lock_home: PathBuf,
+        claude_runs: Mutex<Vec<CommandSpec>>,
+    }
+
+    impl CommandExecutor for FakeMac {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            if command.program == "security" {
+                assert_eq!(command.args[0], "find-generic-password");
+                assert_eq!(command.args[1], "-a");
+                assert_eq!(command.args[3..], ["-s", "Claude Code-credentials", "-w"]);
+                return Ok(CommandOutput {
+                    status: self.security_status,
+                    stdout: self
+                        .login
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|login| serde_json::to_vec(login).unwrap())
+                        .unwrap_or_default(),
+                    stderr: Vec::new(),
+                });
+            }
+            assert_eq!(command.args, ["auth", "login"]);
+            assert!(!command.env.contains_key("CLAUDE_CONFIG_DIR"));
+            assert!(command.env_remove.contains(&"CLAUDE_CONFIG_DIR".to_owned()));
+            assert_eq!(
+                command.env.get("USER"),
+                Some(&crate::setup::claude_keychain_account()),
+                "the renewal writes the account the daemon reads"
+            );
+            assert!(self.lock_home.join(".oauth_refresh.lock").is_dir());
+            self.claude_runs.lock().unwrap().push(command.clone());
+            *self.login.lock().unwrap() = Some(self.renewed.clone());
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn fake_mac(
+        directory: &std::path::Path,
+        security_status: i32,
+        expires_in_ms: i64,
+    ) -> Arc<FakeMac> {
+        let now = mj_core::clock::epoch_millis();
+        Arc::new(FakeMac {
+            login: Mutex::new(Some(credentials(
+                "access-1",
+                Some("refresh-1"),
+                now + expires_in_ms,
+            ))),
+            security_status,
+            renewed: credentials("access-2", Some("refresh-2"), now + 8 * 3_600_000),
+            lock_home: directory.canonicalize().unwrap(),
+            claude_runs: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn keychain_source(directory: &std::path::Path, mac: &Arc<FakeMac>) -> LoginSource {
+        LoginSource::Keychain {
+            lock_marker: directory.join(".credentials.json"),
+            security: mac.clone(),
+        }
+    }
+
+    const ONE_HOUR_MS: i64 = 3_600_000;
+
+    async fn renew_keychain_login(
+        source: LoginSource,
+        mac: &Arc<FakeMac>,
+        rejected_login: Option<&str>,
+    ) -> Result<GrantRefresh, ClaudeUsageError> {
+        // An ambient `CLAUDE_CONFIG_DIR`, as a profile's own environment may
+        // set, must not reach the renewal.
+        // Nor may a `USER` from that environment, which would move the
+        // renewed login to another Keychain account.
+        let environment = HashMap::from([
+            ("CLAUDE_CONFIG_DIR".to_owned(), "/elsewhere".to_owned()),
+            ("USER".to_owned(), "someone-else".to_owned()),
+        ]);
+        refresh_grant_if_due(
+            source,
+            environment,
+            mac.clone(),
+            None,
+            &ClaudeLauncher::Program(PathBuf::from("claude")),
+            &Arc::new(crate::upgrade::Gate::default()),
+            GrantRefreshTrigger {
+                now_ms: mj_core::clock::epoch_millis(),
+                rejected_logins: &rejected_login.into_iter().map(str::to_owned).collect(),
+            },
+        )
+        .await
+    }
+
+    /// #1491: a Keychain login is renewed through the Keychain as the source,
+    /// under the locks Claude Code takes for `~/.claude`, with
+    /// `CLAUDE_CONFIG_DIR` unset so `claude auth login` writes the item the
+    /// sessions' copies come from; the next look finds it current.
+    #[tokio::test]
+    async fn a_due_keychain_login_is_renewed_with_no_config_dir_under_the_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac = fake_mac(directory.path(), 0, ONE_HOUR_MS);
+
+        let first = renew_keychain_login(keychain_source(directory.path(), &mac), &mac, None)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                first,
+                GrantRefresh::Renewed {
+                    by_this_call: true,
+                    ..
+                }
+            ),
+            "{first:?}"
+        );
+        {
+            let runs = mac.claude_runs.lock().unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].env["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"], "refresh-1");
+        }
+        assert!(!directory.path().join(".oauth_refresh.lock").exists());
+
+        let second = renew_keychain_login(keychain_source(directory.path(), &mac), &mac, None)
+            .await
+            .unwrap();
+        assert!(matches!(second, GrantRefresh::Current { .. }), "{second:?}");
+        assert_eq!(mac.claude_runs.lock().unwrap().len(), 1);
+    }
+
+    /// #1491: profiles on one Mac share the Keychain item. A renewal that waits
+    /// for another's lock rereads the item under it, finds it renewed, and
+    /// spends no second refresh token.
+    #[tokio::test]
+    async fn a_waiting_keychain_renewal_follows_the_one_that_held_the_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac = fake_mac(directory.path(), 0, ONE_HOUR_MS);
+        let held = mj_core::credentials::CredentialWriteGuard::acquire(
+            mj_core::config::HarnessKind::Claude,
+            &directory.path().join(".credentials.json"),
+        )
+        .await
+        .unwrap();
+        let follower = tokio::spawn({
+            let (source, mac) = (keychain_source(directory.path(), &mac), mac.clone());
+            async move { renew_keychain_login(source, &mac, None).await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!follower.is_finished(), "the lock is held");
+        // The holder finishes its renewal, then lets go.
+        *mac.login.lock().unwrap() = Some(mac.renewed.clone());
+        drop(held);
+
+        let outcome = follower.await.unwrap().unwrap();
+        assert!(
+            matches!(
+                outcome,
+                GrantRefresh::Renewed {
+                    by_this_call: false,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert!(mac.claude_runs.lock().unwrap().is_empty());
+    }
+
+    // A delayed refusal must adopt the login another daemon renewed under the lock.
+    #[tokio::test]
+    async fn a_refused_unexpired_keychain_login_is_reread_under_the_native_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac = fake_mac(directory.path(), 0, 7 * ONE_HOUR_MS);
+        let refused = mj_core::credentials::claude_access_token_fingerprint(
+            &serde_json::to_vec(mac.login.lock().unwrap().as_ref().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let held = mj_core::credentials::CredentialWriteGuard::acquire(
+            mj_core::config::HarnessKind::Claude,
+            &directory.path().join(".credentials.json"),
+        )
+        .await
+        .unwrap();
+        let source = keychain_source(directory.path(), &mac);
+        let follower = tokio::spawn({
+            let (mac, refused) = (mac.clone(), refused.clone());
+            async move { renew_keychain_login(source, &mac, Some(&refused)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !follower.is_finished(),
+            "even an unexpired refusal must take the native lock"
+        );
+        *mac.login.lock().unwrap() = Some(mac.renewed.clone());
+        drop(held);
+        assert!(matches!(
+            follower.await.unwrap().unwrap(),
+            GrantRefresh::Renewed {
+                by_this_call: false,
+                ..
+            }
+        ));
+        assert!(mac.claude_runs.lock().unwrap().is_empty());
+    }
+
+    /// #1491: a Keychain that cannot be read (locked) is not a missing login.
+    /// The exchange spends the single-use refresh token, so none may start
+    /// while the result could not be read back; the failure is reported.
+    #[tokio::test]
+    async fn a_locked_keychain_starts_no_renewal() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac = fake_mac(directory.path(), 36, ONE_HOUR_MS);
+
+        let error = renew_keychain_login(keychain_source(directory.path(), &mac), &mac, None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ClaudeUsageError::Refresh(message) if message.contains("Keychain")),
+            "{error}"
+        );
+        assert!(mac.claude_runs.lock().unwrap().is_empty());
+        // And no login in the Keychain is simply nothing to renew.
+        let absent = fake_mac(directory.path(), 44, ONE_HOUR_MS);
+        let outcome =
+            renew_keychain_login(keychain_source(directory.path(), &absent), &absent, None)
+                .await
+                .unwrap();
+        assert_eq!(outcome, GrantRefresh::NotRefreshable);
     }
 }

@@ -1,6 +1,6 @@
 //! Actionable host and configuration prerequisite checks.
 
-#[cfg(unix)]
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,11 +18,12 @@ use crate::setup::{
 use crate::targets::{
     APPLE_CONTAINER_MINIMUM_MACOS, BoundedProcessExecutor, CommandExecutor, CommandSpec,
     CommandTimedOut, ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable,
-    PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor, SshTarget as RuntimeSshTarget,
-    TargetTemplate as RuntimeTargetTemplate, failed_podman_postcondition, local_docker_vm_share,
-    podman_probe_observation, run_setup_smoke_test, ssh_command, ssh_connectivity_probe,
+    MICROVM_ENGINE, PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor,
+    SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
+    failed_podman_postcondition, local_docker_vm_share, podman_probe_observation,
+    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_engine_command,
     ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_apple_container,
-    verify_ssh_docker, verify_ssh_podman,
+    verify_ssh_docker, verify_ssh_nitro, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -30,12 +31,17 @@ use mj_core::config::{
 use mj_core::credentials::login_command;
 use mj_core::local_git::{MINIMUM_GIT_VERSION, parse_git_version};
 
+mod catalog;
+mod github;
+mod sshd;
+pub use catalog::{Catalogs, LARGE_CATALOG, catalog_checks, catalog_profile_ids};
+
 // Only the image for the Apple container smoke test when the config has no
 // apple-container target. This intentionally stays a small stock image rather
 // than setup::DEFAULT_IMAGE: the check just proves the runtime can start a
-// container, and pulling the multi-gigabyte agent-dev image to do that would be
+// container, and pulling a larger session image to do that would be
 // a poor trade.
-const DEFAULT_CONTAINER_IMAGE: &str = "ubuntu:24.04";
+const SMOKE_TEST_IMAGE: &str = "ubuntu:24.04";
 /// The official signed package Apple publishes for its container runtime.
 pub(crate) const APPLE_CONTAINER_INSTALL_URL: &str =
     "https://github.com/apple/container#initial-install";
@@ -221,17 +227,19 @@ pub fn run_with_config_path(
     let offered = offered.as_ref().map_err(|gap| *gap);
     checks.extend(podman);
     checks.extend(docker);
+    checks.extend(local_bare_github_checks(config, executor));
+    checks.extend(sshd::checks(config, executor));
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
     checks.extend(ssh_apple_container_checks(config, executor, options.smoke));
+    checks.extend(ssh_nitro_checks(config, executor, options.smoke));
     checks.extend(machine_runtime_checks(config, executor));
     checks.extend(storage_checks(config, executor));
     checks.extend(build_cache_checks(offered, executor));
     checks.extend(build_cache_release_check(
         &crate::controller::recent_release_failures(),
     ));
-    checks.extend(aws_checks(config, executor));
     checks.extend(worker_binary_checks(offered));
     checks.extend(ssh_bare_worker_checks(config, executor));
     checks.push(daemon_build_check());
@@ -253,16 +261,11 @@ fn git_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<
         for (id, target) in &config.targets {
             if let TargetTemplate::SshBare { ssh, .. } = target {
                 let ssh = RuntimeSshTarget::from(ssh);
-                let mut command = ssh_validation_command(
+                let command = strict_ssh_validation_command(
                     &ssh,
                     vec!["git".into(), "--version".into()],
                     "check remote Git version",
                 );
-                // Like the connectivity probe, doctor must not accept a new
-                // host key, even when the target normally uses accept-new.
-                command
-                    .args
-                    .splice(0..0, ["-o".into(), "StrictHostKeyChecking=yes".into()]);
                 checks.push(git_version_check(
                     &format!("git.ssh-bare.{id}"),
                     &ssh.destination,
@@ -273,6 +276,20 @@ fn git_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<
         }
     }
     checks
+}
+
+/// [`ssh_validation_command`] that, like the connectivity probe, never accepts
+/// a new host key, even when the target normally uses accept-new.
+fn strict_ssh_validation_command(
+    ssh: &RuntimeSshTarget,
+    remote_args: Vec<String>,
+    purpose: &'static str,
+) -> CommandSpec {
+    let mut command = ssh_validation_command(ssh, remote_args, purpose);
+    command
+        .args
+        .splice(0..0, ["-o".into(), "StrictHostKeyChecking=yes".into()]);
+    command
 }
 
 fn git_version_check(
@@ -351,21 +368,7 @@ fn build_cache_checks(
                     id,
                     title,
                     format!(
-                        "Host mbx {version} is compatible with Mjolnir's mbx {} for targets {targets}.",
-                        crate::controller::MBX_VERSION
-                    ),
-                ),
-                crate::controller::DoctorHostMbxStatus::TooOld(version) => DoctorCheck::warning(
-                    id,
-                    title,
-                    format!(
-                        "Host mbx {version} is older than the minimum supported version {}; sessions on targets {targets} run without the shared build cache.",
-                        crate::controller::MBX_VERSION
-                    ),
-                    format!(
-                        "Upgrade mbx on {} to {} or newer from Settings › Setup › Machines, then rerun `mj doctor`.",
-                        host.host,
-                        crate::controller::MBX_VERSION
+                        "Host mbx {version} is compatible with the shared build cache for targets {targets}."
                     ),
                 ),
                 crate::controller::DoctorHostMbxStatus::Unknown(error) => DoctorCheck::warning(
@@ -650,6 +653,7 @@ pub fn render_human(checks: &[DoctorCheck], output: &mut impl Write) -> Result<(
 }
 
 pub fn setup_instructions(platform: InstructionsPlatform) -> String {
+    let github_rewrites = github::rewrite_commands().join("\n");
     match platform {
         InstructionsPlatform::Linux => format!(
             "# Mjolnir setup instructions for Linux\n\n\
@@ -668,6 +672,17 @@ package include it. The worker installs the pinned harness version itself.\n\
 Node-based harnesses reuse Node.js 22 or newer with npm and npx when present;\n\
 otherwise Mjolnir installs its own pinned Node.js and needs curl. Kimi and Grok\n\
 need curl and Bash. Mjolnir does not install those shell prerequisites.\n\n\
+## GitHub access on bare targets\n\n\
+A bare target (local or SSH) runs Git as that host's own account, so the host\n\
+needs its own way to reach GitHub without a person present. Either add a GitHub\n\
+SSH key to the host and trust GitHub's host key (check `ssh -T git@github.com`\n\
+there), or use HTTPS: run `gh auth login` and `gh auth setup-git` on the host,\n\
+then send SSH GitHub URLs over HTTPS:\n\n\
+```console\n\
+{github_rewrites}\n\
+```\n\n\
+`mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
+GitHub can ignore them.\n\n\
 ## Linux container-runtime postconditions\n\n{}\n\n{}",
             crate::targets::PODMAN_DOCUMENTATION,
             crate::targets::DOCKER_DOCUMENTATION
@@ -702,6 +717,17 @@ The worker installs the pinned harness version itself. Node-based harnesses\n\
 reuse Node.js 22 or newer with npm and npx when present; otherwise Mjolnir\n\
 installs its own pinned Node.js and needs curl. Kimi and Grok need curl and\n\
 Bash. Mjolnir does not install those shell prerequisites.\n\n\
+## GitHub access on bare targets\n\n\
+A bare target (local or SSH) runs Git as that host's own account, so the host\n\
+needs its own way to reach GitHub without a person present. Either add a GitHub\n\
+SSH key to the host and trust GitHub's host key (check `ssh -T git@github.com`\n\
+there), or use HTTPS: run `gh auth login` and `gh auth setup-git` on the host,\n\
+then send SSH GitHub URLs over HTTPS:\n\n\
+```console\n\
+{github_rewrites}\n\
+```\n\n\
+`mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
+GitHub can ignore them.\n\n\
 ## Podman\n\n\
 A local Podman target on macOS uses a rootless `podman machine`. Install\n\
 Podman and create the machine:\n\n\
@@ -737,7 +763,7 @@ Finish with the opt-in disposable runtime test in JSON mode:\n\n```console\nmj d
 Apple container is ready only when that smoke test creates a disposable\n\
 container, executes `true` in it, and removes it successfully. Use the image\n\
 configured by an `apple-container` target; without one, doctor uses\n\
-`{DEFAULT_CONTAINER_IMAGE}` for the smoke test.\n\n\
+`{SMOKE_TEST_IMAGE}` for the smoke test.\n\n\
 ## Shared Mjolnir prerequisites\n\n\
 `mj doctor --json` also checks the configuration, each configured harness home\n\
 and authentication marker, selected container worker binaries, and any relevant\n\
@@ -925,12 +951,154 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
     config
         .profiles
         .iter()
-        .map(|(id, profile)| {
+        .flat_map(|(id, profile)| {
             let mut check = harness_profile_check(id, profile, executor);
             check.detail = format!("{} {}", profile_summary(profile), check.detail);
-            check
+            let scope = aws_scope_check(id, profile, &config.targets, executor);
+            std::iter::once(check).chain(scope)
         })
         .collect()
+}
+
+/// What AWS credentials a Bedrock profile's sessions receive. Without a
+/// `[profiles.<id>.aws]` role they receive the controller host's own
+/// credentials; with one, credentials limited to the role, which is tested
+/// here with a real `AssumeRole` call so a broken trust policy or policy
+/// shows up before a session fails to start. A target the role cannot apply
+/// to (raw local, EC2, or one that sets its own AWS credentials) is reported
+/// by itself with the reason, whether or not another target is scoped.
+fn aws_scope_check(
+    id: &str,
+    profile: &HarnessProfile,
+    targets: &BTreeMap<String, TargetTemplate>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    use crate::aws_credentials::{CredentialsWithheld, SessionHost, credentials_withheld};
+    if !profile.enabled {
+        return Vec::new();
+    }
+    let check_id = format!("harness.{id}.aws-scope");
+    let title = format!("AWS credentials for profile {id}");
+    if !crate::aws_credentials::is_bedrock(profile) {
+        // Sessions run, without scoping; they are not refused.
+        let Some(role) = &profile.aws else {
+            return Vec::new();
+        };
+        return vec![DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "[profiles.{id}.aws] names {}, but {}, so it has no effect. Sessions run without role-scoped credentials.",
+                role.role_arn,
+                CredentialsWithheld::NotBedrock.why_a_role_cannot_apply()
+            ),
+            format!(
+                "Remove `[profiles.{id}.aws]`, or configure Bedrock (the AWS credential chain) for this profile."
+            ),
+        )];
+    }
+    // The same question launch and the sync ask, per configured target.
+    let mut receiving = Vec::new();
+    let mut withheld = Vec::new();
+    for (target_id, template) in targets {
+        let environment = mj_core::state::TargetRuntimeSettings::from(template).environment;
+        match credentials_withheld(profile, SessionHost::from(template), &environment) {
+            None => receiving.push(target_id.as_str()),
+            Some(reason) => withheld.push((target_id.as_str(), reason)),
+        }
+    }
+    let Some(role) = &profile.aws else {
+        if receiving.is_empty() {
+            return Vec::new();
+        }
+        return vec![DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "Sessions on {} receive the controller host's own AWS credentials, unscoped: anything running in a session can use everything those credentials allow.",
+                receiving.join(", ")
+            ),
+            format!(
+                "Create an IAM role for sessions that the host's AWS login may assume, and set `[profiles.{id}.aws] role_arn = \"arn:aws:iam::<account>:role/<name>\"`. Sessions then receive short-lived credentials limited to that role and to a Bedrock-only session policy."
+            ),
+        )];
+    };
+    let mut checks = withheld
+        .iter()
+        .map(|(target_id, reason)| {
+            DoctorCheck::warning(
+                format!("{check_id}.{target_id}"),
+                format!("AWS credentials for profile {id} on target {target_id}"),
+                format!(
+                    "[profiles.{id}.aws] names {}, but it has no effect on sessions on target {target_id}: {}. Those sessions run with that target's own AWS identity, not role-scoped credentials.",
+                    role.role_arn,
+                    reason.why_a_role_cannot_apply()
+                ),
+                "Run this profile's Bedrock sessions on a container or SSH target without AWS credentials in its environment, or use the target's own identity deliberately and give it only the access sessions need.",
+            )
+        })
+        .collect::<Vec<_>>();
+    if receiving.is_empty() {
+        return checks;
+    }
+    let source = match crate::aws_credentials::selected_source(profile) {
+        Ok(source) => source,
+        Err(error) => {
+            checks.push(DoctorCheck::fixable(
+                check_id,
+                title,
+                format!("The profile's AWS identity could not be selected: {error:#}"),
+                "Fix the profile's Codex configuration or AWS_PROFILE setting.",
+            ));
+            return checks;
+        }
+    };
+    checks.push(match crate::aws_assume_role::probe(&source, executor) {
+        Ok(credentials) => {
+            let until = credentials
+                .expires_at_epoch_millis()
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map_or_else(String::new, |at| {
+                    format!(" Those credentials last until {at}.")
+                });
+            DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "The host's AWS login assumed {} for a probe session that exists only for this check, named like a real session (mj-<32 hex digits>); sessions on {} receive credentials limited to it.{until}",
+                    role.role_arn,
+                    receiving.join(", ")
+                ),
+            )
+        }
+        Err(error) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!("{error:#}"),
+            format!(
+                "Make the controller's AWS login (profile {}) able to assume the role: allow sts:AssumeRole on it, and name the login in the role's trust policy{}. Sessions on this profile are refused until then.",
+                source
+                    .environment
+                    .get("AWS_PROFILE")
+                    .map_or("default", String::as_str),
+                if role.source_identity {
+                    " with sts:SetSourceIdentity allowed (source_identity is on)"
+                } else {
+                    ""
+                }
+            ),
+        ),
+    });
+    checks
+}
+
+/// Login failures observed by the running daemon, even when a local file
+/// still exists and claims hours of lifetime.
+pub fn login_checks(failures: &BTreeMap<String, String>) -> Vec<DoctorCheck> {
+    failures.iter().map(|(id, error)| DoctorCheck::fixable(
+        format!("harness.{id}.login"), format!("Harness profile {id} login"),
+        error.clone(), format!("Run `mj login --profile {id}`. Interrupted authentication-failed work continues when the new login reaches its worker."),
+    )).collect()
 }
 
 /// The readiness of one profile: its home, and whether it can authenticate.
@@ -1228,7 +1396,7 @@ fn subagent_policy_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
 fn subagent_policy_check(config: &Config) -> DoctorCheck {
     let subagents = &config.subagents;
     let detail = format!(
-        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
+        "Claude, Codex, DSH, and OpenCode sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
         subagents.max_concurrent
     );
     DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)
@@ -1866,6 +2034,8 @@ fn ssh_identity_file(ssh: &RuntimeSshTarget) -> Option<&str> {
 }
 
 /// One check per `ssh-bare` target: can Hel reach the host noninteractively?
+/// A reachable host also gets its GitHub access check; an unreachable one has
+/// one problem, not two.
 fn ssh_bare_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
     let Ok(config) = config else {
         return Vec::new();
@@ -1873,35 +2043,79 @@ fn ssh_bare_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) ->
     config
         .targets
         .iter()
-        .filter_map(|(id, target)| match target {
+        .flat_map(|(id, target)| match target {
             TargetTemplate::SshBare { ssh, .. } => {
-                Some(ssh_bare_check(id, &RuntimeSshTarget::from(ssh), executor))
+                let ssh = RuntimeSshTarget::from(ssh);
+                let (check, reachable) = ssh_bare_check(id, &ssh, executor);
+                let mut checks = vec![check];
+                if reachable {
+                    checks.push(github::github_access_check(
+                        format!("github.ssh-bare.{id}"),
+                        format!("GitHub access from target {id}"),
+                        github::BareHost::Ssh(&ssh),
+                        executor,
+                    ));
+                }
+                checks
             }
-            _ => None,
+            _ => Vec::new(),
         })
         .collect()
 }
 
+/// One GitHub access check per local bare target, run on this machine.
+fn local_bare_github_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    // `localhost` is usually a default target rather than a saved one.
+    config
+        .clone()
+        .with_local_targets()
+        .targets
+        .into_iter()
+        .filter(|(_, target)| matches!(target, TargetTemplate::LocalBare))
+        .map(|(id, _)| {
+            github::github_access_check(
+                format!("github.local-bare.{id}"),
+                format!("GitHub access from target {id}"),
+                github::BareHost::Local,
+                executor,
+            )
+        })
+        .collect()
+}
+
+/// The SSH access check, and whether the host answered.
 fn ssh_bare_check(
     id: &str,
     ssh: &RuntimeSshTarget,
     executor: &impl CommandExecutor,
-) -> DoctorCheck {
+) -> (DoctorCheck, bool) {
     let check_id = format!("runtime.ssh-bare.{id}");
     let title = format!("SSH access for target {id}");
     match ssh_connectivity(ssh, executor) {
-        SshConnectivity::Reachable => DoctorCheck::ready(
-            check_id,
-            title,
-            format!(
-                "`ssh {} true` succeeds noninteractively from this host.",
-                ssh.destination
+        SshConnectivity::Reachable => (
+            DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "`ssh {} true` succeeds noninteractively from this host.",
+                    ssh.destination
+                ),
             ),
+            true,
         ),
         SshConnectivity::Failed {
             detail,
             remediation,
-        } => DoctorCheck::fixable(check_id, title, detail, remediation),
+        } => (
+            DoctorCheck::fixable(check_id, title, detail, remediation),
+            false,
+        ),
     }
 }
 
@@ -2087,10 +2301,15 @@ fn ssh_podman_runtime_check(
 /// `crun: create keyring` once the login user's keyring quota is exhausted, and
 /// sshd refuses new connections past `MaxStartups`. `sshd -T` needs root, so the
 /// directive is read from the config files instead; drop-ins may be unreadable,
-/// which the script reports rather than guessing.
+/// which the script reports rather than guessing. Rootless containers share the
+/// login user's inotify instances, so Ubuntu's 128 default fails worker bootstrap
+/// with EMFILE at about 30 containers (#1540).
 const SSH_PODMAN_HOST_LIMITS_SCRIPT: &str = r#"
 if [ -r /proc/sys/kernel/keys/maxkeys ]; then
     printf 'keys.max=%s\n' "$(cat /proc/sys/kernel/keys/maxkeys)"
+fi
+if [ -r /proc/sys/fs/inotify/max_user_instances ]; then
+    printf 'inotify.max_user_instances=%s\n' "$(cat /proc/sys/fs/inotify/max_user_instances)"
 fi
 if [ -r /proc/key-users ]; then
     awk -v uid="$(id -u)" '
@@ -2126,6 +2345,11 @@ exit 0
 /// margin.
 const KEYRING_PRESSURE_PERCENT: u64 = 80;
 
+/// The fleet template's inotify instance allowance, measured good on morannon.
+/// Ubuntu's 128 default fails worker bootstrap with EMFILE at about 30
+/// containers (#1540), so anything below this is reported as low.
+const INOTIFY_INSTANCES_HEALTHY: u64 = 8192;
+
 /// What `SSH_PODMAN_HOST_LIMITS_SCRIPT` managed to read. Every field is
 /// optional: an unreadable file is reported, never guessed at.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -2133,6 +2357,7 @@ struct HostLimits {
     keys_used: Option<u64>,
     keys_quota: Option<u64>,
     keys_max: Option<u64>,
+    inotify_max_user_instances: Option<u64>,
     max_startups: Option<String>,
     max_startups_unreadable: bool,
 }
@@ -2149,6 +2374,9 @@ fn parse_host_limits(stdout: &[u8]) -> HostLimits {
             "keys.used" => limits.keys_used = value.parse().ok(),
             "keys.quota" => limits.keys_quota = value.parse().ok(),
             "keys.max" => limits.keys_max = value.parse().ok(),
+            "inotify.max_user_instances" => {
+                limits.inotify_max_user_instances = value.parse().ok();
+            }
             "maxstartups" if !value.is_empty() => limits.max_startups = Some(value.to_owned()),
             "maxstartups.unreadable" => limits.max_startups_unreadable = value == "1",
             _ => {}
@@ -2163,6 +2391,7 @@ impl HostLimits {
         self.keys_used.is_none()
             && self.keys_quota.is_none()
             && self.keys_max.is_none()
+            && self.inotify_max_user_instances.is_none()
             && self.max_startups.is_none()
             && !self.max_startups_unreadable
     }
@@ -2202,9 +2431,18 @@ impl HostLimits {
             }
         }
     }
+
+    fn inotify_sentence(&self, destination: &str) -> String {
+        match self.inotify_max_user_instances {
+            Some(max) => {
+                format!("`fs.inotify.max_user_instances` on {destination} is {max}.")
+            }
+            None => format!("The inotify instance limit on {destination} could not be read."),
+        }
+    }
 }
 
-/// Report the two host limits that made provisioning fail under load. The
+/// Report the host limits that made provisioning fail under load. The
 /// target still works when they cannot be read, so an unreadable host is a
 /// warning with a manual command, never a `fixable` runtime failure.
 fn ssh_podman_limits_check(
@@ -2217,7 +2455,7 @@ fn ssh_podman_limits_check(
     let destination = &ssh.destination;
     let manual = || {
         format!(
-            "Read them by hand on {destination}: `cat /proc/key-users /proc/sys/kernel/keys/maxkeys` and `grep -ri maxstartups /etc/ssh/sshd_config /etc/ssh/sshd_config.d`."
+            "Read them by hand on {destination}: `cat /proc/key-users /proc/sys/kernel/keys/maxkeys /proc/sys/fs/inotify/max_user_instances` and `grep -ri maxstartups /etc/ssh/sshd_config /etc/ssh/sshd_config.d`."
         )
     };
     let command = ssh_validation_command(
@@ -2237,7 +2475,7 @@ fn ssh_podman_limits_check(
                 check_id,
                 title,
                 format!(
-                    "Could not read the kernel keyring quota or sshd MaxStartups from {destination}: {stderr}"
+                    "Could not read the kernel keyring quota, inotify instance limit, or sshd MaxStartups from {destination}: {stderr}"
                 ),
                 manual(),
             );
@@ -2247,7 +2485,7 @@ fn ssh_podman_limits_check(
                 check_id,
                 title,
                 format!(
-                    "Could not read the kernel keyring quota or sshd MaxStartups from {destination}: {error}"
+                    "Could not read the kernel keyring quota, inotify instance limit, or sshd MaxStartups from {destination}: {error}"
                 ),
                 manual(),
             );
@@ -2257,15 +2495,31 @@ fn ssh_podman_limits_check(
         return DoctorCheck::warning(
             check_id,
             title,
-            format!("{destination} reported no readable kernel keyring or sshd limits."),
+            format!("{destination} reported no readable kernel keyring, inotify, or sshd limits."),
             manual(),
         );
     }
     let detail = format!(
-        "{} {}",
+        "{} {} {}",
         limits.keyring_sentence(destination),
-        limits.max_startups_sentence()
+        limits.max_startups_sentence(),
+        limits.inotify_sentence(destination)
     );
+    if let Some(max) = limits
+        .inotify_max_user_instances
+        .filter(|max| *max < INOTIFY_INSTANCES_HEALTHY)
+    {
+        return DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "{detail} Rootless containers share the login user's inotify instances; the Ubuntu default of 128 fails worker bootstrap with `Too many open files` at about 30 containers."
+            ),
+            format!(
+                "Raise `fs.inotify.max_user_instances` and `user.max_inotify_instances` from {max} to {INOTIFY_INSTANCES_HEALTHY} with sysctl on {destination}; hosts mj makes get /etc/sysctl.d/90-mj-limits.conf from `mj ec2 create` or `mj ec2 tune`."
+            ),
+        );
+    }
     if limits.keyring_is_under_pressure() {
         return DoctorCheck::warning(
             check_id,
@@ -2551,6 +2805,7 @@ fn ssh_docker_check(
     }
 
     let image_command = ssh_command(
+        SshTrafficClass::Control,
         ssh,
         [
             "docker".to_owned(),
@@ -2691,6 +2946,7 @@ fn ssh_apple_container_check(
     // Apple's `container` CLI has no `--format` on `image inspect`, so the
     // exit status is what says the image is present.
     let image_command = ssh_command(
+        SshTrafficClass::Control,
         ssh,
         ["container", "image", "inspect", image]
             .map(str::to_owned)
@@ -2730,6 +2986,134 @@ fn ssh_apple_container_check(
     }
 }
 
+/// One check per `ssh-nitro` target: the host engine's own report (Firecracker,
+/// the memory pool reserved for sandboxes, the kernel), then the target's image
+/// and, with `--smoke`, a disposable sandbox.
+///
+/// Doctor only reads. An engine that is not installed yet is not a fault: the
+/// first launch (or the Targets pane's Test action) installs it.
+fn ssh_nitro_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    config
+        .targets
+        .iter()
+        .filter_map(|(id, target)| match target {
+            TargetTemplate::SshNitro { ssh, container } => Some(ssh_nitro_check(
+                id,
+                &RuntimeSshTarget::from(ssh),
+                &container.image,
+                executor,
+                smoke,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ssh_nitro_check(
+    id: &str,
+    ssh: &RuntimeSshTarget,
+    image: &str,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> DoctorCheck {
+    let check_id = format!("runtime.ssh-nitro.{id}");
+    let title = format!("Nitro sandboxes for target {id}");
+    let destination = &ssh.destination;
+    if let SshConnectivity::Failed {
+        detail,
+        remediation,
+    } = ssh_connectivity(ssh, executor)
+    {
+        return DoctorCheck::fixable(check_id, title, detail, remediation);
+    }
+    let preflight = match verify_ssh_nitro(ssh, executor) {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            let remediation = if error.is::<crate::targets::NitroEngineUnavailable>() {
+                format!(
+                    "Start a session on target {id}, or use Test in the Targets pane: the first use installs the sandbox engine on {destination}."
+                )
+            } else {
+                "Fix the host as the message says, or recreate it with `mj ec2 create --runtime nitro`."
+                    .to_owned()
+            };
+            return DoctorCheck::fixable(check_id, title, format!("{error:#}"), remediation);
+        }
+    };
+    if smoke {
+        let target = RuntimeTargetTemplate::SshNitro {
+            ssh: ssh.clone(),
+            container: RuntimeContainerTemplate {
+                build_cache: None,
+                image: image.to_owned(),
+                pull_policy: Default::default(),
+                extra_run_args: vec![],
+                workspace_storage: Default::default(),
+            },
+        };
+        return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
+            Ok(()) => DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "{}; disposable run/exec/remove smoke test passed for image {image}.",
+                    preflight.summary()
+                ),
+            ),
+            Err(error) => DoctorCheck::fixable(
+                check_id,
+                title,
+                format!(
+                    "Disposable run/exec/remove smoke test failed for image {image} on {destination}: {error:#}"
+                ),
+                format!(
+                    "Fix the configured image or the sandbox engine on {destination}, then run `mj doctor --json --smoke` again."
+                ),
+            ),
+        };
+    }
+    let image_command = ssh_engine_command(
+        SshTrafficClass::Control,
+        ssh,
+        MICROVM_ENGINE,
+        ["image", "inspect", "--format", "{{.Id}}", image],
+    )
+    .purpose("check remote Nitro sandbox image presence");
+    match executor.execute(&image_command) {
+        Ok(output) if output.status == 0 => DoctorCheck::ready(
+            check_id,
+            title,
+            format!(
+                "{}; image {image} is present. Run `mj doctor --json --smoke` to verify a disposable sandbox.",
+                preflight.summary()
+            ),
+        ),
+        Ok(output) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!(
+                "Image {image} is not present on {destination}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            "The first session pulls it, or run `mj doctor --json --smoke` to pull it now."
+                .to_owned(),
+        ),
+        Err(error) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!("Could not inspect Nitro sandbox image {image} on {destination}: {error}"),
+            format!("Verify `ssh {destination}` succeeds, then run `mj doctor` again."),
+        ),
+    }
+}
+
 /// Shared disposable-container identity for every doctor smoke test.
 fn doctor_smoke_id() -> String {
     format!(
@@ -2762,159 +3146,6 @@ fn podman_failure_detail(error: &anyhow::Error) -> String {
 /// as an unreachable SSH host, has no specific fix here.
 fn podman_remediation_match(error: &anyhow::Error) -> Option<&'static str> {
     failed_podman_postcondition(error).map(PodmanPostcondition::remediation)
-}
-
-const AWS_CLI_INSTALL_URL: &str =
-    "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html";
-
-/// One check per `aws-ec2` target: the AWS CLI, its credentials, and the
-/// configured launch template.
-fn aws_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
-    let Ok(config) = config else {
-        return Vec::new();
-    };
-    config
-        .targets
-        .iter()
-        .filter_map(|(id, target)| match target {
-            TargetTemplate::AwsEc2 {
-                aws_profile,
-                region,
-                launch_template,
-                ..
-            } => Some(aws_target_check(
-                id,
-                aws_profile.as_deref(),
-                region,
-                launch_template,
-                executor,
-            )),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The profile and region every AWS probe carries, applied exactly the way
-/// provisioning applies them in `targets`.
-fn aws_global_args<'a>(profile: Option<&'a str>, region: &'a str) -> Vec<String> {
-    vec![
-        "--profile".to_owned(),
-        profile.unwrap_or("default").to_owned(),
-        "--region".to_owned(),
-        region.to_owned(),
-    ]
-}
-
-fn aws_target_check(
-    id: &str,
-    profile: Option<&str>,
-    region: &str,
-    launch_template: &str,
-    executor: &impl CommandExecutor,
-) -> DoctorCheck {
-    let check_id = format!("runtime.aws-ec2.{id}");
-    let title = format!("AWS EC2 target {id}");
-    let profile_label = profile.unwrap_or("default");
-
-    let version = CommandSpec::new("aws", ["--version"]).purpose("check AWS CLI installation");
-    match executor.execute(&version) {
-        Err(error) => {
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!("The `aws` command is not available: {error}"),
-                format!("Install the AWS CLI and put `aws` on PATH: {AWS_CLI_INSTALL_URL}"),
-            );
-        }
-        Ok(output) if output.status != 0 => {
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!(
-                    "`aws --version` failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-                format!("Reinstall the AWS CLI: {AWS_CLI_INSTALL_URL}"),
-            );
-        }
-        Ok(_) => {}
-    }
-
-    let mut identity_args = aws_global_args(profile, region);
-    identity_args.extend(["sts".to_owned(), "get-caller-identity".to_owned()]);
-    identity_args.extend(["--output".to_owned(), "json".to_owned()]);
-    let identity =
-        CommandSpec::new("aws", identity_args).purpose("check AWS credentials for a doctor target");
-    match executor.execute(&identity) {
-        Err(error) => {
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!("Could not run `aws sts get-caller-identity`: {error}"),
-                format!(
-                    "Configure credentials with `aws configure --profile {profile_label}`, or sign in with `aws sso login --profile {profile_label}`."
-                ),
-            );
-        }
-        Ok(output) if output.status != 0 => {
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!(
-                    "AWS credentials for profile {profile_label} are not usable: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-                format!(
-                    "Configure credentials with `aws configure --profile {profile_label}`, or sign in with `aws sso login --profile {profile_label}`."
-                ),
-            );
-        }
-        Ok(_) => {}
-    }
-
-    // Launch templates are addressed by id when they carry the `lt-` prefix
-    // and by name otherwise, the same split provisioning uses.
-    let by_id = launch_template.starts_with("lt-");
-    let mut template_args = aws_global_args(profile, region);
-    template_args.extend(["ec2".to_owned(), "describe-launch-templates".to_owned()]);
-    template_args.extend([
-        if by_id {
-            "--launch-template-ids".to_owned()
-        } else {
-            "--launch-template-names".to_owned()
-        },
-        launch_template.to_owned(),
-    ]);
-    template_args.extend(["--output".to_owned(), "json".to_owned()]);
-    let template =
-        CommandSpec::new("aws", template_args).purpose("check the configured AWS launch template");
-    let template_remediation = format!(
-        "Create the launch template in {region}, or point this target at an existing one; `aws --profile {profile_label} --region {region} ec2 describe-launch-templates` lists them."
-    );
-    match executor.execute(&template) {
-        Err(error) => DoctorCheck::fixable(
-            check_id,
-            title,
-            format!("Could not query launch template {launch_template}: {error}"),
-            template_remediation,
-        ),
-        Ok(output) if output.status != 0 => DoctorCheck::fixable(
-            check_id,
-            title,
-            format!(
-                "Launch template {launch_template} was not found in {region}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            template_remediation,
-        ),
-        Ok(_) => DoctorCheck::ready(
-            check_id,
-            title,
-            format!(
-                "The AWS CLI is installed, profile {profile_label} has valid credentials, and launch template {launch_template} exists in {region}."
-            ),
-        ),
-    }
 }
 
 /// Whether the running daemon is this build.
@@ -3069,7 +3300,8 @@ fn container_worker_architectures(config: ConfigStatus<'_>) -> Vec<String> {
             | TargetTemplate::LocalDocker { container }
             | TargetTemplate::AppleContainer { container }
             | TargetTemplate::SshPodman { container, .. }
-            | TargetTemplate::SshDocker { container, .. } => container,
+            | TargetTemplate::SshDocker { container, .. }
+            | TargetTemplate::SshNitro { container, .. } => container,
             _ => continue,
         };
         let arch = container
@@ -3121,11 +3353,8 @@ fn worker_changed_since_daemon_start(path: &Path, started_at: &str) -> Result<bo
     let started: SystemTime = chrono::DateTime::parse_from_rfc3339(started_at)
         .map_err(|error| anyhow::anyhow!("parse daemon start time {started_at:?}: {error}"))?
         .into();
-    let modified = crate::host_fs::metadata_sync(path)?
-        .modified_ms
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .ok_or_else(|| anyhow::anyhow!("read modification time of {}", path.display()))?;
-    Ok(SystemTime::from(modified) > started)
+    let modified = std::fs::metadata(path)?.modified()?;
+    Ok(modified > started)
 }
 
 /// The targets the build-cache and worker-binary checks cover: every target
@@ -3194,6 +3423,9 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
             TargetTemplate::SshDocker { container, .. } => {
                 Some((id, container, Some("ssh-docker"), None))
             }
+            TargetTemplate::SshNitro { container, .. } => {
+                Some((id, container, Some("ssh-nitro"), None))
+            }
             // Apple container runs only native images, so this remote target
             // is Apple silicon whatever the controller's own machine is.
             TargetTemplate::SshAppleContainer { container, .. } => {
@@ -3211,21 +3443,27 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     }
     containers
         .into_iter()
-        .map(|(id, container, remote_kind, known_arch)| {
+        .flat_map(|(id, container, remote_kind, known_arch)| {
             if let Some(remote_kind) = remote_kind
                 && container.platform.is_none()
             {
-                // The remote CPU architecture is only observable once the host
-                // is reachable, so an explicit `platform` is required here.
-                return DoctorCheck::unsupported(
+                return vec![DoctorCheck::unsupported(
                     format!("worker.{id}"),
                     format!("Container worker binary for target {id}"),
-                    format!(
-                        "Set `platform` on this {remote_kind} target to check its worker binary; the remote architecture is unknown until provisioning."
-                    ),
-                );
+                    format!("Set `platform` on this {remote_kind} target to check its worker binary; the remote architecture is unknown until provisioning."),
+                )];
             }
-            worker_binary_check_on(id, container, known_arch)
+            let mut checks = vec![worker_binary_check_on(id, container, known_arch)];
+            let Ok(architecture) = known_arch.map_or_else(|| container_architecture(container.platform.as_deref()), Ok) else { return checks; };
+            let platform = mj_core::config::canonical_image_platform(architecture);
+            for (bundle_id, images) in &config.images.bundles {
+                if !config.bundles.contains_key(bundle_id) || !images.contains_key(platform) { continue; }
+                let mut effective = container.clone();
+                effective.image = config.session_image(Some(bundle_id), id, platform).expect("container target exists").to_owned();
+                effective.platform = Some(platform.to_owned());
+                checks.push(worker_binary_check_on(&format!("{id}.{bundle_id}.{platform}"), &effective, known_arch));
+            }
+            checks
         })
         .collect()
 }
@@ -3271,8 +3509,8 @@ fn worker_binary_check_on(
 ) -> DoctorCheck {
     let title = format!("Container worker binary for target {id}");
     let image = container.image.as_str();
-    let default_image = image == mj_core::config::DEFAULT_CONTAINER_IMAGE;
-    if default_image && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
+    let release_image = image == mj_core::config::RELEASE_CONTAINER_IMAGE;
+    if release_image && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
         return DoctorCheck::ready(
             format!("worker.{id}"),
             title,
@@ -3296,7 +3534,7 @@ fn worker_binary_check_on(
         &triple,
         worker_binary_prerequisite_for_arch(arch),
     );
-    let provenance = if default_image {
+    let provenance = if release_image {
         "the development image published from master"
     } else {
         "a configured image"
@@ -3370,7 +3608,7 @@ fn apple_container_image(config: ConfigStatus<'_>) -> String {
                 _ => None,
             })
         })
-        .unwrap_or_else(|| DEFAULT_CONTAINER_IMAGE.into())
+        .unwrap_or_else(|| SMOKE_TEST_IMAGE.into())
 }
 
 /// Platform support and daemon readiness shared by setup and doctor.
@@ -3563,18 +3801,19 @@ impl ReviewResidue {
 /// Releases before this one staged the whole working tree into the user's own
 /// object store and pinned it with two refs, and a capture that was killed
 /// partway left its scratch index behind. Linked worktrees pin their baselines
-/// under `refs/mj/worktrees/` (formerly `refs/hel/worktrees/`). All of it is the user's to remove, so this
-/// only reads.
+/// under `refs/mj/worktrees/` (formerly `refs/hel/worktrees/`). Review
+/// residue is the user's to remove, so this only reads. The managed base is
+/// retained state and must stay rooted for Git GC.
 pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     let mut residue = ReviewResidue::default();
     let git_dir = repository.join(".git");
-    if crate::host_fs::metadata_sync(&git_dir).is_err() {
+    if !git_dir.exists() {
         return residue;
     }
     loose_refs(&git_dir.join("refs/hel"), "refs/hel", &mut residue.refs);
     loose_refs(&git_dir.join("refs/mj"), "refs/mj", &mut residue.refs);
     // A packed ref survives `git pack-refs`, which a `git gc` runs.
-    if let Ok(packed) = crate::host_fs::read_to_string_sync(&git_dir.join("packed-refs")) {
+    if let Ok(packed) = std::fs::read_to_string(git_dir.join("packed-refs")) {
         for line in packed.lines() {
             if let Some((_, reference)) = line.split_once(' ')
                 && (reference.starts_with("refs/hel/") || reference.starts_with("refs/mj/"))
@@ -3584,12 +3823,32 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
             }
         }
     }
-    if let Ok(entries) = crate::host_fs::list_sync(&git_dir) {
-        for entry in entries {
-            if entry.name.starts_with("hel-review-index-") {
-                residue.scratch_indexes.push(git_dir.join(entry.name));
+    if let Ok(entries) = std::fs::read_dir(&git_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("hel-review-index-"))
+            {
+                residue.scratch_indexes.push(entry.path());
             }
         }
+    }
+    if residue
+        .refs
+        .iter()
+        .any(|reference| reference == mj_core::targets::HistoryCutoff::BASE_REF)
+        && matches!(
+            mj_checkpoint::archive::remote_workspace_base(
+                &mj_checkpoint::archive::SystemGit,
+                repository
+            ),
+            Ok(Some(_))
+        )
+    {
+        residue
+            .refs
+            .retain(|reference| reference != mj_core::targets::HistoryCutoff::BASE_REF);
     }
     residue.refs.sort();
     residue.scratch_indexes.sort();
@@ -3598,16 +3857,19 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
 
 /// Appends every loose ref stored under `directory`, named from `prefix`.
 fn loose_refs(directory: &Path, prefix: &str, refs: &mut Vec<String>) {
-    let Ok(entries) = crate::host_fs::list_sync(directory) else {
+    let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
-    for entry in entries {
-        let reference = format!("{prefix}/{}", entry.name);
-        let path = directory.join(entry.name);
-        match crate::host_fs::metadata_sync(&path) {
-            Ok(metadata) if metadata.is_dir => loose_refs(&path, &reference, refs),
-            Ok(metadata) if metadata.is_file => refs.push(reference),
-            _ => {}
+    for entry in entries.filter_map(Result::ok) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let reference = format!("{prefix}/{name}");
+        let path = entry.path();
+        if path.is_dir() {
+            loose_refs(&path, &reference, refs);
+        } else if path.is_file() {
+            refs.push(reference);
         }
     }
 }

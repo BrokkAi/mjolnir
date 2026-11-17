@@ -1,0 +1,118 @@
+{
+  "method": "existing audit.audit_reviewer, full saved transcript pages, no scanner fork",
+  "writers": [
+    {
+      "id": "model-overload-unknown-competitor-discarded",
+      "sid": "ed965eebe3d29d1abaed211da6d57d02",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/model-overload-unknown-competitor-discarded/reviewers/ed965eebe3d2/transcript.json",
+      "tool_items": 19,
+      "hits": []
+    },
+    {
+      "id": "rust-while-let-binder-body-field",
+      "sid": "90878775d6a298486f47617381db79a9",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-while-let-binder-body-field/reviewers/90878775d6a2/transcript.json",
+      "tool_items": 14,
+      "hits": [
+        {
+          "seq": 38,
+          "kind": "other-workspace",
+          "where": "input/output",
+          "snippet": "054dfa0752db439117fe0cd354046caa",
+          "classification": "false positive: historical repository plan text in git diff output, no foreign workspace access",
+          "reason": "Actual command is git diff base HEAD with cwd set to this writer own checkout. Output includes a historical .agents/plans/rust-a6-a1-a2-open-shapes.md diff quoting an earlier TMPDIR/report workspace path. No command opens or executes that foreign path, builds, or tests.",
+          "actual_command": "git diff ead7aa834e2ab6718e6e7dea058cda2986db2ecf HEAD",
+          "actual_cwd": "/workspace/90878775d6a298486f47617381db79a9/bifrost-dev",
+          "evidence_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/audit-hit-rust-while-let-38.json"
+        }
+      ]
+    },
+    {
+      "id": "javascript-object-method-indexed-as-field",
+      "sid": "669ced85cbe642ab57b3fb55f0e9b1f3",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/javascript-object-method-indexed-as-field/reviewers/669ced85cbe6/transcript.json",
+      "tool_items": 9,
+      "hits": []
+    },
+    {
+      "id": "matching-analyzer-epoch-needs-writer-slot",
+      "sid": "85b3ccf8e8593227d6c7b4bafac37e73",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/matching-analyzer-epoch-needs-writer-slot/reviewers/85b3ccf8e859/transcript.json",
+      "tool_items": 17,
+      "hits": []
+    },
+    {
+      "id": "maintainability-file-cap-missing-truncated",
+      "sid": "526babaf9257ad36ee12b0164533f0ee",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/maintainability-file-cap-missing-truncated/reviewers/526babaf9257/transcript.json",
+      "tool_items": 12,
+      "hits": []
+    },
+    {
+      "id": "rust-enum-variant-named-fields-omitted",
+      "sid": "be1fea635a78e844eb820a7d82d514d1",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-enum-variant-named-fields-omitted/reviewers/be1fea635a78/transcript.json",
+      "tool_items": 11,
+      "hits": []
+    },
+    {
+      "id": "rust-importer-planning-widens-to-code-mentions",
+      "sid": "bb7f122893e6d596d0152fa0eb0f41e5",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-importer-planning-widens-to-code-mentions/reviewers/bb7f122893e6/transcript.json",
+      "tool_items": 19,
+      "hits": []
+    },
+    {
+      "id": "rust-item-macro-evades-plain-struct-drop-proof",
+      "sid": "7c9f8f68b353d82a0cf900ba0fad1e9f",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-item-macro-evades-plain-struct-drop-proof/reviewers/7c9f8f68b353/transcript.json",
+      "tool_items": 16,
+      "hits": []
+    },
+    {
+      "id": "mcp-timed-out-progress-survives-response",
+      "sid": "8ffdf0d78d0f3a7a302b9a6de713f68b",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/mcp-timed-out-progress-survives-response/reviewers/8ffdf0d78d0f/transcript.json",
+      "tool_items": 13,
+      "hits": []
+    },
+    {
+      "id": "csharp-single-file-namespace-prunes-usages",
+      "sid": "6b340e577d561d88c2f4847fdfd93637",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/csharp-single-file-namespace-prunes-usages/reviewers/6b340e577d56/transcript.json",
+      "tool_items": 20,
+      "hits": []
+    },
+    {
+      "id": "rust-bare-value-admits-associated-constant",
+      "sid": "a0d1c870e1c1041364d7b71d206b47cd",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-bare-value-admits-associated-constant/reviewers/a0d1c870e1c1/transcript.json",
+      "tool_items": 33,
+      "hits": []
+    },
+    {
+      "id": "ruby-constant-navigation-climbs-to-terminal",
+      "sid": "f674f2614a8932f05d4f3029ecde1d2f",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/ruby-constant-navigation-climbs-to-terminal/reviewers/f674f2614a89/transcript.json",
+      "tool_items": 19,
+      "hits": []
+    },
+    {
+      "id": "rust-option-return-implicitly-unwrapped",
+      "sid": "f8126ef4bb4587d420202a5d2cbf7adb",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-option-return-implicitly-unwrapped/reviewers/f8126ef4bb45/transcript.json",
+      "tool_items": 13,
+      "hits": []
+    }
+  ],
+  "coverage": {
+    "expected": 13,
+    "audited": 13,
+    "tool_items": 215,
+    "raw_hits": 1,
+    "missing_transcripts": []
+  },
+  "classification_status": "all raw hits manually classified; no actual forbidden access/build/test found",
+  "actual_forbidden_operations": [],
+  "recorded_at": "2026-11-17T06:32:07.310631+00:00"
+}

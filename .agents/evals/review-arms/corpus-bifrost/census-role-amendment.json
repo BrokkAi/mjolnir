@@ -1,0 +1,24 @@
+{
+  "recorded_at": "2026-11-17T03:05:49.879699+00:00",
+  "authority": "dbcece95f1cdc80785d2df3f995138f2",
+  "verbatim": "Amendment to the census roles, 2026-11-17, before the labels are frozen and before any brief or review. Carbon's first unit (5 of 30 diffs) used 4 points of the gemini2 week, which leaves about 4 points, not the roughly 20 that the other five units need. Quota forces this change, not the labels. The roles are now:\n- GPT-6.1 Sol/high is the primary pass. Its 6 units are already complete.\n- Carbon's completed unit is a partial replication. No further Carbon units run.\n- The relation set is the diffs whose Sol kind is not `none`.\n- Agreement is reported on the 5 diffs both models labelled, with that n stated.\n\nThe readout says that the primary labeller differs from mjolnir's census, so the relation shares of the two codebases are not directly comparable.",
+  "reason": "quota, not labels",
+  "primary_model": "gpt-6.1-sol",
+  "primary_effort": "high",
+  "primary_n": 30,
+  "replication_model": "gemini-4-carbon",
+  "replication_effort": "high",
+  "replication_n": 5,
+  "replication_ids": [
+    "rust-option-return-implicitly-unwrapped",
+    "csharp-single-file-namespace-prunes-usages",
+    "model-overload-unknown-competitor-discarded",
+    "javascript-object-method-indexed-as-field",
+    "kotlin-value-class-this-loses-underlying-projection"
+  ],
+  "replication_subset_basis": "Original frozen Carbon batch-00 from seed20261114, not selected using outcomes.",
+  "amended_plan_sha256": "1e35c37b33595083925132dbc07f8527420f1d9fb72d3453e06edb55bd9cdbf3",
+  "original_pre_census_plan_preserved": "registration/PLAN-bifrost-bugs.md",
+  "label_adjudication": false,
+  "selection_on_labels": false
+}

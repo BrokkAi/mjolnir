@@ -136,7 +136,7 @@ pub(crate) struct NewArgs {
     /// Title shown in session lists. Defaults to the project and profile.
     #[arg(long)]
     title: Option<String>,
-    /// Choose a quota-ranked usable profile for this model and optional effort.
+    /// Load balance across usable profiles for this model and optional effort.
     #[arg(long, conflicts_with = "profile")]
     model: Option<String>,
     /// Harness reasoning effort to select before the first prompt.
@@ -146,6 +146,9 @@ pub(crate) struct NewArgs {
     /// Omitted uses Native.
     #[arg(long)]
     subagents: Option<String>,
+    /// Oracle availability for this session.
+    #[arg(long, value_parser = ["enabled", "disabled"])]
+    oracle: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -158,27 +161,24 @@ pub(crate) struct NewArgs {
     /// Override subtle sub-agent effort (requires --subagent-subtle).
     #[arg(long)]
     subagent_subtle_effort: Option<String>,
+    /// Oracle model for this session, independent of delegation.
+    #[arg(long)]
+    subagent_oracle: Option<String>,
+    /// Oracle effort; requires --subagent-oracle.
+    #[arg(long, requires = "subagent_oracle")]
+    subagent_oracle_effort: Option<String>,
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_model: Option<String>,
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_effort: Option<String>,
-    /// Override the reviewer model while keeping the configured review trigger.
-    /// Without a `[review]` profile, Auto picks a profile that offers the model.
-    #[arg(long)]
-    review_model: Option<String>,
-    /// Override reviewer effort while keeping the configured review trigger.
-    #[arg(long)]
-    review_effort: Option<String>,
-    /// Independent reviewers per review. 1–3 is reasonable; more has diminishing returns.
-    #[arg(long)]
-    review_count: Option<std::num::NonZeroUsize>,
-    /// Deprecated compatibility option; the value is ignored.
-    #[arg(long, hide = true, value_parser = ["quick", "extended"])]
-    review_tier: Option<String>,
-    /// Review trigger for this session, overriding `[review]`.
-    #[arg(long, value_parser = ["off", "turn", "push"])]
+    /// Reviewer model and optional effort; final colon suffix is effort only when a known effort (minimal, low, medium, high, xhigh, max); trailing colon escapes it. Repeat up to three times.
+    #[arg(long = "reviewer", value_name = "MODEL[:EFFORT]")]
+    reviewers: Vec<String>,
+    /// Whether this session is reviewed before push (`push`) or not (`off`).
+    /// Omitted follows `[review]`: review runs when reviewers are configured.
+    #[arg(long, value_name = "off|push")]
     review: Option<String>,
     /// Start this session with no project memory: nothing from the
     /// workspace's project memory is loaded into the harness, and the harness
@@ -191,6 +191,9 @@ pub(crate) struct NewArgs {
     /// Sub-agents inherit the choice.
     #[arg(long)]
     no_github_events: bool,
+    /// Withhold GitHub credentials from this session and its children.
+    #[arg(long)]
+    no_github_credentials: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
     /// size last chosen for that host, else 4 CPUs, capped at the host's.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -493,6 +496,10 @@ fn model_usage_lines(groups: &[mj_core::storage::UsageModelTotal]) -> Vec<String
     lines
 }
 
+fn turn_cost_usd(ticks: u64) -> String {
+    mj_core::usage::ProviderTurnCost::from_usd_ticks(ticks, false).usd
+}
+
 fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
     let coverage = &tree.summary.coverage;
     let mut lines = vec![
@@ -510,6 +517,13 @@ fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
     lines.push(format!(
         "not in totals: {} last-request, {} unknown-scope, {} missing reports",
         coverage.last_request_reports, coverage.unspecified_reports, coverage.missing_reports
+    ));
+    lines.push(format!(
+        "priced turn cost: {} USD ({} provider, {} estimated, {} missing costs)",
+        turn_cost_usd(tree.summary.turn_cost_usd_ticks),
+        coverage.provider_cost_turns,
+        coverage.estimated_cost_turns,
+        coverage.missing_cost_turns
     ));
     for session in &tree.sessions {
         lines.push(format!(
@@ -529,6 +543,14 @@ fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
                 cost.amount, cost.currency
             ));
         }
+        let cost_coverage = &session.summary.coverage;
+        lines.push(format!(
+            "  priced turn cost: {} USD ({} provider, {} estimated, {} missing costs)",
+            turn_cost_usd(session.summary.turn_cost_usd_ticks),
+            cost_coverage.provider_cost_turns,
+            cost_coverage.estimated_cost_turns,
+            cost_coverage.missing_cost_turns
+        ));
     }
     lines
 }
@@ -577,6 +599,13 @@ fn usage_lines(page: &mj_core::storage::UsagePage) -> Vec<String> {
             cost.amount, cost.currency
         ));
     }
+    lines.push(format!(
+        "priced turn cost: {} USD ({} provider, {} estimated, {} missing costs)",
+        turn_cost_usd(page.turn_cost_usd_ticks),
+        coverage.provider_cost_turns,
+        coverage.estimated_cost_turns,
+        coverage.missing_cost_turns
+    ));
     lines.extend(model_usage_lines(&page.by_model));
     if coverage.unfinished_turns > 0 {
         lines.push(format!(
@@ -893,6 +922,7 @@ pub(crate) struct SuspendArgs {
     json: bool,
 }
 
+/// Remove the session even if environment cleanup fails; report remaining resources in a warning.
 #[derive(Debug, Args)]
 pub(crate) struct DestroyArgs {
     /// Session id, as `mj sessions` lists it.
@@ -904,6 +934,34 @@ pub(crate) struct DestroyArgs {
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct NoticesArgs {
+    /// Session id; notices remain readable after the session is removed.
+    #[arg(long)]
+    session: String,
+    /// Print the response as JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+pub(crate) async fn notices(args: NoticesArgs) -> Result<()> {
+    let notices = ApiClient::connect().await?.notices(&args.session).await?;
+    if args.json {
+        print_json(&notices)
+    } else {
+        if notices.is_empty() {
+            println!(
+                "No cleanup notices are currently retained for {}. Notices can arrive while destruction runs; they are kept in the current daemon's recent notice history.",
+                args.session
+            );
+        }
+        for notice in notices {
+            println!("{}", sanitize_terminal_text(&notice.text));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Args)]
@@ -1051,6 +1109,29 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
     )
 }
 
+pub(crate) fn oracle_override(
+    model: Option<&str>,
+    effort: Option<&str>,
+    enabled: Option<&str>,
+) -> Result<Option<mj_core::config::SubagentChoice>> {
+    if effort.is_some() && model.is_none() {
+        bail!("--subagent-oracle-effort requires --subagent-oracle");
+    }
+    if effort == Some("adaptive") {
+        bail!("adaptive oracle effort is not supported");
+    }
+    if model.is_some() && enabled == Some("disabled") {
+        bail!("--subagent-oracle cannot be used with --oracle disabled");
+    }
+    if model.is_some_and(|model| model.trim().is_empty()) {
+        bail!("--subagent-oracle requires a model name");
+    }
+    Ok(model.map(|model| mj_core::config::SubagentChoice {
+        model: model.to_owned(),
+        effort: effort.map(str::to_owned),
+    }))
+}
+
 pub(crate) fn subagent_policy(
     mode: Option<&str>,
     straightforward: Option<&str>,
@@ -1061,7 +1142,7 @@ pub(crate) fn subagent_policy(
     retired_effort: Option<&str>,
 ) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
-    const REMEDY: &str = "Configure [subagents.straightforward], and optionally [subagents.subtle], in config.toml or TUI Settings -> Sub-agents";
+    const REMEDY: &str = "Configure [subagents.straightforward] and optionally [subagents.subtle], or their [subagents.yolo.*] counterparts for a YOLO target, in config.toml or TUI Settings -> Sub-agents";
     if retired_model.is_some() || retired_effort.is_some() {
         bail!(
             "--subagent-model and --subagent-effort are retired; use --subagent-straightforward, --subagent-straightforward-effort, --subagent-subtle, and --subagent-subtle-effort"
@@ -1112,55 +1193,61 @@ pub(crate) fn subagent_policy(
     })
 }
 
+/// Said when a session asks for the review mode that was removed.
+const TURN_REVIEW_REMOVED: &str = "Per-turn review was removed. Use `--review push`, or omit `--review` to review before push when reviewers are configured.";
+
 /// The session's review overrides, or `None` to follow all of `[review]`.
-fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> {
-    session_review(
-        args.review.as_deref(),
-        args.review_model.as_deref(),
-        args.review_effort.as_deref(),
-        args.review_tier.as_deref(),
-        args.review_count,
-    )
+fn new_session_review(args: &NewArgs) -> Result<Option<mj_core::config::SessionReview>> {
+    session_review(args.review.as_deref(), &args.reviewers)
 }
 
 /// The review flags shared by `mj new` and `mj import`.
 pub(crate) fn session_review(
     trigger: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-    tier: Option<&str>,
-    count: Option<std::num::NonZeroUsize>,
-) -> Option<mj_core::config::SessionReview> {
+    choices: &[String],
+) -> Result<Option<mj_core::config::SessionReview>> {
     use mj_core::config::SessionReview;
-    let model = model.map(str::to_owned);
-    let effort = effort.map(str::to_owned);
+    ensure!(
+        choices.len() <= mj_core::config::MAX_REVIEWERS,
+        "at most three --reviewer values are allowed"
+    );
+    let reviewers = choices
+        .iter()
+        .map(|value| {
+            let (model, effort) =
+                value
+                    .rsplit_once(':')
+                    .map_or((value.as_str(), None), |(model, suffix)| {
+                        if matches!(
+                            suffix,
+                            "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+                        ) {
+                            (model, Some(suffix))
+                        } else if suffix.is_empty() {
+                            (model, None)
+                        } else {
+                            (value.as_str(), None)
+                        }
+                    });
+            ensure!(!model.trim().is_empty(), "reviewer model must not be empty");
+            Ok(mj_core::config::SubagentChoice {
+                model: model.to_owned(),
+                effort: effort.map(str::to_owned),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let reviewers = (!reviewers.is_empty()).then_some(reviewers);
     let Some(trigger) = trigger else {
-        // Reviewer overrides preserve the configured trigger. The deprecated
-        // tier is accepted but does not change it.
-        return (model.is_some() || effort.is_some() || count.is_some() || tier.is_some())
-            .then_some(SessionReview::Inherit {
-                count,
-                model,
-                effort,
-                tier: None,
-            });
+        return Ok(reviewers.map(|reviewers| SessionReview::Inherit {
+            reviewers: Some(reviewers),
+        }));
     };
-    Some(match trigger {
+    Ok(Some(match trigger {
         "off" => SessionReview::Off,
-        "push" => SessionReview::Push {
-            count,
-            model,
-            effort,
-            tier: None,
-        },
-        "turn" => SessionReview::Turn {
-            count,
-            model,
-            effort,
-            tier: None,
-        },
-        _ => unreachable!("clap validates the review trigger"),
-    })
+        "push" => SessionReview::Push { reviewers },
+        "turn" => bail!("{TURN_REVIEW_REMOVED}"),
+        other => bail!("unknown --review value {other:?}; use off or push"),
+    }))
 }
 
 /// Create a session and deliver its optional first prompt.
@@ -1184,9 +1271,16 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let request = StartSessionRequest {
         remember_container_size: false,
         subagents: new_subagent_policy(&args)?,
-        review: new_session_review(&args),
+        oracle: args.oracle.as_deref().map(|choice| choice == "enabled"),
+        oracle_choice: oracle_override(
+            args.subagent_oracle.as_deref(),
+            args.subagent_oracle_effort.as_deref(),
+            args.oracle.as_deref(),
+        )?,
+        review: new_session_review(&args)?,
         no_project_memory: args.no_project_memory,
         no_github_events: args.no_github_events,
+        no_github_credentials: args.no_github_credentials,
         create_managed_worktree: None,
         at: args.at.clone(),
         branch: args.branch.clone(),
@@ -1213,7 +1307,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let client = ApiClient::connect().await?;
     let response = client.start(&request).await.map_err(name_launch_flags)?;
     if let Some(notice) = &response.notice {
-        eprintln!("{}", sanitize_terminal_text(notice));
+        write_start_notice(std::io::stderr().lock(), notice)?;
     }
     if args.json {
         return print_json(&response);
@@ -1223,6 +1317,13 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         println!("turn {turn_id}");
     }
     Ok(())
+}
+
+pub(crate) fn write_start_notice(
+    mut output: impl std::io::Write,
+    notice: &str,
+) -> std::io::Result<()> {
+    writeln!(output, "{}", sanitize_terminal_text(notice))
 }
 
 /// Name the command-line flags where a refused start names the API's fields.
@@ -1535,15 +1636,19 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         ));
     }
     lines.push(summary);
-    // A wait for turn N answers with the latest turn that ended, which is a
-    // later turn when the session has moved on. Say so rather than let the
-    // reply read as turn N's.
-    if let (Some(requested), Some(answered)) = (response.requested_turn_id, response.turn_id)
-        && answered > requested
+    // A wait for turn N answers with the latest turn that ended, which can be
+    // another turn: a later one, an earlier one that ended after N was
+    // removed from the queue, or one the session ran without a prompt. Only
+    // an answer about a finished turn has a turn number.
+    if let Some(requested) = response.requested_turn_id
+        && response.turn_number.is_some()
+        && response.turn_id != Some(requested)
     {
-        lines.push(format!(
-            "this is turn {answered}, which ended after turn {requested}; a session keeps only its latest turn's outcome and reply"
-        ));
+        let answered = response.turn_id.map_or_else(
+            || "a turn the session ran without a prompt".to_owned(),
+            |turn| format!("turn {turn}"),
+        );
+        lines.push(format!("this is the outcome of {answered}, not of turn {requested}; a session keeps only its latest turn's outcome and reply"));
     }
     // The wait's message, the diagnostic and the agent's last message are
     // often one sentence (a Codex quota error was printed three times,
@@ -1602,7 +1707,9 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
 fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
     let mut lines = vec![format!(
         "{}  {}  {}",
-        session.id, session.state, session.title
+        session.id,
+        listed_state(session),
+        session.title
     )];
     // Silence is reported, never acted on. A turn waiting on a long build
     // is quiet and healthy, so this says what is true and leaves the
@@ -1619,6 +1726,9 @@ fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
     }
     if let Some(problem) = &session.storage_problem {
         lines.push(problem.clone());
+    }
+    if let Some(error) = &session.profile_login_error {
+        lines.push(format!("profile {}: {error}", session.profile_id));
     }
     if let Some(outcome) = &session.last_turn_outcome {
         lines.push(format!("last turn {}", outcome.outcome));
@@ -1666,7 +1776,7 @@ pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
     for item in &page.items {
         println!("[{}] {}", item.seq, item.role);
         if !item.text.trim().is_empty() {
-            println!("{}", item.text.trim_end());
+            println!("{}", sanitize_terminal_text(item.text.trim_end()));
         }
         println!();
     }
@@ -1689,7 +1799,13 @@ pub(crate) async fn diff(args: DiffArgs) -> Result<()> {
     if args.json {
         return print_json(&details);
     }
-    print!("{}", details.diff);
+    // A redirected patch keeps its exact bytes (CRLF, control characters) so
+    // it still applies; only a terminal gets the inert rendering.
+    if std::io::stdout().is_terminal() {
+        print!("{}", sanitize_terminal_text(&details.diff));
+    } else {
+        print!("{}", details.diff);
+    }
     std::io::stdout()
         .flush()
         .context("write the session diff")?;
@@ -1743,21 +1859,33 @@ pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
     let fetched = client.fetch(&args.session, &args.path, args.ls).await?;
     if args.ls {
         let listing: mj_checkpoint::archive::SessionListing =
-            serde_json::from_slice(&fetched.bytes).context("decode the listing")?;
+            tokio::task::spawn_blocking(move || {
+                serde_json::from_reader(fetched.reader()).context("decode the listing")
+            })
+            .await??;
         if args.json {
             return print_json(&listing);
         }
         print_lines(listing_lines(&listing));
         return Ok(());
     }
-    if args.stdout {
-        let mut stdout = std::io::stdout().lock();
-        stdout
-            .write_all(&fetched.bytes)
-            .context("write the fetched path")?;
-        return stdout.flush().context("write the fetched path");
-    }
-    let saved = fetched.save(&std::env::temp_dir(), &args.session)?;
+    let session = args.session.clone();
+    let saved = tokio::task::spawn_blocking(
+        move || -> Result<Option<mj_checkpoint::archive::SavedFetch>> {
+            if args.stdout {
+                let mut stdout = std::io::stdout().lock();
+                std::io::copy(&mut fetched.reader(), &mut stdout)
+                    .context("write the fetched path")?;
+                stdout.flush().context("write the fetched path")?;
+                return Ok(None);
+            }
+            Ok(Some(fetched.save(&std::env::temp_dir(), &session)?))
+        },
+    )
+    .await??;
+    let Some(saved) = saved else {
+        return Ok(());
+    };
     if args.json {
         return print_json(&saved);
     }
@@ -1849,7 +1977,14 @@ pub(crate) async fn sessions(
             listed_state(session),
             sanitize_terminal_text(&session.title)
         );
-        if session.has_error {
+        if let Some(error) = &session.profile_login_error {
+            println!(
+                "  profile {}: {}",
+                sanitize_terminal_text(&session.profile_id),
+                sanitize_terminal_text(error)
+            );
+        }
+        if session.attention == mj_core::attention::SessionAttention::Failed {
             println!(
                 "  error details: run `mj sessions --session {}`",
                 session.id
@@ -1862,10 +1997,25 @@ pub(crate) async fn sessions(
 /// The STATE column: the session's state, and "disk full" when its target
 /// cannot take writes. `--session` prints the whole reason.
 fn listed_state(session: &ApiSession) -> String {
-    match session.storage_problem {
-        Some(_) => format!("{} (disk full)", session.state),
-        None => session.state.clone(),
+    use mj_core::attention::SessionAttention;
+    let attention = match session.attention {
+        SessionAttention::NeedsInput => Some("needs input"),
+        SessionAttention::Important => Some("important"),
+        SessionAttention::Failed => Some("failed"),
+        SessionAttention::Unreachable => Some("unreachable"),
+        _ => None,
+    };
+    let mut state = session.state.clone();
+    if let Some(attention) = attention {
+        state.push_str(&format!(" ({attention})"));
     }
+    if session.storage_problem.is_some() {
+        state.push_str(" (disk full)");
+    }
+    if session.profile_login_error.is_some() {
+        state.push_str(" (login required)");
+    }
+    state
 }
 
 /// Report one SessionWiki row for an id that names no Mjolnir session.
@@ -1940,12 +2090,16 @@ pub(crate) async fn destroy(args: DestroyArgs) -> Result<()> {
         .await?;
     if args.json {
         print_json(
-            &serde_json::json!({"session_id": args.session, "accepted": true, "operation": "destroy"}),
+            &serde_json::json!({"session_id": args.session, "accepted": true, "operation": "destroy", "notices_url": format!("/api/v1/sessions/{}/notices", args.session)}),
         )
     } else {
         println!("destruction accepted for {}", args.session);
         println!(
             "it finishes in the background; check removal with `mj sessions --session {}`",
+            args.session
+        );
+        println!(
+            "read cleanup warnings with `mj notices --session {}`",
             args.session
         );
         Ok(())
@@ -2183,14 +2337,20 @@ enum ReviewCommand {
     /// Show the review the session has open: what it is doing, each reviewing
     /// role, and its verdict once it has one.
     Status(SessionArgs),
-    /// Send the open review's findings to the primary agent. Findings are
-    /// forwarded automatically; this retries a forward the agent refused.
-    Forward(SessionArgs),
-    /// Close the open review and accept the change as reviewed.
-    Dismiss(SessionArgs),
-    /// Close the open review without accepting the change, so a later review
-    /// covers it again.
-    Cancel(SessionArgs),
+    /// Show a finished review's per-reviewer output: each reviewer's model,
+    /// effort and profile, its full handback, its verdict, and its usage.
+    /// Works after the reviewer sessions have been destroyed.
+    Show(ReviewShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ReviewShowArgs {
+    #[command(flatten)]
+    session: SessionArgs,
+    /// Review id, as a verdict message names it. Defaults to the newest
+    /// finished review for the session.
+    #[arg(long)]
+    review: Option<String>,
 }
 
 pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
@@ -2217,19 +2377,17 @@ pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
             print_lines(review_lines(status.review.as_ref()));
             Ok(())
         }
-        ReviewCommand::Forward(args) => resolve_review(&client, &args, "forward").await,
-        ReviewCommand::Dismiss(args) => resolve_review(&client, &args, "dismiss").await,
-        ReviewCommand::Cancel(args) => resolve_review(&client, &args, "cancel").await,
+        ReviewCommand::Show(args) => {
+            let response = client
+                .finished_review(&args.session.session, args.review.as_deref())
+                .await?;
+            if args.session.json {
+                return print_json(&response);
+            }
+            print_lines(finished_review_lines(&response));
+            Ok(())
+        }
     }
-}
-
-async fn resolve_review(client: &ApiClient, args: &SessionArgs, resolution: &str) -> Result<()> {
-    let resolved = client.resolve_review(&args.session, resolution).await?;
-    if args.json {
-        return print_json(&resolved);
-    }
-    println!("review on {}: {resolution}", args.session);
-    Ok(())
 }
 
 /// A review as plain lines: its status, one line per role, then the verdict
@@ -2244,9 +2402,6 @@ fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec
     }
     if let Some(verdict) = &review.verdict {
         lines.push(format!("verdict: {}", verdict.kind));
-        if !verdict.allowed.is_empty() {
-            lines.push(format!("resolve with: {}", verdict.allowed.join(", ")));
-        }
         if !verdict.text.is_empty() {
             lines.push(String::new());
             lines.push(verdict.text.clone());
@@ -2255,20 +2410,125 @@ fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec
     lines
 }
 
-/// Print where the API is and which file holds its token, which is what a
-/// caller driving it with curl needs.
+/// A finished review as plain lines, including each reviewer's full handback
+/// and the usage its deleted child session still accounts for.
+fn finished_review_lines(
+    response: &mj_controller::server::api::FinishedReviewResponse,
+) -> Vec<String> {
+    let Some(review) = &response.review else {
+        return vec![format!(
+            "no finished review is recorded for {}",
+            response.session_id
+        )];
+    };
+    let resolution = match review.resolution {
+        mj_controller::database::FinishedReviewResolution::Completed => "completed",
+        mj_controller::database::FinishedReviewResolution::Failed => "failed",
+        mj_controller::database::FinishedReviewResolution::Cancelled => "cancelled",
+    };
+    let finished = chrono::DateTime::from_timestamp_millis(review.finished_at_ms)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| format!("{} ms", review.finished_at_ms));
+    let mut lines = vec![format!(
+        "review {}: {resolution}, finished {finished}",
+        review.review_id
+    )];
+    for role in &review.roles {
+        lines.push(format!(
+            "  {} ({}) profile {}; model {}; effort {}",
+            role.label,
+            role.role,
+            if role.profile.is_empty() {
+                "unknown"
+            } else {
+                &role.profile
+            },
+            role.model.as_deref().unwrap_or("harness default"),
+            role.effort.as_deref().unwrap_or("default effort"),
+        ));
+        match role.verdict.as_ref() {
+            Some(mj_core::review::verdict::ReviewVerdict::Clean) => {
+                lines.push("    verdict: clean".to_owned());
+            }
+            Some(mj_core::review::verdict::ReviewVerdict::Findings { synthesis, .. }) => {
+                lines.push("    verdict: findings".to_owned());
+                for line in synthesis.lines() {
+                    lines.push(format!("      {line}"));
+                }
+            }
+            Some(mj_core::review::verdict::ReviewVerdict::Failed { reason }) => {
+                lines.push(format!("    verdict: failed: {reason}"));
+            }
+            None => lines.push("    verdict: none (the reviewer did not settle)".to_owned()),
+        }
+        if let Some(turn) = &role.turn {
+            let result = turn.result();
+            let kind = match result.kind {
+                mj_core::event_outcome::TurnResultKind::Completed => "completed",
+                mj_core::event_outcome::TurnResultKind::InputRequired => "input required",
+                mj_core::event_outcome::TurnResultKind::Cancelled => "cancelled",
+                mj_core::event_outcome::TurnResultKind::Rejected => "rejected",
+                mj_core::event_outcome::TurnResultKind::Interrupted => "interrupted",
+                mj_core::event_outcome::TurnResultKind::Failed => "failed",
+            };
+            let detail = result
+                .message
+                .as_deref()
+                .or(result.stop_reason.as_deref())
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default();
+            lines.push(format!("    turn: {kind}{detail}"));
+            if let Some(usage) = &turn.usage {
+                let mut counters = vec![
+                    format!("total {}", usage.total_tokens),
+                    format!("input {}", usage.input_tokens),
+                    format!("output {}", usage.output_tokens),
+                ];
+                for (name, value) in [
+                    ("thought", usage.thought_tokens),
+                    ("cached read", usage.cached_read_tokens),
+                    ("cached write", usage.cached_write_tokens),
+                ] {
+                    if let Some(value) = value {
+                        counters.push(format!("{name} {value}"));
+                    }
+                }
+                lines.push(format!("    usage: {}", counters.join(", ")));
+            }
+        }
+        if let Some(handback) = &role.handback {
+            lines.push("    handback:".to_owned());
+            if handback.is_empty() {
+                lines.push("      (empty)".to_owned());
+            }
+            for line in handback.lines() {
+                lines.push(format!("      {line}"));
+            }
+        }
+    }
+    lines
+}
+
+/// Print the API location without exposing credentials.
 pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    let token_path = ApiClient::token_path();
     if args.json {
         return print_json(&serde_json::json!({
             "base_url": format!("{}/api/v1", client.base_url()),
-            "token_path": token_path,
         }));
     }
     println!("base url   {}/api/v1", client.base_url());
-    println!("token file {}", token_path.display());
     println!("version    Mjolnir API 1");
+    Ok(())
+}
+
+/// Explicit credential output for callers authenticating outside the CLI.
+pub(crate) async fn api_token() -> Result<()> {
+    let mut client = crate::daemon::connect_or_start().await?;
+    // The daemon sets the credential before it publishes viewer readiness;
+    // a daemon this command just started may not have reached that point.
+    crate::daemon::wait_for_web_access(&mut client).await?;
+    println!("{}", client.api_credential().await?);
     Ok(())
 }
 
@@ -2387,12 +2647,20 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
 
 #[derive(Debug, Args)]
 pub(crate) struct ModelsArgs {
-    /// Profile whose harness to ask.
+    /// Profile whose harness to ask. Omitted lists the models every enabled
+    /// profile offers, with the profiles supporting each.
     #[arg(long)]
-    profile: String,
+    profile: Option<String>,
     /// List the efforts this model offers instead of the default model's.
-    #[arg(long)]
+    #[arg(long, requires = "profile")]
     model: Option<String>,
+    /// List every model the harness advertises, ignoring the profile's
+    /// `models` allow-list. Use it to find the exact values to put there.
+    #[arg(long, conflicts_with = "model")]
+    unrestricted: bool,
+    /// With no --profile, include disabled profiles in the aggregate.
+    #[arg(long)]
+    with_disabled: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -2414,24 +2682,175 @@ pub(crate) struct SetConfigArgs {
     json: bool,
 }
 pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
-    let choices = ApiClient::connect()
-        .await?
-        .models(&args.profile, args.model)
+    let mut daemon = crate::daemon::connect_or_start().await?;
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =
+        daemon.runtime_changes(None, false).await?
+    else {
+        bail!("daemon did not return a runtime snapshot for cached quota reports");
+    };
+    let client = ApiClient::connect().await?;
+    let Some(profile) = args.profile.as_deref() else {
+        let config = projection.metadata.installed_config();
+        let ids: Vec<String> = config
+            .profiles
+            .iter()
+            .filter(|(_, profile)| args.with_disabled || profile.enabled)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let results = futures::future::join_all(ids.iter().map(|id| {
+            let client = &client;
+            async move {
+                (
+                    id.clone(),
+                    client
+                        .models(id, None, args.unrestricted, args.with_disabled)
+                        .await,
+                )
+            }
+        }))
+        .await;
+        let rendered = render_models_aggregate(&results, args.json)?;
+        println!("{rendered}");
+        return Ok(());
+    };
+    let quota = projection.metadata.quotas.reports.get(profile);
+    let billing = quota
+        .map(mj_client::quota::ProfileQuota::billing_class)
+        .unwrap_or(mj_client::quota::QuotaBilling::Unknown);
+    let choices = client
+        .models(profile, args.model, args.unrestricted, args.with_disabled)
         .await?;
-    if args.json {
-        return print_json(&choices);
+    let rendered = render_models(&choices, billing, args.json)?;
+    println!("{rendered}");
+    Ok(())
+}
+
+/// The aggregated `mj models` view: one row per normalized model identity,
+/// naming every profile that offers it. Provider qualifiers fold away, so
+/// `openai/gpt-5.3-codex` and `gpt-5.3-codex` share a row.
+fn render_models_aggregate(
+    results: &[(String, Result<mj_core::worker_launch::ProfileConfig>)],
+    json: bool,
+) -> Result<String> {
+    let mut by_model: std::collections::BTreeMap<String, (String, Vec<String>)> =
+        Default::default();
+    let mut unavailable: Vec<(String, String)> = Vec::new();
+    for (profile, result) in results {
+        match result {
+            Ok(choices) => {
+                for model in &choices.models {
+                    let entry = by_model
+                        .entry(mj_core::model_catalog::normalize_model(&model.value))
+                        .or_insert_with(|| (model.name.clone(), Vec::new()));
+                    entry.1.push(profile.clone());
+                }
+            }
+            Err(error) => unavailable.push((profile.clone(), format!("{error:#}"))),
+        }
+    }
+    if json {
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "models": by_model
+                .iter()
+                .map(|(value, (name, profiles))| serde_json::json!({
+                    "value": value,
+                    "name": name,
+                    "profiles": profiles,
+                }))
+                .collect::<Vec<_>>(),
+            "unavailable": unavailable
+                .iter()
+                .map(|(profile, error)| (profile.clone(), error.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        }))
+        .context("serialize the aggregated model catalog");
+    }
+    let mut lines: Vec<String> = by_model
+        .iter()
+        .map(|(value, (name, profiles))| format!("{value}  {name}: {}", profiles.join(", ")))
+        .collect();
+    if by_model.is_empty() {
+        lines.push("no profile reports any models".to_owned());
+    }
+    for (profile, error) in &unavailable {
+        lines.push(format!("{profile}: {error}"));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn render_models(
+    choices: &mj_core::worker_launch::ProfileConfig,
+    billing: mj_client::quota::QuotaBilling,
+    json: bool,
+) -> Result<String> {
+    let rates = |model: &str| {
+        (billing == mj_client::quota::QuotaBilling::Usage)
+            .then(|| mj_core::usage::pricing::rates(model))
+            .flatten()
+    };
+    if json {
+        let mut value = serde_json::to_value(choices).context("serialize model catalog")?;
+        value["billing"] = serde_json::Value::String(
+            match billing {
+                mj_client::quota::QuotaBilling::Usage => "usage",
+                mj_client::quota::QuotaBilling::Subscription => "subscription",
+                mj_client::quota::QuotaBilling::Unknown => "unknown",
+            }
+            .to_owned(),
+        );
+        value["models"] = serde_json::Value::Array(
+            choices
+                .models
+                .iter()
+                .map(|model| {
+                    let mut item = serde_json::to_value(model).expect("model choice serializes");
+                    item["price"] = rates(&model.value)
+                        .map(|r| {
+                            serde_json::json!({
+                                "input": r[0] as f64 / 1000.0,
+                                "output": r[1] as f64 / 1000.0,
+                                "cached_input": r[2] as f64 / 1000.0,
+                                "cache_write": r[3] as f64 / 1000.0
+                            })
+                        })
+                        .unwrap_or(serde_json::Value::Null);
+                    item
+                })
+                .collect(),
+        );
+        return serde_json::to_string_pretty(&value).context("serialize model catalog");
+    }
+    let mut lines = Vec::new();
+    if billing != mj_client::quota::QuotaBilling::Usage {
+        lines.push(format!(
+            "billing: {}",
+            match billing {
+                mj_client::quota::QuotaBilling::Subscription => "subscription",
+                _ => "unknown",
+            }
+        ));
     }
     if choices.models.is_empty() && choices.efforts.is_empty() {
-        println!("this profile's harness reports no models or efforts");
+        lines.push("this profile's harness reports no models or efforts".to_owned());
     }
     for model in &choices.models {
-        println!("{}  {}", model.value, model.name);
+        let price = rates(&model.value)
+            .map(|r| {
+                format!(
+                    "  ${:.3} in / ${:.3} cached / ${:.3} out per 1M",
+                    r[0] as f64 / 1000.0,
+                    r[2] as f64 / 1000.0,
+                    r[1] as f64 / 1000.0
+                )
+            })
+            .unwrap_or_default();
+        lines.push(format!("{}  {}{}", model.value, model.name, price));
     }
     // A harness without efforts, or one whose efforts are not known yet,
     // printed a bare "effort (default):" line, which reads as a value that
     // failed to print (F-16).
     if !choices.efforts.is_empty() {
-        println!(
+        lines.push(format!(
             "effort ({}): {}",
             choices.model.as_deref().unwrap_or("default model"),
             choices
@@ -2440,10 +2859,381 @@ pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
                 .map(|c| c.value.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        ));
     }
+    Ok(lines.join("\n"))
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct QuotaArgs {
+    /// Show only this profile; default lists every enabled profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Ask the daemon to probe again, and wait for the fresh cycle's readings.
+    #[arg(long)]
+    refresh: bool,
+    /// Include disabled profiles, probing once for any without a report.
+    #[arg(long)]
+    with_disabled: bool,
+    /// Print the response as JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+/// How long `mj quota --refresh` waits for the cycle it asked for before
+/// printing what the daemon already has. Quota probes launch each profile's
+/// agent, so a fresh cycle can take a while on a loaded host.
+const QUOTA_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Pump runtime deltas until `done` holds or the deadline passes; returns the
+/// latest cursor and metadata seen. One waiter feeds `--refresh` (a new
+/// cycle) and `--with-disabled` (a report for every profile just probed).
+/// Own a dedicated connection: a deadline abandons its in-flight exchange,
+/// while quota control requests continue on their original connection.
+async fn pump_quota_feed(
+    mut daemon: mj_client::daemon::DaemonClient,
+    mut cursor: Option<mj_client::runtime_feed::RuntimeCursor>,
+    mut metadata: mj_client::runtime_feed::RuntimeMetadata,
+    deadline: std::time::Instant,
+    done: impl Fn(&mj_client::runtime_feed::RuntimeMetadata) -> bool,
+) -> Result<(
+    Option<mj_client::runtime_feed::RuntimeCursor>,
+    mj_client::runtime_feed::RuntimeMetadata,
+)> {
+    use mj_client::runtime_feed::RuntimeFrame;
+    while !done(&metadata) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let Ok(frame) =
+            tokio::time::timeout(remaining, daemon.runtime_changes(cursor.clone(), true)).await
+        else {
+            break;
+        };
+        match frame? {
+            RuntimeFrame::Snapshot {
+                cursor: next,
+                projection,
+            } => {
+                cursor = Some(next);
+                metadata = projection.metadata;
+            }
+            RuntimeFrame::Delta {
+                cursor: next,
+                changes,
+                ..
+            } => {
+                cursor = Some(next);
+                if let Some(changed) = changes.metadata {
+                    metadata = changed;
+                }
+            }
+            RuntimeFrame::ResetRequired => cursor = None,
+        }
+    }
+    Ok((cursor, metadata))
+}
+
+pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
+    let mut daemon = crate::daemon::connect_or_start().await?;
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot {
+        cursor: first,
+        projection,
+    } = daemon.runtime_changes(None, false).await?
+    else {
+        bail!("daemon did not return a runtime snapshot for quota reports");
+    };
+    let mut cursor = Some(first);
+    let mut metadata = projection.metadata;
+    if args.refresh {
+        // The daemon coalesces this with any probe already running; the
+        // cycle count advancing past the request's is the refresh done.
+        let pending = metadata.quotas.cycles;
+        daemon.refresh_quota().await?;
+        let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
+        let pumped = pump_quota_feed(
+            mj_client::daemon::connect_existing().await?,
+            cursor,
+            metadata,
+            deadline,
+            |metadata| metadata.quotas.cycles > pending,
+        )
+        .await?;
+        cursor = pumped.0;
+        metadata = pumped.1;
+    }
+    if args.with_disabled {
+        let config = metadata.installed_config();
+        // A disabled profile with a served report shows it; one without gets
+        // a single daemon probe, and this waits for the answer.
+        let probe: Vec<String> = config
+            .profiles
+            .iter()
+            .filter(|(id, profile)| {
+                !profile.enabled
+                    && args.profile.as_deref().is_none_or(|wanted| wanted == *id)
+                    && !metadata.quotas.reports.contains_key(*id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !probe.is_empty() {
+            daemon.probe_quota_profiles(probe.clone(), false).await?;
+            let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
+            let pumped = pump_quota_feed(
+                mj_client::daemon::connect_existing().await?,
+                cursor,
+                metadata,
+                deadline,
+                |metadata| {
+                    probe
+                        .iter()
+                        .all(|id| metadata.quotas.reports.contains_key(id))
+                },
+            )
+            .await?;
+            metadata = pumped.1;
+        }
+    }
+    let rendered = render_quota(
+        &metadata,
+        args.profile.as_deref(),
+        args.with_disabled,
+        args.json,
+    )?;
+    println!("{rendered}");
     Ok(())
 }
+
+/// One profile's row for `mj quota`, or the reason its quota cannot be read.
+fn quota_row(
+    id: &str,
+    profile: &mj_core::config::HarnessProfile,
+    snapshot: &mj_client::quota::QuotaSnapshot,
+    now: u64,
+) -> (String, serde_json::Value) {
+    use mj_client::quota::{ProfileQuota, QuotaBilling};
+    let report = snapshot.reports.get(id);
+    let billing = ProfileQuota::billing_for(profile.kind, report);
+    let billing_label = match billing {
+        QuotaBilling::Usage => "usage",
+        QuotaBilling::Subscription => "subscription",
+        QuotaBilling::Unknown => "unknown",
+    };
+    let probing = snapshot.probing.contains(id);
+    let mut entry = serde_json::json!({
+        "profile": id,
+        "harness": profile.kind.id(),
+        "billing": billing_label,
+        "enabled": profile.enabled,
+        "probing": probing,
+        "report": report,
+    });
+    // The quota text, and the reason a missing or failed reading shows.
+    let status = match report {
+        None if probing => "probing now".to_owned(),
+        None => "no quota report yet".to_owned(),
+        Some(report) => {
+            if let Some(error) = report.error_label() {
+                let held = report
+                    .rate_limit_label(now)
+                    .map(|label| format!(" ({label})"))
+                    .unwrap_or_default();
+                format!("error: {error}{held}")
+            } else if let Some(label) = report.windowless_label() {
+                label.to_owned()
+            } else {
+                report
+                    .windows
+                    .iter()
+                    .map(|window| {
+                        let usage = match (window.remaining_percent, window.used, window.limit) {
+                            (Some(remaining), _, _) => format!("{remaining}% left"),
+                            (_, Some(used), Some(limit)) => format!("{used}/{limit} used"),
+                            _ => "available".to_owned(),
+                        };
+                        let reset =
+                            window.reset_display(now, report.banked_resets_for_window(window));
+                        if reset.is_empty() {
+                            format!("{} {usage}", window.label)
+                        } else {
+                            format!("{} {usage}, resets {reset}", window.label)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }
+        }
+    };
+    let credits = match report.and_then(|report| report.paid_credits.as_ref()) {
+        Some(mj_client::quota::PaidCredits::Limited(balance)) => format!("credits ${balance} left"),
+        Some(mj_client::quota::PaidCredits::Unlimited) => "unlimited credits".into(),
+        Some(mj_client::quota::PaidCredits::Available) => "credits available".into(),
+        None => String::new(),
+    };
+    let status = [status, credits]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    entry["detail"] = serde_json::Value::String(status.clone());
+    let mut text = format!(
+        "{id} ({}, {billing_label}{}): {status}",
+        profile.kind.display_name(),
+        if profile.enabled { "" } else { ", disabled" }
+    );
+    if let Some(report) = report {
+        text.push_str(&format!(
+            " · checked {} ago",
+            quota_age(now, report.refreshed_at_epoch_seconds)
+        ));
+    }
+    (text, entry)
+}
+
+/// A compact age for a reading: `45s`, `4m`, `2h`, `3d`.
+fn quota_age(now: u64, epoch_seconds: u64) -> String {
+    let age = now.saturating_sub(epoch_seconds);
+    if age < 60 {
+        format!("{age}s")
+    } else if age < 3600 {
+        format!("{}m", age / 60)
+    } else if age < 24 * 3600 {
+        format!("{}h", age / 3600)
+    } else {
+        format!("{}d", age / (24 * 3600))
+    }
+}
+
+fn render_quota(
+    metadata: &mj_client::runtime_feed::RuntimeMetadata,
+    only: Option<&str>,
+    with_disabled: bool,
+    json: bool,
+) -> Result<String> {
+    render_quota_at(
+        metadata,
+        only,
+        with_disabled,
+        json,
+        mj_core::clock::epoch_seconds(),
+    )
+}
+
+fn render_quota_at(
+    metadata: &mj_client::runtime_feed::RuntimeMetadata,
+    only: Option<&str>,
+    with_disabled: bool,
+    json: bool,
+    now: u64,
+) -> Result<String> {
+    let config = metadata.installed_config();
+    let mut rows = Vec::new();
+    for (id, profile) in &config.profiles {
+        if !profile.enabled && !with_disabled {
+            continue;
+        }
+        if only.is_some_and(|wanted| wanted != id) {
+            continue;
+        }
+        rows.push(quota_row(id, profile, &metadata.quotas, now));
+    }
+    if let Some(wanted) = only
+        && rows.is_empty()
+    {
+        if with_disabled {
+            bail!("no profile {wanted:?}");
+        }
+        bail!("no enabled profile {wanted:?}");
+    }
+    if json {
+        let value = serde_json::json!({
+            "cycles": metadata.quotas.cycles,
+            "profiles": rows.iter().map(|(_, entry)| entry.clone()).collect::<Vec<_>>(),
+        });
+        return serde_json::to_string_pretty(&value).context("serialize quota reports");
+    }
+    if rows.is_empty() {
+        return Ok("no enabled profiles".to_owned());
+    }
+    Ok(rows
+        .iter()
+        .map(|(text, _)| text.clone())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+#[derive(Debug, Args)]
+pub(crate) struct HostsArgs {
+    /// Show only this host or fleet, named by its host or by a target it
+    /// contains; default lists every host.
+    #[arg(long)]
+    host: Option<String>,
+    /// Print the response as JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+/// Read the daemon capacity service's latest readings; this never samples a
+/// host itself. The TUI dashboard still samples hosts with its own poller, so
+/// its numbers come from separate samples and can differ by up to one round.
+pub(crate) async fn hosts(args: HostsArgs) -> Result<()> {
+    let mut daemon = crate::daemon::connect_or_start().await?;
+    let rows = daemon.host_capacity().await?;
+    println!(
+        "{}",
+        render_hosts(
+            &rows,
+            args.host.as_deref(),
+            args.json,
+            mj_core::clock::epoch_seconds()
+        )?
+    );
+    Ok(())
+}
+
+fn render_hosts(
+    rows: &[mj_core::targets::HostCapacityRow],
+    only: Option<&str>,
+    json: bool,
+    now: u64,
+) -> Result<String> {
+    let selected: Vec<_> = match only {
+        None => rows.to_vec(),
+        Some(name) => {
+            let found: Vec<_> = rows
+                .iter()
+                .filter(|row| row.matches(name))
+                .cloned()
+                .collect();
+            if found.is_empty() {
+                let known: std::collections::BTreeSet<&str> = rows
+                    .iter()
+                    .flat_map(|row| {
+                        std::iter::once(row.host.as_str())
+                            .chain(row.target_ids.iter().map(String::as_str))
+                    })
+                    .collect();
+                if known.is_empty() {
+                    bail!("no host or target {name:?}: the daemon has no hosts");
+                }
+                bail!(
+                    "no host or target {name:?}; known names: {}",
+                    known.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            found
+        }
+    };
+    if json {
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "now_epoch_seconds": now,
+            "hosts": selected,
+        }))
+        .context("serialize host capacity");
+    }
+    Ok(mj_core::targets::render_host_capacity(&selected, now))
+}
+
 pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
     let session = match (args.key, args.value) {
@@ -2527,9 +3317,10 @@ mod tests {
                 &[root.path().to_path_buf()],
                 false,
                 FetchMode::Listing,
+                tempfile::tempfile().unwrap(),
             )
             .unwrap();
-            serde_json::from_slice(&fetched.bytes).unwrap()
+            serde_json::from_reader(fetched.reader()).unwrap()
         };
         let mut directory = list(&probes);
         // The standard library cannot set a symlink's own time, so the link's
@@ -2607,27 +3398,44 @@ mod tests {
             let Some(Command::Review(args)) = cli.command else {
                 panic!("expected the review command");
             };
-            let (ReviewCommand::Start(session)
-            | ReviewCommand::Status(session)
-            | ReviewCommand::Forward(session)
-            | ReviewCommand::Dismiss(session)
-            | ReviewCommand::Cancel(session)) = args.command;
+            let session = match args.command {
+                ReviewCommand::Start(session) | ReviewCommand::Status(session) => session,
+                ReviewCommand::Show(_) => panic!("expected start or status"),
+            };
             assert_eq!(session.session, "s1");
             assert_eq!(session.json, json);
         }
+        let cli = Cli::try_parse_from([
+            "mj",
+            "review",
+            "show",
+            "--session",
+            "s1",
+            "--review",
+            "r1",
+            "--json",
+        ])
+        .expect("review show parses");
+        let Some(Command::Review(args)) = cli.command else {
+            panic!("expected the review command");
+        };
+        let ReviewCommand::Show(args) = args.command else {
+            panic!("expected review show");
+        };
+        assert_eq!(args.session.session, "s1");
+        assert_eq!(args.review.as_deref(), Some("r1"));
+        assert!(args.session.json);
+        let cli = Cli::try_parse_from(["mj", "review", "show", "--session", "s1"])
+            .expect("review show defaults to the latest finished review");
+        let Some(Command::Review(args)) = cli.command else {
+            panic!("expected the review command");
+        };
+        let ReviewCommand::Show(args) = args.command else {
+            panic!("expected review show");
+        };
+        assert!(args.review.is_none());
         for verb in ["forward", "dismiss", "cancel"] {
-            let cli = Cli::try_parse_from(["mj", "review", verb, "--session", "s1"])
-                .expect("review resolutions parse");
-            let Some(Command::Review(args)) = cli.command else {
-                panic!("expected the review command");
-            };
-            let resolved = match args.command {
-                ReviewCommand::Forward(_) => "forward",
-                ReviewCommand::Dismiss(_) => "dismiss",
-                ReviewCommand::Cancel(_) => "cancel",
-                _ => panic!("{verb} parsed as another review command"),
-            };
-            assert_eq!(resolved, verb);
+            assert!(Cli::try_parse_from(["mj", "review", verb, "--session", "s1"]).is_err());
         }
         assert!(Cli::try_parse_from(["mj", "review", "start"]).is_err());
     }
@@ -2938,17 +3746,22 @@ mod tests {
             let mut argv = vec!["mj", "new", "--bundle", "product"];
             argv.extend_from_slice(extra);
             match Cli::try_parse_from(argv).unwrap().command {
-                Some(Command::New(args)) => (args.no_project_memory, args.no_github_events),
+                Some(Command::New(args)) => (
+                    args.no_project_memory,
+                    args.no_github_events,
+                    args.no_github_credentials,
+                ),
                 _ => panic!("expected the new command"),
             }
         };
         assert!(Cli::try_parse_from(["mj", "new", "--bundle", "product", "--no-mailbox"]).is_err());
-        assert_eq!(parse(&[]), (false, false));
-        assert_eq!(parse(&["--no-project-memory"]), (true, false));
-        assert_eq!(parse(&["--no-github-events"]), (false, true));
+        assert_eq!(parse(&[]), (false, false, false));
+        assert_eq!(parse(&["--no-project-memory"]), (true, false, false));
+        assert_eq!(parse(&["--no-github-events"]), (false, true, false));
+        assert_eq!(parse(&["--no-github-credentials"]), (false, false, true));
         assert_eq!(
             parse(&["--no-github-events", "--no-project-memory"]),
-            (true, true)
+            (true, true, false)
         );
     }
 
@@ -2974,112 +3787,133 @@ mod tests {
         assert_eq!(refused.to_string(), "--no-later-history requires --at");
     }
 
-    // Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
+    // Hard-won: 06cfc1cfe: reviewer-only flags preserve the global trigger.
     #[test]
     fn new_review_flags_choose_the_sessions_own_review() {
-        use mj_core::config::{ReviewConfig, ReviewTrigger, SessionReview};
+        use mj_core::config::{ReviewConfig, ReviewTrigger, SessionReview, SubagentChoice};
         let parse = |extra: &[&str]| {
             let mut argv = vec!["mj", "new", "--bundle", "product"];
             argv.extend_from_slice(extra);
             Cli::try_parse_from(argv).map(|cli| match cli.command {
                 Some(Command::New(args)) => new_session_review(&args),
-                _ => panic!("expected the new command"),
+                _ => panic!("expected new command"),
             })
         };
-        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(parse(&[]).unwrap().unwrap(), None);
+        let inherited = parse(&[
+            "--reviewer",
+            "gpt-6-terra:xhigh",
+            "--reviewer",
+            "gpt-6-sol:medium",
+        ])
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let choices = vec![
+            SubagentChoice {
+                model: "gpt-6-terra".into(),
+                effort: Some("xhigh".into()),
+            },
+            SubagentChoice {
+                model: "gpt-6-sol".into(),
+                effort: Some("medium".into()),
+            },
+        ];
         assert_eq!(
-            parse(&["--review", "off", "--review-count", "3"]).unwrap(),
+            inherited,
+            SessionReview::Inherit {
+                reviewers: Some(choices.clone())
+            }
+        );
+        // Session reviewer flags enable review even without global reviewers.
+        for (global_reviewers, trigger) in [
+            (Vec::new(), ReviewTrigger::Push),
+            (vec![choices[1].clone()], ReviewTrigger::Push),
+        ] {
+            let global = ReviewConfig {
+                reviewers: global_reviewers,
+                ..Default::default()
+            };
+            assert_eq!(global.for_session(Some(&inherited)).trigger(), trigger);
+            assert_eq!(global.for_session(Some(&inherited)).reviewers, choices);
+        }
+        assert_eq!(
+            parse(&["--review", "off"]).unwrap().unwrap(),
             Some(SessionReview::Off)
         );
         assert_eq!(
-            parse(&["--review", "push"]).unwrap().unwrap().trigger(),
-            Some(ReviewTrigger::Push)
+            parse(&["--review", "push"]).unwrap().unwrap(),
+            Some(SessionReview::Push { reviewers: None })
         );
-        assert_eq!(
-            parse(&["--review", "turn"]).unwrap().unwrap().trigger(),
-            Some(ReviewTrigger::Turn)
-        );
-        assert!(parse(&["--review", "on"]).is_err());
-        assert_eq!(
-            parse(&["--review-model", "gpt-6-astra", "--review-count", "3"]).unwrap(),
-            Some(SessionReview::Inherit {
-                count: std::num::NonZeroUsize::new(3),
-                model: Some("gpt-6-astra".into()),
-                effort: None,
-                tier: None,
-            })
-        );
-        assert_eq!(
-            parse(&["--review-effort", "high"]).unwrap(),
-            Some(SessionReview::Inherit {
-                count: None,
-                model: None,
-                effort: Some("high".into()),
-                tier: None,
-            })
-        );
-        assert_eq!(
-            parse(&["--review-tier", "extended", "--review-model", "gpt-6-luna"]).unwrap(),
-            Some(SessionReview::Inherit {
-                count: None,
-                model: Some("gpt-6-luna".into()),
-                effort: None,
-                tier: None,
-            })
-        );
-        assert_eq!(
-            parse(&["--review-tier", "quick"]).unwrap(),
-            Some(SessionReview::Inherit {
-                count: None,
-                model: None,
-                effort: None,
-                tier: None,
-            })
-        );
-        for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
-            let global = ReviewConfig {
-                trigger,
-                ..Default::default()
-            };
-            for flags in [
-                ["--review-model", "gpt-6-astra"],
-                ["--review-effort", "high"],
-                ["--review-count", "3"],
-                ["--review-tier", "extended"],
-            ] {
-                let inherited = parse(&flags).unwrap().unwrap();
-                assert_eq!(
-                    global.for_session(Some(&inherited)).trigger,
-                    trigger,
-                    "{flags:?} with global {trigger}"
-                );
-            }
-            for (flag, expected) in [
-                ("off", ReviewTrigger::Off),
-                ("turn", ReviewTrigger::Turn),
-                ("push", ReviewTrigger::Push),
-            ] {
-                let explicit = parse(&["--review", flag]).unwrap().unwrap();
-                assert_eq!(global.for_session(Some(&explicit)).trigger, expected);
-            }
-        }
-        let help = Cli::try_parse_from(["mj", "new", "--help"])
-            .expect_err("help exits parsing")
+        // Per-turn review was removed; the refusal says what to use instead.
+        let refused = parse(&["--review", "turn"])
+            .unwrap()
+            .unwrap_err()
             .to_string();
+        assert!(refused.contains("--review push"), "{refused}");
         assert!(
-            !help.contains("--review-tier"),
-            "deprecated option is hidden"
+            parse(&[
+                "--reviewer",
+                "a",
+                "--reviewer",
+                "b",
+                "--reviewer",
+                "c",
+                "--reviewer",
+                "d"
+            ])
+            .unwrap()
+            .is_err()
         );
-        assert!(
-            parse(&["--review-tier", "thorough"]).is_err(),
-            "the deprecated flag still accepts only quick and extended"
-        );
-        assert!(parse(&["--no-review"]).is_err());
-        let counted = parse(&["--review-count", "4"]).unwrap().unwrap();
+        assert!(parse(&["--reviewer", ":high"]).unwrap().is_err());
+        for (input, model, effort) in [
+            ("openai/gpt-oss-120b:free", "openai/gpt-oss-120b:free", None),
+            ("qwen:latest", "qwen:latest", None),
+            ("x:0:high", "x:0", Some("high")),
+            ("foo:high:", "foo:high", None),
+        ] {
+            let parsed = parse(&["--reviewer", input]).unwrap().unwrap().unwrap();
+            let SessionReview::Inherit {
+                reviewers: Some(reviewers),
+            } = parsed
+            else {
+                panic!("review override expected")
+            };
+            assert_eq!(reviewers[0].model, model);
+            assert_eq!(reviewers[0].effort.as_deref(), effort);
+        }
+
+        let parsed = parse(&[
+            "--reviewer",
+            "anthropic.claude-haiku:0",
+            "--reviewer",
+            "x:0:high",
+            "--reviewer",
+            "m:high",
+        ])
+        .unwrap()
+        .unwrap()
+        .unwrap();
         assert_eq!(
-            serde_json::to_value(counted).unwrap(),
-            serde_json::json!({"mode":"inherit","count":4})
+            parsed,
+            SessionReview::Inherit {
+                reviewers: Some(vec![
+                    SubagentChoice {
+                        model: "anthropic.claude-haiku:0".into(),
+                        effort: None
+                    },
+                    SubagentChoice {
+                        model: "x:0".into(),
+                        effort: Some("high".into())
+                    },
+                    SubagentChoice {
+                        model: "m".into(),
+                        effort: Some("high".into())
+                    },
+                ])
+            }
         );
+        assert!(parse(&["--review-count", "2"]).is_err());
     }
 
     #[test]
@@ -3109,6 +3943,56 @@ mod tests {
         };
         for command in ["new", "move"] {
             let parse = |extra: &[&str]| parse_command(command, extra);
+            let oracle = |extra: &[&str]| {
+                let mut argv = vec!["mj", command, "--profile", "codex", "--target", "raw"];
+                if command == "new" {
+                    argv.extend(["--project-directory", "/srv/project"]);
+                } else {
+                    argv.extend(["--session", "session"]);
+                }
+                argv.extend_from_slice(extra);
+                let cli = Cli::try_parse_from(argv).map_err(anyhow::Error::from)?;
+                match cli.command {
+                    Some(Command::New(args)) => oracle_override(
+                        args.subagent_oracle.as_deref(),
+                        args.subagent_oracle_effort.as_deref(),
+                        args.oracle.as_deref(),
+                    ),
+                    Some(Command::Move(args)) => oracle_override(
+                        args.subagent_oracle.as_deref(),
+                        args.subagent_oracle_effort.as_deref(),
+                        args.oracle.as_deref(),
+                    ),
+                    _ => unreachable!(),
+                }
+            };
+            assert_eq!(
+                oracle(&[
+                    "--subagents",
+                    "native",
+                    "--subagent-oracle",
+                    "advisor",
+                    "--subagent-oracle-effort",
+                    "high"
+                ])
+                .unwrap(),
+                Some(mj_core::config::SubagentChoice {
+                    model: "advisor".into(),
+                    effort: Some("high".into())
+                })
+            );
+            assert!(oracle(&["--subagent-oracle-effort", "high"]).is_err());
+            assert!(
+                oracle(&[
+                    "--subagent-oracle",
+                    "advisor",
+                    "--subagent-oracle-effort",
+                    "adaptive"
+                ])
+                .is_err()
+            );
+            assert!(oracle(&["--oracle", "disabled", "--subagent-oracle", "advisor"]).is_err());
+            assert!(oracle(&["--oracle", "invalid"]).is_err());
             use mj_core::subagent::SubagentPolicy;
             assert_eq!(parse(&[]).unwrap(), None);
             assert_eq!(
@@ -3279,9 +4163,45 @@ mod tests {
         assert_eq!(
             session_report_lines(&session, 0),
             [
-                "s1  running  t",
+                "s1  running (disk full)  t",
                 "disk full: precision-3260 has 0 B free on /"
             ]
+        );
+        // Served severity wins even when the older raw fields disagree.
+        session.attention = mj_core::attention::SessionAttention::Important;
+        assert_eq!(listed_state(&session), "running (important) (disk full)");
+        session.attention = mj_core::attention::SessionAttention::Unreachable;
+        assert_eq!(listed_state(&session), "running (unreachable) (disk full)");
+    }
+
+    // Hard-won: #1529: refused unexpired logins were absent from session and doctor diagnostics.
+    #[test]
+    fn golden_refused_profile_login_diagnostics() {
+        let failure = mj_client::quota::refused_login_message("claude");
+        let mut session = wait_response(
+            "error",
+            serde_json::json!({
+                "diagnostic": {"message": "Authentication required", "code": "-32000"}
+            }),
+        )
+        .session;
+        session.profile_id = "claude".into();
+        session.profile_login_error = Some(failure.clone());
+        let mut output = String::from("mj sessions --session s1\n");
+        output.push_str(&session_report_lines(&session, 0).join("\n"));
+        output.push_str("\n\nmj doctor\n");
+        let checks = mj_controller::doctor::login_checks(&[("claude".into(), failure)].into());
+        let mut doctor = Vec::new();
+        mj_controller::doctor::render_human(&checks, &mut doctor).unwrap();
+        output.push_str(&String::from_utf8(doctor).unwrap());
+        output.push_str("\nSession JSON login status: ");
+        output
+            .push_str(&serde_json::to_value(&session).unwrap()["profile_login_error"].to_string());
+        output.push('\n');
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "profile-login-refused",
+            &output,
         );
     }
 
@@ -3377,12 +4297,35 @@ mod tests {
         // A wait for an earlier turn answers about the later one, and says so.
         let later = wait_response(
             "finished",
-            serde_json::json!({"turn_id": 87, "requested_turn_id": 82}),
+            serde_json::json!({"turn_id": 87, "requested_turn_id": 82, "turn_number": 5}),
         );
         assert!(
-            wait_report_lines(&later)[1].contains("turn 87, which ended after turn 82"),
+            wait_report_lines(&later)[1].contains("outcome of turn 87, not of turn 82"),
             "{:?}",
             wait_report_lines(&later)
+        );
+        // Hard-won: #1450 review: autonomous outcomes hid which turn answered.
+        let autonomous = wait_response(
+            "finished",
+            serde_json::json!({"requested_turn_id":82, "turn_number":5}),
+        );
+        assert_eq!(
+            wait_report_lines(&autonomous)[1],
+            "this is the outcome of a turn the session ran without a prompt, not of turn 82; a session keeps only its latest turn's outcome and reply"
+        );
+        // An answer with no finished turn, such as a failed session, is not one.
+        let earlier = wait_response(
+            "finished",
+            serde_json::json!({"turn_id": 80, "requested_turn_id":82, "turn_number":5}),
+        );
+        assert!(wait_report_lines(&earlier)[1].contains("outcome of turn 80, not of turn 82"));
+        let failed = wait_response("error", serde_json::json!({"requested_turn_id":82}));
+        assert!(
+            !wait_report_lines(&failed)
+                .iter()
+                .any(|line| line.contains("this is the outcome")),
+            "{:?}",
+            wait_report_lines(&failed)
         );
         let same = wait_response(
             "finished",
@@ -3976,5 +4919,406 @@ mod tests {
             usage_tree_lines(&tree).join("\n")
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-usage-tree", &output);
+    }
+
+    // Hard-won: #1501: Terra was missing from the shared pricing table.
+    #[test]
+    fn api_models_matches_cli_golden() {
+        let choices = mj_core::worker_launch::ProfileConfig {
+            model: Some("deepseek-flash".to_owned()),
+            models: vec![
+                mj_core::acp::SessionConfigChoice {
+                    value: "gpt-6.1-terra".to_owned(),
+                    name: "GPT-6.1 Terra".to_owned(),
+                    description: None,
+                },
+                mj_core::acp::SessionConfigChoice {
+                    value: "deepseek-flash".to_owned(),
+                    name: "DeepSeek Flash".to_owned(),
+                    description: None,
+                },
+                mj_core::acp::SessionConfigChoice {
+                    value: "unknown-model".to_owned(),
+                    name: "Unknown Model".to_owned(),
+                    description: None,
+                },
+            ],
+            efforts: vec![],
+            observed_at: 1,
+        };
+        let mut output = String::from("=== mj models text and JSON output ===");
+        for (name, billing) in [
+            ("usage", mj_client::quota::QuotaBilling::Usage),
+            ("subscription", mj_client::quota::QuotaBilling::Subscription),
+            ("unknown", mj_client::quota::QuotaBilling::Unknown),
+        ] {
+            output.push_str(&format!("\n--- {name} text ---\n"));
+            output.push_str(&render_models(&choices, billing, false).unwrap());
+            output.push_str(&format!("\n--- {name} JSON ---\n"));
+            output.push_str(&render_models(&choices, billing, true).unwrap());
+        }
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-models", &output);
+    }
+
+    #[test]
+    fn api_models_aggregate_matches_cli_golden() {
+        let choices = |models: &[(&str, &str)]| mj_core::worker_launch::ProfileConfig {
+            model: None,
+            models: models
+                .iter()
+                .map(|(value, name)| mj_core::acp::SessionConfigChoice {
+                    value: (*value).to_owned(),
+                    name: (*name).to_owned(),
+                    description: None,
+                })
+                .collect(),
+            efforts: vec![],
+            observed_at: 1,
+        };
+        let results = vec![
+            (
+                "claude-main".to_owned(),
+                Ok(choices(&[
+                    ("claude-opus-4-7", "Claude Opus 4.7"),
+                    ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+                ])),
+            ),
+            (
+                "claude-backup".to_owned(),
+                Ok(choices(&[("anthropic.claude-opus-4-7", "Opus")])),
+            ),
+            (
+                "codex".to_owned(),
+                Ok(choices(&[("gpt-5.3-codex", "GPT-5.3 Codex")])),
+            ),
+            (
+                "grok".to_owned(),
+                Err(anyhow::anyhow!("profile discovery failed: login expired")),
+            ),
+        ];
+        let mut output = String::from("=== mj models text ===\n");
+        output.push_str(&render_models_aggregate(&results, false).unwrap());
+        output.push_str("\n=== mj models --json ===\n");
+        output.push_str(&render_models_aggregate(&results, true).unwrap());
+        output.push_str("\n=== mj models, nothing offered ===\n");
+        output.push_str(&render_models_aggregate(&[], false).unwrap());
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-models-aggregate", &output);
+    }
+
+    // Hard-won: #1566: a timed-out quota feed left the control client unusable for disabled-profile probes.
+    #[tokio::test]
+    async fn quota_feed_timeout_preserves_the_control_connection() {
+        use mj_client::daemon::{
+            DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply,
+            PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
+        };
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "quota-feed-timeout".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let (received, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut control, _) = listener.accept().await.unwrap();
+            let (mut feed, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = read_frame(&mut feed).await.unwrap();
+            assert!(matches!(
+                request.action,
+                DaemonAction::RuntimeChanges { .. }
+            ));
+            received.send(()).unwrap();
+            let mut byte = [0];
+            assert_eq!(feed.read(&mut byte).await.unwrap(), 0);
+            let request: RequestEnvelope = read_frame(&mut control).await.unwrap();
+            assert!(matches!(
+                request.action,
+                DaemonAction::ProbeQuotaProfiles { .. }
+            ));
+            write_frame(
+                &mut control,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::Done),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let mut control = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let feed = DaemonClient::connect(metadata).await.unwrap();
+        let observed = mj_client::runtime_feed::RuntimeMetadata::default();
+        let pump = pump_quota_feed(
+            feed,
+            None,
+            observed.clone(),
+            std::time::Instant::now() + QUOTA_REFRESH_WAIT,
+            |_| false,
+        );
+        tokio::pin!(pump);
+        tokio::select! {
+            result = &mut pump => panic!("feed reply remains pending: {result:?}"),
+            result = waiting => result.unwrap(),
+        }
+        tokio::time::pause();
+        tokio::time::advance(QUOTA_REFRESH_WAIT + std::time::Duration::from_secs(1)).await;
+        let (_, latest) = pump.await.unwrap();
+        assert_eq!(latest, observed);
+        control
+            .probe_quota_profiles(vec!["disabled".into()], false)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn api_quota_matches_cli_golden() {
+        use mj_client::quota::{PaidCredits, ProfileQuota, QuotaSnapshot, QuotaWindow};
+        use mj_core::config::{HarnessKind, HarnessProfile};
+        let now = 1_800_000_000u64;
+        let window = |label: &str,
+                      remaining: Option<u8>,
+                      used: Option<i64>,
+                      limit: Option<i64>,
+                      resets_in: Option<u64>| QuotaWindow {
+            label: label.into(),
+            remaining_percent: remaining,
+            duration_seconds: None,
+            model_scope: None,
+            used,
+            limit,
+            resets: None,
+            resets_at_epoch_seconds: resets_in.map(|delta| (now + delta) as i64),
+        };
+        let report = |profile: &str,
+                      harness: HarnessKind,
+                      windows: Vec<QuotaWindow>,
+                      extra: Option<&str>,
+                      error: Option<&str>,
+                      age: u64| ProfileQuota {
+            paid_credits: None,
+            monthly_price_usd: None,
+            banked_resets: None,
+            profile_id: profile.into(),
+            harness,
+            windows,
+            extra: extra.map(str::to_owned),
+            error: error.map(str::to_owned),
+            refreshed_at_epoch_seconds: now - age,
+            rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
+        };
+        let mut config = mj_core::config::Config::default();
+        for (id, kind, enabled) in [
+            ("claude", HarnessKind::Claude, true),
+            ("codex", HarnessKind::Codex, true),
+            ("kimi", HarnessKind::Kimi, true),
+            ("muse", HarnessKind::Muse, true),
+            ("opencode", HarnessKind::OpenCode, true),
+            ("dsh", HarnessKind::Dsh, false),
+        ] {
+            config.profiles.insert(
+                id.into(),
+                HarnessProfile {
+                    enabled,
+                    ..HarnessProfile::new(kind, format!("/home/agent/.{id}"))
+                },
+            );
+        }
+        let mut claude = report(
+            "claude",
+            HarnessKind::Claude,
+            vec![
+                window("5H", Some(62), None, None, Some(2 * 3600 + 41 * 60)),
+                window(
+                    "Week",
+                    None,
+                    Some(340),
+                    Some(500),
+                    Some(3 * 24 * 3600 + 4 * 3600),
+                ),
+            ],
+            None,
+            None,
+            240,
+        );
+        claude.monthly_price_usd = Some(100);
+        let mut codex = report(
+            "codex",
+            HarnessKind::Codex,
+            vec![],
+            Some(mj_client::quota::API_LABEL),
+            None,
+            60,
+        );
+        codex.paid_credits = PaidCredits::limited(43.2);
+        let kimi = report(
+            "kimi",
+            HarnessKind::Kimi,
+            vec![],
+            Some(mj_client::quota::NOT_REPORTED_LABEL),
+            None,
+            30,
+        );
+        let mut grok_profile = HarnessProfile::new(HarnessKind::Grok, "/home/agent/.grok");
+        grok_profile.enabled = true;
+        config.profiles.insert("grok".into(), grok_profile);
+        let grok = report(
+            "grok",
+            HarnessKind::Grok,
+            vec![],
+            None,
+            Some("login expired"),
+            600,
+        );
+        let snapshot = QuotaSnapshot {
+            reports: [
+                ("claude".to_owned(), claude),
+                ("codex".to_owned(), codex),
+                ("kimi".to_owned(), kimi),
+                ("grok".to_owned(), grok),
+            ]
+            .into_iter()
+            .collect(),
+            probing: ["opencode".to_owned()].into_iter().collect(),
+            cycles: 7,
+        };
+        let metadata = mj_client::runtime_feed::RuntimeMetadata {
+            config: config.into(),
+            quotas: snapshot.into(),
+            ..Default::default()
+        };
+        let mut output = String::from("=== mj quota text ===\n");
+        output.push_str(&render_quota_at(&metadata, None, false, false, now).unwrap());
+        output.push_str("\n=== mj quota --profile claude ===\n");
+        output.push_str(&render_quota_at(&metadata, Some("claude"), false, false, now).unwrap());
+        output.push_str("\n=== mj quota --json ===\n");
+        output.push_str(&render_quota_at(&metadata, None, false, true, now).unwrap());
+        output.push_str("\n=== mj quota --with-disabled ===\n");
+        output.push_str(&render_quota_at(&metadata, None, true, false, now).unwrap());
+        output.push_str("\n=== mj quota --profile missing ===\n");
+        output.push_str(
+            &render_quota_at(&metadata, Some("missing"), false, false, now)
+                .unwrap_err()
+                .to_string(),
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-quota", &output);
+    }
+    #[test]
+    fn api_hosts_matches_cli_golden() {
+        use mj_core::targets::storage::StorageCondition;
+        use mj_core::targets::{DeploymentCapacityKind, HostCapacityRow, HostFilesystemRow};
+        const GIB: u64 = 1 << 30;
+        let now = 1_700_000_000;
+        let filesystem =
+            |host: &str, mount: &str, available: u64, total: u64, condition| HostFilesystemRow {
+                host: host.into(),
+                mount: mount.into(),
+                available_bytes: available,
+                total_bytes: total,
+                condition,
+            };
+        let row = |id: &str, kind, targets: &[&str]| HostCapacityRow {
+            id: id.into(),
+            host: id.into(),
+            target_ids: targets.iter().map(|id| (*id).to_owned()).collect(),
+            kind,
+            fleet_instances: None,
+            has_reading: true,
+            cpu_percent: Some(12),
+            memory_used_bytes: 14 * GIB,
+            memory_total_bytes: 31 * GIB,
+            logical_cores: 16,
+            filesystems: Vec::new(),
+            sampled_at_epoch_seconds: Some(now - 20),
+            probe_error: None,
+            on_demand: false,
+        };
+        let mut local = row("local", DeploymentCapacityKind::Host, &["local", "podman"]);
+        local.filesystems = vec![
+            filesystem("local", "/", 300 * GIB, 900 * GIB, StorageCondition::Ok),
+            filesystem(
+                "local",
+                "/mnt/optane",
+                3 * GIB,
+                400 * GIB,
+                StorageCondition::Low,
+            ),
+        ];
+        let mut build = row("build.example", DeploymentCapacityKind::Host, &["build"]);
+        build.cpu_percent = None;
+        build.sampled_at_epoch_seconds = Some(now - 600);
+        build.probe_error = Some("ssh: connection timed out".into());
+        build.filesystems = vec![filesystem(
+            "build.example",
+            "/srv",
+            GIB / 2,
+            200 * GIB,
+            StorageCondition::Full,
+        )];
+        let mut fleet = row("ec2-fleet", DeploymentCapacityKind::AwsFleet, &["ec2"]);
+        fleet.fleet_instances = Some(2);
+        fleet.cpu_percent = None;
+        fleet.logical_cores = 96;
+        fleet.memory_total_bytes = 384 * GIB;
+        fleet.filesystems = vec![
+            filesystem(
+                "i-0a1",
+                "/mnt/ebs",
+                80 * GIB,
+                100 * GIB,
+                StorageCondition::Ok,
+            ),
+            filesystem(
+                "i-0b2",
+                "/mnt/ebs",
+                60 * GIB,
+                100 * GIB,
+                StorageCondition::Ok,
+            ),
+        ];
+        let mut idle = row("ec2-idle", DeploymentCapacityKind::AwsFleet, &["ec2-spare"]);
+        idle.fleet_instances = Some(0);
+        idle.has_reading = false;
+        idle.on_demand = true;
+        // The fleet last answered empty, then its probe failed: the size is
+        // unknown, so the row must not claim "0 VMs".
+        let mut failed_idle = row(
+            "ec2-failed",
+            DeploymentCapacityKind::AwsFleet,
+            &["ec2-broken"],
+        );
+        failed_idle.fleet_instances = Some(0);
+        failed_idle.has_reading = false;
+        failed_idle.probe_error = Some("describe-instances: access denied".into());
+        let mut fresh = row("new.example", DeploymentCapacityKind::Host, &["new"]);
+        fresh.has_reading = false;
+        fresh.sampled_at_epoch_seconds = None;
+        // The rows travel from the daemon as JSON.
+        let rows: Vec<HostCapacityRow> = serde_json::from_value(
+            serde_json::to_value(vec![local, build, fleet, idle, failed_idle, fresh]).unwrap(),
+        )
+        .unwrap();
+        let mut output = String::from("=== mj hosts ===\n");
+        output.push_str(&render_hosts(&rows, None, false, now).unwrap());
+        output.push_str("\n=== mj hosts --host podman ===\n");
+        output.push_str(&render_hosts(&rows, Some("podman"), false, now).unwrap());
+        output.push_str("\n=== mj hosts --host ec2-fleet --json ===\n");
+        output.push_str(&render_hosts(&rows, Some("ec2-fleet"), true, now).unwrap());
+        output.push_str("\n=== mj hosts --host missing ===\n");
+        output.push_str(
+            &render_hosts(&rows, Some("missing"), false, now)
+                .unwrap_err()
+                .to_string(),
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-hosts", &output);
     }
 }

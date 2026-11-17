@@ -1,0 +1,399 @@
+{
+  "id": "L2001",
+  "title": "bifrost via claude2",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "b77c55f68caf70b180d18e5a49723134",
+    "session_title": "bifrost via claude2",
+    "reply_position": 26120,
+    "captured_at": "2026-08-21T14:01:19.156Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:12",
+          "role": "user",
+          "text": "Implement the functionality necessary for https://github.com/BrokkAi/bifrost-dev/issues/2433\n\nDo this in a separate branch and create a PR when done; assign review to DavidEffendiBaker"
+        },
+        {
+          "id": "user:4157",
+          "role": "user",
+          "text": "go ahead and fix the followups"
+        },
+        {
+          "id": "user:4185",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:9395",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:9649",
+          "role": "user",
+          "text": "CI says your PR failed, is that the existing bug?"
+        },
+        {
+          "id": "user:9879",
+          "role": "user",
+          "text": "> every tracked path must appear in the reviewed .open-core/public-paths.tsv manifest\n\nwhat fresh hell is this?"
+        },
+        {
+          "id": "user:10018",
+          "role": "user",
+          "text": "can you classify the new files based on existing precedent?"
+        },
+        {
+          "id": "user:10082",
+          "role": "user",
+          "text": "great. merge this into master pls"
+        },
+        {
+          "id": "user:10203",
+          "role": "user",
+          "text": "jesus i don't want to wait another 30 minutes, just merge it pls"
+        },
+        {
+          "id": "user:10241",
+          "role": "user",
+          "text": "what follow up work should obviously come next?"
+        },
+        {
+          "id": "user:10266",
+          "role": "user",
+          "text": "create tickets for these including call-binding refinements and near-miss ranking (unless such tickets already exist)\n\nthen let's dig into #1, give me your recommended solution to start"
+        },
+        {
+          "id": "user:10567",
+          "role": "user",
+          "text": "sorry, pls break it down for me\n\nwhy was it designed this way and what assumptions were incorrect"
+        },
+        {
+          "id": "user:10615",
+          "role": "user",
+          "text": "> True for dependency packs; meaningless for a repo describing\n│ itself\n\ni don't understand, what is \"a repo describing itself\""
+        },
+        {
+          "id": "user:10648",
+          "role": "user",
+          "text": "ok so \"self-describing model\" was something added later?"
+        },
+        {
+          "id": "user:10678",
+          "role": "user",
+          "text": "ok so what's your recommended fix"
+        },
+        {
+          "id": "user:10704",
+          "role": "user",
+          "text": "great. delegate to opus. \n\nthen: what else should we do before the P1 epic (#2441)"
+        },
+        {
+          "id": "user:11796",
+          "role": "user",
+          "text": "ok, good analysis, pls burn down the pre-P1 work in parallel where that makes sense"
+        },
+        {
+          "id": "user:18355",
+          "role": "user",
+          "text": "we got disconnected, how far did you get?"
+        },
+        {
+          "id": "user:18457",
+          "role": "user",
+          "text": "i'm heading to bed. merge + push when done pls"
+        },
+        {
+          "id": "user:18857",
+          "role": "user",
+          "text": "David says he wants to do some refactoring, so pause after pushing #2494 and #2495"
+        },
+        {
+          "id": "user:18874",
+          "role": "user",
+          "text": "i want to go back to default \"push to master\", we don't need PRs for these"
+        },
+        {
+          "id": "user:18882",
+          "role": "user",
+          "text": "if you have a bunch of open PRs rn, pls merge them to master"
+        },
+        {
+          "id": "agent:18895",
+          "role": "assistant",
+          "text": "Three of four merged clean; the last (#2513 flow explanations) conflicts with #2512's changes in the two prose files. Resolving."
+        },
+        {
+          "id": "agent:18939",
+          "role": "assistant",
+          "text": "All four PRs merged locally, manifest regenerated, gate green. Full validation before pushing to master — including the built-in-pack scan that was failing in CI, to confirm the dedupe fixes it."
+        },
+        {
+          "id": "user:18971",
+          "role": "user",
+          "text": "you know what, i'm more scared of cramping David's refactoring than I am of doing some extra merge work\n\ngo ahead and complete #2494 and #2495 but keep the work local until I get back, no push no PR"
+        },
+        {
+          "id": "agent:19020",
+          "role": "assistant",
+          "text": "Both agents are still mid-implementation (work present in their trees, no commits yet). Nothing to do until they report."
+        },
+        {
+          "id": "agent:19039",
+          "role": "assistant",
+          "text": "Still in progress on both (no commits yet — the benchmark agent has long measurement runs; the Python one is deep in resolver work). Quiet hold."
+        },
+        {
+          "id": "agent:21438",
+          "role": "assistant",
+          "text": "The failures are exactly at the predicted collision point. First hypothesis check: did the Python policy body actually end up with the port spelling matching the hash I pinned?"
+        },
+        {
+          "id": "agent:21859",
+          "role": "assistant",
+          "text": "**All done — everything complete, validated, and held locally. Nothing pushed, nothing filed, no GitHub changes.** Here's the hand-back:\n\n## What's sitting in local `master` (18 commits ahead of remote, all suites green)\n\nEverything from the burn-down, merged and integration-tested together: the four open PRs' content (#2504 workspace model activation, #2511 suppressions dedupe + dogfood record, #2512 named flow ports, #2513 flow explanations), plus #2494 (benchmarks, with recorded numbers) and #2495 (Python exact selection), plus the integration fixes the merge demanded.\n\nThe integration surfaced one genuine soundness bug worth knowing about: the named-port resolver built its formal-name table from declaration order, so Python's `self` shifted every name by one — `(argument :name \"first\")` could bind the *wrong operand* and report a **false positive with a proven, complete verdict**. It's fixed at the resolver (names now come from the semantic lowering's own parameter values), pinned by two regression tests, and with it fixed the named-port spelling works uniformly across Java and Python.\n\nFinal numbers: `suite_bench_policy` 619, `suite_semantic` 1048, `suite_cross_language` 644, `suite_usages` 1977, `suite_mcp_cli` 142, workspace clippy `-D warnings` clean.\n\n## When you're back\n\n- **To publish everything:** `git push dev master` — the four open PRs auto-close as merged. If David landed his refactoring first, I (or you) merge `dev/master` into local master, regenerate the open-core manifest, re-run the suites, then push.\n- **Individual branches** all exist locally too (`fable/issue-2494-substrate-benchmarks`, `fable/issue-2495-python-exact-calls`, etc.), so cherry-picking a different integration order stays possible.\n\n## Held for your decision\n\n1. **9 dogfood friction issues** (drafts in the campaign report) — worst two: the silent enum-typo false green in relational `:where`, and filter-blind `--explain-candidate`.\n2. **2 benchmark findings** — reference policy B covers only 6% of its subjects on google/gson before a shared semantic budget exhausts (verdict honest but nearly useless), and assertion runs publish no work metrics.\n3. **Closure-audit draft comments** ready to close #2436 and #2437.\n\n**Parked:** wave 2 (#2498 registry refactor → #2499/#2500) — deliberately, since the refactor is exactly what would collide with David's. Sleep well."
+        },
+        {
+          "id": "user:21912",
+          "role": "user",
+          "text": "okay, you're good to merge and push, David is done, then keep going on the \"prep for P1 epic\" work"
+        },
+        {
+          "id": "agent:21914",
+          "role": "assistant",
+          "text": "David's done — publishing everything now, then continuing the pre-P1 work. First: sync with whatever David landed, validate, push."
+        },
+        {
+          "id": "agent:22235",
+          "role": "assistant",
+          "text": "Rejected — remote moved again while we reconciled (someone merged PR #2513 remotely, and its content is already in my local master). Fetching and merging the new tip."
+        },
+        {
+          "id": "agent:22245",
+          "role": "assistant",
+          "text": "Clean merge this time. Quick validation of the combined tree, then push before the remote moves again."
+        },
+        {
+          "id": "agent:22272",
+          "role": "assistant",
+          "text": "The classification gate needs another regeneration after this merge, and the push was rejected again (remote is moving fast today). Handling both."
+        },
+        {
+          "id": "agent:22291",
+          "role": "assistant",
+          "text": "The remote is being actively pushed to right now. Tight fetch-merge-push retry loop."
+        },
+        {
+          "id": "agent:22321",
+          "role": "assistant",
+          "text": "One line. I'll restore the remote's `ci.yml`, push everything else, and hand the one-liner to you (it needs a `workflow`-scoped token)."
+        },
+        {
+          "id": "agent:22332",
+          "role": "assistant",
+          "text": "**Master is pushed** (`ff8b18237`). Now verifying PR #2504 closed, then filing the held items."
+        },
+        {
+          "id": "agent:22342",
+          "role": "assistant",
+          "text": "PR #2504 hasn't auto-closed yet (GitHub can lag; I'll re-check and close it manually if needed). The audit lives on its unmerged branch — merging that in, then filing everything."
+        },
+        {
+          "id": "agent:22370",
+          "role": "assistant",
+          "text": "Now the two benchmark findings, then the closures."
+        },
+        {
+          "id": "agent:23334",
+          "role": "assistant",
+          "text": "All 23 sibling migrations are public — 0024 must be public too or the projected crate breaks. Regenerating with an explicit approval."
+        },
+        {
+          "id": "agent:23376",
+          "role": "assistant",
+          "text": "Two-pass flow: pass 1 puts the path in the manifest (review state), pass 2 approves it."
+        },
+        {
+          "id": "agent:23385",
+          "role": "assistant",
+          "text": "Gate is green. Committing, pushing, and launching the final two wave-2 agents."
+        },
+        {
+          "id": "agent:23403",
+          "role": "assistant",
+          "text": "David just replaced the single manifest with sharded inventory files (#2527) while I was pushing. Adopting his structure and re-applying my two classifications in the new format."
+        },
+        {
+          "id": "agent:23413",
+          "role": "assistant",
+          "text": "David's shards already carry both classifications — he folded my in-flight decisions into the resharding. Verifying the gate and pushing."
+        },
+        {
+          "id": "agent:23525",
+          "role": "assistant",
+          "text": "Green again (the two lib failures are the known `javac` container ones). Committing with proper exit-code gating this time, validating the remaining suites, and pushing."
+        },
+        {
+          "id": "agent:25368",
+          "role": "assistant",
+          "text": "Both final wave-2 pieces are done. Merging into master — #2500 first, then #2499 — and validating."
+        },
+        {
+          "id": "agent:25380",
+          "role": "assistant",
+          "text": "Both merged clean, no conflicts. Full validation, then push."
+        },
+        {
+          "id": "agent:25417",
+          "role": "assistant",
+          "text": "All green (the 2 lib failures are the known `javac` container ones). Pushing."
+        },
+        {
+          "id": "agent:25443",
+          "role": "assistant",
+          "text": "**Wave 2 is done and pushed — the entire pre-P1 queue is now on master** (`19547d25c`), and with it the #2433 epic's substrate work is complete end to end. The final two pieces:\n\n- **#2499 call-binding second slice**: all seven binding kinds now mint rows — Python fully adapted (`self`/`cls` as receiver rows, defaults, keywords, an `__init__` implicit binding; the fix also repaired the production binder, which had been answering `Unavailable` for every Python `local.method(...)` call), TypeScript defaults/rest/spread with an honestly-stated receiver gap, Rust receiver identity, defaults free for Scala/C++/PHP/Ruby via the grammar field. Overload `signature_id` selection landed; the coercion column exists schema-complete and honestly empty; the policy sugar is deliberately deferred (it's selector-surface work needing its own design).\n- **#2500 near-miss ranking**: a relaxation-ladder distance over declared predicates (scope never relaxed, `unknown` never scored as distance, enumeration never a default repo scan), exposed as `bifrost_policy_near_miss/v1` through MCP `explain_policy` and CLI `--explain-near-misses`. The P0 acceptance is pinned end to end: `cache.put` ranks at distance 1 with `inside_decl` named as its failing conjunct, byte-deterministic through the shipped binary.\n\nFinal validation: `suite_bench_policy` 626, `suite_cross_language` 656, `suite_usages` 1977, `suite_semantic` 1048, `suite_mcp_cli` 142, policy 498, MCP 148 — all green; classification gate green.\n\n**Going into the P1 epic (#2441), everything open is ticketed:** the flow `transform` design (#2507), policy-declared unknown behavior (#2506), the #2434 lowering + cross-language fixture (#2505), effect summary caching keys (#2508), relational why-not join replay (#2509), the two benchmark findings (#2523 — the effect-policy budget exhaustion is the most usability-critical of everything open — and #2524), TS/Rust exact selection, and the dogfood frictions (#2516–#2522). Of the six P0 children, #2436 and #2437 are closed with evidence; #2434/#2435/#2438/#2439 stay open with their remainders tracked.\n\n**One item only you can do:** re-add the one-liner `scripts/summarize-policy-substrate-benchmark.test.mjs` to the node-test list in `.github/workflows/ci.yml` — my token lacks the `workflow` scope to push workflow changes."
+        },
+        {
+          "id": "user:25492",
+          "role": "user",
+          "text": "sorry, what do you need me to do?"
+        },
+        {
+          "id": "agent:25494",
+          "role": "assistant",
+          "text": "Just one small thing: a one-line CI edit that my token isn't allowed to push (GitHub requires the `workflow` scope to modify anything under `.github/workflows/`, and this session's token doesn't have it).\n\nIn `.github/workflows/ci.yml`, in the node test list (~line 107, right after the `run-semantic-summary-taint-lifecycle-benchmarks.test.mjs` line), add:\n\n```\n          scripts/summarize-policy-substrate-benchmark.test.mjs\n```\n\nand push to master. That wires the #2494 benchmark summarizer's tests into CI — the test file itself is already on master and passing locally; it's just not being run by CI until that line lands.\n\nThat's the only pending human action. Everything else is done and pushed: all pre-P1 work is on master, the open items are ticketed (#2505–#2509, #2516–#2524), and #2436/#2437 are closed. If you'd rather I handle even that line, an alternative is to re-auth the session's `gh` with a token that has the `workflow` scope — then I can push it myself.Just one small thing: a one-line CI edit that my token isn't allowed to push (GitHub requires the `workflow` scope to modify anything under `.github/workflows/`, and this session's token doesn't have it).\n\nIn `.github/workflows/ci.yml`, in the node test list (~line 107, right after the `run-semantic-summary-taint-lifecycle-benchmarks.test.mjs` line), add:\n\n```\n          scripts/summarize-policy-substrate-benchmark.test.mjs\n```\n\nand push to master. That wires the #2494 benchmark summarizer's tests into CI — the test file itself is already on master and passing locally; it's just not being run by CI until that line lands.\n\nThat's the only pending human action. Everything else is done and pushed: all pre-P1 work is on master, the open items are ticketed (#2505–#2509, #2516–#2524), and #2436/#2437 are closed. If you'd rather I handle even that line, an alternative is to re-auth the session's `gh` with a token that has the `workflow` scope — then I can push it myself.Just one small thing: a one-line CI edit that my token isn't allowed to push (GitHub requires the `workflow` scope to modify anything under `.github/workflows/`, and this session's token doesn't have it).\n\nIn `.github/workflows/ci.yml`, in the node test list (~line 107, right after the `run-semantic-summary-taint-lifecycle-benchmarks.test.mjs` line), add:\n\n```\n          scripts/summarize-policy-substrate-benchmark.test.mjs\n```\n\nand push to master. That wires the #2494 benchmark summarizer's tests into CI — the test file itself is already on master and passing locally; it's just not being run by CI until that line lands.\n\nThat's the only pending human action. Everything else is done and pushed: all pre-P1 work is on master, the open items are ticketed (#2505–#2509, #2516–#2524), and #2436/#2437 are closed. If you'd rather I handle even that line, an alternative is to re-auth the session's `gh` with a token that has the `workflow` scope — then I can push it myself."
+        },
+        {
+          "id": "user:25514",
+          "role": "user",
+          "text": "/compact"
+        },
+        {
+          "id": "agent:25515",
+          "role": "assistant",
+          "text": "Compacting...\n\nCompacting completed."
+        },
+        {
+          "id": "user:25520",
+          "role": "user",
+          "text": "ok, that's done (the workflows add)\n\nP1 is now yours"
+        },
+        {
+          "id": "agent:25522",
+          "role": "assistant",
+          "text": "P1 it is. Let me pull the epic and sync with master first.P1 it is. Let me pull the epic and sync with master first.P1 it is. Let me pull the epic and sync with master first."
+        },
+        {
+          "id": "agent:25537",
+          "role": "assistant",
+          "text": "Master synced (the ci.yml one-liner is in as `6b7f9b718`, plus David's PHP sigil fix). Now let me read all nine P1 children to plan the epic.Master synced (the ci.yml one-liner is in as `6b7f9b718`, plus David's PHP sigil fix). Now let me read all nine P1 children to plan the epic.Master synced (the ci.yml one-liner is in as `6b7f9b718`, plus David's PHP sigil fix). Now let me read all nine P1 children to plan the epic."
+        },
+        {
+          "id": "agent:25560",
+          "role": "assistant",
+          "text": "The head cut off the last issues — fetching the remainder.The head cut off the last issues — fetching the remainder.The head cut off the last issues — fetching the remainder."
+        },
+        {
+          "id": "agent:25958",
+          "role": "assistant",
+          "text": "All six recon agents are running. While they work, I'll re-read the ExecPlan standard and start the epic plan skeleton.All six recon agents are running. While they work, I'll re-read the ExecPlan standard and start the epic plan skeleton.All six recon agents are running. While they work, I'll re-read the ExecPlan standard and start the epic plan skeleton."
+        },
+        {
+          "id": "agent:26120",
+          "role": "assistant",
+          "text": "The recon fan-out is underway and the prerequisite issue states are confirmed (#2401, #2414, #2376, #813 all still open — those anchor the Wave A contracts; #2371 is closed, meaning the sealed-dispatch discharge contract already exists for the summary work to build on).\n\nPlan of record for the epic, following the epic's own dependency structure:\n\n1. **Recon (running now):** six read-only agents mapping the Wave A subsystems — semantic-pack activation (#2442), the #2102 control machinery (#2443), heap/object vocabulary (#2444), summary machinery (#2445), project topology evidence (#2448), and the cache/generation layer (#2449).\n2. **Design:** one living ExecPlan at `.agents/plans/issue-2441-real-project-semantics.md` (same pattern that worked for the P0 epic), whose first milestone is the thing the epic gates everything on: the shared contracts — the project-topology envelope that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land.The recon fan-out is underway and the prerequisite issue states are confirmed (#2401, #2414, #2376, #813 all still open — those anchor the Wave A contracts; #2371 is closed, meaning the sealed-dispatch discharge contract already exists for the summary work to build on).\n\nPlan of record for the epic, following the epic's own dependency structure:\n\n1. **Recon (running now):** six read-only agents mapping the Wave A subsystems — semantic-pack activation (#2442), the #2102 control machinery (#2443), heap/object vocabulary (#2444), summary machinery (#2445), project topology evidence (#2448), and the cache/generation layer (#2449).\n2. **Design:** one living ExecPlan at `.agents/plans/issue-2441-real-project-semantics.md` (same pattern that worked for the P0 epic), whose first milestone is the thing the epic gates everything on: the shared contracts — the project-topology envelope that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land.The recon fan-out is underway and the prerequisite issue states are confirmed (#2401, #2414, #2376, #813 all still open — those anchor the Wave A contracts; #2371 is closed, meaning the sealed-dispatch discharge contract already exists for the summary work to build on).\n\nPlan of record for the epic, following the epic's own dependency structure:\n\n1. **Recon (running now):** six read-only agents mapping the Wave A subsystems — semantic-pack activation (#2442), the #2102 control machinery (#2443), heap/object vocabulary (#2444), summary machinery (#2445), project topology evidence (#2448), and the cache/generation layer (#2449).\n2. **Design:** one living ExecPlan at `.agents/plans/issue-2441-real-project-semantics.md` (same pattern that worked for the P0 epic), whose first milestone is the thing the epic gates everything on: the shared contracts — the project-topology envelope that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ok, that's done (the workflows add)\n\nP1 is now yours",
+    "assistant_text_tail": "that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land.The recon fan-out is underway and the prerequisite issue states are confirmed (#2401, #2414, #2376, #813 all still open — those anchor the Wave A contracts; #2371 is closed, meaning the sealed-dispatch discharge contract already exists for the summary work to build on).\n\nPlan of record for the epic, following the epic's own dependency structure:\n\n1. **Recon (running now):** six read-only agents mapping the Wave A subsystems — semantic-pack activation (#2442), the #2102 control machinery (#2443), heap/object vocabulary (#2444), summary machinery (#2445), project topology evidence (#2448), and the cache/generation layer (#2449).\n2. **Design:** one living ExecPlan at `.agents/plans/issue-2441-real-project-semantics.md` (same pattern that worked for the P0 epic), whose first milestone is the thing the epic gates everything on: the shared contracts — the project-topology envelope that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 25520,
+    "input_rationale": "Progress report on starting P1: recon agents running, plan of record, ExecPlan next. 'Still open' only describes prerequisite issue states; no decision or input is requested.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-08-21T14:07:58.232Z",
+        "kind": "agent",
+        "text": "The summary-machinery recon is back and it's decisive for #2445: there are four separate summary envelopes today (semantic, taint, protocol, string-effect), three incompatible evidence encodings, no s"
+      },
+      {
+        "at": "2026-08-21T14:08:06.288Z",
+        "kind": "agent",
+        "text": "The dependency/activation recon is back with a headline that reshapes #2442: most of what the issue asks for already exists (canonical `ResolvedDependency` evidence rows, nine bounded per-ecosystem re"
+      },
+      {
+        "at": "2026-08-21T14:09:10.423Z",
+        "kind": "agent",
+        "text": "The control recon is in, and it sharpens #2443's first slice considerably: all five control algorithms (#2102) already exist, tested and deterministic — but they're `pub(crate)`, keyed by procedure-lo"
+      },
+      {
+        "at": "2026-08-21T14:09:30.405Z",
+        "kind": "agent",
+        "text": "The incrementality recon is in — four of six now done. Key takeaways for #2449: the store's two validity axes (content-addressed blobs, per-language epoch generations from #772) are sound, but every w"
+      },
+      {
+        "at": "2026-08-21T14:09:40.988Z",
+        "kind": "agent",
+        "text": "The topology recon is in — five of six done. The #2448 picture: there is no topology model at all today (ownership is a path prefix, the only dependency edge is an untyped derived file-import relation"
+      },
+      {
+        "at": "2026-08-21T14:10:25.522Z",
+        "kind": "agent",
+        "text": "All six recon reports are in. The heap one completes the picture with the same theme as the others: the vocabulary #2444 wants largely exists (alias relations, strong-update certificates, bounded acce"
+      }
+    ]
+  }
+}

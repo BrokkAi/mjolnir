@@ -1,6 +1,6 @@
 ---
-title: Web viewer and desktop app
-description: Control the same durable Mjolnir sessions from a browser, phone, or native desktop window.
+title: Web viewer
+description: Control the same durable Mjolnir sessions from a browser or phone.
 ---
 
 Mjolnir's daemon starts a personal authenticated web viewer by default. It is a
@@ -112,7 +112,7 @@ state.
 
 Choose **Menu › Settings** to see and change the same settings as the
 terminal's Settings dialog: agent profiles, projects, runtimes, machines, code
-review, continuation, sub-agents, SessionWiki, web access, display and privacy.
+review, sub-agents, SessionWiki, web access, display and privacy.
 Each section names what it is set to; open it to change its fields, add or
 remove entries, then press **Save**. Saving writes the configuration file with
 the same checks the terminal uses. A setting another client changed since you
@@ -144,18 +144,6 @@ disconnect. Mjolnir verifies the process identity again before requesting a
 graceful stop and does not escalate to a force kill. The current daemon and
 unrelated applications cannot be stopped through this dialog. On other platforms,
 stop the identified application yourself or use another port.
-
-## Open the native desktop shell
-
-```console
-mj app
-```
-
-`mj app` launches the separate `mj-desktop` executable and opens the same
-viewer in a native window. The main `mj` binary stays headless. On Linux, the
-desktop executable uses the system WebKitGTK runtime; install the distribution
-package that provides WebKitGTK 4.1 when the app cannot start. Headless
-installations do not need the desktop package or its native libraries.
 
 ## Local access by default
 
@@ -214,6 +202,6 @@ use cannot reach it.
 See [Security boundaries](/security/) for the full trust model,
 [Configuration reference](/configuration/#web-viewer-phone) for every field,
 and [Troubleshooting](/troubleshooting/) when the viewer remains loopback-only
-or the desktop shell cannot open.
+or the browser cannot open.
 
 **Suspend session…** confirms saving a recovery copy and releasing the environment, warning about the current turn and about sub-agents still at work, which suspending stops. Accepted work remains visible until it completes or reports a failure. **Destroy session…** permanently removes the session record, environment, and recovery archive after indexing the conversation in SessionWiki. The archived conversation can seed a new session, but cannot recover deleted workspace files. Closing a browser pane or tab leaves sessions running.

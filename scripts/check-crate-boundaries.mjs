@@ -17,7 +17,6 @@ const allowed = {
   'brokk-mj-chat': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client'],
   'brokk-mj-tui': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-chat'],
   'brokk-mjolnir': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-chat', 'brokk-mj-tui'],
-  'brokk-mj-desktop': ['brokk-mj-core', 'brokk-mj-controller'],
   'brokk-mj-voice-worker': [],
 };
 const packages = new Set(metadata.packages.map(p => p.name));

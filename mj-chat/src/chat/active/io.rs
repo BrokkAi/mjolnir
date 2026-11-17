@@ -48,6 +48,14 @@ impl ActiveChat {
                 .prepared_startup
                 .push_back(prompt);
         }
+        while let Some(command_id) = self
+            .state
+            .composer_runtime
+            .prepared_receipt_retries
+            .pop_front()
+        {
+            self.dispatch(ChatAction::ResendSubmission { command_id });
+        }
         self.refresh_voice_availability();
         while let Ok(result) = self.remote.try_recv() {
             self.apply_remote_result(result);
@@ -63,6 +71,10 @@ impl ActiveChat {
             self.apply_session_view(view);
         }
         self.publish_conversation_notices();
+        // Applying an update can queue a history page or listing; every
+        // wakeup ends here, so neither waits for a key press.
+        dispatch_history_search_request(self.session.clone(), &mut self.state);
+        dispatch_session_history_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
     }
 
     pub(super) fn publish_conversation_notices(&mut self) {
@@ -89,40 +101,28 @@ impl ActiveChat {
 
     /// Shows the review the daemon is running for this session.
     ///
-    /// The terminal hosts no part of a review: it projects the daemon's status
-    /// and actions into the prompt area and sends resolutions back.
+    /// The terminal projects the daemon's status above the ordinary composer.
     /// A review therefore survives this view closing.
     pub fn apply_review_view(&mut self, view: Option<mj_client::review::RuntimeReviewView>) {
         self.state.set_turn_review(view);
         self.surface_reviewer_elicitations();
     }
 
-    /// Asks the daemon to review the turn that just finished.
+    /// Asks the daemon to review committed work.
     pub(crate) fn request_turn_review(&mut self) {
         let session_id = self.session.session_id().to_owned();
         self.state.set_notice("Starting a review…");
         self.send_daemon_request(ChatDaemonRequest::StartTurnReview { session_id });
     }
 
-    /// Sends one resolution to the daemon, which owns the review.
     pub(crate) fn run_turn_review(&mut self, intent: crate::chat::TurnReviewRequest) {
-        use crate::chat::TurnReviewRequest;
-
-        let session_id = self.session.session_id().to_owned();
         match intent {
-            TurnReviewRequest::Start => self.request_turn_review(),
-            TurnReviewRequest::Resolve(resolution) => {
-                self.send_daemon_request(ChatDaemonRequest::ResolveTurnReview {
-                    session_id,
-                    resolution,
-                });
-            }
+            crate::chat::TurnReviewRequest::Start => self.request_turn_review(),
         }
     }
 
     /// Hands one request to the daemon bridge, or reports that this chat has
-    /// none: a chat without a bridge cannot reach the daemon at all, and
-    /// silently dropping a review action would leave the prompt held.
+    /// none: a chat without a bridge cannot reach the daemon at all.
     pub(crate) fn send_daemon_request(&mut self, request: ChatDaemonRequest) {
         let Some(persistence) = &self.persistence else {
             self.state
@@ -194,7 +194,6 @@ impl ActiveChat {
         if let PrefixRebuild::Needed { attempt } = apply_chat_io_update(&mut self.state, update) {
             self.rebuild_transcript_prefix(attempt);
         }
-        dispatch_history_search_request(self.session.clone(), &mut self.state);
         dispatch_diffstat_requests(
             &mut self.state,
             &self.chat_io_tx,
@@ -231,14 +230,7 @@ impl ActiveChat {
         let Some(context) = &self.context else {
             return;
         };
-        let paths = mj_client::auth::auth_paths(&context.config, &context.session.last_profile);
-        if paths != self.voice_probe_paths {
-            self.voice_probe_paths.clone_from(&paths);
-            self.voice_auth = None;
-            self.voice_unavailable = None;
-            self.state.set_voice_available(false);
-            self.voice_probe_at = None;
-        }
+        let preferred = context.session.last_profile.clone();
         if self.voice_probe_pending
             || self
                 .voice_probe_at
@@ -250,21 +242,31 @@ impl ActiveChat {
         self.voice_probe_at = Some(std::time::Instant::now());
         let updates = self.voice_updates_tx.clone();
         tokio::spawn(async move {
-            let probed_paths = paths.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                if let Some(reason) = crate::speech::voice_input_unavailable_reason() {
-                    return Err(reason);
+            let result = async {
+                if let Some(reason) =
+                    tokio::task::spawn_blocking(crate::speech::voice_input_unavailable_reason)
+                        .await?
+                {
+                    return Ok(Err(reason));
                 }
-                if paths.is_empty() {
-                    return Err(DICTATION_NEEDS_A_CODEX_PROFILE.to_owned());
+                let mut client = mj_client::daemon::connect_existing().await?;
+                match client
+                    .request(mj_client::daemon::DaemonAction::TranscriptionAvailable {
+                        preferred_profile: preferred,
+                    })
+                    .await?
+                {
+                    mj_client::daemon::DaemonReply::TranscriptionAvailable(true) => Ok(Ok(())),
+                    mj_client::daemon::DaemonReply::TranscriptionAvailable(false) => {
+                        Ok(Err(DICTATION_NEEDS_A_CODEX_PROFILE.to_owned()))
+                    }
+                    reply => Err(anyhow::anyhow!(
+                        "unexpected transcription availability reply: {reply:?}"
+                    )),
                 }
-                mj_client::auth::available_auth(paths)
-                    .ok_or_else(|| DICTATION_NEEDS_A_CHATGPT_SIGN_IN.to_owned())
-            })
+            }
             .await;
-            let result = result
-                .map_err(|error| anyhow::anyhow!("dictation availability task failed: {error}"));
-            if let Err(error) = updates.send(VoiceUpdate::Availability(probed_paths, result)) {
+            if let Err(error) = updates.send(VoiceUpdate::Availability(result)) {
                 tracing::debug!(%error, "dictation availability dropped because the chat closed");
             }
         });
@@ -272,23 +274,22 @@ impl ActiveChat {
 
     pub(super) fn apply_voice_update(&mut self, update: VoiceUpdate) {
         match update {
-            VoiceUpdate::Availability(paths, result) => {
+            VoiceUpdate::Availability(result) => {
                 self.voice_probe_pending = false;
-                if paths != self.voice_probe_paths {
-                    return;
-                }
                 match result {
-                    Ok(Ok(path)) => {
+                    Ok(Ok(())) => {
                         self.state.set_voice_available(true);
-                        self.voice_auth = Some(path);
                         self.voice_unavailable = None;
                     }
                     Ok(Err(reason)) => {
                         self.state.set_voice_available(false);
-                        self.voice_auth = None;
                         self.voice_unavailable = Some(reason);
                     }
-                    Err(error) => self.state.set_notice(error.to_string()),
+                    Err(error) => {
+                        self.state.set_voice_available(false);
+                        self.voice_unavailable = Some(format!("Dictation is unavailable: {error}"));
+                        self.state.set_notice(error.to_string());
+                    }
                 }
             }
             VoiceUpdate::Status(status) => self.state.set_notice(status),
@@ -425,5 +426,4 @@ impl ActiveChat {
 /// Shown until the first availability probe answers. A conversation opened
 /// without its session's settings never probes, so this also covers that.
 const DICTATION_NOT_CHECKED: &str = "Dictation is unavailable until Mjolnir has checked for the voice helper and a Codex sign-in. Try again in a moment.";
-pub(super) const DICTATION_NEEDS_A_CODEX_PROFILE: &str = "Dictation is unavailable. It transcribes through a Codex profile signed in with a ChatGPT account, and no Codex profile is configured. Add one in Setup.";
-const DICTATION_NEEDS_A_CHATGPT_SIGN_IN: &str = "Dictation is unavailable. It transcribes through a Codex profile signed in with a ChatGPT account, and no Codex profile is signed in that way; an API key does not work. Sign a Codex profile in with ChatGPT.";
+pub(super) const DICTATION_NEEDS_A_CODEX_PROFILE: &str = "Dictation is unavailable. It transcribes through a Codex profile signed in with a ChatGPT account, and the daemon has no Codex profile signed in that way. Sign a daemon Codex profile in with ChatGPT.";

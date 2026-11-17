@@ -15,14 +15,7 @@ pub const ROOT_GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Sessions",
-        &[
-            "review",
-            "continuation",
-            "subagents",
-            "quota",
-            "sessionwiki",
-            "phone",
-        ],
+        &["review", "subagents", "quota", "sessionwiki", "phone"],
     ),
     ("Display", &["interface", "notify", "advanced"]),
     ("Privacy", &["jev"]),
@@ -38,14 +31,31 @@ pub enum PageRow {
     Setting(usize),
 }
 
-/// Every row `keys` draws on the page `path`, in order.
-pub fn page_plan(path: &[String], keys: &[String]) -> Vec<PageRow> {
+/// Every row `paths` draws on the page `path`, in order.
+///
+/// The first page groups its sections by heading. The Sub-agents page puts a
+/// heading before its conditional YOLO task rows, so the two sets stay
+/// visibly separate.
+pub fn page_plan(path: &[String], paths: &[Vec<String>]) -> Vec<PageRow> {
     if !path.is_empty() {
-        return (0..keys.len()).map(PageRow::Setting).collect();
+        let mut plan = Vec::new();
+        let mut yolo_heading = false;
+        for (index, child) in paths.iter().enumerate() {
+            if path == ["subagents"]
+                && !yolo_heading
+                && child.get(1).is_some_and(|key| key == "yolo")
+            {
+                plan.push(PageRow::Heading("YOLO Target Subagents"));
+                yolo_heading = true;
+            }
+            plan.push(PageRow::Setting(index));
+        }
+        return plan;
     }
     let mut plan = Vec::new();
     let mut group = None;
-    for (index, key) in keys.iter().enumerate() {
+    for (index, child) in paths.iter().enumerate() {
+        let key = child.last().map(String::as_str).unwrap_or("");
         let heading = root_group(key);
         if group != Some(heading) {
             if group.is_some() {
@@ -80,6 +90,8 @@ pub fn hidden_root_key(key: &str) -> bool {
             | "theme"
             | "keys"
             | "_subagent_options"
+            | "_reviewer_options"
+            | "_review_action_reason"
     )
 }
 
@@ -135,7 +147,7 @@ pub fn visible_paths(path: &[String], value: &Value) -> Vec<Vec<String>> {
     let keys = visible_keys(path, value);
     if path == ["subagents"] {
         let mut fields = vec![vec!["subagents".to_owned(), "max_concurrent".to_owned()]];
-        for task in ["straightforward", "subtle"] {
+        for task in ["straightforward", "subtle", "oracle"] {
             fields.push(vec![
                 "subagents".to_owned(),
                 task.to_owned(),
@@ -150,11 +162,39 @@ pub fn visible_paths(path: &[String], value: &Value) -> Vec<Vec<String>> {
                 ]);
             }
         }
+        fields.push(vec![
+            "subagents".to_owned(),
+            "use_same_on_all_targets".to_owned(),
+        ]);
+        if !schema::shared_subagents(value) {
+            for task in ["straightforward", "subtle", "oracle"] {
+                if value["yolo"].get(task).is_none() {
+                    continue;
+                }
+                fields.push(vec![
+                    "subagents".to_owned(),
+                    "yolo".to_owned(),
+                    task.to_owned(),
+                    "model".to_owned(),
+                ]);
+                let model = value["yolo"][task]["model"].as_str().unwrap_or_default();
+                if !model.is_empty() {
+                    fields.push(vec![
+                        "subagents".to_owned(),
+                        "yolo".to_owned(),
+                        task.to_owned(),
+                        "effort".to_owned(),
+                    ]);
+                }
+            }
+        }
         let extras = visible_keys(path, value)
             .into_iter()
             .filter(|child| {
                 child != "max_concurrent"
-                    && !["straightforward", "subtle"].contains(&child.as_str())
+                    && child != "use_same_on_all_targets"
+                    && child != "yolo"
+                    && !["straightforward", "subtle", "oracle"].contains(&child.as_str())
             })
             .map(|child| vec!["subagents".to_owned(), child])
             .collect::<Vec<_>>();
@@ -171,8 +211,21 @@ pub fn visible_paths(path: &[String], value: &Value) -> Vec<Vec<String>> {
 
 /// Page that owns the row for a full setting path.
 pub fn row_page(path: &[String]) -> &[String] {
-    if matches!(path, [section, task, field] if section == "subagents" && ["straightforward", "subtle"].contains(&task.as_str()) && ["model", "effort"].contains(&field.as_str()))
-    {
+    let subagent_field = matches!(
+        path,
+        [section, task, field]
+            if section == "subagents"
+                && ["straightforward", "subtle", "oracle"].contains(&task.as_str())
+                && ["model", "effort"].contains(&field.as_str())
+    ) || matches!(
+        path,
+        [section, yolo, task, field]
+            if section == "subagents"
+                && yolo == "yolo"
+                && ["straightforward", "subtle", "oracle"].contains(&task.as_str())
+                && ["model", "effort"].contains(&field.as_str())
+    );
+    if subagent_field {
         &path[..1]
     } else {
         path.get(..path.len().saturating_sub(1)).unwrap_or_default()
@@ -182,19 +235,20 @@ pub fn row_page(path: &[String]) -> &[String] {
 /// Settings that exist in the stored shape but have no meaning on this entry,
 /// so showing them would invite a value that does nothing.
 pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
-    if key == "_subagent_options" {
+    if matches!(key, "_subagent_options" | "_reviewer_options") {
         return true;
     }
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
+        // A legacy per-profile table, read but never saved: not a setting.
+        // Fields of other profile kinds never appear: each kind's defaults
+        // list only its own (`schema::defaults`).
+        ["profiles", _] if matches!(key, "subagents" | "muse_auto_review") => true,
         // This machine is always this machine; its type is not a choice.
-        ["profiles", _] if key == "subagents" => true,
-        // These two settings are read only for a Codex profile; the profile's
-        // own validation rejects them on any other kind.
-        ["profiles", _] if matches!(key, "guardian_review_model" | "codex_profile") => {
-            value["kind"].as_str() != Some("codex")
-        }
         ["machines", mj_core::config::LOCAL_MACHINE_ID] => key == "kind",
+        // Present only while reviewers still have to be chosen automatically:
+        // it is not a setting. Review is on exactly when reviewers exist.
+        ["review"] => key == "trigger",
         // Approvals are a remote-machine setting: a bare runtime here always
         // uses the configured approvals.
         ["targets", _] => {
@@ -204,6 +258,9 @@ pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
                     .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
                     == mj_core::config::LOCAL_MACHINE_ID
         }
+        // The YOLO set is retained while the shared set is active, but it is
+        // not a setting the page offers and edits to it do nothing.
+        ["subagents"] => key == "yolo" && schema::shared_subagents(value),
         _ => false,
     }
 }
@@ -285,13 +342,14 @@ pub fn machine_build_cache_summary(path: &[String], value: &Value) -> Option<Str
     Some(format!("{enabled} · {budget}"))
 }
 
-/// How much a row that opens its own page holds.
-pub fn contents_summary(value: &Value) -> Option<String> {
+/// How much the page at `path` holds, counted the way the page lists it:
+/// hidden keys are left out, and synthetic pages such as `interface` count
+/// the rows they show.
+pub fn contents_summary(path: &[String], value: &Value) -> Option<String> {
+    let count = visible_paths(path, value).len();
     match value {
-        Value::Object(entries) => {
-            Some(mj_core::text::counted(entries.len(), "setting", "settings"))
-        }
-        Value::Array(entries) => Some(mj_core::text::counted(entries.len(), "entry", "entries")),
+        Value::Object(_) => Some(mj_core::text::counted(count, "setting", "settings")),
+        Value::Array(_) => Some(mj_core::text::counted(count, "entry", "entries")),
         _ => None,
     }
 }
@@ -345,5 +403,38 @@ pub fn row_kind(draft: &Value, page: &[String], path: &[String]) -> RowKind {
         RowKind::Checkbox
     } else {
         RowKind::Field
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The YOLO set is retained in the draft but absent from the page and
+    /// from direct edits while the shared set is active. Unchecking reveals
+    /// the same rows under their own heading.
+    #[test]
+    fn yolo_rows_are_hidden_refused_and_restored_by_the_checkbox() {
+        let mut value = json!({"subagents": {"straightforward": {"model": "shared"}, "yolo": {"straightforward": {"model": "yolo"}}}});
+        schema::expand(&mut value, &mut Vec::new());
+        let subagents = &value["subagents"];
+        let path = ["subagents".to_owned()];
+        let yolo_model = vec![
+            "subagents".to_owned(),
+            "yolo".to_owned(),
+            "straightforward".to_owned(),
+            "model".to_owned(),
+        ];
+        assert!(!visible_paths(&path, subagents).contains(&yolo_model));
+        assert!(hidden_key(&path, subagents, "yolo"));
+
+        value["subagents"]["use_same_on_all_targets"] = json!(false);
+        let subagents = &value["subagents"];
+        let paths = visible_paths(&path, subagents);
+        assert!(paths.contains(&yolo_model));
+        assert!(!hidden_key(&path, subagents, "yolo"));
+        assert!(page_plan(&path, &paths).contains(&PageRow::Heading("YOLO Target Subagents")));
+        assert_eq!(subagents["yolo"]["straightforward"]["model"], "yolo");
     }
 }

@@ -1,7 +1,9 @@
 //! Durable contracts for Mjolnir-managed child-agent sessions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use crate::continuation::GeneratedPrompt;
 use serde::{Deserialize, Serialize};
 
 /// A session's delegation policy, optionally overriding global task choices.
@@ -87,6 +89,7 @@ pub enum SubagentTaskType {
     #[default]
     Straightforward,
     Subtle,
+    Oracle,
 }
 
 impl SubagentTaskType {
@@ -94,6 +97,7 @@ impl SubagentTaskType {
         match self {
             Self::Straightforward => "straightforward",
             Self::Subtle => "subtle",
+            Self::Oracle => "oracle",
         }
     }
 }
@@ -116,6 +120,7 @@ impl SubagentPolicy {
             } => match task_type {
                 SubagentTaskType::Straightforward => straightforward.as_deref(),
                 SubagentTaskType::Subtle => subtle.as_deref(),
+                SubagentTaskType::Oracle => None,
             },
             _ => None,
         }
@@ -241,7 +246,7 @@ pub struct SubagentOptions {
 impl SubagentOptions {
     pub fn validate(&self, choice: &crate::config::SubagentChoice) -> Result<(), String> {
         let crate::config::SubagentChoice { model, effort } = choice;
-        if model.trim().is_empty() || !self.models.iter().any(|choice| &choice.value == model) {
+        if model.trim().is_empty() || crate::model_catalog::resolve(&self.models, model).is_none() {
             return Err(format!(
                 "Selected subagent model {model:?} is unavailable.{} {ELIGIBILITY_NOTE}",
                 choice_list(" Available models", &self.models)
@@ -340,6 +345,32 @@ pub enum SubagentFinishIdentity {
     },
 }
 
+impl SubagentFinishIdentity {
+    /// Whether a report with this identity was made after the turn that
+    /// completed at `ordinal`, or for a later one: the parent has been told of
+    /// that turn's ending.
+    pub fn covers(&self, ordinal: u64) -> bool {
+        self.completed_ordinal()
+            .is_some_and(|completed| completed >= ordinal)
+    }
+
+    /// The ordinal of the turn this finish completed, whatever the kind of
+    /// identity: a terminal one carries the last completed turn, and has none
+    /// for a child that never completed a turn. The one place that says which
+    /// turn a finish's recorded facts belong to.
+    pub fn completed_ordinal(&self) -> Option<u64> {
+        match self {
+            Self::Turn {
+                completed_ordinal, ..
+            } => Some(*completed_ordinal),
+            Self::Terminal {
+                last_completed_ordinal,
+                ..
+            } => *last_completed_ordinal,
+        }
+    }
+}
+
 fn deserialize_terminal_last_completed_ordinal<'de, D>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error>
@@ -370,6 +401,19 @@ pub struct FileSourceRanges {
     pub file: PathBuf,
     pub ranges: Vec<LineRange>,
 }
+
+/// One before-push review finding the agent declines to fix, in the agent's
+/// own words, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewOverride {
+    pub finding: String,
+    pub reason: String,
+}
+
+/// The finding recorded for a queued override from an older worker, which
+/// overrode the whole verdict with one reason.
+pub const LEGACY_WHOLE_VERDICT_FINDING: &str = "Every finding in the reviewed verdict";
 
 /// One MCP request created inside a parent worker and consumed by the
 /// controller. `request_id` is the idempotency identity across reconnects.
@@ -403,10 +447,21 @@ pub enum SubagentToolAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    AskOracle {
+        message: String,
+    },
     OverrideReview {
-        reason: String,
+        overrides: Vec<ReviewOverride>,
+    },
+    /// Mark commits through `commit` as reviewed, so later reviews start there.
+    SetReviewBaseline {
+        commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     Spawn {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_github_credentials: bool,
         task_name: String,
         instructions: String,
         #[serde(default)]
@@ -474,10 +529,25 @@ enum SubagentToolActionWire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    AskOracle {
+        message: String,
+    },
     OverrideReview {
-        reason: String,
+        #[serde(default)]
+        overrides: Vec<ReviewOverride>,
+        /// A queued request from an older worker, which overrode the whole
+        /// verdict with one reason.
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    SetReviewBaseline {
+        commit: String,
+        #[serde(default)]
+        path: Option<String>,
     },
     Spawn {
+        #[serde(default)]
+        no_github_credentials: bool,
         task_name: String,
         instructions: String,
         #[serde(default)]
@@ -532,7 +602,9 @@ impl SubagentToolAction {
             self,
             Self::Spawn { .. }
                 | Self::RequestReview { .. }
+                | Self::AskOracle { .. }
                 | Self::OverrideReview { .. }
+                | Self::SetReviewBaseline { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
                 | Self::LegacyInterruptAgent { .. }
@@ -584,8 +656,24 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
             SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
-            SubagentToolActionWire::OverrideReview { reason } => Self::OverrideReview { reason },
+            SubagentToolActionWire::AskOracle { message } => Self::AskOracle { message },
+            SubagentToolActionWire::OverrideReview {
+                mut overrides,
+                reason,
+            } => {
+                if let Some(reason) = reason {
+                    overrides.push(ReviewOverride {
+                        finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
+                        reason,
+                    });
+                }
+                Self::OverrideReview { overrides }
+            }
+            SubagentToolActionWire::SetReviewBaseline { commit, path } => {
+                Self::SetReviewBaseline { commit, path }
+            }
             SubagentToolActionWire::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -596,6 +684,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 context,
                 files,
             } => Self::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -732,15 +821,26 @@ pub enum SubagentKind {
     #[default]
     Worker,
     Reviewer,
+    Oracle,
 }
 
 impl SubagentKind {
+    /// Maximum report length, counted in Unicode characters.
+    #[must_use]
+    pub fn max_handback_chars(self) -> usize {
+        match self {
+            Self::Worker => MAX_HANDBACK_CHARS,
+            Self::Reviewer | Self::Oracle => MAX_ADVISOR_HANDBACK_CHARS,
+        }
+    }
+
     /// Key in the request index; the record keeps the caller's original id.
     #[must_use]
     pub fn request_key(self, key: &str) -> String {
         match self {
             Self::Worker => format!("worker:{key}"),
             Self::Reviewer => format!("reviewer:{key}"),
+            Self::Oracle => format!("oracle:{key}"),
         }
     }
 }
@@ -890,10 +990,18 @@ impl SubagentRecord {
 /// harness, so its tools reach the model as `mcp__mj-agents__<tool>`.
 pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 
+/// The name of the separate MCP server that offers the before-push review
+/// tools, so they reach the model as `mcp__mj-review__<tool>`. Claude loads
+/// its tools on demand because they are needed only when a push is near.
+pub const REVIEW_MCP_SERVER: &str = "mj-review";
+
+/// The tools the review server lists, in the order it lists them.
+pub const REVIEW_MCP_TOOLS: &[&str] = &["request_review", "override_review", "set_review_baseline"];
+
 /// Which tools a worker's `mj-agents` MCP server offers. A parent may delegate,
 /// a top-level session without Mjolnir delegation can message sessions, and a
-/// child also hands its report back. Messaging, fetch, and explicit reviews
-/// are common to every role.
+/// child also hands its report back. Messaging and fetch are common to every
+/// role. The review tools belong to the separate `mj-review` server.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentMcpRole {
@@ -907,10 +1015,26 @@ pub enum SubagentMcpRole {
 }
 
 impl SubagentMcpRole {
-    /// Only top-level sessions enforce the automatic push-review gate.
+    /// The arguments that start the `mj-review` server. Only a managed child
+    /// names its role, which selects its instructions; a top-level session's
+    /// arguments stay as earlier builds wrote them.
     #[must_use]
-    pub fn supports_push_gate(self) -> bool {
-        matches!(self, Self::Parent | Self::MessageOnly)
+    pub fn review_server_args(self, socket: &Path, harness: &str) -> Vec<String> {
+        let mut args: Vec<String> = [
+            "worker",
+            "subagent-mcp",
+            "--socket",
+            &socket.to_string_lossy(),
+            "--harness",
+            harness,
+            "--review-server",
+        ]
+        .map(str::to_owned)
+        .into();
+        if matches!(self, Self::Child | Self::FetchOnly) {
+            args.extend(["--role".to_owned(), self.id().to_owned()]);
+        }
+        args
     }
 
     #[must_use]
@@ -934,11 +1058,11 @@ impl SubagentMcpRole {
                 "send_message",
                 "close",
                 "fetch",
-                "request_review",
+                "ask_oracle",
             ],
-            Self::MessageOnly => &["send_message", "fetch", "request_review"],
-            Self::FetchOnly => &["fetch", "send_message", "request_review"],
-            Self::Child => &["handback", "fetch", "send_message", "request_review"],
+            Self::MessageOnly => &["send_message", "fetch", "ask_oracle"],
+            Self::FetchOnly => &["fetch", "send_message", "ask_oracle"],
+            Self::Child => &["handback", "fetch", "send_message"],
         }
     }
 }
@@ -964,11 +1088,6 @@ impl std::str::FromStr for SubagentMcpRole {
     }
 }
 
-/// Command id prefix of the one prompt that reminds a child to hand back its
-/// report. A turn whose command id carries it is that reminder, which is how
-/// [`report_state`] tells it from the task it follows up.
-pub const HANDBACK_REMINDER_PREFIX: &str = "handback-reminder";
-
 /// The reminder itself, sent as an ordinary prompt so the child's transcript
 /// shows it. A turn can end before the task is done (a harness failure, a
 /// question in plain text), so the reminder must not order a child that has
@@ -979,16 +1098,25 @@ pub const HANDBACK_REMINDER_TEXT: &str = "[handback reminder] Your turn ended wi
 /// A child's delegated authority and reporting requirements. Shared
 /// by the first-prompt note, the child's server instructions and the handback
 /// tool description, so the three cannot drift apart.
-pub const HANDBACK_REPORT_RULES: &str = "Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.";
+pub static HANDBACK_REPORT_RULES: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Your parent reads your report, at most {} characters for workers or {} for oracles and reviewers: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.",
+        SubagentKind::Worker.max_handback_chars(),
+        SubagentKind::Oracle.max_handback_chars(),
+    )
+});
 
 /// What a child's first prompt opens with when it has the tool. It leads the
 /// prompt rather than trailing a parent's long instructions, where live runs
 /// showed children skipping it. `report_dir` is the directory Mjolnir created
-/// for this child's files.
+/// for this child's files. The sentence about long waits is here and not in
+/// [`HANDBACK_REPORT_RULES`] because those rules already fill the length the
+/// harnesses keep of a tool description and of server instructions.
 #[must_use]
 pub fn handback_prompt_note(report_dir: &str) -> String {
     format!(
-        "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is {report_dir}. {HANDBACK_REPORT_RULES}"
+        "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. When your assignment needs the result of a build, test run or other long command, wait for it to finish: a long wait is not a reason to hand back. Your report directory is {report_dir}. {}",
+        HANDBACK_REPORT_RULES.as_str()
     )
 }
 
@@ -997,12 +1125,12 @@ pub fn handback_prompt_note(report_dir: &str) -> String {
 /// or it never reached the child; either way it is not coming.
 pub const HANDBACK_REMINDER_GRACE_MS: i64 = 30_000;
 
-/// The longest report a child can hand back or a notification includes.
+/// The longest ordinary worker report a handback or notification includes.
 /// Details belong in files in the child's report directory.
 pub const MAX_HANDBACK_CHARS: usize = 4_000;
 
-/// Reviewers return their complete structured findings in one handback.
-pub const MAX_REVIEWER_HANDBACK_CHARS: usize = 128 * 1024;
+/// Oracles and reviewers return complete advice and findings in one handback.
+pub const MAX_ADVISOR_HANDBACK_CHARS: usize = 64 * 1024;
 
 /// Directory under a parent's workspace root that holds its children's report
 /// directories, outside every repository.
@@ -1036,26 +1164,64 @@ pub fn max_child_report_bytes(max_concurrent_children: usize) -> u64 {
 /// out and how the parent can get it. Returns the text and whether it was cut.
 #[must_use]
 pub fn bounded_report(text: &str) -> (String, bool) {
+    bounded_report_with_recovery(
+        text,
+        SubagentKind::Worker.max_handback_chars(),
+        "use send_message to ask the child to write the details to files in its report directory and send you the paths",
+    )
+}
+
+/// Bound an oracle answer while keeping its recovery channel in the oracle.
+#[must_use]
+pub fn bounded_oracle_report(text: &str) -> (String, bool) {
+    bounded_report_with_recovery(
+        text,
+        SubagentKind::Oracle.max_handback_chars(),
+        "use ask_oracle to ask for the rest; the oracle keeps its context",
+    )
+}
+
+fn bounded_report_with_recovery(text: &str, maximum: usize, recovery: &str) -> (String, bool) {
     let total = text.chars().count();
-    if total <= MAX_HANDBACK_CHARS {
+    if total <= maximum {
         return (text.to_owned(), false);
     }
-    let kept: String = text.chars().take(MAX_HANDBACK_CHARS).collect();
+    let kept: String = text.chars().take(maximum).collect();
     (
         format!(
-            "{kept}\n[truncated: {} more characters; use send_message to ask the child to write the details to files in its report directory and send you the paths]",
-            total - MAX_HANDBACK_CHARS
+            "{kept}\n[truncated: {} more characters; {recovery}]",
+            total - maximum
         ),
         true,
     )
 }
 
-/// Whether a command id names a handback reminder.
+/// How long Mjolnir holds a child that ended its turn to wait for processes it
+/// started before asking it to hand back what it has. The user chose 30
+/// minutes on 2026-11-16: the measured 90th percentile of background work that
+/// agents waited for was 30 minutes (1,057 tasks since 2026-11-01; 99th
+/// percentile 115 minutes), and a longer run survives because a park waits for
+/// the parent's next turn, in which the parent can tell the child to continue.
+pub const HOLD_GIVE_UP_MS: i64 = 30 * 60 * 1000;
+
+/// Which follow-up prompt Mjolnir sends a child it is holding while the child
+/// waits for its own background processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldFollowUpKind {
+    /// Every process the child was waiting for has exited.
+    ProcessesExited,
+    /// The child waited [`HOLD_GIVE_UP_MS`] and should hand back what it has.
+    GiveUp,
+}
+
+/// Whether a command id names the prompt that reminds a child to hand back its
+/// report, which is how [`report_state`] tells it from the task it follows up.
 #[must_use]
 pub fn is_handback_reminder(command_id: &str) -> bool {
-    command_id
-        .strip_prefix(HANDBACK_REMINDER_PREFIX)
-        .is_some_and(|rest| rest.starts_with('-'))
+    GeneratedPrompt::HandbackReminder
+        .suffix(command_id)
+        .is_some()
 }
 
 /// The command id of the handback reminder for the turn that finished at
@@ -1063,18 +1229,48 @@ pub fn is_handback_reminder(command_id: &str) -> bool {
 /// once per turn, and [`reminded_turn_ordinal`] reads it back.
 #[must_use]
 pub fn handback_reminder_command_id(completed_ordinal: u64) -> String {
-    format!("{HANDBACK_REMINDER_PREFIX}-{completed_ordinal}")
+    GeneratedPrompt::HandbackReminder.command_id(completed_ordinal)
 }
 
 /// The ordinal at which the reminded turn finished, when `command_id` names a
 /// handback reminder.
 #[must_use]
 pub fn reminded_turn_ordinal(command_id: &str) -> Option<u64> {
-    command_id
-        .strip_prefix(HANDBACK_REMINDER_PREFIX)?
-        .strip_prefix('-')?
+    GeneratedPrompt::HandbackReminder
+        .suffix(command_id)?
         .parse()
         .ok()
+}
+
+impl HoldFollowUpKind {
+    fn prompt(self) -> GeneratedPrompt {
+        match self {
+            Self::ProcessesExited => GeneratedPrompt::HoldWake,
+            Self::GiveUp => GeneratedPrompt::HoldGiveUp,
+        }
+    }
+}
+
+/// The deterministic command id of the follow-up of `kind` for the reminder
+/// turn that finished at `reminder_completed_ordinal`. The id makes a retry
+/// idempotent and lets a restarted daemon see what it already sent.
+#[must_use]
+pub fn hold_follow_up_command_id(
+    kind: HoldFollowUpKind,
+    reminder_completed_ordinal: u64,
+) -> String {
+    kind.prompt().command_id(reminder_completed_ordinal)
+}
+
+/// The kind and reminder-turn ordinal a hold follow-up command id names.
+#[must_use]
+pub fn hold_follow_up_of(command_id: &str) -> Option<(HoldFollowUpKind, u64)> {
+    [HoldFollowUpKind::ProcessesExited, HoldFollowUpKind::GiveUp]
+        .into_iter()
+        .find_map(|kind| {
+            let ordinal = kind.prompt().suffix(command_id)?.parse().ok()?;
+            Some((kind, ordinal))
+        })
 }
 
 /// A report a child handed back during the turn `command_id` names.
@@ -1083,6 +1279,15 @@ pub struct SubagentHandback {
     pub command_id: String,
     pub message: String,
     pub recorded_at_ms: i64,
+}
+
+impl SubagentHandback {
+    /// Whether this report answers the turn `command_id` names. A report from
+    /// an earlier or later task of the same child answers none of the others.
+    #[must_use]
+    pub fn answers(&self, command_id: &str) -> bool {
+        self.command_id == command_id
+    }
 }
 
 /// The reminder Mjolnir sent after the turn `for_command_id` ended without a
@@ -1122,29 +1327,7 @@ pub fn awaiting_prompt(
     awaited_ordinal: Option<u64>,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
 ) -> bool {
-    prompt_unanswered(awaited_ordinal, last_turn.and_then(answered_ordinal))
-}
-
-/// Whether the prompt accepted at `awaited_ordinal` is still unanswered by a
-/// finished turn that answers prompts up to `answered_ordinal` (see
-/// [`answered_ordinal`]). This is the one comparison every reader applies.
-#[must_use]
-pub fn prompt_unanswered(awaited_ordinal: Option<u64>, answered_ordinal: Option<u64>) -> bool {
-    awaited_ordinal
-        .is_some_and(|awaited| answered_ordinal.is_none_or(|answered| answered < awaited))
-}
-
-/// The newest prompt a finished turn answers, by acceptance ordinal.
-///
-/// A prompt's turn answers the prompt accepted at its own ordinal. A handback
-/// reminder is Mjolnir's, not the parent's: the store gives its turn no
-/// acceptance ordinal, and the report the child hands back in it answers the
-/// turn it reminded about, so it answers every prompt accepted before that
-/// turn finished. A prompt accepted after that runs after the reminder and is
-/// still owed.
-#[must_use]
-pub fn answered_ordinal(turn: &crate::state::MaterializedTurnOutcome) -> Option<u64> {
-    reminded_turn_ordinal(&turn.command_id).or(turn.accepted_ordinal)
+    awaited_ordinal.is_some_and(|ordinal| last_turn.is_none_or(|turn| !turn.answers(ordinal)))
 }
 
 /// How a child's last finished turn failed, if it did: `interrupted` for a
@@ -1211,6 +1394,19 @@ pub fn login_invalid_reason(profile_id: &str) -> String {
     format!("the login is no longer valid; run `mj login --profile {profile_id}` and spawn again")
 }
 
+/// What a caller knows of the processes a child's last turn left running.
+/// "No worker to ask" is not "nothing is running": a reader that cannot reach
+/// the child's worker must not report a child that may be waiting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Liveness {
+    /// The child's worker is not attached to this reader.
+    #[default]
+    Unknown,
+    /// The connected worker's publication: `None` when it publishes no
+    /// liveness (no processes were left, or the worker predates protocol 67).
+    Known(Option<crate::work_facts::WorkLiveness>),
+}
+
 /// Where a child's report stands after its last finished turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportState {
@@ -1219,8 +1415,38 @@ pub enum ReportState {
     /// The child owes a report. `remind` says no reminder has been sent for
     /// this turn yet; otherwise one is on its way.
     Pending { remind: bool },
+    /// The child ended its reminder turn without a report while processes it
+    /// started are still running (or just exited): it is waiting, not done.
+    /// No report is owed to the parent and the child is not parked.
+    Held {
+        /// When the reminder turn ended, which is when the hold began.
+        since_ms: i64,
+        /// When the hold gives up and asks the child to hand back.
+        give_up_at_ms: i64,
+        /// The processes the child waits on, rendered one per line.
+        waiting_on: Vec<String>,
+        /// The follow-up prompt due now, if any. `None` while still waiting.
+        follow_up: Option<HoldFollowUpKind>,
+    },
     /// No handback is coming: report the turn's last message, as before.
     Fallback,
+}
+
+/// The processes a finished turn's work facts list as running, one per line.
+#[must_use]
+pub fn running_process_lines(facts: &crate::work_facts::WorkFacts) -> Vec<String> {
+    let Some(processes) = facts.processes.known() else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = processes
+        .shown
+        .iter()
+        .map(crate::work_facts::render_process)
+        .collect();
+    if processes.omitted > 0 {
+        lines.push(format!("and {} more", processes.omitted));
+    }
+    lines
 }
 
 /// The rule for a child's report, shared by notifications, session waiting
@@ -1229,12 +1455,16 @@ pub enum ReportState {
 /// `in_flight` names the commands queued or running on the child, so a sent
 /// reminder is known to be on its way. A child without the tool, and a turn
 /// that did not finish normally, fall back to the last message; a child that
-/// already had its one reminder does too.
+/// already had its one reminder does too, unless the reminder turn ended with
+/// processes the child started still alive (`liveness` names that turn): then
+/// the child is held, see [`ReportState::Held`]. A worker that publishes no
+/// liveness never holds a child.
 #[must_use]
 pub fn report_state(
     handback_tool: bool,
     report: &SubagentReport,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
+    liveness: &Liveness,
     in_flight: &[&str],
     now_ms: i64,
 ) -> ReportState {
@@ -1254,8 +1484,56 @@ pub fn report_state(
             if crate::state::classify_prompt_completion(stop_reason)
                 == crate::state::PromptCompletion::Finished
     );
+    // A follow-up the worker refused as stale ends the hold: the child's last
+    // message is reported.
+    if finished
+        && is_handback_reminder(&turn.command_id)
+        && report.reminder_failed_for.as_deref() != Some(turn.command_id.as_str())
+    {
+        let follow_up_in_flight = [HoldFollowUpKind::ProcessesExited, HoldFollowUpKind::GiveUp]
+            .into_iter()
+            .any(|kind| {
+                in_flight
+                    .contains(&hold_follow_up_command_id(kind, turn.completed_ordinal).as_str())
+            });
+        if follow_up_in_flight {
+            return ReportState::Pending { remind: false };
+        }
+        let liveness = match liveness {
+            // Nobody can say whether the child still waits: not an ending.
+            Liveness::Unknown => return ReportState::Pending { remind: false },
+            Liveness::Known(known) => known
+                .as_ref()
+                .filter(|l| l.completed_ordinal == turn.completed_ordinal),
+        };
+        let Some(liveness) = liveness else {
+            return ReportState::Fallback;
+        };
+        let give_up_at_ms = turn.completed_at_ms.saturating_add(HOLD_GIVE_UP_MS);
+        let follow_up = if liveness.alive == 0 {
+            Some(HoldFollowUpKind::ProcessesExited)
+        } else if now_ms >= give_up_at_ms {
+            Some(HoldFollowUpKind::GiveUp)
+        } else {
+            None
+        };
+        return ReportState::Held {
+            since_ms: turn.completed_at_ms,
+            give_up_at_ms,
+            waiting_on: turn
+                .work_facts
+                .as_ref()
+                .map(running_process_lines)
+                .unwrap_or_default(),
+            follow_up,
+        };
+    }
     if !finished
         || is_handback_reminder(&turn.command_id)
+        || matches!(
+            hold_follow_up_of(&turn.command_id),
+            Some((HoldFollowUpKind::GiveUp, _))
+        )
         || report.reminder_failed_for.as_deref() == Some(turn.command_id.as_str())
     {
         return ReportState::Fallback;
@@ -1292,11 +1570,40 @@ pub struct StoppedSubagent {
     pub handed_back: bool,
 }
 
+/// The key under which a stopped oracle is kept in the parent's stopped list.
+/// It stands in for the oracle's session ID, so that ID never reaches the
+/// primary: the list is rendered into its prompt context.
+pub const STOPPED_ORACLE_ID: &str = "oracle";
+
+/// The one line a primary is told when its oracle was stopped.
+pub const STOPPED_ORACLE_LINE: &str = "The oracle was stopped. If you were waiting for its answer, ask again; a fresh oracle will answer.";
+
+impl StoppedSubagent {
+    /// The list entry for a stopped oracle: no session ID and no prompt.
+    #[must_use]
+    pub fn oracle() -> Self {
+        Self {
+            child_session_id: STOPPED_ORACLE_ID.into(),
+            title: "oracle".into(),
+            task: None,
+            handed_back: true,
+        }
+    }
+
+    /// Whether this entry is the stopped oracle, which is rendered as
+    /// [`STOPPED_ORACLE_LINE`] and never as a child.
+    #[must_use]
+    pub fn is_oracle(&self) -> bool {
+        self.child_session_id == STOPPED_ORACLE_ID
+    }
+}
+
 /// A child whose parent remains live across an in-place harness swap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InPlaceSubagent {
     pub child_session_id: String,
-    pub task_name: String,
+    /// The child's name as the session list shows it.
+    pub name: String,
     pub state: InPlaceSubagentState,
 }
 
@@ -1318,14 +1625,10 @@ impl InPlaceSubagentState {
 /// Reserved hidden-context tag for children retained across an in-place swap.
 pub const IN_PLACE_SUBAGENTS_TAG: &str = "mj-in-place-subagents";
 
-fn safe_subagent_task_name(task_name: &str) -> String {
-    let single_line = task_name.split_whitespace().collect::<Vec<_>>().join(" ");
-    let safe = single_line.replace('<', "‹").replace('>', "›");
-    if safe.chars().count() <= STOPPED_TASK_CHARS {
-        return safe;
-    }
-    let kept: String = safe.chars().take(STOPPED_TASK_CHARS - 1).collect();
-    format!("{}…", kept.trim_end())
+fn safe_subagent_name(name: &str) -> String {
+    crate::state::bounded_one_line(name, STOPPED_TASK_CHARS)
+        .replace('<', "‹")
+        .replace('>', "›")
 }
 
 /// Hidden instructions for the first prompt after an in-place swap. The new
@@ -1342,7 +1645,7 @@ pub fn in_place_subagents_prompt_context(children: &[InPlaceSubagent]) -> Option
     for child in children {
         lines.push(format!(
             "- {} (child_session_id {}; {})",
-            safe_subagent_task_name(&child.task_name),
+            safe_subagent_name(&child.name),
             child.child_session_id,
             child.state.label()
         ));
@@ -1427,6 +1730,17 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
     if stopped.is_empty() {
         return None;
     }
+    let oracle_stopped = stopped.iter().any(StoppedSubagent::is_oracle);
+    let stopped = stopped
+        .iter()
+        .filter(|child| !child.is_oracle())
+        .cloned()
+        .collect::<Vec<_>>();
+    if stopped.is_empty() {
+        return Some(format!(
+            "<{STOPPED_SUBAGENTS_TAG}>\n{STOPPED_ORACLE_LINE}\n</{STOPPED_SUBAGENTS_TAG}>"
+        ));
+    }
     let total = stopped.len();
     let not_handed_back = stopped.iter().filter(|child| !child.handed_back).count();
     let mut lines = vec![
@@ -1436,7 +1750,7 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
             crate::text::counted(total, "sub-agent", "sub-agents")
         ),
     ];
-    for child in stopped {
+    for child in &stopped {
         let task = child
             .task
             .as_deref()
@@ -1470,6 +1784,9 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
         "A stopped sub-agent no longer exists: wait, send_message and close cannot reach it."
             .to_owned(),
     );
+    if oracle_stopped {
+        lines.push(STOPPED_ORACLE_LINE.to_owned());
+    }
     lines.push(format!("</{STOPPED_SUBAGENTS_TAG}>"));
     Some(lines.join("\n"))
 }
@@ -1480,6 +1797,25 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
 /// nothing was stopped.
 #[must_use]
 pub fn stopped_subagents_notice(stopped: &[StoppedSubagent]) -> Option<String> {
+    if stopped.is_empty() {
+        return None;
+    }
+    let oracle_stopped = stopped.iter().any(StoppedSubagent::is_oracle);
+    let children = stopped
+        .iter()
+        .filter(|child| !child.is_oracle())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !oracle_stopped {
+        return stopped_children_notice(&children);
+    }
+    Some(match stopped_children_notice(&children) {
+        Some(notice) => format!("{notice} {STOPPED_ORACLE_LINE}"),
+        None => STOPPED_ORACLE_LINE.to_owned(),
+    })
+}
+
+fn stopped_children_notice(stopped: &[StoppedSubagent]) -> Option<String> {
     if stopped.is_empty() {
         return None;
     }
@@ -1581,6 +1917,7 @@ pub fn has_handed_back(
     report: &SubagentReport,
     working: bool,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
+    liveness: &Liveness,
     now_ms: i64,
 ) -> bool {
     let Some(turn) = last_turn else {
@@ -1589,9 +1926,9 @@ pub fn has_handed_back(
     if working || awaiting_prompt(report.awaited_ordinal, Some(turn)) {
         return false;
     }
-    match report_state(handback_tool, report, Some(turn), &[], now_ms) {
+    match report_state(handback_tool, report, Some(turn), liveness, &[], now_ms) {
         ReportState::Delivered(_) => true,
-        ReportState::Pending { .. } => false,
+        ReportState::Pending { .. } | ReportState::Held { .. } => false,
         ReportState::Fallback => matches!(
             &turn.outcome,
             crate::state::TurnOutcomeKind::Completed { stop_reason }
@@ -1623,10 +1960,35 @@ mod tests {
         );
     }
 
+    // A request queued by an older worker carries one whole-verdict reason.
+    #[test]
+    fn a_queued_override_with_one_reason_decodes_as_one_pair() {
+        let old = r#"{"action":"override_review","params":{"reason":"wrong premise"}}"#;
+        let action: SubagentToolAction = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            action,
+            SubagentToolAction::OverrideReview {
+                overrides: vec![ReviewOverride {
+                    finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
+                    reason: "wrong premise".into(),
+                }],
+            }
+        );
+        let pairs =
+            r#"{"action":"override_review","params":{"overrides":[{"finding":"F","reason":"R"}]}}"#;
+        let action: SubagentToolAction = serde_json::from_str(pairs).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SubagentToolAction>(&serde_json::to_string(&action).unwrap())
+                .unwrap(),
+            action
+        );
+    }
+
     #[test]
     fn only_child_mutations_hold_an_in_place_move_drain() {
         let mutations = [
             SubagentToolAction::Spawn {
+                no_github_credentials: false,
                 task_type: SubagentTaskType::Straightforward,
                 task_name: "task".into(),
                 instructions: "work".into(),
@@ -1650,7 +2012,14 @@ mod tests {
                 child_session_id: "child".into(),
             },
             SubagentToolAction::OverrideReview {
-                reason: "reason".into(),
+                overrides: vec![ReviewOverride {
+                    finding: "finding".into(),
+                    reason: "reason".into(),
+                }],
+            },
+            SubagentToolAction::SetReviewBaseline {
+                commit: "abc123".into(),
+                path: None,
             },
         ];
         assert!(
@@ -1782,6 +2151,7 @@ mod tests {
             crate::config::HarnessKind::Claude,
             crate::config::HarnessKind::Codex,
             crate::config::HarnessKind::Dsh,
+            crate::config::HarnessKind::OpenCode,
         ] {
             for policy in [
                 SubagentPolicy::Native,
@@ -1808,6 +2178,8 @@ mod tests {
 
     fn finished(command_id: &str, stop_reason: &str) -> crate::state::MaterializedTurnOutcome {
         crate::state::MaterializedTurnOutcome {
+            work_facts: None,
+            answered_through: None,
             diagnostic: None,
             usage: None,
             command_id: command_id.to_owned(),
@@ -1842,11 +2214,11 @@ mod tests {
         let turn = finished("task", "end_turn");
         let report = SubagentReport::default();
         assert_eq!(
-            report_state(false, &report, Some(&turn), &[], 0),
+            report_state(false, &report, Some(&turn), &Liveness::Known(None), &[], 0),
             ReportState::Fallback
         );
         assert_eq!(
-            report_state(true, &report, None, &[], 0),
+            report_state(true, &report, None, &Liveness::Known(None), &[], 0),
             ReportState::Fallback
         );
     }
@@ -1859,14 +2231,28 @@ mod tests {
         };
         for stop_reason in ["end_turn", "cancelled", "refusal"] {
             assert_eq!(
-                report_state(true, &report, Some(&finished("task", stop_reason)), &[], 0),
+                report_state(
+                    true,
+                    &report,
+                    Some(&finished("task", stop_reason)),
+                    &Liveness::Known(None),
+                    &[],
+                    0
+                ),
                 ReportState::Delivered("the report".to_owned()),
                 "{stop_reason}"
             );
         }
         // A report for an earlier task does not answer this one.
         assert_eq!(
-            report_state(true, &report, Some(&finished("next", "end_turn")), &[], 0),
+            report_state(
+                true,
+                &report,
+                Some(&finished("next", "end_turn")),
+                &Liveness::Known(None),
+                &[],
+                0
+            ),
             ReportState::Pending { remind: true }
         );
     }
@@ -1875,12 +2261,26 @@ mod tests {
     fn only_a_normally_finished_task_turn_is_owed_a_reminder() {
         let report = SubagentReport::default();
         assert_eq!(
-            report_state(true, &report, Some(&finished("task", "end_turn")), &[], 0),
+            report_state(
+                true,
+                &report,
+                Some(&finished("task", "end_turn")),
+                &Liveness::Known(None),
+                &[],
+                0
+            ),
             ReportState::Pending { remind: true }
         );
         for stop_reason in ["cancelled", "awaiting_input", "quota_limit", "max_tokens"] {
             assert_eq!(
-                report_state(true, &report, Some(&finished("task", stop_reason)), &[], 0),
+                report_state(
+                    true,
+                    &report,
+                    Some(&finished("task", stop_reason)),
+                    &Liveness::Known(None),
+                    &[],
+                    0
+                ),
                 ReportState::Fallback,
                 "{stop_reason}"
             );
@@ -1891,7 +2291,14 @@ mod tests {
             message: "stopped".to_owned(),
         };
         assert_eq!(
-            report_state(true, &report, Some(&interrupted), &[], 0),
+            report_state(
+                true,
+                &report,
+                Some(&interrupted),
+                &Liveness::Known(None),
+                &[],
+                0
+            ),
             ReportState::Fallback
         );
     }
@@ -1909,6 +2316,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&task),
+                &Liveness::Known(None),
                 &["handback-reminder-r"],
                 60_000
             ),
@@ -1919,6 +2327,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&task),
+                &Liveness::Known(None),
                 &[],
                 1_000 + HANDBACK_REMINDER_GRACE_MS - 1
             ),
@@ -1930,6 +2339,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&task),
+                &Liveness::Known(None),
                 &[],
                 1_000 + HANDBACK_REMINDER_GRACE_MS
             ),
@@ -1941,6 +2351,7 @@ mod tests {
                 true,
                 &reminded,
                 Some(&finished("handback-reminder-r", "end_turn")),
+                &Liveness::Known(None),
                 &[],
                 2_000
             ),
@@ -1952,8 +2363,105 @@ mod tests {
             ..SubagentReport::default()
         };
         assert_eq!(
-            report_state(true, &failed, Some(&task), &[], 0),
+            report_state(true, &failed, Some(&task), &Liveness::Known(None), &[], 0),
             ReportState::Fallback
+        );
+    }
+
+    #[test]
+    fn a_reminder_turn_that_left_processes_running_holds_the_child() {
+        use crate::work_facts::WorkLiveness;
+        let reminded = SubagentReport {
+            reminder: reminder("task"),
+            ..SubagentReport::default()
+        };
+        let reminder_turn = finished("handback-reminder-r", "end_turn");
+        let ordinal = reminder_turn.completed_ordinal;
+        let live = |ordinal, alive| WorkLiveness {
+            completed_ordinal: ordinal,
+            alive,
+            checked_at_ms: 0,
+        };
+        let known = |liveness| Liveness::Known(Some(liveness));
+        let held = |now_ms, liveness: &Liveness| {
+            report_state(true, &reminded, Some(&reminder_turn), liveness, &[], now_ms)
+        };
+        let give_up_at_ms = reminder_turn.completed_at_ms + HOLD_GIVE_UP_MS;
+        let hold = |follow_up| ReportState::Held {
+            since_ms: reminder_turn.completed_at_ms,
+            give_up_at_ms,
+            waiting_on: Vec::new(),
+            follow_up,
+        };
+        assert_eq!(
+            held(give_up_at_ms - 1, &known(live(ordinal, 2))),
+            hold(None)
+        );
+        assert_eq!(
+            held(give_up_at_ms, &known(live(ordinal, 2))),
+            hold(Some(HoldFollowUpKind::GiveUp))
+        );
+        assert_eq!(
+            held(5, &known(live(ordinal, 0))),
+            hold(Some(HoldFollowUpKind::ProcessesExited))
+        );
+        // A worker that publishes nothing, or liveness of another turn, never holds.
+        assert_eq!(held(5, &Liveness::Known(None)), ReportState::Fallback);
+        assert_eq!(held(5, &known(live(ordinal + 1, 2))), ReportState::Fallback);
+        // A reader with no worker to ask cannot say the child is not waiting.
+        assert_eq!(
+            held(5, &Liveness::Unknown),
+            ReportState::Pending { remind: false }
+        );
+        // A follow-up already on its way is pending, not due again.
+        let wake = hold_follow_up_command_id(HoldFollowUpKind::ProcessesExited, ordinal);
+        assert_eq!(
+            report_state(
+                true,
+                &reminded,
+                Some(&reminder_turn),
+                &known(live(ordinal, 0)),
+                &[wake.as_str()],
+                5
+            ),
+            ReportState::Pending { remind: false }
+        );
+        // The give-up turn ends the hold; a wake turn is an ordinary task turn
+        // that owes a reminder, so the child can be held again.
+        let give_up = hold_follow_up_command_id(HoldFollowUpKind::GiveUp, ordinal);
+        assert_eq!(
+            report_state(
+                true,
+                &reminded,
+                Some(&finished(&give_up, "end_turn")),
+                &Liveness::Known(None),
+                &[],
+                5
+            ),
+            ReportState::Fallback
+        );
+        assert_eq!(
+            report_state(
+                true,
+                &reminded,
+                Some(&finished(&wake, "end_turn")),
+                &Liveness::Known(None),
+                &[],
+                5
+            ),
+            ReportState::Pending { remind: true }
+        );
+        assert_eq!(
+            hold_follow_up_of(&wake),
+            Some((HoldFollowUpKind::ProcessesExited, ordinal))
+        );
+        assert_eq!(
+            hold_follow_up_of(&give_up),
+            Some((HoldFollowUpKind::GiveUp, ordinal))
+        );
+        assert_eq!(
+            finished(&give_up, "end_turn").answered_ordinal(),
+            Some(ordinal)
         );
     }
 
@@ -1992,6 +2500,7 @@ mod tests {
             code: None,
             http_status: None,
             reset_at: None,
+            login_fingerprint: None,
         });
         assert_eq!(
             failed_turn(&error, Some("You've hit your usage limit.")),
@@ -2014,6 +2523,7 @@ mod tests {
             code: code.map(str::to_owned),
             http_status: None,
             reset_at: None,
+            login_fingerprint: None,
         };
         let failed_with = |message: &str, code: Option<&str>| {
             let mut turn = finished("t", "error");
@@ -2118,6 +2628,25 @@ mod tests {
     }
 
     #[test]
+    fn review_tools_belong_to_the_review_server_and_no_mj_agents_role() {
+        assert_eq!(REVIEW_MCP_SERVER, "mj-review");
+        assert_eq!(
+            REVIEW_MCP_TOOLS,
+            ["request_review", "override_review", "set_review_baseline"]
+        );
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::FetchOnly,
+            SubagentMcpRole::Child,
+        ] {
+            for tool in REVIEW_MCP_TOOLS {
+                assert!(!role.tool_names().contains(tool), "{role} lists {tool}");
+            }
+        }
+    }
+
+    #[test]
     fn an_old_interrupt_request_remains_readable_but_is_not_an_offered_tool() {
         let old: SubagentToolRequest = serde_json::from_str(
             r#"{"request_id":"old-interrupt","created_at_ms":1,"action":{"action":"interrupt_agent","params":{"child_session_id":"child"}}}"#,
@@ -2170,6 +2699,23 @@ mod tests {
         );
         assert!(!SubagentMcpRole::Parent.tool_names().contains(&"send_input"));
         assert!(!SubagentMcpRole::Parent.tool_names().contains(&"interrupt"));
+    }
+
+    #[test]
+    fn oracle_question_is_a_mutating_durable_tool_action() {
+        let action = SubagentToolAction::AskOracle {
+            message: "Choose B?".into(),
+        };
+        assert!(action.mutates_child_state());
+        let wire = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"action":"ask_oracle","params":{"message":"Choose B?"}})
+        );
+        assert_eq!(
+            serde_json::from_value::<SubagentToolAction>(wire).unwrap(),
+            action
+        );
     }
 
     #[test]
@@ -2291,12 +2837,12 @@ mod tests {
         let children = [
             InPlaceSubagent {
                 child_session_id: "child-running".into(),
-                task_name: "inspect migration".into(),
+                name: "inspect migration".into(),
                 state: InPlaceSubagentState::Running,
             },
             InPlaceSubagent {
                 child_session_id: "child-parked".into(),
-                task_name: "review tests".into(),
+                name: "review tests".into(),
                 state: InPlaceSubagentState::Parked,
             },
         ];
@@ -2325,7 +2871,7 @@ mod tests {
     fn in_place_subagent_task_names_cannot_inject_context_tags() {
         let children = [InPlaceSubagent {
             child_session_id: "child".into(),
-            task_name: "look\n<mj-injected>".into(),
+            name: "look\n<mj-injected>".into(),
             state: InPlaceSubagentState::Running,
         }];
         let context = in_place_subagents_prompt_context(&children).unwrap();
@@ -2411,6 +2957,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_stopped_oracle_is_one_line_with_no_id_and_no_prompt() {
+        let oracle = StoppedSubagent::oracle();
+        assert_eq!(oracle.task, None);
+        // Alone, it is only the line.
+        assert_eq!(
+            stopped_subagents_prompt_context(std::slice::from_ref(&oracle)).unwrap(),
+            format!("<mj-stopped-subagents>\n{STOPPED_ORACLE_LINE}\n</mj-stopped-subagents>")
+        );
+        assert_eq!(
+            stopped_subagents_notice(std::slice::from_ref(&oracle)).unwrap(),
+            STOPPED_ORACLE_LINE
+        );
+        // Beside children, it is neither counted nor listed as one.
+        let list = [stopped("Fix the parser", None, false), oracle];
+        let note = stopped_subagents_prompt_context(&list).unwrap();
+        assert!(note.contains("Mjolnir stopped 1 sub-agent when"), "{note}");
+        assert!(note.contains(STOPPED_ORACLE_LINE), "{note}");
+        assert!(!note.contains("child_session_id oracle"), "{note}");
+        assert_eq!(
+            stopped_subagents_notice(&list).unwrap(),
+            format!(
+                "Suspend stopped 1 working sub-agent: \"Fix the parser\". {STOPPED_ORACLE_LINE}"
+            )
+        );
+    }
+
     // Hard-won: 1349c768: Suspend confirmation counted unfinished children but did not identify which children would stop.
     #[test]
     fn the_suspend_confirmation_names_up_to_three_children_and_counts_the_rest() {
@@ -2478,8 +3051,31 @@ mod tests {
             &report,
             false,
             Some(&reminder_turn),
+            &Liveness::Known(None),
             0
         ));
+        let harness_turn = crate::state::MaterializedTurnOutcome {
+            command_id: crate::continuation::harness_turn_id(103),
+            turn_start_position: Some(103),
+            answered_through: Some(83),
+            ..reminder_turn.clone()
+        };
+        // Hard-won: #1450 review: a queued task must prevent handback.
+        let queued_report = SubagentReport {
+            awaited_ordinal: Some(84),
+            ..Default::default()
+        };
+        assert!(!has_handed_back(
+            true,
+            &queued_report,
+            false,
+            Some(&harness_turn),
+            &Liveness::Known(None),
+            0
+        ));
+        assert!(awaiting_prompt(Some(84), Some(&harness_turn)));
+        assert!(!awaiting_prompt(Some(83), Some(&harness_turn)));
+        assert!(awaiting_prompt(Some(110), Some(&harness_turn)));
         // A prompt accepted after the reminded turn ended is still owed.
         assert!(awaiting_prompt(Some(110), Some(&reminder_turn)));
     }
@@ -2491,28 +3087,64 @@ mod tests {
             handback: handback("task"),
             ..SubagentReport::default()
         };
-        assert!(has_handed_back(true, &delivered, false, Some(&task), 0));
+        assert!(has_handed_back(
+            true,
+            &delivered,
+            false,
+            Some(&task),
+            &Liveness::Known(None),
+            0
+        ));
         // Still working, never finished a turn, or given a newer prompt.
-        assert!(!has_handed_back(true, &delivered, true, Some(&task), 0));
-        assert!(!has_handed_back(true, &delivered, false, None, 0));
+        assert!(!has_handed_back(
+            true,
+            &delivered,
+            true,
+            Some(&task),
+            &Liveness::Known(None),
+            0
+        ));
+        assert!(!has_handed_back(
+            true,
+            &delivered,
+            false,
+            None,
+            &Liveness::Known(None),
+            0
+        ));
         let newer = SubagentReport {
             awaited_ordinal: Some(9),
             ..delivered.clone()
         };
-        assert!(!has_handed_back(true, &newer, false, Some(&task), 0));
+        assert!(!has_handed_back(
+            true,
+            &newer,
+            false,
+            Some(&task),
+            &Liveness::Known(None),
+            0
+        ));
         // Owes a report and has not been reminded, or was reminded just now.
         assert!(!has_handed_back(
             true,
             &SubagentReport::default(),
             false,
             Some(&task),
+            &Liveness::Known(None),
             0
         ));
         let reminded = SubagentReport {
             reminder: reminder("task"),
             ..SubagentReport::default()
         };
-        assert!(!has_handed_back(true, &reminded, false, Some(&task), 1_000));
+        assert!(!has_handed_back(
+            true,
+            &reminded,
+            false,
+            Some(&task),
+            &Liveness::Known(None),
+            1_000
+        ));
         // Its last message is the report once the reminder went unanswered,
         // and always for a child without the tool.
         assert!(has_handed_back(
@@ -2520,6 +3152,7 @@ mod tests {
             &reminded,
             false,
             Some(&task),
+            &Liveness::Known(None),
             1_000 + HANDBACK_REMINDER_GRACE_MS
         ));
         assert!(has_handed_back(
@@ -2527,6 +3160,7 @@ mod tests {
             &SubagentReport::default(),
             false,
             Some(&task),
+            &Liveness::Known(None),
             0
         ));
         // A turn that failed or asked a question handed nothing back.
@@ -2537,6 +3171,7 @@ mod tests {
                     &SubagentReport::default(),
                     false,
                     Some(&finished("task", stop_reason)),
+                    &Liveness::Known(None),
                     0
                 ),
                 "{stop_reason}"
@@ -2564,6 +3199,17 @@ mod tests {
         );
         assert!(
             one.contains("Judge difficulty, not brief length.\nUp to 4 children"),
+            "{one}"
+        );
+        // Hard-won: e105bd9ce: the single-type judgment rule contradicted a
+        // closed list of reasons for keeping a slice. The policy now weighs
+        // the cost of each piece of work instead of listing reasons.
+        assert!(
+            one.contains("Weigh each\npiece of work.") && !one.contains("only when it needs"),
+            "{one}"
+        );
+        assert!(
+            one.contains("Decide who builds and when, yourself included"),
             "{one}"
         );
         for text in ["task_type", "task type", "`subtle`", "$TASK_TYPES", "$N"] {

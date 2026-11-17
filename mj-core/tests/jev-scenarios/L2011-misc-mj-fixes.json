@@ -1,0 +1,166 @@
+{
+  "id": "L2011",
+  "title": "Misc mj fixes",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "96f321a675e77a6fcd31abbcc11344d7",
+    "session_title": "mjolnir via claude3",
+    "reply_position": 5121,
+    "captured_at": "2026-10-06T20:59:26.664Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:4859",
+          "role": "user",
+          "text": "Jev should always recover from a confident quota stop, even when it also thinks the agent is waiting for the user.\n\nIncident: worker 0bf0983d553751026807d97d54857ede, 2026-10-06 12:17:41 to 12:23:17 CDT. Seven assessments (ordinals 41873, 41880, 41888, 41896, 41903, 41911, 41919) in ~/.local/share/mjolnir/workers/0bf0983d553751026807d97d54857ede/jev-decisions/decisions.0.jsonl. Each one had failure=quota at 1.0 (\"You've hit your session limit · resets 3pm\"), input=required at 0.82 to 0.89, and action=await_input with no retry time. The session never resumed after the reset. The input=required verdict was probably caused by an opt-out line in the last reply (\"Tell me if you want to hold the push instead.\"), but the cause does not matter here. We cannot make question detection reliable, and the resumed agent can stop and ask again if it really needs a decision.\n\nCause: Verdict::action in mj-core/src/assessment.rs checks requires_input() before the failure branch, so AwaitInput wins over RecoverQuota. The test explicit_user_handoff_blocks_provider_automation locks in that order for quota.\n\nChange:\n1. In Verdict::action, return RecoverQuota whenever failure.choice is Quota with confidence >= AUTOMATION_CONFIDENCE, before the requires_input() check, whatever the input and work answers are. Leave TransientProvider and Other as they are. Low-confidence quota keeps its current behavior.\n2. Find the prompt the worker sends when a quota recovery comes due (start at mj-worker/src/relay/verdict.rs, the Action::RecoverQuota arm, and mj-worker/src/relay/commands.rs). Make sure it tells the agent that if it was waiting on a user decision before the limit, it should ask again and stop instead of proceeding. If continuation::PROMPT is the prompt used and already says this, leave it alone.\n3. Check every other place that combines requires_input() with failure or quota handling, so none of them still blocks quota recovery:\n   - mj-core/src/activity/verdict.rs (around line 218)\n   - mj-core/src/relay/snapshot/apply.rs (around lines 240 and 1434)\n   - mj-controller/src/daemon/continuation.rs (around lines 321 and 713)\n   - scripts/jev-scenarios-eval.py (requires_input and the action policy around lines 55 to 65). This is a Python copy of the Rust policy and must match it.\n   - mj-core/tests/jev_scenarios.rs and its fixtures. Update any expected action for quota + required.\n4. Tests:\n   - Change explicit_user_handoff_blocks_provider_automation so that Quota + Required gives RecoverQuota. Transient + Required must still give AwaitInput.\n   - Add a regression test shaped like the incident: quota at 1.0, input required at 0.89 (none 0.10, redundant_request 0.01), work split about evenly between authorized_unfinished, finished and waiting, and authorization_complete true. It must give RecoverQuota.\n   - Run the affected mj-core, mj-worker and mj-controller tests, plus scripts/jev-scenarios-eval.test.py.\n\nFollow AGENTS.md for build and test commands. Report what the recovery prompt says after your change and list every file you changed."
+        },
+        {
+          "id": "agent:4882",
+          "role": "assistant",
+          "text": "Now the worker side: what the recovery prompt is, and how the worker handles `RecoverQuota`."
+        },
+        {
+          "id": "agent:4921",
+          "role": "assistant",
+          "text": "I've confirmed the policy bug and that the quota resume prompt is `continuation::PROMPT`. I'm now checking the last call site (the mid-turn path in `verdict_client.rs`) before editing."
+        },
+        {
+          "id": "agent:4964",
+          "role": "assistant",
+          "text": "I'm pulling the incident's recorded verdict so the regression test matches it, then I'll make the edits."
+        },
+        {
+          "id": "agent:4976",
+          "role": "assistant",
+          "text": "Now the edits. First the policy in `Verdict::action`:"
+        },
+        {
+          "id": "agent:4993",
+          "role": "assistant",
+          "text": "Next the incident regression. I'm adding it to `mj-core/tests/jev-gates.json`, which both the Rust test and the Python test read, so one case pins both copies of the policy."
+        },
+        {
+          "id": "agent:5011",
+          "role": "assistant",
+          "text": "Now the Python port of the policy and its unit test:"
+        },
+        {
+          "id": "agent:5020",
+          "role": "assistant",
+          "text": "The test name `test_required_input_beats_everything` is no longer true, so I'll rename it."
+        },
+        {
+          "id": "agent:5035",
+          "role": "assistant",
+          "text": "Edits are done. Now I'll check AGENTS.md for the test commands and hand the suite runs to a child."
+        },
+        {
+          "id": "agent:5057",
+          "role": "assistant",
+          "text": "I'll mark the changed Rust test as hard-won (AGENTS.md asks for this when a test pins a defect found after release), citing the commit that introduced the order."
+        },
+        {
+          "id": "agent:5106",
+          "role": "assistant",
+          "text": "All suites pass. Committing (AGENTS.md says to commit on the current branch after validation)."
+        },
+        {
+          "id": "agent:5121",
+          "role": "assistant",
+          "text": "Jev now resumes after a confident quota stop even when it also thinks the agent is waiting for the user. All requested tests pass, and the change is committed as `91ef9d506` on `master` (not pushed).\n\n**The recovery prompt is unchanged.** When a quota recovery comes due, the daemon sends `RelayCommand::ResumeAfterQuota` (`mj-controller/src/daemon/continuation/quota.rs:339`). `RelayCommand::prompt_blocks` turns that into `continuation::prompt_blocks()` (`mj-core/src/relay/snapshot.rs:164`), so the agent receives `continuation::PROMPT` (`mj-core/src/continuation.rs:12`):\n\n> \"Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.\"\n\nThe last sentence already tells the agent to ask again and stop if a decision is still open, so I left the prompt alone as you asked. One exception: if the session has a goal that can resume after quota, the daemon sends `GoalControl::Resume` instead, and that path sends no prompt. That path is outside this change.\n\n**Files changed:**\n- `mj-core/src/assessment.rs`:\n  - `Verdict::action` now returns `RecoverQuota` first when the failure is quota with confidence at or above `AUTOMATION_CONFIDENCE`.\n  - `TransientProvider`, `Other` and low-confidence quota keep their old behavior.\n  - I renamed the test to `explicit_user_handoff_blocks_provider_retry_but_not_quota_recovery`. Quota + Required now gives `RecoverQuota`, Transient + Required still gives `AwaitInput`, and quota at 0.89 + Required gives `AwaitInput`.\n  - I added a `// Hard-won: 8cecc1c` marker; that is the commit that introduced the old order.\n- `mj-core/tests/jev-gates.json`: added the incident case (quota 1.0; input required 0.89 / none 0.10 / redundant_request 0.01; work split 0.35 / 0.32 / 0.33; authorization complete; expected `recover_quota`). Both the Rust test and the Python test read this file, so this one case checks both copies of the policy.\n- `scripts/jev-scenarios-eval.py`: `action()` now matches the Rust order.\n- `scripts/jev-scenarios-eval.test.py`: added quota + required checks at 0.99 (gives `recover_quota`) and at 0.89 (gives `await_input`). I renamed the test, since \"required input beats everything\" is no longer true.\n\n**The other places you listed needed no change:**\n- `mj-controller/src/daemon/continuation.rs` (lines 321 and 713): both read the stored `a.action`, so they follow the new order automatically. The older path uses `is_quota_limit()`, which never checked input.\n- `mj-core/src/relay/snapshot/apply.rs` (lines 240 and 1434): they only check whether the action is `RecoverQuota`. They do not check input.\n- `mj-core/tests/jev_scenarios.rs` fixtures: no recorded scenario combines quota with required input. The quota fixtures (S23, S24, S27) still pass.\n- `mj-core/src/activity/verdict.rs:218`: for a finished turn it uses `action()`, so quota now leads to `KeepCurrent`. While a turn is still running, `requires_input()` alone still gives `AwaitingInput`. I left that alone because it does not block recovery: the worker schedules quota recovery from the assessment it makes after the turn ends (`apply_turn_assessment`), and that now gives `RecoverQuota`. Change it too if you also want a quota stop during a running turn to suppress the \"waiting for input\" status.\n\n**Tests (run by a child agent):**\n- `mj-core`: full crate, 465 unit tests and 2 scenario tests passed.\n- `mj-worker`: tests matching `relay` (333) and `verdict` (25) passed.\n- `mj-controller`: tests matching `continuation` (21) passed.\n- `scripts/jev-scenarios-eval.test.py`: 19 tests passed.\n- `cargo clippy -p brokk-mj-core --all-targets -- -D warnings` and `cargo fmt --check` passed.\n\nThe Cargo package names are `brokk-mj-*`, so `cargo test -p mj-core` does not find a package. I did not run workspace-wide clippy.\n\n`★ Insight ─────────────────────────────────────`\n- The decision is made in one place. `Verdict::action` produces the action; the worker stores it, and the controller and the snapshot code only read the stored value. That is why fixing one function fixed every downstream site, and why `continuation.rs` needed no edit.\n- `jev-gates.json` is the shared contract between the Rust policy and its Python copy. Putting the incident there, rather than in two separate unit tests, means the two copies cannot quietly disagree on this case.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": " lines 240 and 1434)\n   - mj-controller/src/daemon/continuation.rs (around lines 321 and 713)\n   - scripts/jev-scenarios-eval.py (requires_input and the action policy around lines 55 to 65). This is a Python copy of the Rust policy and must match it.\n   - mj-core/tests/jev_scenarios.rs and its fixtures. Update any expected action for quota + required.\n4. Tests:\n   - Change explicit_user_handoff_blocks_provider_automation so that Quota + Required gives RecoverQuota. Transient + Required must still give AwaitInput.\n   - Add a regression test shaped like the incident: quota at 1.0, input required at 0.89 (none 0.10, redundant_request 0.01), work split about evenly between authorized_unfinished, finished and waiting, and authorization_complete true. It must give RecoverQuota.\n   - Run the affected mj-core, mj-worker and mj-controller tests, plus scripts/jev-scenarios-eval.test.py.\n\nFollow AGENTS.md for build and test commands. Report what the recovery prompt says after your change and list every file you changed.",
+    "assistant_text_tail": "s` (lines 240 and 1434): they only check whether the action is `RecoverQuota`. They do not check input.\n- `mj-core/tests/jev_scenarios.rs` fixtures: no recorded scenario combines quota with required input. The quota fixtures (S23, S24, S27) still pass.\n- `mj-core/src/activity/verdict.rs:218`: for a finished turn it uses `action()`, so quota now leads to `KeepCurrent`. While a turn is still running, `requires_input()` alone still gives `AwaitingInput`. I left that alone because it does not block recovery: the worker schedules quota recovery from the assessment it makes after the turn ends (`apply_turn_assessment`), and that now gives `RecoverQuota`. Change it too if you also want a quota stop during a running turn to suppress the \"waiting for input\" status.\n\n**Tests (run by a child agent):**\n- `mj-core`: full crate, 465 unit tests and 2 scenario tests passed.\n- `mj-worker`: tests matching `relay` (333) and `verdict` (25) passed.\n- `mj-controller`: tests matching `continuation` (21) passed.\n- `scripts/jev-scenarios-eval.test.py`: 19 tests passed.\n- `cargo clippy -p brokk-mj-core --all-targets -- -D warnings` and `cargo fmt --check` passed.\n\nThe Cargo package names are `brokk-mj-*`, so `cargo test -p mj-core` does not find a package. I did not run workspace-wide clippy.\n\n`★ Insight ─────────────────────────────────────`\n- The decision is made in one place. `Verdict::action` produces the action; the worker stores it, and the controller and the snapshot code only read the stored value. That is why fixing one function fixed every downstream site, and why `continuation.rs` needed no edit.\n- `jev-gates.json` is the shared contract between the Rust policy and its Python copy. Putting the incident there, rather than in two separate unit tests, means the two copies cannot quietly disagree on this case.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      5121
+    ],
+    "user_position": 4859,
+    "input_rationale": "Fix is committed and tested, but left unpushed and an optional extension is offered. No explicit question, so a weak label. The 'still open' match is inside the quoted continuation prompt, not an open item.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-06T21:05:31.010Z",
+        "kind": "user",
+        "text": "push"
+      },
+      {
+        "at": "2026-10-06T21:05:39.426Z",
+        "kind": "agent",
+        "text": "I pushed commit `91ef9d506` to `origin/master` on github.com:BrokkAi/mjolnir. It was the only commit not yet pushed.  `★ Insight ─────────────────────────────────────` - The push went straight from `c"
+      },
+      {
+        "at": "2026-10-07T01:04:39.224Z",
+        "kind": "system",
+        "text": "Clearing context…"
+      },
+      {
+        "at": "2026-10-07T01:04:40.709Z",
+        "kind": "system",
+        "text": "Context cleared — a new conversation starts here."
+      },
+      {
+        "at": "2026-10-07T01:05:40.830Z",
+        "kind": "user",
+        "text": "I Moved 0bf0983d553751026807d97d54857ede from native to MJ agents, but it just ran out of Sonnet (native) quota, what went wrong?"
+      },
+      {
+        "at": "2026-10-07T01:05:51.939Z",
+        "kind": "agent",
+        "text": "The session still reports `\"subagents\": {\"mode\": \"native\"}`. Let me find out whether the switch was recorded at all."
+      }
+    ]
+  }
+}

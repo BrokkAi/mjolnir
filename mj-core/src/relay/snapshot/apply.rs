@@ -13,7 +13,11 @@ use super::*;
 /// fails if the two ever disagree.
 pub fn observation_changes_state(observation: &RelayObservation) -> bool {
     match observation {
-        RelayObservation::TurnAssessmentUpdated { .. }
+        RelayObservation::QuestionTargetUpdated { .. }
+        | RelayObservation::ManagedSubagentConfigured { .. }
+        | RelayObservation::WorkLivenessChanged { .. }
+        | RelayObservation::HandbackCheckStarted { .. }
+        | RelayObservation::TurnAssessmentUpdated { .. }
         | RelayObservation::SteeringUnconfirmed { .. }
         | RelayObservation::AgentInitialized { .. }
         | RelayObservation::SessionOpened { .. }
@@ -219,6 +223,43 @@ fn complete_hook_steering(
 pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Result<()> {
     validate_relay_event(snapshot.latest_ordinal, &snapshot.latest_digest, event)?;
     match &event.observation {
+        RelayObservation::ManagedSubagentConfigured { managed } => {
+            snapshot.managed_subagent = *managed;
+        }
+        RelayObservation::WorkLivenessChanged { liveness } => {
+            // A late recount for an older turn must not overwrite the current one.
+            if let Some(current) = snapshot
+                .work_liveness
+                .as_mut()
+                .filter(|current| current.completed_ordinal == liveness.completed_ordinal)
+            {
+                *current = liveness.clone();
+            }
+        }
+        RelayObservation::QuestionTargetUpdated {
+            question,
+            question_message,
+        } => {
+            if let Some(request) = snapshot
+                .request
+                .as_mut()
+                .filter(|request| request.question == *question)
+            {
+                request.question_message = Some(question_message.clone());
+            }
+            if let Some(assessment) = snapshot.assessment.as_mut().filter(|assessment| {
+                assessment.turn_id == question.turn_id
+                    && assessment.completed_ordinal == question.completed_ordinal
+            }) {
+                Arc::make_mut(assessment).question_message = Some(question_message.clone());
+            }
+        }
+        RelayObservation::HandbackCheckStarted { assignment_id } => {
+            snapshot
+                .handback_checks
+                .checked
+                .insert(assignment_id.clone());
+        }
         RelayObservation::TurnAssessmentUpdated { assessment } => {
             let current = snapshot
                 .assessment
@@ -250,8 +291,19 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 // Only consecutive provider refusals share a retry backoff.
                 snapshot.capacity_retry = None;
             }
+            if !snapshot.managed_subagent
+                && let Some(question) = assessment.inferred_question()
+            {
+                snapshot.request = Some(crate::assessment::OpenRequest {
+                    question,
+                    question_message: assessment
+                        .question_message
+                        .clone()
+                        .or_else(|| snapshot.completed_reply_message.clone()),
+                });
+            }
             snapshot.retry_assessment = None;
-            snapshot.assessment = Some((**assessment).clone());
+            snapshot.assessment = Some(std::sync::Arc::new((**assessment).clone()));
         }
         RelayObservation::SteeringUnconfirmed {
             command_id,
@@ -296,6 +348,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if *native_continuity_lost {
                 snapshot.continuation.quota_recovery = None;
                 snapshot.continuation.quota_suppressed = true;
+                snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
             }
             snapshot.native_session_id = Some(native_session_id.clone());
             snapshot.native_session_opened_ordinal = Some(event.ordinal);
@@ -313,7 +366,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
         }
         RelayObservation::SessionConfigured { config_options } => {
-            snapshot.config_options = config_options.clone();
+            snapshot.config_options = std::sync::Arc::new(config_options.clone());
         }
         RelayObservation::SessionModesConfigured { modes } => {
             snapshot.modes = modes.clone();
@@ -370,6 +423,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .active_prompt
                         .as_ref()
                         .map(|prompt| prompt.command_id.clone());
+                    // With no prompt of ours running, the stop is aimed at the
+                    // harness's own turn. A second stop of the same turn never
+                    // downgrades an acknowledged first one.
+                    if snapshot.active_prompt.is_none()
+                        && let Some(turn) = snapshot.autonomous_harness_turn()
+                        && snapshot
+                            .cancelling_harness_turn
+                            .is_none_or(|target| target.first_ordinal != turn.first_ordinal)
+                    {
+                        snapshot.cancelling_harness_turn = Some(HarnessTurnCancel {
+                            first_ordinal: turn.first_ordinal,
+                            applied: false,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -377,25 +444,32 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 // Legacy protocol-39 journals still replay this command.
                 RelayCommand::SetSubagentWait { .. } => {}
                 RelayCommand::Prompt { prompt }
-                    if !crate::continuation::is_generated_prompt(command_id)
-                        && !crate::continuation::is_generated_prompt_text(
-                            &prompt
-                                .iter()
-                                .filter_map(|b| {
-                                    if let ContentBlock::Text(t) = b {
-                                        Some(t.text.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ) =>
+                    if crate::continuation::is_user_authored_message(
+                        Some(command_id),
+                        &prompt
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text(t) = b {
+                                    Some(t.text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ) =>
                 {
+                    snapshot.person_input_through = event.ordinal;
+                    let context = crate::acp::context_command(prompt).is_some();
                     snapshot.continuation = crate::continuation::ContinuationState {
                         user_command_id: Some(command_id.clone()),
-                        suppressed: crate::acp::context_command(prompt).is_some(),
-                        quota_suppressed: crate::acp::context_command(prompt).is_some(),
+                        suppressed: context,
+                        quota_suppressed: context,
+                        withdrawn_ordinal: if context {
+                            Some(event.ordinal)
+                        } else {
+                            snapshot.continuation.withdrawn_ordinal
+                        },
                         ..Default::default()
                     };
                 }
@@ -404,19 +478,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.continuation.completed_command_id = None;
                     snapshot.continuation.harness_turn = None;
                 }
+                // Another session's message delivered as a turn, by a mailbox
+                // wake or, for workers without mailbox delivery, as a prompt.
                 RelayCommand::MailboxWake { .. } => {
-                    let continuation = &mut snapshot.continuation;
-                    // The accepted wake owns a new turn even after restore or
-                    // cancellation. It may recover from quota without granting
-                    // new authorization or renewing the ordinary nudge allowance.
-                    if continuation.user_command_id.is_none() {
-                        continuation.user_command_id = Some(command_id.clone());
-                        continuation.suppressed = true;
-                    }
-                    continuation.completed_command_id = None;
-                    continuation.harness_turn = None;
-                    continuation.quota_suppressed = false;
-                    continuation.quota_recovery = None;
+                    begin_delivered_message_turn(&mut snapshot.continuation, command_id);
+                }
+                RelayCommand::Prompt { .. }
+                    if crate::continuation::GeneratedPrompt::of(command_id)
+                        == Some(crate::continuation::GeneratedPrompt::SessionMessageTurn) =>
+                {
+                    begin_delivered_message_turn(&mut snapshot.continuation, command_id);
                 }
                 RelayCommand::InstallPromptContext { text } => {
                     match snapshot.pending_prompt_context.as_mut() {
@@ -434,19 +505,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     }
                 }
                 RelayCommand::DismissQuestion { question } => {
-                    let assessment = snapshot
-                        .assessment
-                        .as_mut()
-                        .filter(|a| a.inferred_question().as_ref() == Some(question))
-                        .ok_or_else(|| {
-                            anyhow!("dismissed question no longer matches the completed turn")
-                        })?;
-                    assessment.status = crate::assessment::Status::Superseded;
-                    assessment.reason = "question_dismissed".into();
-                    assessment.retry_at_ms = None;
+                    if snapshot.open_request().map(|request| &request.question) != Some(question) {
+                        bail!("dismissed question no longer matches the open request");
+                    }
+                    snapshot.person_input_through = event.ordinal;
+                    if let Some(context) = &mut snapshot.assessment_context {
+                        Arc::make_mut(context).set_aside_replies(false);
+                    }
                 }
                 RelayCommand::SeedAssessmentContext { context, .. } => {
-                    snapshot.assessment_context = Some((**context).clone());
+                    snapshot.assessment_context = Some(Arc::new((**context).clone()));
                     if let Some(a) = snapshot.assessment.as_mut().filter(|a| {
                         a.current()
                             && !matches!(
@@ -457,11 +525,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                                 )
                             )
                     }) {
-                        a.revision = event.ordinal;
-                        a.status = crate::assessment::Status::Pending;
-                        a.evidence = None;
-                        a.verdict = None;
-                        a.action = None;
+                        let a = Arc::make_mut(a);
+                        a.classify_again(event.ordinal);
                         a.failures = 0;
                         a.retry_at_ms = None;
                         a.reason = "authorization_evidence_changed".into();
@@ -493,6 +558,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 | RelayCommand::SetSessionMode { .. } => {
                     snapshot.continuation.suppressed = true;
                     snapshot.continuation.quota_suppressed = true;
+                    snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
                 }
                 _ => {}
             }
@@ -512,6 +578,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.continuation.quota_recovery = None;
                 if !matches!(command, RelayCommand::Prompt { .. }) {
                     snapshot.continuation.quota_suppressed = true;
+                    snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
                 }
             }
             if cancels_capacity_retry(command)
@@ -611,6 +678,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             match &dispatch.command {
                 RelayCommand::Prompt { .. }
                 | RelayCommand::HandbackReminder { .. }
+                | RelayCommand::HoldFollowUp { .. }
                 | RelayCommand::MailboxWake { .. }
                 | RelayCommand::ContinueAuthorizedWork { .. }
                 | RelayCommand::ResumeAfterQuota { .. } => {
@@ -624,6 +692,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         bail!("queued command {command_id} is not a prompt");
                     };
                     snapshot.execution = RelayExecutionState::Running;
+                    // New input supersedes the finished turn the liveness
+                    // describes once it runs, not while it is only queued: a
+                    // queued prompt that is dropped leaves the child held.
+                    snapshot.work_liveness = None;
                     snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
                     snapshot.active_prompt = Some(StoredActiveRelayPrompt {
                         command_id: queued.command_id,
@@ -701,7 +773,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .get_mut(command_id)
                 .expect("completed command ledger was just checked")
                 .outcome = Some(outcome.clone());
-            if let RelayCommandOutcome::Prompt { stop_reason, .. } = outcome {
+            if let RelayCommandOutcome::Prompt {
+                stop_reason,
+                work_facts,
+                ..
+            } = outcome
+            {
+                snapshot.work_liveness = crate::work_facts::WorkLiveness::from_turn_facts(
+                    event.ordinal,
+                    work_facts.as_deref(),
+                );
                 // Always `KeepCurrent`; see `TurnCompletion` for why the field
                 // is still written.
                 snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
@@ -736,6 +817,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 (
                     RelayCommand::Prompt { .. }
                     | RelayCommand::HandbackReminder { .. }
+                    | RelayCommand::HoldFollowUp { .. }
                     | RelayCommand::MailboxWake { .. }
                     | RelayCommand::ContinueAuthorizedWork { .. }
                     | RelayCommand::ResumeAfterQuota { .. },
@@ -844,11 +926,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     RelayCommandOutcome::NoticeRecorded,
                 ) => {}
                 (RelayCommand::GoalControl { .. }, RelayCommandOutcome::GoalControlled) => {}
-                (RelayCommand::Cancel, RelayCommandOutcome::Cancelled)
-                | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled)
+                (
+                    RelayCommand::Cancel | RelayCommand::CancelTurn,
+                    RelayCommandOutcome::Cancelled,
+                ) => {
+                    if let Some(target) = snapshot.cancelling_harness_turn.as_mut() {
+                        target.applied = true;
+                    }
+                }
                 // A cancel acknowledgement does not end its originating
                 // prompt, and must never retarget cancellation to a later one.
-                | (RelayCommand::CancelTurnFor { .. } | RelayCommand::ApplyQueuedFor { .. }, RelayCommandOutcome::Cancelled) => {}
+                (
+                    RelayCommand::CancelTurnFor { .. } | RelayCommand::ApplyQueuedFor { .. },
+                    RelayCommandOutcome::Cancelled,
+                ) => {}
                 (
                     RelayCommand::ResolveSteering { steering_id },
                     RelayCommandOutcome::NoticeRecorded,
@@ -1168,6 +1259,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             if matches!(command, RelayCommand::Cancel | RelayCommand::CancelTurn) {
                 snapshot.cancelling_prompt_id = None;
+                // A refused stop leaves the turn running. Admission refuses a
+                // second stop while one is pending, so an acknowledged stop
+                // is the only one this can meet.
+                if snapshot
+                    .cancelling_harness_turn
+                    .is_some_and(|target| !target.applied)
+                {
+                    snapshot.cancelling_harness_turn = None;
+                }
             }
             snapshot
                 .dispatches
@@ -1312,10 +1412,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             // Codex also reports native starts inside our own prompts; only a
             // start with no prompt in flight is a turn of the harness's own.
-            snapshot.continuation.autonomous_turn_started =
-                snapshot.active_prompt.is_none().then_some(event.ordinal);
             snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
             snapshot.harness_turn = Some(StoredHarnessTurn {
+                autonomous: snapshot.active_prompt.is_none(),
                 started_at_ms: *started_at_ms,
                 first_ordinal: event.ordinal,
             });
@@ -1325,28 +1424,55 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
         }
         RelayObservation::HarnessTurnSettled {
-            prompt_in_flight, ..
+            prompt_in_flight,
+            autonomous,
+            ..
         } => {
-            let started = snapshot.continuation.autonomous_turn_started.take();
-            if let Some(turn) = &snapshot.harness_turn
+            if let Some(turn) = autonomous {
+                // The same rule as a prompted turn's outcome: whatever started
+                // the turn, its end decides what the worker watches.
+                snapshot.work_liveness = crate::work_facts::WorkLiveness::from_turn_facts(
+                    event.ordinal,
+                    turn.work_facts.as_deref(),
+                );
+                snapshot.harness_turn_work =
+                    turn.work_facts
+                        .as_deref()
+                        .map(|facts| crate::relay::HarnessTurnWork {
+                            completed_ordinal: event.ordinal,
+                            facts: facts.clone(),
+                        });
+                snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
+                    command_id: crate::continuation::harness_turn_id(turn.start_ordinal),
+                    completed_ordinal: event.ordinal,
+                    decision: crate::activity::verdict::Decision::KeepCurrent,
+                });
+            }
+            let autonomous_turn = snapshot.autonomous_harness_turn();
+            if let Some(turn) = autonomous_turn
                 && !*prompt_in_flight
-                && started == Some(turn.first_ordinal)
             {
+                snapshot.completed_reply_message = snapshot
+                    .assessment_context
+                    .as_ref()
+                    .and_then(|context| context.open_assistant_id.as_deref())
+                    .and_then(crate::activity::question_locator::transcript_stable_id);
                 // Physical completion does not depend on a retained user command.
                 // Missing authorization gates nudges, never provider assessment.
-                snapshot.assessment = Some(crate::assessment::TurnAssessment::pending(
-                    crate::continuation::harness_turn_id(turn.first_ordinal),
-                    event.ordinal,
-                    event.recorded_at_ms,
-                    crate::activity::verdict::CompletionEvidence::bounded(
-                        "harness_turn_settled",
-                        None,
+                snapshot.assessment = Some(std::sync::Arc::new(
+                    crate::assessment::TurnAssessment::pending(
+                        crate::continuation::harness_turn_id(turn.first_ordinal),
+                        event.ordinal,
+                        event.recorded_at_ms,
+                        crate::activity::verdict::CompletionEvidence::bounded(
+                            "harness_turn_settled",
+                            None,
+                        ),
                     ),
                 ));
             }
-            if let Some(turn) = &snapshot.harness_turn
+            if let Some(turn) = autonomous_turn
                 && !*prompt_in_flight
-                && started == Some(turn.first_ordinal)
                 && snapshot.continuation.user_command_id.is_some()
             {
                 let id = crate::continuation::harness_turn_id(turn.first_ordinal);
@@ -1396,10 +1522,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.goal.apply(update)?;
             }
             SessionUpdate::AvailableCommandsUpdate(update) => {
-                snapshot.available_commands = update.available_commands.clone();
+                snapshot.available_commands =
+                    std::sync::Arc::new(update.available_commands.clone());
             }
             SessionUpdate::ConfigOptionUpdate(update) => {
-                snapshot.config_options = update.config_options.clone();
+                snapshot.config_options = std::sync::Arc::new(update.config_options.clone());
             }
             SessionUpdate::CurrentModeUpdate(update) => {
                 if let Some(modes) = snapshot.modes.as_mut() {
@@ -1651,6 +1778,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if lease_id.is_some() && events != &claimed {
                 bail!("leased hook delivery is missing its event details");
             }
+            record_handback_mailbox_assignments(snapshot, &claimed);
             if path == &MailboxDeliveryPath::ToolHook && lease_id.is_some() {
                 snapshot.mailbox_hook_lease = None;
             } else {
@@ -1683,6 +1811,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         .is_some_and(|id| snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(id))
     {
         snapshot.cancelling_prompt_id = None;
+    }
+    // The stop belongs to the autonomous turn it named; once that turn is gone
+    // (settled, interrupted, or taken over by a prompt) nothing is left to stop.
+    if snapshot.cancelling_harness_turn.is_some_and(|target| {
+        snapshot
+            .autonomous_harness_turn()
+            .is_none_or(|turn| turn.first_ordinal != target.first_ordinal)
+    }) {
+        snapshot.cancelling_harness_turn = None;
     }
     apply_assessment_context(snapshot, event);
     snapshot.compact_terminal_commands()?;
@@ -1810,6 +1947,27 @@ fn cancels_capacity_retry(command: &RelayCommand) -> bool {
     )
 }
 
+fn record_handback_mailbox_assignments(
+    snapshot: &mut RelaySnapshot,
+    events: &[crate::mailbox::MailboxEvent],
+) {
+    for event in events {
+        if let Some((id, text)) = event.handback_assignment() {
+            snapshot.handback_checks.assignment_id = Some(id.clone());
+            snapshot
+                .handback_checks
+                .context
+                .get_or_insert_default()
+                .handback_user(
+                    &id,
+                    &[ContentBlock::Text(
+                        agent_client_protocol::v1::schema::TextContent::new(text),
+                    )],
+                );
+        }
+    }
+}
+
 /// Classification boundaries and action invalidation share the journal owner.
 fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
     use crate::activity::verdict::CompletionEvidence;
@@ -1828,21 +1986,57 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         _ => {}
     }
     if let Some(id) = delivered
+        && let Some(RelayCommand::MailboxWake { events }) =
+            snapshot.dispatches.get(id).map(|d| &d.command)
+    {
+        let events = events.clone();
+        record_handback_mailbox_assignments(snapshot, &events);
+    }
+    if let Some(id) = delivered
         && let Some(prompt) = snapshot
             .dispatches
             .get(id)
-            .filter(|d| !matches!(d.command, RelayCommand::HandbackReminder { .. }))
+            .and_then(|d| d.command.prompt_blocks())
+    {
+        if crate::continuation::GeneratedPrompt::is_subagent_assignment(id) {
+            snapshot.handback_checks.assignment_id = Some(id.clone());
+            snapshot.handback_checks.context.get_or_insert_default();
+        }
+        if let Some(context) = &mut snapshot.handback_checks.context {
+            context.handback_user(id, &prompt);
+        }
+    }
+    if let Some(id) = delivered
+        && let Some(prompt) = snapshot
+            .dispatches
+            .get(id)
+            .filter(|d| {
+                !matches!(
+                    d.command,
+                    RelayCommand::HandbackReminder { .. } | RelayCommand::HoldFollowUp { .. }
+                )
+            })
             .and_then(|d| d.command.prompt_blocks())
         && let Some(context) = &mut snapshot.assessment_context
     {
-        context.user(id, &prompt);
+        Arc::make_mut(context).user(id, &prompt);
     }
     match &event.observation {
         RelayObservation::ElicitationRequested { request } => {
             snapshot.assessment_questions.insert(request.id.clone());
         }
-        RelayObservation::ElicitationResolved { elicitation_id, .. } => {
+        RelayObservation::ElicitationResolved {
+            elicitation_id,
+            reply,
+            ..
+        } => {
             snapshot.assessment_questions.remove(elicitation_id);
+            if reply.is_some() {
+                snapshot.person_input_through = event.ordinal;
+                if let Some(context) = &mut snapshot.assessment_context {
+                    Arc::make_mut(context).set_aside_replies(true);
+                }
+            }
         }
         RelayObservation::ElicitationsCleared => {
             snapshot.assessment_questions.clear();
@@ -1852,7 +2046,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 && let ContentBlock::Text(text) = &chunk.content
                 && let Some(context) = &mut snapshot.assessment_context
             {
-                context.assistant(
+                Arc::make_mut(context).assistant(
                     chunk.message_id.as_ref().map(|id| id.0.as_ref()),
                     event.ordinal,
                     &text.text,
@@ -1869,6 +2063,11 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 },
             ..
         } => {
+            snapshot.completed_reply_message = snapshot
+                .assessment_context
+                .as_ref()
+                .and_then(|context| context.open_assistant_id.as_deref())
+                .and_then(crate::activity::question_locator::transcript_stable_id);
             let mut a = TurnAssessment::pending(
                 command_id.clone(),
                 event.ordinal,
@@ -1883,9 +2082,21 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 a.status = Status::Superseded;
                 a.reason = "explicit_handoff_or_cancellation".into();
             }
-            snapshot.assessment = Some(a);
+            if !snapshot.managed_subagent
+                && crate::state::classify_prompt_completion(stop_reason)
+                    == crate::state::PromptCompletion::InputRequired
+            {
+                snapshot.request = Some(crate::assessment::OpenRequest {
+                    question: crate::assessment::InferredQuestion {
+                        turn_id: command_id.clone(),
+                        completed_ordinal: event.ordinal,
+                    },
+                    question_message: snapshot.completed_reply_message.clone(),
+                });
+            }
+            snapshot.assessment = Some(std::sync::Arc::new(a));
             if let Some(context) = &mut snapshot.assessment_context {
-                context.open_assistant_id = None;
+                Arc::make_mut(context).open_assistant_id = None;
             }
         }
         RelayObservation::HarnessTurnSettled {
@@ -1893,7 +2104,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             ..
         } => {
             if let Some(context) = &mut snapshot.assessment_context {
-                context.open_assistant_id = None;
+                Arc::make_mut(context).open_assistant_id = None;
             }
         }
         RelayObservation::CommandCompleted {
@@ -1902,6 +2113,10 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         } => {
             snapshot.assessment_context = Some(Default::default());
             snapshot.assessment = None;
+            // The conversation that held any open request is gone, so fence it
+            // like person input; a fresh conversation inherits no question.
+            snapshot.person_input_through = event.ordinal;
+            snapshot.completed_reply_message = None;
         }
         RelayObservation::CommandQueued {
             command_id,
@@ -1910,10 +2125,13 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         } => {
             let automatic = matches!(
                 command,
-                RelayCommand::HandbackReminder { .. } | RelayCommand::MailboxWake { .. }
+                RelayCommand::HandbackReminder { .. }
+                    | RelayCommand::HoldFollowUp { .. }
+                    | RelayCommand::MailboxWake { .. }
             ) || crate::continuation::is_generated_prompt(command_id)
                 || crate::continuation::is_quota_goal_resume(command_id);
             if let Some(a) = &mut snapshot.assessment {
+                let a = std::sync::Arc::make_mut(a);
                 if let RelayCommand::SetQuotaRecovery { recovery, .. } = command {
                     if a.current() && a.action == Some(crate::assessment::Action::RecoverQuota) {
                         a.status = if recovery.as_ref().is_some_and(|r| r.retry_at_ms.is_some()) {
@@ -1951,6 +2169,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         | RelayObservation::Closing
         | RelayObservation::Closed => {
             if let Some(a) = &mut snapshot.assessment {
+                let a = std::sync::Arc::make_mut(a);
                 a.status = Status::Superseded;
                 a.reason = "turn_or_lifecycle_changed".into();
             }
@@ -1963,5 +2182,220 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             }
         }
         _ => {}
+    }
+}
+
+/// The accepted delivery owns a new turn even after restore or cancellation.
+/// It may recover from quota without granting new authorization or renewing
+/// the ordinary nudge allowance.
+fn begin_delivered_message_turn(
+    continuation: &mut crate::continuation::ContinuationState,
+    command_id: &str,
+) {
+    if continuation.user_command_id.is_none() {
+        continuation.user_command_id = Some(command_id.to_owned());
+        continuation.suppressed = true;
+    }
+    continuation.completed_command_id = None;
+    continuation.harness_turn = None;
+    continuation.quota_suppressed = false;
+    continuation.quota_recovery = None;
+}
+
+#[cfg(test)]
+mod open_request_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_form_resolution_preserves_request_but_person_answer_clears_it() {
+        let mut snapshot = RelaySnapshot::new("forms".into());
+        snapshot.request = Some(crate::assessment::OpenRequest {
+            question: crate::assessment::InferredQuestion {
+                turn_id: "original".into(),
+                completed_ordinal: 1,
+            },
+            question_message: None,
+        });
+        for reply in [None, Some("Use the old format".into())] {
+            let human = reply.is_some();
+            let mut event = RelayEvent {
+                format: RELAY_EVENT_FORMAT_V2,
+                ordinal: snapshot.latest_ordinal + 1,
+                previous_digest: String::new(),
+                digest: String::new(),
+                recorded_at_ms: 1,
+                command_id: None,
+                observation: RelayObservation::ElicitationResolved {
+                    elicitation_id: "form".into(),
+                    action: "accept".into(),
+                    reply,
+                },
+            };
+            event.digest = relay_event_digest(&event).unwrap();
+            apply_relay_event(&mut snapshot, &event).unwrap();
+            assert_eq!(snapshot.open_request().is_none(), human);
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_without_request_and_retained_request_round_trip() {
+        let mut snapshot = RelaySnapshot::new("compatibility".into());
+        let mut legacy = serde_json::to_value(&snapshot).unwrap();
+        legacy.as_object_mut().unwrap().remove("request");
+        legacy.as_object_mut().unwrap().remove("managed_subagent");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("person_input_through");
+        let restored: RelaySnapshot = serde_json::from_value(legacy).unwrap();
+        assert!(restored.open_request().is_none());
+        snapshot.request = Some(crate::assessment::OpenRequest {
+            question: crate::assessment::InferredQuestion {
+                turn_id: "earlier-turn".into(),
+                completed_ordinal: 7,
+            },
+            question_message: Some("agent:question".into()),
+        });
+        let restored: RelaySnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored.open_request(), snapshot.open_request());
+    }
+}
+
+#[cfg(test)]
+mod work_liveness_tests {
+    use super::*;
+    use crate::subagent::HoldFollowUpKind;
+    use crate::work_facts::WorkLiveness;
+
+    fn apply(snapshot: &mut RelaySnapshot, observation: RelayObservation) {
+        let mut event = RelayEvent {
+            format: RELAY_EVENT_FORMAT_V2,
+            ordinal: snapshot.latest_ordinal + 1,
+            previous_digest: String::new(),
+            digest: String::new(),
+            recorded_at_ms: 1,
+            command_id: None,
+            observation,
+        };
+        event.digest = relay_event_digest(&event).unwrap();
+        apply_relay_event(snapshot, &event).unwrap();
+    }
+
+    fn liveness(completed_ordinal: u64, alive: u32) -> WorkLiveness {
+        WorkLiveness {
+            completed_ordinal,
+            alive,
+            checked_at_ms: 9,
+        }
+    }
+
+    #[test]
+    fn a_recount_for_an_older_turn_is_dropped_and_a_snapshot_round_trips() {
+        let mut snapshot = RelaySnapshot::new("liveness".into());
+        snapshot.work_liveness = Some(liveness(7, 3));
+        apply(
+            &mut snapshot,
+            RelayObservation::WorkLivenessChanged {
+                liveness: liveness(5, 0),
+            },
+        );
+        assert_eq!(snapshot.work_liveness, Some(liveness(7, 3)));
+        apply(
+            &mut snapshot,
+            RelayObservation::WorkLivenessChanged {
+                liveness: liveness(7, 1),
+            },
+        );
+        assert_eq!(snapshot.work_liveness, Some(liveness(7, 1)));
+        let restored: RelaySnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored.work_liveness, snapshot.work_liveness);
+
+        // A snapshot written before protocol 67 has no field and no liveness.
+        let mut legacy = serde_json::to_value(RelaySnapshot::new("old".into())).unwrap();
+        assert!(
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("work_liveness")
+                .is_none()
+        );
+        let restored: RelaySnapshot = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.work_liveness, None);
+    }
+
+    #[test]
+    fn hold_follow_up_replays_as_a_guarded_prompt_and_clears_liveness_when_it_starts() {
+        let mut snapshot = RelaySnapshot::new("follow-up".into());
+        snapshot.work_liveness = Some(liveness(7, 2));
+        let command = RelayCommand::HoldFollowUp {
+            completed_command_id: "handback-reminder-6".into(),
+            completed_ordinal: 7,
+            kind: HoldFollowUpKind::GiveUp,
+            running: vec!["pid 4 sleep 1000".into()],
+        };
+        // The journal stores the command with its kind in snake_case.
+        let json = serde_json::to_value(&command).unwrap();
+        assert_eq!(json["data"]["kind"], "give_up");
+        assert_eq!(
+            serde_json::from_value::<RelayCommand>(json).unwrap(),
+            command
+        );
+        assert_eq!(
+            command.minimum_protocol(),
+            crate::relay::RELAY_WORK_LIVENESS_PROTOCOL
+        );
+        let text = &command.prompt_blocks().unwrap()[0];
+        let text = serde_json::to_string(text).unwrap();
+        assert!(text.contains("[background wait ended] You have waited 30 minutes"));
+        assert!(text.contains("- pid 4 sleep 1000"));
+        apply(
+            &mut snapshot,
+            RelayObservation::CommandQueued {
+                command_id: "hold-give-up-7".into(),
+                command,
+                created_at_ms: 1,
+            },
+        );
+        assert_eq!(
+            snapshot.latest_prompt_accepted_ordinal,
+            Some(snapshot.latest_ordinal)
+        );
+        // Queued is not running: a follow-up the queue drops leaves the child
+        // held. Only its start supersedes the turn the liveness describes.
+        assert_eq!(snapshot.work_liveness, Some(liveness(7, 2)));
+        apply(
+            &mut snapshot,
+            RelayObservation::CommandStarted {
+                command_id: "hold-give-up-7".into(),
+                started_at_ms: 2,
+            },
+        );
+        assert_eq!(snapshot.work_liveness, None);
+    }
+
+    // Protocol-66 workers decode `RelayCommand` with `deny_unknown_fields`, so
+    // a reminder carrying `running` is rejected by them. The daemon therefore
+    // fills `running` only for workers at protocol 67 or later, which
+    // `minimum_protocol` enforces.
+    #[test]
+    fn a_reminder_with_processes_needs_protocol_67_and_without_them_stays_old() {
+        let plain = RelayCommand::HandbackReminder {
+            completed_command_id: "t".into(),
+            completed_ordinal: 1,
+            running: Vec::new(),
+        };
+        assert_eq!(plain.minimum_protocol(), 26);
+        assert!(!serde_json::to_string(&plain).unwrap().contains("running"));
+        let named = RelayCommand::HandbackReminder {
+            completed_command_id: "t".into(),
+            completed_ordinal: 1,
+            running: vec!["pid 1 sleep".into()],
+        };
+        assert_eq!(
+            named.minimum_protocol(),
+            crate::relay::RELAY_WORK_LIVENESS_PROTOCOL
+        );
     }
 }

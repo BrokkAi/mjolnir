@@ -1,0 +1,1573 @@
+{
+  "recorded_at": "2026-11-17T03:12:55.104759+00:00",
+  "currency": "USD",
+  "cost_type": "Mjolnir API-equivalent estimates for priced full-turn reports, not subscription invoice spend.",
+  "usage_root_scope": "Whole-session aggregates counted once per uniqueSID, never once per pagination page.",
+  "source_helper_pre_census_baseline_usd": 41.8760924,
+  "helpers_including_later_orchestration": {
+    "sessions": [
+      "4986f1be933dd07fa4abb1088914d33a",
+      "9c3ec86f17e8a0eb57de3a22476a772a",
+      "b267ea5fe084e493a9416bcd94c9cb9e",
+      "f8bf595a98b0e09061d860d8e9b0af95",
+      "045bf52ed9425283f1ba1946c2b99eb2",
+      "9c8350835f6d374c1249ed5b75844448",
+      "9874d7ac5202d0b7b4a70602122d5085",
+      "d051706eabc753e1c7aa893b803d9843",
+      "c3dfb897e83da2e557c6273885d91a3a",
+      "824e829f399fef1ec6012210ae91d2df",
+      "edb382976d7253121a0bb12b96e02505",
+      "1b07d051e59e03e86eb2b0102545de6f"
+    ],
+    "reported_priced_cost_ticks": 489595624000,
+    "reported_api_equivalent_usd": 48.9595624,
+    "coverage": {
+      "recorded_turns": 46,
+      "full_turn_reports": 45,
+      "last_request_reports": 0,
+      "unspecified_reports": 1,
+      "missing_reports": 0,
+      "unfinished_turns": 0,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 45,
+      "missing_cost_turns": 0
+    },
+    "rows": [
+      {
+        "session": "4986f1be933dd07fa4abb1088914d33a",
+        "cost_ticks": 56270752000,
+        "coverage": {
+          "recorded_turns": 6,
+          "full_turn_reports": 6,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 6,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 38943872,
+            "reported_turns": 6
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 6
+          },
+          "input_tokens": {
+            "tokens": 354259,
+            "reported_turns": 6
+          },
+          "output_tokens": {
+            "tokens": 102417,
+            "reported_turns": 6
+          },
+          "thought_tokens": {
+            "tokens": 35481,
+            "reported_turns": 6
+          },
+          "total_tokens": {
+            "tokens": 39400548,
+            "reported_turns": 6
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 38943872,
+                "reported_turns": 6
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 6
+              },
+              "input_tokens": {
+                "tokens": 354259,
+                "reported_turns": 6
+              },
+              "output_tokens": {
+                "tokens": 102417,
+                "reported_turns": 6
+              },
+              "thought_tokens": {
+                "tokens": 35481,
+                "reported_turns": 6
+              },
+              "total_tokens": {
+                "tokens": 39400548,
+                "reported_turns": 6
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "9c3ec86f17e8a0eb57de3a22476a772a",
+        "cost_ticks": 50567988000,
+        "coverage": {
+          "recorded_turns": 4,
+          "full_turn_reports": 4,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 4,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 33039488,
+            "reported_turns": 4
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 4
+          },
+          "input_tokens": {
+            "tokens": 460610,
+            "reported_turns": 4
+          },
+          "output_tokens": {
+            "tokens": 83163,
+            "reported_turns": 4
+          },
+          "thought_tokens": {
+            "tokens": 24772,
+            "reported_turns": 4
+          },
+          "total_tokens": {
+            "tokens": 33583261,
+            "reported_turns": 4
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 33039488,
+                "reported_turns": 4
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 4
+              },
+              "input_tokens": {
+                "tokens": 460610,
+                "reported_turns": 4
+              },
+              "output_tokens": {
+                "tokens": 83163,
+                "reported_turns": 4
+              },
+              "thought_tokens": {
+                "tokens": 24772,
+                "reported_turns": 4
+              },
+              "total_tokens": {
+                "tokens": 33583261,
+                "reported_turns": 4
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "b267ea5fe084e493a9416bcd94c9cb9e",
+        "cost_ticks": 50019784000,
+        "coverage": {
+          "recorded_turns": 4,
+          "full_turn_reports": 3,
+          "last_request_reports": 0,
+          "unspecified_reports": 1,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 3,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 33163264,
+            "reported_turns": 3
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 3
+          },
+          "input_tokens": {
+            "tokens": 492636,
+            "reported_turns": 3
+          },
+          "output_tokens": {
+            "tokens": 70038,
+            "reported_turns": 3
+          },
+          "thought_tokens": {
+            "tokens": 19504,
+            "reported_turns": 3
+          },
+          "total_tokens": {
+            "tokens": 33725938,
+            "reported_turns": 3
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 33163264,
+                "reported_turns": 3
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 3
+              },
+              "input_tokens": {
+                "tokens": 492636,
+                "reported_turns": 3
+              },
+              "output_tokens": {
+                "tokens": 70038,
+                "reported_turns": 3
+              },
+              "thought_tokens": {
+                "tokens": 19504,
+                "reported_turns": 3
+              },
+              "total_tokens": {
+                "tokens": 33725938,
+                "reported_turns": 3
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "f8bf595a98b0e09061d860d8e9b0af95",
+        "cost_ticks": 53285544000,
+        "coverage": {
+          "recorded_turns": 3,
+          "full_turn_reports": 3,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 3,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 35111424,
+            "reported_turns": 3
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 3
+          },
+          "input_tokens": {
+            "tokens": 467486,
+            "reported_turns": 3
+          },
+          "output_tokens": {
+            "tokens": 88244,
+            "reported_turns": 3
+          },
+          "thought_tokens": {
+            "tokens": 26228,
+            "reported_turns": 3
+          },
+          "total_tokens": {
+            "tokens": 35667154,
+            "reported_turns": 3
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 35111424,
+                "reported_turns": 3
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 3
+              },
+              "input_tokens": {
+                "tokens": 467486,
+                "reported_turns": 3
+              },
+              "output_tokens": {
+                "tokens": 88244,
+                "reported_turns": 3
+              },
+              "thought_tokens": {
+                "tokens": 26228,
+                "reported_turns": 3
+              },
+              "total_tokens": {
+                "tokens": 35667154,
+                "reported_turns": 3
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "045bf52ed9425283f1ba1946c2b99eb2",
+        "cost_ticks": 91629576000,
+        "coverage": {
+          "recorded_turns": 8,
+          "full_turn_reports": 8,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 8,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 72116096,
+            "reported_turns": 8
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 8
+          },
+          "input_tokens": {
+            "tokens": 432979,
+            "reported_turns": 8
+          },
+          "output_tokens": {
+            "tokens": 108539,
+            "reported_turns": 8
+          },
+          "thought_tokens": {
+            "tokens": 31195,
+            "reported_turns": 8
+          },
+          "total_tokens": {
+            "tokens": 72657614,
+            "reported_turns": 8
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 72116096,
+                "reported_turns": 8
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 8
+              },
+              "input_tokens": {
+                "tokens": 432979,
+                "reported_turns": 8
+              },
+              "output_tokens": {
+                "tokens": 108539,
+                "reported_turns": 8
+              },
+              "thought_tokens": {
+                "tokens": 31195,
+                "reported_turns": 8
+              },
+              "total_tokens": {
+                "tokens": 72657614,
+                "reported_turns": 8
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "9c8350835f6d374c1249ed5b75844448",
+        "cost_ticks": 1886448000,
+        "coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 430848,
+            "reported_turns": 1
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 1
+          },
+          "input_tokens": {
+            "tokens": 61270,
+            "reported_turns": 1
+          },
+          "output_tokens": {
+            "tokens": 2302,
+            "reported_turns": 1
+          },
+          "thought_tokens": {
+            "tokens": 92,
+            "reported_turns": 1
+          },
+          "total_tokens": {
+            "tokens": 494420,
+            "reported_turns": 1
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 430848,
+                "reported_turns": 1
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 1
+              },
+              "input_tokens": {
+                "tokens": 61270,
+                "reported_turns": 1
+              },
+              "output_tokens": {
+                "tokens": 2302,
+                "reported_turns": 1
+              },
+              "thought_tokens": {
+                "tokens": 92,
+                "reported_turns": 1
+              },
+              "total_tokens": {
+                "tokens": 494420,
+                "reported_turns": 1
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "9874d7ac5202d0b7b4a70602122d5085",
+        "cost_ticks": 44180508000,
+        "coverage": {
+          "recorded_turns": 4,
+          "full_turn_reports": 4,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 4,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 25375488,
+            "reported_turns": 4
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 4
+          },
+          "input_tokens": {
+            "tokens": 609231,
+            "reported_turns": 4
+          },
+          "output_tokens": {
+            "tokens": 66204,
+            "reported_turns": 4
+          },
+          "thought_tokens": {
+            "tokens": 16715,
+            "reported_turns": 4
+          },
+          "total_tokens": {
+            "tokens": 26050923,
+            "reported_turns": 4
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 25375488,
+                "reported_turns": 4
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 4
+              },
+              "input_tokens": {
+                "tokens": 609231,
+                "reported_turns": 4
+              },
+              "output_tokens": {
+                "tokens": 66204,
+                "reported_turns": 4
+              },
+              "thought_tokens": {
+                "tokens": 16715,
+                "reported_turns": 4
+              },
+              "total_tokens": {
+                "tokens": 26050923,
+                "reported_turns": 4
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "d051706eabc753e1c7aa893b803d9843",
+        "cost_ticks": 41350628000,
+        "coverage": {
+          "recorded_turns": 4,
+          "full_turn_reports": 4,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 4,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 26523008,
+            "reported_turns": 4
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 4
+          },
+          "input_tokens": {
+            "tokens": 335771,
+            "reported_turns": 4
+          },
+          "output_tokens": {
+            "tokens": 81122,
+            "reported_turns": 4
+          },
+          "thought_tokens": {
+            "tokens": 29756,
+            "reported_turns": 4
+          },
+          "total_tokens": {
+            "tokens": 26939901,
+            "reported_turns": 4
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 26523008,
+                "reported_turns": 4
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 4
+              },
+              "input_tokens": {
+                "tokens": 335771,
+                "reported_turns": 4
+              },
+              "output_tokens": {
+                "tokens": 81122,
+                "reported_turns": 4
+              },
+              "thought_tokens": {
+                "tokens": 29756,
+                "reported_turns": 4
+              },
+              "total_tokens": {
+                "tokens": 26939901,
+                "reported_turns": 4
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "c3dfb897e83da2e557c6273885d91a3a",
+        "cost_ticks": 38295112000,
+        "coverage": {
+          "recorded_turns": 4,
+          "full_turn_reports": 4,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 4,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 22100992,
+            "reported_turns": 4
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 4
+          },
+          "input_tokens": {
+            "tokens": 366541,
+            "reported_turns": 4
+          },
+          "output_tokens": {
+            "tokens": 88633,
+            "reported_turns": 4
+          },
+          "thought_tokens": {
+            "tokens": 34782,
+            "reported_turns": 4
+          },
+          "total_tokens": {
+            "tokens": 22556166,
+            "reported_turns": 4
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 22100992,
+                "reported_turns": 4
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 4
+              },
+              "input_tokens": {
+                "tokens": 366541,
+                "reported_turns": 4
+              },
+              "output_tokens": {
+                "tokens": 88633,
+                "reported_turns": 4
+              },
+              "thought_tokens": {
+                "tokens": 34782,
+                "reported_turns": 4
+              },
+              "total_tokens": {
+                "tokens": 22556166,
+                "reported_turns": 4
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "824e829f399fef1ec6012210ae91d2df",
+        "cost_ticks": 21383360000,
+        "coverage": {
+          "recorded_turns": 2,
+          "full_turn_reports": 2,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 2,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 11973120,
+            "reported_turns": 2
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 2
+          },
+          "input_tokens": {
+            "tokens": 279182,
+            "reported_turns": 2
+          },
+          "output_tokens": {
+            "tokens": 38266,
+            "reported_turns": 2
+          },
+          "thought_tokens": {
+            "tokens": 8247,
+            "reported_turns": 2
+          },
+          "total_tokens": {
+            "tokens": 12290568,
+            "reported_turns": 2
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 11973120,
+                "reported_turns": 2
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 2
+              },
+              "input_tokens": {
+                "tokens": 279182,
+                "reported_turns": 2
+              },
+              "output_tokens": {
+                "tokens": 38266,
+                "reported_turns": 2
+              },
+              "thought_tokens": {
+                "tokens": 8247,
+                "reported_turns": 2
+              },
+              "total_tokens": {
+                "tokens": 12290568,
+                "reported_turns": 2
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "edb382976d7253121a0bb12b96e02505",
+        "cost_ticks": 25461988000,
+        "coverage": {
+          "recorded_turns": 3,
+          "full_turn_reports": 3,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 3,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 15159808,
+            "reported_turns": 3
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 3
+          },
+          "input_tokens": {
+            "tokens": 310914,
+            "reported_turns": 3
+          },
+          "output_tokens": {
+            "tokens": 40839,
+            "reported_turns": 3
+          },
+          "thought_tokens": {
+            "tokens": 8513,
+            "reported_turns": 3
+          },
+          "total_tokens": {
+            "tokens": 15511561,
+            "reported_turns": 3
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 15159808,
+                "reported_turns": 3
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 3
+              },
+              "input_tokens": {
+                "tokens": 310914,
+                "reported_turns": 3
+              },
+              "output_tokens": {
+                "tokens": 40839,
+                "reported_turns": 3
+              },
+              "thought_tokens": {
+                "tokens": 8513,
+                "reported_turns": 3
+              },
+              "total_tokens": {
+                "tokens": 15511561,
+                "reported_turns": 3
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "1b07d051e59e03e86eb2b0102545de6f",
+        "cost_ticks": 15263936000,
+        "coverage": {
+          "recorded_turns": 3,
+          "full_turn_reports": 3,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 3,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 7326976,
+            "reported_turns": 3
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 3
+          },
+          "input_tokens": {
+            "tokens": 211103,
+            "reported_turns": 3
+          },
+          "output_tokens": {
+            "tokens": 37149,
+            "reported_turns": 3
+          },
+          "thought_tokens": {
+            "tokens": 6343,
+            "reported_turns": 3
+          },
+          "total_tokens": {
+            "tokens": 7575228,
+            "reported_turns": 3
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 7326976,
+                "reported_turns": 3
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 3
+              },
+              "input_tokens": {
+                "tokens": 211103,
+                "reported_turns": 3
+              },
+              "output_tokens": {
+                "tokens": 37149,
+                "reported_turns": 3
+              },
+              "thought_tokens": {
+                "tokens": 6343,
+                "reported_turns": 3
+              },
+              "total_tokens": {
+                "tokens": 7575228,
+                "reported_turns": 3
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "primary_sol": {
+    "sessions": [
+      "b5f3589259fbfff6a51b620adc829e15",
+      "fd2146375f85e61ff03cee573c8750de",
+      "4d28dad0e639c9c2c2e459622fd63d66",
+      "85deeeb21ecef43d553bd7e248f8b340",
+      "6b68e2cdf980c836684f732addac2ee7",
+      "00b112ceb46b80087f1152ef6a4ca8a2"
+    ],
+    "reported_priced_cost_ticks": 18450548000,
+    "reported_api_equivalent_usd": 1.8450548,
+    "coverage": {
+      "recorded_turns": 6,
+      "full_turn_reports": 6,
+      "last_request_reports": 0,
+      "unspecified_reports": 0,
+      "missing_reports": 0,
+      "unfinished_turns": 0,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 6,
+      "missing_cost_turns": 0
+    },
+    "rows": [
+      {
+        "session": "b5f3589259fbfff6a51b620adc829e15",
+        "cost_ticks": 3706364000,
+        "coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 1184384,
+            "reported_turns": 1
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 1
+          },
+          "input_tokens": {
+            "tokens": 94984,
+            "reported_turns": 1
+          },
+          "output_tokens": {
+            "tokens": 6223,
+            "reported_turns": 1
+          },
+          "thought_tokens": {
+            "tokens": 667,
+            "reported_turns": 1
+          },
+          "total_tokens": {
+            "tokens": 1285591,
+            "reported_turns": 1
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 1184384,
+                "reported_turns": 1
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 1
+              },
+              "input_tokens": {
+                "tokens": 94984,
+                "reported_turns": 1
+              },
+              "output_tokens": {
+                "tokens": 6223,
+                "reported_turns": 1
+              },
+              "thought_tokens": {
+                "tokens": 667,
+                "reported_turns": 1
+              },
+              "total_tokens": {
+                "tokens": 1285591,
+                "reported_turns": 1
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "fd2146375f85e61ff03cee573c8750de",
+        "cost_ticks": 2476296000,
+        "coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 585856,
+            "reported_turns": 1
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 1
+          },
+          "input_tokens": {
+            "tokens": 62392,
+            "reported_turns": 1
+          },
+          "output_tokens": {
+            "tokens": 6426,
+            "reported_turns": 1
+          },
+          "thought_tokens": {
+            "tokens": 818,
+            "reported_turns": 1
+          },
+          "total_tokens": {
+            "tokens": 654674,
+            "reported_turns": 1
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 585856,
+                "reported_turns": 1
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 1
+              },
+              "input_tokens": {
+                "tokens": 62392,
+                "reported_turns": 1
+              },
+              "output_tokens": {
+                "tokens": 6426,
+                "reported_turns": 1
+              },
+              "thought_tokens": {
+                "tokens": 818,
+                "reported_turns": 1
+              },
+              "total_tokens": {
+                "tokens": 654674,
+                "reported_turns": 1
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "4d28dad0e639c9c2c2e459622fd63d66",
+        "cost_ticks": 3310768000,
+        "coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 891648,
+            "reported_turns": 1
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 1
+          },
+          "input_tokens": {
+            "tokens": 88281,
+            "reported_turns": 1
+          },
+          "output_tokens": {
+            "tokens": 6535,
+            "reported_turns": 1
+          },
+          "thought_tokens": {
+            "tokens": 535,
+            "reported_turns": 1
+          },
+          "total_tokens": {
+            "tokens": 986464,
+            "reported_turns": 1
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 891648,
+                "reported_turns": 1
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 1
+              },
+              "input_tokens": {
+                "tokens": 88281,
+                "reported_turns": 1
+              },
+              "output_tokens": {
+                "tokens": 6535,
+                "reported_turns": 1
+              },
+              "thought_tokens": {
+                "tokens": 535,
+                "reported_turns": 1
+              },
+              "total_tokens": {
+                "tokens": 986464,
+                "reported_turns": 1
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "85deeeb21ecef43d553bd7e248f8b340",
+        "cost_ticks": 2759696000,
+        "coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 761856,
+            "reported_turns": 1
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 1
+          },
+          "input_tokens": {
+            "tokens": 71692,
+            "reported_turns": 1
+          },
+          "output_tokens": {
+            "tokens": 5640,
+            "reported_turns": 1
+          },
+          "thought_tokens": {
+            "tokens": 918,
+            "reported_turns": 1
+          },
+          "total_tokens": {
+            "tokens": 839188,
+            "reported_turns": 1
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 761856,
+                "reported_turns": 1
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 1
+              },
+              "input_tokens": {
+                "tokens": 71692,
+                "reported_turns": 1
+              },
+              "output_tokens": {
+                "tokens": 5640,
+                "reported_turns": 1
+              },
+              "thought_tokens": {
+                "tokens": 918,
+                "reported_turns": 1
+              },
+              "total_tokens": {
+                "tokens": 839188,
+                "reported_turns": 1
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "6b68e2cdf980c836684f732addac2ee7",
+        "cost_ticks": 3408192000,
+        "coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 775552,
+            "reported_turns": 1
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 1
+          },
+          "input_tokens": {
+            "tokens": 99632,
+            "reported_turns": 1
+          },
+          "output_tokens": {
+            "tokens": 6400,
+            "reported_turns": 1
+          },
+          "thought_tokens": {
+            "tokens": 887,
+            "reported_turns": 1
+          },
+          "total_tokens": {
+            "tokens": 881584,
+            "reported_turns": 1
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 775552,
+                "reported_turns": 1
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 1
+              },
+              "input_tokens": {
+                "tokens": 99632,
+                "reported_turns": 1
+              },
+              "output_tokens": {
+                "tokens": 6400,
+                "reported_turns": 1
+              },
+              "thought_tokens": {
+                "tokens": 887,
+                "reported_turns": 1
+              },
+              "total_tokens": {
+                "tokens": 881584,
+                "reported_turns": 1
+              }
+            }
+          }
+        ]
+      },
+      {
+        "session": "00b112ceb46b80087f1152ef6a4ca8a2",
+        "cost_ticks": 2789232000,
+        "coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 550272,
+            "reported_turns": 1
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 1
+          },
+          "input_tokens": {
+            "tokens": 89763,
+            "reported_turns": 1
+          },
+          "output_tokens": {
+            "tokens": 4437,
+            "reported_turns": 1
+          },
+          "thought_tokens": {
+            "tokens": 631,
+            "reported_turns": 1
+          },
+          "total_tokens": {
+            "tokens": 644472,
+            "reported_turns": 1
+          }
+        },
+        "by_model": [
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 550272,
+                "reported_turns": 1
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 1
+              },
+              "input_tokens": {
+                "tokens": 89763,
+                "reported_turns": 1
+              },
+              "output_tokens": {
+                "tokens": 4437,
+                "reported_turns": 1
+              },
+              "thought_tokens": {
+                "tokens": 631,
+                "reported_turns": 1
+              },
+              "total_tokens": {
+                "tokens": 644472,
+                "reported_turns": 1
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "partial_carbon": {
+    "sessions": [
+      "f746482795ad3103d9f24ed5d7704bff"
+    ],
+    "reported_priced_cost_ticks": 0,
+    "reported_api_equivalent_usd": 0.0,
+    "coverage": {
+      "recorded_turns": 1,
+      "full_turn_reports": 0,
+      "last_request_reports": 0,
+      "unspecified_reports": 1,
+      "missing_reports": 0,
+      "unfinished_turns": 0,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 0,
+      "missing_cost_turns": 0
+    },
+    "rows": [
+      {
+        "session": "f746482795ad3103d9f24ed5d7704bff",
+        "cost_ticks": 0,
+        "coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 0,
+          "last_request_reports": 0,
+          "unspecified_reports": 1,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 0,
+          "missing_cost_turns": 0
+        },
+        "totals": {},
+        "by_model": []
+      }
+    ]
+  },
+  "parent_completed_reports": {
+    "sessions": [
+      "d2fa840b25852a07c2e024357afec69d"
+    ],
+    "reported_priced_cost_ticks": 103501574000,
+    "reported_api_equivalent_usd": 10.3501574,
+    "coverage": {
+      "recorded_turns": 20,
+      "full_turn_reports": 20,
+      "last_request_reports": 0,
+      "unspecified_reports": 0,
+      "missing_reports": 0,
+      "unfinished_turns": 1,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 20,
+      "missing_cost_turns": 0
+    },
+    "rows": [
+      {
+        "session": "d2fa840b25852a07c2e024357afec69d",
+        "cost_ticks": 103501574000,
+        "coverage": {
+          "recorded_turns": 20,
+          "full_turn_reports": 20,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 1,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 20,
+          "missing_cost_turns": 0
+        },
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 43399429,
+            "reported_turns": 20
+          },
+          "cached_write_tokens": {
+            "tokens": 107941,
+            "reported_turns": 20
+          },
+          "input_tokens": {
+            "tokens": 1443739,
+            "reported_turns": 20
+          },
+          "output_tokens": {
+            "tokens": 196559,
+            "reported_turns": 20
+          },
+          "thought_tokens": {
+            "tokens": 106219,
+            "reported_turns": 17
+          },
+          "total_tokens": {
+            "tokens": 45147668,
+            "reported_turns": 20
+          }
+        },
+        "by_model": [
+          {
+            "model": "claude-haiku-5-5",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 0,
+                "reported_turns": 1
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 1
+              },
+              "input_tokens": {
+                "tokens": 2863,
+                "reported_turns": 1
+              },
+              "output_tokens": {
+                "tokens": 27,
+                "reported_turns": 1
+              },
+              "total_tokens": {
+                "tokens": 2890,
+                "reported_turns": 1
+              }
+            }
+          },
+          {
+            "model": "claude-opus-5-5",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 3450117,
+                "reported_turns": 3
+              },
+              "cached_write_tokens": {
+                "tokens": 107941,
+                "reported_turns": 3
+              },
+              "input_tokens": {
+                "tokens": 78,
+                "reported_turns": 3
+              },
+              "output_tokens": {
+                "tokens": 27797,
+                "reported_turns": 3
+              },
+              "total_tokens": {
+                "tokens": 3585933,
+                "reported_turns": 3
+              }
+            }
+          },
+          {
+            "model": "gpt-6.1-sol",
+            "effort": null,
+            "totals": {
+              "cached_read_tokens": {
+                "tokens": 39949312,
+                "reported_turns": 17
+              },
+              "cached_write_tokens": {
+                "tokens": 0,
+                "reported_turns": 17
+              },
+              "input_tokens": {
+                "tokens": 1440798,
+                "reported_turns": 17
+              },
+              "output_tokens": {
+                "tokens": 168735,
+                "reported_turns": 17
+              },
+              "thought_tokens": {
+                "tokens": 106219,
+                "reported_turns": 17
+              },
+              "total_tokens": {
+                "tokens": 41558845,
+                "reported_turns": 17
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "reported_priced_total_usd": 61.1547746,
+  "complete_total_available": false,
+  "gaps": [
+    "Carbon1recordedturn has unspecified usage scope, no full-turn tokens and no price; zero ticks is not zero cost.",
+    "One helper report has unspecified usage scope and is excluded from priced whole-turn totals; its fully reported other turns are included.",
+    "The parent current reporting turn is unfinished and not yet fully priced."
+  ],
+  "carbon_quota_observation": {
+    "before_week_percent": 8,
+    "fresh_post_week_percent": 3,
+    "observed_account_percentage_point_delta": 5,
+    "isolated_unit_cost": false,
+    "note": "Rounded shared-account cached readings, not isolated monetary cost; final refresh is322s after completion."
+  }
+}

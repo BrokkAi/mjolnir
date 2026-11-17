@@ -175,7 +175,7 @@ pub(crate) fn recover_worker_controlled(
                 .context("read durable session before worker recovery")?;
             let eligible = session.as_ref().is_some_and(|session| {
                 crate::pollers::session_target_is_pollable(session)
-                    && session.target.as_ref() == Some(&plan.source_target)
+                    && session.target.as_deref() == Some(&plan.source_target)
             });
             if !eligible
                 || crate::controller::move_session::move_owns_session(id)
@@ -200,17 +200,13 @@ pub(crate) fn recover_worker_controlled(
         {
             return Ok(WorkerRecoveryOutcome::TargetMissing);
         }
-        let output = executor
-            .execute(&plan.liveness_probe)
-            .context("probe relay worker liveness")?;
-        if output.status != 0 {
-            bail!(
-                "{} failed with status {}: {}",
-                plan.liveness_probe.purpose,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
+        // The probe plan stages the current worker, then runs it.
+        let output = plan
+            .liveness_probe
+            .execute(executor)
+            .context("probe relay worker liveness")?
+            .pop()
+            .context("the liveness probe produced no output")?;
         // A replacement may still be replaying its journal after the daemon
         // that launched it has exited. A lost handshake is not permission to kill
         // that live process; only a liveness probe proving death permits restart.
@@ -317,15 +313,17 @@ fn restart_owned_worker(
         if config.github.session_token_path.is_some() {
             let session = crate::database::read_durable_session_record(id)?
                 .context("session disappeared before installing its GitHub token")?;
-            let backend =
-                crate::controller::backend_locator(&plan.source_target, &session, &config)?;
-            let root = crate::targets::worker_root(&backend, id)?;
-            crate::controller::install_configured_session_github_token(
-                &config.github,
-                executor,
-                &backend,
-                &root,
-            )?;
+            if !session.no_github_credentials {
+                let backend =
+                    crate::controller::backend_locator(&plan.source_target, &session, &config)?;
+                let root = crate::targets::worker_root(&backend, id)?;
+                crate::controller::install_configured_session_github_token(
+                    &config.github,
+                    executor,
+                    &backend,
+                    &root,
+                )?;
+            }
         }
     }
     plan.restart.execute(executor)?;

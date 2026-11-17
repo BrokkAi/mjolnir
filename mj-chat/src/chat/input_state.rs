@@ -84,6 +84,7 @@ impl ChatState {
     pub(crate) fn set_input_payload(&mut self, payload: PromptPayload) {
         self.composer_runtime.submit_when_ready = None;
         self.pending_attachment_markers.clear();
+        self.composer_runtime.legacy_draft_images.clear();
         let mut payload = payload;
         for image in &mut payload.images {
             if image.image.is_pending() {
@@ -126,7 +127,17 @@ impl ChatState {
         }
         match PromptPayload::decode_draft(&draft) {
             Ok(payload) => {
+                let interrupted = payload.images.iter().any(|image| image.image.is_pending());
+                let legacy = payload
+                    .images
+                    .iter()
+                    .filter(|image| {
+                        image.image.reference.is_none() && !image.image.is_placeholder()
+                    })
+                    .map(|image| (image.number, image.image.clone()))
+                    .collect();
                 self.set_input_payload(payload);
+                self.composer_runtime.legacy_draft_images = legacy;
                 if let Some(body) = draft.strip_prefix(CHAT_DRAFT_PREFIX) {
                     match serde_json::from_str::<SavedChatDraft>(body) {
                         Ok(saved) => self.restore_submissions(saved.pending),
@@ -134,6 +145,11 @@ impl ChatState {
                             self.set_notice(format!("Could not restore pending prompts: {error}"))
                         }
                     }
+                }
+                if interrupted {
+                    self.set_notice(
+                        "An image upload was interrupted. Re-paste the failed attachment to retry.",
+                    );
                 }
             }
             Err(error) => {
@@ -247,6 +263,7 @@ impl ChatState {
         };
         match result {
             Ok(ready) => {
+                self.composer_runtime.legacy_draft_images.remove(&number);
                 self.input_images[index].image = ready;
                 self.input_generation = self.input_generation.wrapping_add(1);
                 self.feedback.clear();
@@ -296,9 +313,7 @@ impl ChatState {
     }
 
     pub(super) fn clipboard_target(&self) -> ClipboardTarget {
-        if self.earlier.is_some()
-            || (!self.reviewer_elicitation_open() && (self.turn_review_active()))
-        {
+        if self.earlier.is_some() {
             ClipboardTarget::Unavailable
         } else if let Some(dialog) = &self.elicitation {
             ClipboardTarget::Answer(dialog.request().id.clone())
@@ -348,11 +363,20 @@ impl ChatState {
     }
 
     pub(crate) fn encoded_draft(&self) -> String {
+        let mut composer = self.draft_payload();
+        // Already-durable legacy bytes stay durable until installation succeeds.
+        for image in &mut composer.images {
+            if image.image.is_placeholder()
+                && let Some(legacy) = self.composer_runtime.legacy_draft_images.get(&image.number)
+            {
+                image.image = legacy.clone();
+            }
+        }
         if self.pending_submissions.is_empty() {
-            return self.draft_payload().encode_draft();
+            return composer.encode_draft();
         }
         let saved = SavedChatDraft {
-            composer: self.draft_payload(),
+            composer,
             pending: self.pending_submissions.clone(),
         };
         format!(
@@ -701,6 +725,11 @@ impl ChatState {
                     let (key, value) = args
                         .split_once(char::is_whitespace)
                         .map_or((args, None), |(key, value)| (key, Some(value.trim())));
+                    if !self.config_key_user_settable(key) {
+                        self.clear_input();
+                        self.set_notice(self.policy_config_notice());
+                        return ChatAction::None;
+                    }
                     let values = self.config_values(key);
                     if values.is_empty() {
                         self.clear_input();
@@ -812,7 +841,7 @@ impl ChatState {
                     self.clear_input();
                     let review = self.review_config();
                     return match args.trim().to_ascii_lowercase().as_str() {
-                        // Bare `/review` reviews the turn that just finished,
+                        // Bare `/review` reviews committed work,
                         // whether or not automatic review is armed.
                         "" => ChatAction::StartTurnReview,
                         // Arming is configuration, not a session gesture: a
@@ -820,7 +849,7 @@ impl ChatState {
                         // machine-wide setting from inside one conversation.
                         "on" | "off" => {
                             self.set_notice(
-                                "automatic review is configured in config.toml: [review] trigger",
+                                "review runs before push when reviewers are set in Settings › Code Review",
                             );
                             ChatAction::None
                         }
@@ -959,13 +988,6 @@ impl ChatState {
     ) -> ChatAction {
         if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
             self.set_notice("The worker is closing; this prompt was not sent");
-            return ChatAction::None;
-        }
-        // Review is synchronous. While one is unresolved the agent it reviewed
-        // stays where the review found it, so findings can never arrive in the
-        // middle of the next turn.
-        if self.turn_review_active() {
-            self.set_notice("A review of the last turn is open; answer it first");
             return ChatAction::None;
         }
         if !history.is_empty() {

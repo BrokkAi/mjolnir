@@ -65,10 +65,12 @@ use mj_core::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode, ProjectBundle,
     ProjectRepository, SshConnection,
 };
+use mj_core::remote_git::Shorthand;
 use mj_core::state::{ProjectSourceIdentity, STATE_VERSION, SessionRecord};
 
 pub(super) fn sample_config_state() -> (Config, AppState) {
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -83,7 +85,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -93,15 +94,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
-                kind: HarnessKind::Codex,
-                home: "/highly/secret/codex".into(),
                 environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]).into(),
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, "/highly/secret/codex")
             },
         )]),
         bundles: BTreeMap::from([(
@@ -138,6 +132,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         ]),
     };
     let state = AppState {
+        last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
@@ -145,6 +140,9 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: [(
             "session-1".into(),
             SessionRecord {
+                oracle_choice: None,
+                oracle: true,
+                notifications_ignored: false,
                 project: None,
                 target_runtime: None,
                 launch_base: None,
@@ -157,8 +155,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 archived: false,
-                container_cpus: None,
-                container_memory: None,
                 id: "session-1".into(),
                 title: "Build Hel".into(),
                 harness_kind: HarnessKind::Codex,
@@ -169,6 +165,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 target_template_id: "podman".into(),
                 resource_allocation: None,
                 additional_mounts: vec![],
@@ -182,6 +179,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 viewed_through_event_ordinal: 0,
                 draft_input: String::new(),
                 last_error: Some("secret-token at /highly/secret/codex".into()),
+                dismissed_failure: None,
+                failure_generation: 0,
                 last_checkpoint_error: None,
                 checkpoint: None,
             },
@@ -218,6 +217,14 @@ fn app_with(
     conversations: BTreeMap<String, BrowserTranscript>,
     adjust: impl FnOnce(&mut ViewerSnapshot),
 ) -> TestServer {
+    app_with_backend(conversations, adjust, None)
+}
+
+fn app_with_backend(
+    conversations: BTreeMap<String, BrowserTranscript>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    backend: Option<Arc<dyn api::SubagentBackend>>,
+) -> TestServer {
     let (config, state) = sample_config_state();
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     adjust(&mut snapshot);
@@ -240,6 +247,10 @@ fn app_with(
         client_state_tx,
     )
     .with_test_credentials("123456", b"01234567890123456789012345678901");
+    let mut options = options;
+    if let Some(backend) = backend {
+        options.set_subagent_backend(backend);
+    }
     (
         router(options),
         action_rx,
@@ -693,12 +704,16 @@ fn generated_code_and_cookie_attributes_are_phone_safe() {
 fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
-        trigger: mj_core::config::ReviewTrigger::Turn,
-        count: mj_core::config::default_review_count(),
-        tier: Some("extended".into()),
-        profile: Some("reviewer-1".into()),
-        model: Some("private-review-model".into()),
-        effort: Some("private-review-effort".into()),
+        legacy: None,
+        disabled: false,
+        brief_writer: None,
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "private-review-model".into(),
+                effort: Some("private-review-effort".into())
+            };
+            2
+        ],
     };
 
     let value =
@@ -706,9 +721,8 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     assert_eq!(
         value.get("review_config"),
         Some(&serde_json::json!({
-            "trigger": "turn",
-            "profile": "reviewer-1",
-            "count": 2,
+            "trigger": "push",
+            "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
         }))
     );
     let json = value.to_string();
@@ -717,8 +731,8 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     assert!(!json.contains("secret-target"));
     assert!(!json.contains("secret.registry"));
     assert!(!json.contains("native-secret-id"));
-    assert!(!json.contains("private-review-model"));
-    assert!(!json.contains("private-review-effort"));
+    assert!(json.contains("private-review-model"));
+    assert!(json.contains("private-review-effort"));
     assert!(json.contains("\"has_error\":true"));
 }
 
@@ -727,8 +741,19 @@ fn public_snapshot_keeps_running_sessions_but_omits_disabled_profiles() {
     let (mut config, state) = sample_config_state();
     config.profiles.get_mut("codex-1").unwrap().enabled = false;
 
+    let retired: TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+    }))
+    .unwrap();
+    config.targets.insert("retired-ec2".into(), retired);
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
 
+    assert!(
+        !snapshot
+            .targets
+            .iter()
+            .any(|target| target.id == "retired-ec2")
+    );
     assert!(snapshot.profiles.is_empty());
     assert_eq!(snapshot.sessions.len(), 1);
     assert_eq!(snapshot.sessions[0].profile_id, "codex-1");
@@ -777,15 +802,82 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
 }
 
 #[test]
+fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
+    let (config, mut state) = sample_config_state();
+    let parent = state.sessions["session-1"].clone();
+    for (id, kind) in [
+        ("worker", mj_core::subagent::SubagentKind::Worker),
+        ("reviewer", mj_core::subagent::SubagentKind::Reviewer),
+    ] {
+        let mut child = parent.clone();
+        child.id = id.into();
+        child.state = if id == "reviewer" {
+            mj_core::state::SessionState::Error
+        } else {
+            mj_core::state::SessionState::Stopped
+        };
+        state.sessions.insert(id.into(), child);
+        state.subagents.insert(
+            id.into(),
+            mj_core::subagent::SubagentRecord {
+                kind,
+                reviewer_launch: None,
+                child_session_id: id.into(),
+                parent_session_id: "session-1".into(),
+                task_name: id.into(),
+                profile_id: "codex-1".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: String::new(),
+                request_key: id.into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            }
+            .into(),
+        );
+    }
+
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let row = |id: &str| snapshot.sessions.0.get(id).unwrap();
+    assert_eq!(
+        row("session-1").subagent_session_ids,
+        ["reviewer", "worker"]
+    );
+    assert_eq!(row("session-1").reviewer_session_ids, ["reviewer"]);
+    assert!(row("worker").reviewer_session_ids.is_empty());
+    assert!(row("reviewer").active);
+    assert!(!row("worker").active);
+
+    // The summary rows a compact client sees carry both lists, so Reviewers
+    // and Subagents never wait for a child's own record.
+    let mut stopped = state.clone();
+    stopped.sessions.get_mut("session-1").unwrap().state = mj_core::state::SessionState::Stopped;
+    let snapshot = ViewerSnapshot::from_config_state(&config, &stopped, 1);
+    let wire = viewer_wire::row(snapshot.sessions.0.get("session-1").unwrap()).unwrap();
+    assert_eq!(wire.row["detail"], false);
+    assert_eq!(
+        wire.row["reviewer_session_ids"],
+        serde_json::json!(["reviewer"])
+    );
+}
+
+#[test]
 fn public_snapshot_exposes_only_review_status_configuration() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
-        trigger: mj_core::config::ReviewTrigger::Turn,
-        count: mj_core::config::default_review_count(),
-        tier: Some("extended".into()),
-        profile: Some("reviewer-1".into()),
-        model: Some("private-review-model".into()),
-        effort: Some("private-review-effort".into()),
+        legacy: None,
+        disabled: false,
+        brief_writer: None,
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "private-review-model".into(),
+                effort: Some("private-review-effort".into())
+            };
+            2
+        ],
     };
 
     let value =
@@ -794,32 +886,37 @@ fn public_snapshot_exposes_only_review_status_configuration() {
     assert_eq!(
         value.get("review_config"),
         Some(&serde_json::json!({
-            "trigger": "turn",
-            "profile": "reviewer-1",
-            "count": 2,
+            "trigger": "push",
+            "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
         }))
     );
     let json = value.to_string();
-    assert!(!json.contains("private-review-model"));
-    assert!(!json.contains("private-review-effort"));
+    assert!(json.contains("private-review-model"));
+    assert!(json.contains("private-review-effort"));
 }
 
 #[test]
 fn session_review_count_overrides_phone_status_projection() {
     let (mut config, mut state) = sample_config_state();
-    config.review.count = mj_core::config::default_review_count();
+    config.review.reviewers = vec![
+        mj_core::config::SubagentChoice {
+            model: "model-a".into(),
+            effort: None
+        };
+        2
+    ];
     state.sessions.get_mut("session-1").unwrap().review =
-        Some(mj_core::config::SessionReview::Turn {
-            count: std::num::NonZeroUsize::new(1),
-            model: None,
-            effort: None,
-            tier: None,
-        });
+        Some(Box::new(mj_core::config::SessionReview::Push {
+            reviewers: Some(vec![mj_core::config::SubagentChoice {
+                model: "model-b".into(),
+                effort: None,
+            }]),
+        }));
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
-    assert_eq!(snapshot.review_config.count.get(), 2);
+    assert_eq!(snapshot.review_config.reviewers.len(), 2);
     let session = snapshot.sessions.get("session-1").unwrap();
-    assert_eq!(session.review_trigger, mj_core::config::ReviewTrigger::Turn);
-    assert_eq!(session.review_count.get(), 1);
+    assert_eq!(session.review_trigger, mj_core::config::ReviewTrigger::Push);
+    assert_eq!(session.review_count, 1);
     let wire = serde_json::to_value(session).unwrap();
     assert_eq!(wire["review_count"], 1);
 }
@@ -1435,8 +1532,11 @@ fn viewer_session_applies_a_resolved_source_without_publishing_it() {
         .into_iter()
         .next()
         .expect("session");
-    let source = ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git")
-        .expect("GitHub source");
+    let source = ProjectSourceIdentity::git_remote(
+        "git@github.com:BrokkAi/bifrost-dev.git",
+        Shorthand::Allowed,
+    )
+    .expect("GitHub source");
 
     viewer.set_project_source(&source);
 
@@ -1536,6 +1636,115 @@ async fn operator_activity_action_is_sessionless_and_reaches_controller() {
     assert_eq!(request.action, ControllerAction::RecordOperatorActivity);
     request.reply.send(ActionOutcome::accepted()).unwrap();
     assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn guardian_permission_mode_is_hidden_and_refused_by_api() {
+    use agent_client_protocol::v1::schema::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        SessionConfigSelectOptions,
+    };
+    use mj_core::config::HarnessKind;
+    let mode_option = |current: &str, values: &[&str]| {
+        SessionConfigOption::select(
+            "mode",
+            "Mode",
+            current.to_owned(),
+            SessionConfigSelectOptions::Ungrouped(
+                values
+                    .iter()
+                    .map(|value| {
+                        SessionConfigSelectOption::new(value.to_string(), value.to_string())
+                    })
+                    .collect(),
+            ),
+        )
+        .category(SessionConfigOptionCategory::Mode)
+    };
+    // Muse container images built before muse-acp 0.10 carry the approval
+    // policy on `mode` instead of `approval_mode`; the worker enforces it
+    // there, so that is the selector the policy owns.
+    let auto_review = || {
+        SessionConfigOption::select(
+            "auto_review",
+            "Auto review",
+            "on",
+            SessionConfigSelectOptions::Ungrouped(vec![
+                SessionConfigSelectOption::new("on", "On"),
+                SessionConfigSelectOption::new("off", "Off"),
+            ]),
+        )
+    };
+    for (harness, raw, value) in [
+        (
+            HarnessKind::Claude,
+            vec![mode_option(
+                "auto",
+                &["default", "auto", "bypassPermissions"],
+            )],
+            "bypassPermissions",
+        ),
+        (
+            HarnessKind::Muse,
+            vec![
+                mode_option("promptUnmatched", &["promptUnmatched", "allowAll"]),
+                auto_review(),
+            ],
+            "allowAll",
+        ),
+    ] {
+        let enforcement = harness.resolve_execution_enforcement(
+            mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+            mj_core::config::ApprovalChoices::default(),
+        );
+        let (app, mut actions, _, _, _) = app_with_snapshot(|snapshot| {
+            let session = &mut snapshot.sessions[0];
+            session.harness_kind = harness.id().into();
+            session.capabilities.set_config = true;
+            session.execution_enforcement = enforcement;
+            let facts = mj_core::acp::AcpSessionFacts::from_operational(
+                harness,
+                &Default::default(),
+                &raw,
+                None,
+            );
+            session.config_options = viewer_config_options(&raw, &facts);
+            session.policy_config_keys =
+                filter_policy_config_options(&mut session.config_options, enforcement, &raw);
+            assert!(session.config_options.is_empty(), "{harness:?}");
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/sessions/session-1/row")
+                    .header(COOKIE, cookie())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let row: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            row["row"]
+                .get("config_options")
+                .is_none_or(|options| options.as_array().unwrap().is_empty()),
+            "{harness:?}"
+        );
+        let response = post_action(
+            app,
+            cookie(),
+            format!(
+                r#"{{"action":"set-config","session_id":"session-1","key":"mode","value":"{value}"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{harness:?}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("permission policy"));
+        assert!(actions.try_recv().is_err());
+    }
 }
 
 /// A setting the harness never advertised is not a setting. Forwarding one
@@ -1665,7 +1874,7 @@ fn a_tampered_cookie_is_refused() {
 #[tokio::test]
 async fn an_oversized_draft_is_refused_with_a_stable_code() {
     let (app, _, _, _, mut stored) = app();
-    let draft = "x".repeat(64 * 1024 + 1);
+    let draft = "x".repeat(MAX_DRAFT_BYTES + 1);
     let response = app
         .oneshot(
             Request::put("/api/sessions/session-1/draft")
@@ -2569,6 +2778,7 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
         snapshot.workspaces.push(ViewerWorkspace {
             id: id.into(),
             name: id.into(),
+            last_opened_at: String::new(),
         });
     }
     let change_workspace = |workspace_id: &str| ControllerAction::ChangeWorkspace {
@@ -2577,8 +2787,7 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     };
     let container_settings = || ControllerAction::SetContainerSettings {
         session_id: "session-1".into(),
-        cpus: None,
-        memory: None,
+        resource_allocation: None,
         mounts: Vec::new(),
     };
     let restart = || ControllerAction::Restart {
@@ -2607,9 +2816,6 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     validate_action(&restart(), &snapshot).unwrap();
     validate_action(&interrupt_all(), &snapshot).unwrap();
 
-    // A workspace the snapshot does not list is refused, capability or not.
-    let error = validate_action(&change_workspace("missing"), &snapshot).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
     // An unknown session is still unknown.
     let error = validate_action(
         &ControllerAction::Restart {
@@ -2770,11 +2976,14 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+        oracle: None,
+        oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         at: None,
         branch: None,
         base: None,
@@ -2857,11 +3066,14 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
         |target_id: &str,
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -2955,21 +3167,14 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     config.profiles.insert(
         "claude-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
-            kind: HarnessKind::Claude,
-            home: "/secret/claude".into(),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, "/secret/claude")
         },
     );
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     snapshot.workspaces.push(ViewerWorkspace {
         id: "workspace-1".into(),
         name: "One".into(),
+        last_opened_at: String::new(),
     });
     validate_action(
         &ControllerAction::Resume {
@@ -2986,21 +3191,6 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     .unwrap();
 
     let error = validate_action(
-        &ControllerAction::Resume {
-            session_id: "session-1".into(),
-            workspace_id: "missing".into(),
-            profile_id: "claude-1".into(),
-            target_id: "podman".into(),
-            queue: ResumeQueueDisposition::Start,
-            additional_mounts: None,
-            resource_allocation: None,
-        },
-        &snapshot,
-    )
-    .unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-
-    let error = validate_action(
         &ControllerAction::Suspend {
             session_id: "not-managed".into(),
             acknowledge_unpublished_work: false,
@@ -3015,7 +3205,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
 #[test]
 fn a_running_review_projects_to_the_phone() {
     use crate::review_host::{RuntimeReviewView, VerdictKind, VerdictView};
-    use mj_core::review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
+    use mj_core::review::driver::{RoleState, RoleStatus, TurnReviewPhase};
 
     let review = RuntimeReviewView {
         child_session_id: None,
@@ -3043,11 +3233,7 @@ fn a_running_review_projects_to_the_phone() {
         verdict: Some(VerdictView {
             kind: VerdictKind::Findings,
             text: "[P1] src/lib.rs:1 -- unbounded retry".into(),
-            allowed: vec![
-                Resolution::Forwarded,
-                Resolution::Dismissed,
-                Resolution::Cancelled,
-            ],
+            allowed: Vec::new(),
         }),
     };
 
@@ -3077,86 +3263,6 @@ fn a_running_review_projects_to_the_phone() {
     let verdict = projected.verdict.expect("a findings verdict travels");
     assert_eq!(verdict.kind, "findings");
     assert!(verdict.text.contains("unbounded retry"));
-    assert_eq!(verdict.allowed, vec!["forward", "dismiss", "cancel"]);
-}
-
-/// A phone can always cancel a review, and can only forward or dismiss one
-/// the daemon says is ready for it. The same gate runs in the daemon; this
-/// one is what makes the refusal immediate.
-#[test]
-fn resolving_a_review_is_gated_on_what_the_daemon_published() {
-    let (config, state) = sample_config_state();
-    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-
-    let resolve = |resolution: &str| ControllerAction::ResolveReview {
-        session_id: "session-1".into(),
-        resolution: resolution.into(),
-    };
-
-    // No review at all.
-    let error = validate_action(&resolve("cancel"), &snapshot).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-
-    snapshot.sessions[0].turn_review = Some(ViewerTurnReview {
-        child_session_id: None,
-        status: "the reviewer is reading the change…".into(),
-        roles: Vec::new(),
-        verdict: None,
-    });
-    // Running: cancel works, the rest do not.
-    validate_action(&resolve("cancel"), &snapshot).unwrap();
-    assert_eq!(
-        validate_action(&resolve("forward"), &snapshot)
-            .unwrap_err()
-            .status,
-        StatusCode::BAD_REQUEST
-    );
-
-    // A failed review can be dismissed but has nothing to forward.
-    snapshot.sessions[0].turn_review = Some(ViewerTurnReview {
-        child_session_id: None,
-        status: "the review failed".into(),
-        roles: Vec::new(),
-        verdict: Some(ViewerReviewVerdict {
-            kind: "failed".into(),
-            text: "reviewer exited with 1".into(),
-            allowed: vec!["dismiss".into(), "cancel".into()],
-        }),
-    });
-    validate_action(&resolve("dismiss"), &snapshot).unwrap();
-    assert_eq!(
-        validate_action(&resolve("forward"), &snapshot)
-            .unwrap_err()
-            .status,
-        StatusCode::BAD_REQUEST
-    );
-    // A resolution that is not one of the three is refused by name.
-    assert_eq!(
-        validate_action(&resolve("approve"), &snapshot)
-            .unwrap_err()
-            .status,
-        StatusCode::BAD_REQUEST
-    );
-
-    // Starting a review needs only a session that exists.
-    validate_action(
-        &ControllerAction::StartReview {
-            session_id: "session-1".into(),
-        },
-        &snapshot,
-    )
-    .unwrap();
-    assert_eq!(
-        validate_action(
-            &ControllerAction::StartReview {
-                session_id: "not-managed".into(),
-            },
-            &snapshot,
-        )
-        .unwrap_err()
-        .status,
-        StatusCode::NOT_FOUND
-    );
 }
 
 #[test]
@@ -3169,10 +3275,11 @@ fn resume_action_refuses_a_target_the_session_cannot_use() {
     snapshot.workspaces.push(ViewerWorkspace {
         id: "workspace-1".into(),
         name: "One".into(),
+        last_opened_at: String::new(),
     });
     assert_eq!(
         snapshot.sessions[0].incompatible_resume_targets,
-        vec!["raw".to_owned()]
+        Arc::<[Arc<str>]>::from(vec![Arc::from("raw")])
     );
 
     let error = validate_action(
@@ -3209,6 +3316,8 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     snapshot.sessions[0].capabilities.move_session = true;
     let selection = MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -3341,7 +3450,13 @@ async fn snapshot_clock_anchor_is_fresh_even_when_the_projection_has_not_changed
 
 #[tokio::test]
 async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_interned_fields() {
-    let (app, _, _, _, _) = app();
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.notices.push(mj_client::daemon::RuntimeNotice {
+            id: 1,
+            session_id: "removed-session".into(),
+            text: "Cleanup failed; resources may remain.".into(),
+        });
+    });
     let cookie = login_cookie(&app).await;
     let snapshot_response = app
         .clone()
@@ -3365,6 +3480,11 @@ async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_intern
     )
     .unwrap();
     assert_eq!(snapshot["operator_away"], false);
+    assert_eq!(snapshot["notices"][0]["session_id"], "removed-session");
+    assert_eq!(
+        snapshot["notices"][0]["text"],
+        "Cleanup failed; resources may remain."
+    );
     assert_eq!(snapshot["cursor"]["sequence"], 1);
     assert!(snapshot["cursor"]["incarnation"].as_str().is_some());
     let snapshot_row = &snapshot["sessions"][0];
@@ -3429,6 +3549,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 tool_ended_at_ms: None,
                 lines: vec!["retained history ".repeat(10_000)],
                 mailbox_events: Vec::new(),
+                generated: false,
                 glyph: "\u{276f}",
                 tone: "user",
                 tool_status: None,
@@ -3445,12 +3566,16 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 tool_ended_at_ms: None,
                 lines: vec!["live".into()],
                 mailbox_events: Vec::new(),
+                generated: false,
                 glyph: "\u{25cf}",
                 tone: "agent",
                 tool_status: None,
                 diffstats: Vec::new(),
             },
-        ],
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
     };
     let (app, _, _, _, _) =
         app_with_conversations(BTreeMap::from([("session-1".into(), transcript)]));
@@ -3527,11 +3652,15 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
             tool_ended_at_ms: None,
             lines: vec!["stale".into()],
             mailbox_events: Vec::new(),
+            generated: false,
             glyph: "●",
             tone: "agent",
             tool_status: None,
             diffstats: Vec::new(),
-        }],
+        }]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
     };
     let (app, _, _, _, _) = app_with(
         BTreeMap::from([("session-1".into(), transcript)]),
@@ -3619,7 +3748,7 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
                 reference: "4321-9".to_owned(),
             },
             StatusCode::INTERNAL_SERVER_ERROR,
-            "reference 4321-9",
+            "the controller could not start this action: The lifecycle operation could not finish. Retry the action; if the runtime is unavailable, Resume the session to repair it first. Reference 4321-9.",
         ),
         (
             ActionOutcome::Refused(mj_core::refusal::Refusal::precondition(
@@ -3773,6 +3902,7 @@ async fn live_state_and_the_service_worker_are_never_stored() {
 #[tokio::test]
 async fn shell_assets_revalidate_with_strong_content_etags() {
     for path in [
+        "/push-sync.js",
         "/",
         "/viewer.css",
         "/viewer.js",
@@ -4070,6 +4200,34 @@ fn persisted_cookie_key_survives_a_restart_and_stays_owner_only() {
     assert!(!session_cookie_valid(&rotated, &cookie, 100));
 }
 
+// Two callers that find no key must not each create one: the phone server
+// starting while sessions launch and renew would otherwise end with different
+// keys, and records signed with the loser's stop verifying.
+#[test]
+fn concurrent_first_uses_of_the_cookie_key_end_with_one_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("nested").join("phone-cookie-key");
+    let start = std::sync::Arc::new(std::sync::Barrier::new(16));
+    let keys = (0..16)
+        .map(|_| {
+            let (path, start) = (path.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                load_or_create_cookie_key(&path).unwrap()
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+
+    let stored = std::fs::read(&path).unwrap();
+    assert!(
+        keys.iter().all(|key| *key == stored),
+        "callers ended with different keys"
+    );
+}
+
 #[test]
 fn corrupt_cookie_key_is_regenerated_instead_of_blocking_startup() {
     let directory = tempfile::tempdir().unwrap();
@@ -4317,7 +4475,8 @@ async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() 
 async fn desktop_and_legacy_cookies_keep_their_original_expiry() {
     let options = detached_options();
     let key = options.cookie_key.clone();
-    let desktop = mint_desktop_session_cookie(&key).unwrap();
+    // Cookies from the retired desktop shell remain valid until expiry.
+    let desktop = signed_cookie_value(&key, "retired-desktop-viewer", now_unix() + 3600);
     let legacy = signed_cookie_value(&key, "legacy-viewer", now_unix() + 3600);
     let app = router(options);
     for value in [desktop, legacy] {
@@ -4732,7 +4891,7 @@ fn viewer_move_controls_use_global_availability_for_delegation() {
 import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
 installDocument();
 let newDraft = null;
-const snapshot = {{ subagents_configured: false, profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
+const snapshot = {{ subagents_configured: false, targets: [], profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
 function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
 {source}
 const draft = {{ profileId:'parent', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
@@ -4795,6 +4954,7 @@ async fn settings_request(
 /// the viewer is sent for a draft holding literal secrets, a page, an
 /// accepted and a refused edit, and the save. The recorded exchange is also
 /// the fixture the browser test replays, so both sides agree on its shape.
+// Hard-won: isolated children inherited MJ_INSTANCE from the test process, which moved the default viewer port in the golden.
 #[tokio::test]
 async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model() {
     if !in_isolated_store("settings_routes_hide_literal_secrets_and_save_through_the_shared_model")
@@ -4905,13 +5065,10 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             serde_json::json!({"path": ["profiles", "claude"]}),
         ),
         root(),
-        (
-            "/api/settings/page",
-            serde_json::json!({"path": ["continuation"]}),
-        ),
+        ("/api/settings/page", serde_json::json!({"path": ["phone"]})),
         (
             "/api/settings/edit",
-            serde_json::json!({"page": ["continuation"], "edit": {"kind": "toggle", "path": ["continuation", "enabled"]}}),
+            serde_json::json!({"page": ["phone"], "edit": {"kind": "toggle", "path": ["phone", "enabled"]}}),
         ),
         root(),
         (
@@ -4937,6 +5094,26 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
         (
             "/api/settings/edit",
             serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "effort"], "choice": "high"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "model"], "choice": "opus"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "effort"], "choice": "high"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
         ),
         (
             "/api/settings/save",
@@ -4978,7 +5155,7 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert!(saved.contains(SECRET), "{saved}");
     assert!(saved.contains(RUNTIME_SECRET), "{saved}");
     let saved = Config::load_from(&path).unwrap();
-    assert!(!saved.continuation.enabled);
+    assert!(!saved.phone.enabled);
     assert_eq!(
         serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
         "opus"
@@ -4990,6 +5167,22 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert_eq!(
         serde_json::to_value(&saved.subagents).unwrap()["subtle"]["model"],
         "opus"
+    );
+    assert!(!saved.subagents.use_same_on_all_targets);
+    assert_eq!(
+        saved.subagents.yolo.straightforward.as_ref().unwrap().model,
+        "opus"
+    );
+    assert_eq!(
+        saved
+            .subagents
+            .yolo
+            .straightforward
+            .as_ref()
+            .unwrap()
+            .effort
+            .as_deref(),
+        Some("high")
     );
 
     let rendered_home = serde_json::to_string(&home.display().to_string()).unwrap();
@@ -5058,4 +5251,298 @@ async fn settings_save_refuses_a_stale_draft_without_writing() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("hidden value of LAB_TOKEN"), "{body}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// Resume and change-workspace ask the store whether the workspace exists. The
+/// snapshot's copy of the workspace list lagged the store: it was read before
+/// the first session landed in the hidden `default` workspace and republished
+/// only by a few daemon actions.
+// Hard-won: #1334: `mj resume` answered "unknown workspace" for a session in `default` until a daemon restart, because the check read a published list that was empty when the daemon started.
+#[tokio::test]
+async fn resume_validates_the_workspace_against_the_store_not_the_published_list() {
+    if !in_isolated_store("resume_validates_the_workspace_against_the_store_not_the_published_list")
+    {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    assert!(
+        crate::database::list_workspaces().unwrap().is_empty(),
+        "an empty `default` is not listed, so the daemon starts with no workspace"
+    );
+    // The snapshot the server holds was built from that empty list.
+    let (app, mut actions, ..) = app_with_backend(
+        BTreeMap::new(),
+        |snapshot| assert!(snapshot.workspaces.is_empty()),
+        Some(Arc::new(SettingsReviewBackend)),
+    );
+    let cookie = login_cookie(&app).await;
+    let mut session = crate::controller::test_support::checkpoint_test_session("session-1");
+    session.state = SessionState::Stopped;
+    crate::database::save_session(&session).unwrap();
+
+    let resume = |workspace_id: &str| {
+        serde_json::to_string(&ControllerAction::Resume {
+            session_id: "session-1".into(),
+            workspace_id: workspace_id.into(),
+            profile_id: "codex-1".into(),
+            target_id: "podman".into(),
+            queue: ResumeQueueDisposition::Start,
+            additional_mounts: None,
+            resource_allocation: None,
+        })
+        .unwrap()
+    };
+    let response = tokio::spawn(post_action(app.clone(), cookie.clone(), resume("default")));
+    // A refusal never reaches the controller, so bound the wait for the action.
+    let request = tokio::time::timeout(Duration::from_secs(10), actions.recv()).await;
+    let Ok(Some(request)) = request else {
+        panic!(
+            "the resume was refused: {:?}",
+            response.await.unwrap().status()
+        );
+    };
+    assert!(matches!(request.action, ControllerAction::Resume { .. }));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: None,
+            notice: None,
+        })
+        .unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+
+    let response = post_action(app, cookie, resume("nosuch")).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(actions.try_recv().is_err());
+}
+
+struct SettingsReviewBackend;
+
+impl api::SubagentBackend for SettingsReviewBackend {
+    fn session_handle(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<mj_client::session::SessionHandle>>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+    fn prompt(&self, _: String, _: String) -> futures::future::BoxFuture<'_, anyhow::Result<u64>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn turn_state(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TurnState>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn turn_summary(
+        &self,
+        _: String,
+        _: api::TurnSpan,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<api::TurnSummary>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn start_followup(
+        &self,
+        _: String,
+        _: api::StartFollowup,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn start_status(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::StartStatus>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn transcript(
+        &self,
+        _: String,
+        _: u64,
+        _: usize,
+        _: Vec<mj_core::transcript::TranscriptRole>,
+        _: bool,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TranscriptPage>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn diff(
+        &self,
+        _: String,
+        _: api::DiffOptions,
+    ) -> futures::future::BoxFuture<'_, Result<String, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn read_file(
+        &self,
+        _: String,
+        _: std::path::PathBuf,
+        _: mj_checkpoint::archive::FetchMode,
+    ) -> futures::future::BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, api::ExportError>>
+    {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn push_branch(
+        &self,
+        _: String,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, Result<api::PushedBranch, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn bundle(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, Result<api::BundleExport, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+
+    fn profile_config(
+        &self,
+        _profile: String,
+        model: Option<String>,
+        _refresh: bool,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<mj_core::worker_launch::ProfileConfig>> {
+        Box::pin(async move {
+            Ok(mj_core::worker_launch::ProfileConfig {
+                model: model.clone(),
+                models: vec![mj_core::acp::SessionConfigChoice {
+                    value: model.unwrap_or_else(|| "claude-sonnet-4.5".into()),
+                    name: "Sonnet 4.5".into(),
+                    description: None,
+                }],
+                efforts: vec![mj_core::acp::SessionConfigChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                    description: None,
+                }],
+                observed_at: 0,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
+    if !in_isolated_store("settings_review_autoconfigure_returns_preset_draft_without_saving") {
+        return;
+    }
+    let path = mj_core::config::config_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "version = {}\n[profiles.claude]\nkind = \"claude\"\nhome = \"/tmp/test-claude\"\n[review]\ntrigger = \"push\"\n",
+            mj_core::config::CONFIG_VERSION
+        ),
+    )
+    .unwrap();
+    let stored = std::fs::read(&path).unwrap();
+    let identity = Config::load_from(&path).unwrap().profiles["claude"].capabilities_key("claude");
+    let capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot = serde_json::from_value(serde_json::json!({"profiles": {identity: {
+        "choices": {"status": "ready", "value": {"model": "claude-sonnet-4.5", "observed_at": 0, "efforts": [{"value": "high", "name": "High", "description": null}],
+            "models": [{"value": "claude-sonnet-4.5", "name": "Sonnet 4.5", "description": null}]}},
+        "efforts": {"claude-sonnet-4.5": {"status": "ready", "value": [{"value": "high", "name": "High", "description": null}]}}
+    }}})).unwrap();
+    let (app, ..) = app_with_backend(
+        BTreeMap::new(),
+        move |snapshot| snapshot.profile_capabilities = capabilities.into(),
+        Some(Arc::new(SettingsReviewBackend)),
+    );
+    let cookie = login_cookie(&app).await;
+    let (status, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let request = serde_json::json!({"draft": opened["draft"], "page": ["review"], "edit": {"kind": "action", "id": "review.autoconfigure"}});
+    let (status, body) =
+        settings_request(&app, &cookie, "/api/settings/edit", Some(&request)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        reply["draft"]["review"]["reviewers"],
+        serde_json::json!([
+            {"model": "claude-sonnet-4.5", "effort": "high"},
+            {"model": "claude-sonnet-4.5", "effort": "high"}
+        ])
+    );
+    assert!(reply["draft"]["review"].get("profile").is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), stored);
+}
+
+#[tokio::test]
+async fn github_relevance_daemon_notices_snapshot_golden() {
+    use crate::github_relevance::Notices;
+    use crate::github_student::{
+        StudentDevice, StudentDeviceFallbackReason, StudentFailureKind, StudentNotice,
+    };
+    let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = notices.clone();
+    let sink = Notices::new(move |text| {
+        let mut notices = capture.lock().unwrap();
+        let id = notices.len() as u64 + 1;
+        notices.push(mj_client::daemon::RuntimeNotice {
+            id,
+            session_id: String::new(),
+            text,
+        });
+    });
+    sink.observe(Some((
+        Some(StudentFailureKind::Download),
+        "private download details",
+    )));
+    sink.observe(Some((Some(StudentFailureKind::Download), "same episode")));
+    sink.observe(None);
+    for notice in [
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::Cuda,
+            reason: StudentDeviceFallbackReason::Slower {
+                gpu_ms: 20,
+                cpu_ms: 10,
+            },
+        },
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::CoreMl,
+            reason: StudentDeviceFallbackReason::Failed(StudentFailureKind::Load),
+        },
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::DirectMl,
+            reason: StudentDeviceFallbackReason::Failed(StudentFailureKind::Inference),
+        },
+        StudentNotice::InferenceFailing {
+            cause: "private inference details".into(),
+        },
+        StudentNotice::InferenceFailing {
+            cause: "same episode".into(),
+        },
+        StudentNotice::InferenceRecovered,
+        StudentNotice::CudaLibrariesMissing {
+            missing: vec!["libcudnn.so.9".into()],
+        },
+        StudentNotice::GpuAfterRestart,
+        StudentNotice::PlatformUnsupported,
+        StudentNotice::WindowsRuntimeMissing {
+            missing: vec!["MSVCP140.dll".into()],
+        },
+    ] {
+        sink.student_notice(notice);
+    }
+    let notices = notices.lock().unwrap().clone();
+    let (app, _, _, _, _) = app_with_snapshot(move |snapshot| snapshot.notices = notices);
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(!snapshot["notices"].to_string().contains("private"));
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "github-relevance-notices",
+        &serde_json::to_string_pretty(&snapshot["notices"]).unwrap(),
+    );
 }

@@ -1,0 +1,20 @@
+{
+    "Instances": [
+        {
+            "InstanceId": "i-0123456789abcdef0",
+            "InstanceType": "m8i-flex.large",
+            "State": {
+                "Code": 0,
+                "Name": "pending"
+            },
+            "MetadataOptions": {
+                "State": "pending",
+                "HttpTokens": "required",
+                "HttpPutResponseHopLimit": 1,
+                "HttpEndpoint": "enabled",
+                "HttpProtocolIpv6": "disabled",
+                "InstanceMetadataTags": "disabled"
+            }
+        }
+    ]
+}

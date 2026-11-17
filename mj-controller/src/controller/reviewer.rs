@@ -48,6 +48,7 @@ impl Controller {
             environment.insert("IS_SANDBOX".into(), "1".into());
         }
         Ok(ReviewerLaunchConfig {
+            role: mj_core::worker_launch::ReviewChildRole::Reviewer,
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
             bridge_command: bridge_command.into(),
@@ -161,7 +162,7 @@ mod tests {
             .unwrap(),
             _ => TargetTemplate::LocalBare,
         };
-        session.target = Some(locator);
+        session.target = Some(Box::new(locator));
         let mut config = Config::default();
         config.targets.insert("local".into(), template);
         for (id, kind) in [
@@ -174,14 +175,17 @@ mod tests {
                 id.to_owned(),
                 HarnessProfile {
                     enabled: true,
-                    kind,
-                    home,
                     environment: BTreeMap::from([("EXTRA".into(), "1".into())]).into(),
                     context_window_bytes: None,
+                    models: Default::default(),
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     codex_profile: None,
-                    muse_auto_review: None,
+                    legacy_muse_auto_review: None,
+                    load_balancing_may_consume_credits: false,
+                    claude_permission_mode: None,
+                    aws: None,
+                    ..mj_core::config::HarnessProfile::new(kind, home)
                 },
             );
         }

@@ -200,6 +200,7 @@ fn unavailable_import_explains_why_and_copies_its_id_without_closing() {
 
 fn state_with(sessions: Vec<SessionRecord>) -> State {
     State {
+        last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
@@ -226,6 +227,8 @@ fn incomplete_move() -> MoveOperation {
         source_checkpoint_only: false,
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             clear_resource_allocation: false,
@@ -239,6 +242,8 @@ fn incomplete_move() -> MoveOperation {
         source_target_template_id: "target-1".into(),
         source_target: None,
         source_native_session_id: None,
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,
@@ -534,7 +539,7 @@ fn a_thread_from_a_mjolnir_sessions_own_checkout_is_not_offered_for_import() {
         session.state = state;
         session.native_session_id = Some(stored.into());
         session.project_directory = Some(clone.clone());
-        session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
             kind: mj_core::state::ManagedCheckoutKind::Clone,
             source_project_directory: "/home/dev/reverify-10/project".into(),
             source_repository: "/home/dev/reverify-10/project".into(),
@@ -542,7 +547,7 @@ fn a_thread_from_a_mjolnir_sessions_own_checkout_is_not_offered_for_import() {
             branch: "main".into(),
             target: mj_core::state::ManagedWorktreeTarget::Local,
             base_commit: None,
-        });
+        }));
         let mut before = native(pre_clear, "Remember PINEAPPLE and reply OK", 10);
         before.cwd = clone.clone();
         let mut after = native(post_clear, "What word did I ask you to remember?", 20);

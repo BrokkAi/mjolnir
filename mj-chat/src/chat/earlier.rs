@@ -28,20 +28,6 @@ impl ChatState {
         });
     }
 
-    pub(super) fn open_text_reader(&mut self, title: &'static str, text: &str) {
-        self.earlier_generation += 1;
-        self.earlier = Some(EarlierMessages {
-            title: Some(title),
-            generation: self.earlier_generation,
-            loaded: true,
-            lines: sanitize_terminal_text(text)
-                .lines()
-                .map(|line| Line::raw(line.to_owned()))
-                .collect(),
-            ..Default::default()
-        });
-    }
-
     pub(super) fn earlier_key(&mut self, code: KeyCode) -> ChatAction {
         if code == KeyCode::Esc {
             self.earlier = None;

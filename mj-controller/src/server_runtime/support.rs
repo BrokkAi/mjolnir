@@ -11,7 +11,11 @@ pub(super) fn feed_stopped(shutting_down: bool, reason: &'static str) -> Option<
 
 pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<String> {
     match action {
-        ControllerAction::New { .. }
+        ControllerAction::PushSubscribe { .. }
+        | ControllerAction::PushRenew { .. }
+        | ControllerAction::PushUnsubscribe { .. }
+        | ControllerAction::PushTest { .. }
+        | ControllerAction::New { .. }
         | ControllerAction::RecordOperatorActivity
         | ControllerAction::SetOperatorAway { .. } => None,
         ControllerAction::Prompt { session_id, .. }
@@ -26,6 +30,8 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         | ControllerAction::RemoveQueuedPrompt { session_id, .. }
         | ControllerAction::RespondElicitation { session_id, .. }
         | ControllerAction::Rename { session_id, .. }
+        | ControllerAction::DismissNotification { session_id, .. }
+        | ControllerAction::SetSessionNotificationsIgnored { session_id, .. }
         | ControllerAction::TurnControl { session_id, .. }
         | ControllerAction::InterruptTurn { session_id }
         | ControllerAction::SetConfig { session_id, .. }
@@ -34,8 +40,7 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         | ControllerAction::SetContainerSettings { session_id, .. }
         | ControllerAction::Restart { session_id, .. }
         | ControllerAction::InterruptAll { session_id }
-        | ControllerAction::StartReview { session_id }
-        | ControllerAction::ResolveReview { session_id, .. } => Some(session_id.clone()),
+        | ControllerAction::StartReview { session_id } => Some(session_id.clone()),
         ControllerAction::UpgradeContainer { request } => {
             Some(request.selection.session_id.clone())
         }

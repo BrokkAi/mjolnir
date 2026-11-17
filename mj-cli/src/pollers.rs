@@ -11,8 +11,49 @@ use std::time::Duration;
 /// The daemon's lifecycle projection remains the authority for session state.
 pub(crate) struct DashboardLifecycleUpdate {
     pub(crate) session_id: String,
-    pub(crate) result: std::result::Result<LifecycleSuccess, String>,
+    pub(crate) result: std::result::Result<LifecycleSuccess, DashboardLifecycleFailure>,
     pub(crate) operation: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+pub(crate) enum DashboardLifecycleFailure {
+    Failed(String),
+    AdmissionUnconfirmed,
+    ObservationUnavailable,
+}
+
+impl From<anyhow::Error> for DashboardLifecycleFailure {
+    fn from(error: anyhow::Error) -> Self {
+        if error.is::<mj_client::daemon::LifecycleAdmissionUnconfirmed>() {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "daemon lifecycle acceptance is unconfirmed"
+            );
+            Self::AdmissionUnconfirmed
+        } else if error.is::<mj_client::daemon::LifecycleObservationUnavailable>() {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "daemon lifecycle observation is unavailable"
+            );
+            Self::ObservationUnavailable
+        } else {
+            Self::Failed(format!("{error:#}"))
+        }
+    }
+}
+
+impl std::fmt::Display for DashboardLifecycleFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(error) => formatter.write_str(error),
+            Self::AdmissionUnconfirmed => formatter.write_str(
+                "daemon acceptance was not confirmed; check session status before retrying",
+            ),
+            Self::ObservationUnavailable => {
+                formatter.write_str("operation observation is unavailable; check session status")
+            }
+        }
+    }
 }
 
 const WORKER_DIAGNOSIS_TIMEOUT: Duration = Duration::from_secs(15);

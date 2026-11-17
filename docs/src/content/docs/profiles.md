@@ -15,18 +15,41 @@ available choices can come from the provider's current catalog.
 Configure Mjolnir sub-agents in **Settings → Sub-agents**. Set a model and,
 when offered, effort for **Straightforward** tasks. **Subtle** is optional; if
 you set it, choose a smarter model or higher effort than Straightforward. Subtle
-cannot be set without Straightforward. These choices apply globally. With both
+cannot be set without Straightforward. These choices apply to every target
+unless you split YOLO targets below. With both
 set, parents choose a task type each time they delegate work. With only
 Straightforward, parents delegate straightforward work and do work that
 needs judgment themselves.
 
+**Oracle** is also optional, and independent of the other two. Set a strong
+model for read-only questions that the primary agent isn't sure about; sessions
+then get an `ask_oracle` tool whatever their delegation choice. **Create** and
+**Move…** show an Oracle row when a model is set.
+
+**Use the same subagents on all targets** is checked by default. Uncheck it to
+give SSH bare targets with `permissions = "yolo"` their own Straightforward,
+Subtle, and Oracle choices under **YOLO Target Subagents**. The maximum
+concurrent children limit stays shared. The YOLO group starts empty; an empty
+group means no Mjolnir sub-agents or oracle on YOLO targets. Checking the box
+again hides the group and makes its values do nothing, but keeps them: uncheck
+the box later to restore the same choices. Container targets are unconstrained
+inside their isolation boundary but have no YOLO permission setting, so they
+use the shared choices.
+
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
-requires a Claude, Codex, or DSH profile and a configured Straightforward task.
+requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task
+in the set the destination target uses.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
 **None** instead. A DSH session starts on Mjolnir when the last choice was
 Mjolnir and Straightforward is configured, and on None otherwise. Its choice
 becomes the remembered one on interactive creation only when it is Mjolnir, so choosing None for DSH
 does not change what the next Claude or Codex session starts with.
+OpenCode has no steering, so a child's report reaches an OpenCode parent when
+its current turn ends, not between its tool calls. An OpenCode older than 2.2.6
+(for example in a container built from an older image) loads its MCP tools
+shortly after it connects, so the worker holds its first prompt for 250 ms.
+Under configured approvals OpenCode asks the person before each `mj-agents`
+call; choose "always allow" to stop it asking for the rest of the session.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -216,6 +239,56 @@ built-in Bedrock catalog; Mjolnir does not try to fetch `/models` with an API
 key. If Codex reports no models, the command says so and the `model` configured
 in `config.toml` remains the profile's default.
 
+### Limiting the AWS credentials sessions receive
+
+By default a Bedrock profile's container and SSH sessions receive a copy of the
+controller host's AWS credentials, so code in a session can do whatever that
+identity can. To give each session credentials limited to one IAM role instead,
+add a table to the profile. It works for Claude Code and Codex Bedrock
+profiles alike:
+
+```toml
+[profiles.bedrock-luna.aws]
+role_arn = "arn:aws:iam::123456789012:role/mj-bedrock-session"
+# session_policy = '{"Version":"2012-10-17","Statement":[...]}'
+# session_policy_arns = ["arn:aws:iam::aws:policy/AmazonBedrockReadOnly"]
+# duration_seconds = 3600
+# source_identity = true
+```
+
+Mjolnir assumes the role (AWS `sts assume-role`) with the host's AWS login for
+each session, names the role session `mj-<session id>` so CloudTrail shows
+which session made each call, and installs the temporary credentials in the
+session. It renews them when half of their lifetime has passed. The host's own
+credentials stay on the controller.
+
+`session_policy` (inline JSON) and `session_policy_arns` (managed policies)
+narrow the role further for the session; they can only remove permissions,
+never add them. With neither set, Mjolnir uses a built-in policy that allows
+invoking and listing Bedrock models and nothing else. `duration_seconds`
+defaults to AWS's own default of 3600 and may be 900 up to the role's maximum
+session duration; AWS rejects other values. `source_identity = true` also sets
+AWS `SourceIdentity`, which the role's trust policy must allow with
+`sts:SetSourceIdentity`.
+
+The controller's AWS login (the profile's `AWS_PROFILE`, or the default) needs
+`sts:AssumeRole` on the role, and the role's trust policy must name that login.
+`mj doctor` assumes the role once to check this. If AWS refuses, a new session
+fails to start with AWS's error and what to change. A running session keeps the
+scoped credentials Mjolnir issued until they expire, and has any other AWS
+credentials it holds (the host's own, from before you added the role) withdrawn;
+the session's other synchronization continues and the failure is reported. you can also remove the table to return to
+copying the host's credentials. A table that cannot apply to a session
+has no effect there: sessions start without it, with a notice that names the
+reason, and `mj doctor` warns, per target. The reasons are a profile that does
+not authenticate with the AWS credential chain, a raw local target (it reads the
+host's own AWS files), an EC2 machine (it uses its instance role), and a target
+or profile whose environment sets its own AWS profile or credentials. This applies only to container and SSH
+sessions that receive synced credentials: raw local sessions read the host's
+AWS files directly, EC2 sessions use their instance role, and a Bedrock API key
+(`AWS_BEARER_TOKEN_BEDROCK`) is not covered. The table is edited in
+`config.toml`; Settings preserves it but does not yet offer a form for it.
+
 ## Codex with a custom provider
 
 A Codex profile does not have to talk to OpenAI. Codex's own `config.toml`
@@ -397,6 +470,67 @@ The setting applies only to a Codex profile with a custom provider, because
 Mjolnir generates a catalog only for those. Setting it on any other profile is a
 configuration error.
 
+## Limit the models a profile offers
+
+Some harnesses advertise very large catalogues. OpenCode with an OpenRouter key
+lists several hundred models, and they all appear in session model pickers,
+sub-agent choices, review slots and Autoconfigure. OpenCode ignores its own
+provider `whitelist` and `blacklist`, so Mjolnir has its own list. Set `models`
+on the profile to the exact model values you want offered:
+
+```toml
+[profiles.ds8bit]
+kind = "opencode"
+home = "/home/me/.opencode-ds8bit"
+models = ["openrouter/deepseek/deepseek-v4.1-flash-1017"]
+```
+
+`mj models --profile ds8bit --unrestricted` prints every value the profile
+advertises, ignoring `models`. Without `--unrestricted`, `mj models` prints what
+Mjolnir offers. A profile without `models`, or with an empty list, offers
+everything it advertises. You can also edit the list in Settings, under the
+profile's **Offered models**.
+
+The profile's current model stays offered even when `models` omits it, so a
+session never runs a model its picker hides. Edits to `models` take effect
+without rediscovering the profile's catalogue. A Settings draft that changes
+only `models` shows the saved list in its pickers until you save.
+
+`mj doctor` warns when an enabled profile advertises more than 50 models and has
+no `models` list, and gives the line to add. It also warns about entries the
+profile does not advertise and about a current model outside the list. The check
+reads the catalogue from a running daemon; without one, or while discovery is
+still running, it reports "Not checked" and does not fail.
+
+## Choose Claude's permission mode
+
+On a runtime that keeps configured approvals (a bare runtime on this machine,
+or on an SSH machine with `permissions = "guardian"`), Claude sessions run in
+Claude Code's Auto mode by default: Claude's own classifier approves or denies
+each action, without asking you. Set `claude_permission_mode` on a Claude
+profile to choose another mode for its new sessions:
+
+```toml
+[profiles.claude]
+kind = "claude"
+home = "/home/me/.claude"
+claude_permission_mode = "manual"
+```
+
+| Value | Claude Code mode | Behavior |
+| --- | --- | --- |
+| `auto` (default) | Auto | Claude's classifier decides each action. |
+| `accept-edits` | Accept edits | File edits run; every other action asks you. |
+| `manual` | Manual (`default`) | Every action that needs permission asks you. |
+
+You can also set it in Settings, under the Claude profile's **Claude
+permission mode**. Every session the profile launches selects the mode when it
+opens, including when an existing session resumes, so a change applies from the
+next launch on. Runtimes that allow all actions (containers, EC2 machines, and
+SSH machines with `permissions = "yolo"`) always run Claude with
+`bypassPermissions`, whatever this setting says. The setting applies only to a
+Claude profile; setting it on any other profile is a configuration error.
+
 ## Codex profile files
 
 Codex reads profile files beside its `config.toml`: `codex -p ds` layers
@@ -535,7 +669,7 @@ configuration copy and stores native history under that copy's `.data/muse/`
 tree, including on a bare runtime on this machine. Do not override `XDG_CONFIG_HOME` or
 `XDG_DATA_HOME` in the profile environment.
 
-For OpenCode, configure `kind = "opencode"` and a home ending in `opencode`,
+For OpenCode, configure `kind = "open-code"` and a home ending in `opencode`,
 for example `home = "/home/me/.config/opencode"` or
 `/home/me/accounts/work/opencode`. Discovery uses `$XDG_CONFIG_HOME/opencode`
 when set. OpenCode 2 keeps its logins in its database, `opencode.db`, in its
@@ -565,6 +699,33 @@ variables a provider in your `opencode.json` or `opencode.jsonc` lists under
 wins over a key for the same provider, as it does in OpenCode. Export the key
 before running `mj`, and run `mj daemon restart` after exporting a new one;
 `mj doctor` names the keys a profile is using.
+
+Mjolnir copies the profile's `opencode.json` to each session unchanged and adds
+its own permission rules on top, so any OpenCode setting in it applies. For example, to set a
+default model and send every OpenRouter request for it to one provider, with
+no fallback to others:
+
+```json
+{
+  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+  "provider": {
+    "openrouter": {
+      "models": {
+        "deepseek/deepseek-v4.1-flash-1017": {
+          "options": {
+            "provider": { "only": ["morph"], "allow_fallbacks": false }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The `provider` object under `options` is OpenRouter's provider routing
+preference, sent with each request. Provider names are the endpoint tags that
+`https://openrouter.ai/api/v1/models/<model>/endpoints` lists, such as
+`morph` for `morph/fp8`.
 
 For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
@@ -772,6 +933,14 @@ Mjolnir then adds its own files to the staged home:
 - for Muse, the permission profile in its settings;
 - for OpenCode under an unconstrained policy, the `"permission": "allow"`
   setting in `opencode.json`;
+- for every OpenCode session, permission rules in `OPENCODE_CONFIG_CONTENT`
+  that turn off OpenCode's `execute` tool, so the `mj-agents` tools are
+  ordinary tools named `mj-agents_spawn` and so on instead of reachable only
+  through scripts, and, unless the session uses OpenCode's own delegation
+  (Native), its own `subagent` tool. OpenCode names a tool
+  `<server>_<tool>`, so another server can carry the same name as a Mjolnir
+  tool; the worker therefore never answers OpenCode's permission requests,
+  and under configured approvals the person approves Mjolnir's tools too;
 - for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
   `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
   session open: `ask` under configured approvals, `allow` under an
@@ -978,7 +1147,7 @@ and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
 The pinned installation disables OpenCode's self-update so a running session
 never replaces its own binary.
 DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
-it is 0.5.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.5.0` package
+it is 0.6.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.6.0` package
 through `npx`, using the compatible system runtime or the managed Node
 described above; the npm package bundles the release binaries. An older
 `dsh-acp` on `PATH` is not used: Mjolnir falls back to `npx` when Node.js, npm,
@@ -1043,9 +1212,6 @@ policy, and a failed or unusable review denies the action. Muse's own
 Unconstrained sessions stage `:ask-me` as well, but select `allowAll`
 approvals with auto-review off and disable only the sandbox
 (`--disable-sandbox`), so they run without permission checks like OpenCode.
-A Muse profile with `muse_auto_review = true` keeps the reviewer on in
-unconstrained targets too (`promptUnmatched` approvals with auto-review on
-inside the container boundary).
 
 Muse accepts one workspace root, without attached directories. Native import
 and checkpoint restore can relocate that workspace while retaining the session

@@ -1,6 +1,7 @@
 use super::*;
 
 pub(in crate::controller) async fn connect_checkpoint_relay(
+    admission: &crate::recovery_gate::SessionAdmission,
     session_id: &str,
     manager: Option<&SessionManagerControl>,
     reconnect: &targets::CommandSpec,
@@ -10,7 +11,7 @@ pub(in crate::controller) async fn connect_checkpoint_relay(
         let handle = manager
             .wait_for_session(session_id, Duration::from_secs(5))
             .await?;
-        let mut lease = handle.lease_connection().await?;
+        let mut lease = handle.lease_connection(admission).await?;
         lease
             .connection_mut()
             .set_project_memory_target(project_memory);
@@ -32,6 +33,7 @@ pub(in crate::controller) async fn connect_checkpoint_relay(
 }
 
 pub(in crate::controller) async fn adopt_restarted_checkpoint_relay(
+    admission: &crate::recovery_gate::SessionAdmission,
     session_id: &str,
     manager: Option<&SessionManagerControl>,
     connection: StandaloneSession,
@@ -42,7 +44,7 @@ pub(in crate::controller) async fn adopt_restarted_checkpoint_relay(
     let handle = manager
         .wait_for_session(session_id, Duration::from_secs(5))
         .await?;
-    match handle.lease_connection().await {
+    match handle.lease_connection(admission).await {
         Ok(mut lease) => {
             lease.replace_connection(connection);
             Ok(ControllerRelayLease::Managed {
@@ -69,6 +71,7 @@ pub(in crate::controller) enum BarrierBusyPolicy {
     /// end at the deadline, and the deadline means "wedged", which restarts
     /// the worker and kills the work in flight.
     DeferWhileRunning,
+    DeferQuotaMove,
     /// Request non-steering cancellation and wait for the turn to settle.
     /// Close may interrupt work, but only an unresponsive or incompatible
     /// worker needs restart recovery.
@@ -81,6 +84,7 @@ impl BarrierBusyPolicy {
             LatchExclusivity::ReleaseAfterLatch | LatchExclusivity::HoldThroughIdleClose => {
                 Self::DeferWhileRunning
             }
+            LatchExclusivity::HoldThroughQuotaClose => Self::DeferQuotaMove,
             LatchExclusivity::HoldThroughClose => Self::InterruptWhileRunning,
         }
     }
@@ -100,6 +104,13 @@ pub(in crate::controller) async fn wait_for_checkpoint_barrier(
     let mut cancel_started_at: Option<Instant> = None;
     loop {
         let snapshot = relay.sync().await?;
+        if busy == BarrierBusyPolicy::DeferQuotaMove {
+            let mut operational = snapshot.operational.clone();
+            operational.checkpoint_barrier = None;
+            if !operational.safe_to_move(harness, mj_core::activity::MovePurpose::QuotaRetry) {
+                return Err(CheckpointDeferred::harness_busy().into());
+            }
+        }
         if busy == BarrierBusyPolicy::DeferWhileRunning
             && let Some(wait) = snapshot.operational.routine_checkpoint_wait(harness)
         {
@@ -179,6 +190,7 @@ pub(in crate::controller) async fn wait_for_checkpoint_barrier(
             &snapshot,
             command_id,
             busy,
+            harness,
             out_of_time,
             cancel_submitted,
         ) {
@@ -201,14 +213,22 @@ pub(super) fn checkpoint_barrier_wait_ended(
     snapshot: &ManagedSessionSnapshot,
     command_id: &str,
     busy: BarrierBusyPolicy,
+    harness: HarnessKind,
     out_of_time: bool,
     cancel_submitted: bool,
 ) -> Option<anyhow::Error> {
     if snapshot.operational.execution == RelayExecutionState::Closed {
         return Some(CheckpointBarrierUnreachable::runtime_stopped().into());
     }
-    if busy == BarrierBusyPolicy::DeferWhileRunning {
-        if snapshot.operational.has_work_in_flight() {
+    if busy != BarrierBusyPolicy::InterruptWhileRunning {
+        let working = if busy == BarrierBusyPolicy::DeferQuotaMove {
+            let mut operational = snapshot.operational.clone();
+            operational.checkpoint_barrier = None;
+            !operational.safe_to_move(harness, mj_core::activity::MovePurpose::QuotaRetry)
+        } else {
+            snapshot.operational.has_work_in_flight()
+        };
+        if working {
             return Some(CheckpointDeferred::harness_busy().into());
         }
         return out_of_time.then(|| CheckpointBarrierUnreachable::not_admitted(command_id).into());

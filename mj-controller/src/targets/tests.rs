@@ -1,5 +1,6 @@
 use super::*;
 use mj_core::path_completion::{CompletionKind, ssh_completions};
+use mj_core::targets::SshTrafficClass;
 use std::cell::RefCell;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -118,6 +119,29 @@ impl PodmanPreflightExecutor {
 }
 
 impl CommandExecutor for PodmanPreflightExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.seen.borrow_mut().push(command.clone());
         Ok(self.outputs.borrow_mut().remove(0))
@@ -141,6 +165,29 @@ fn a_waiter_for_the_apple_container_gate_stops_when_cancelled() {
         first_check: Mutex<Option<mpsc::Sender<()>>>,
     }
     impl CommandExecutor for WaitingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             panic!("a cancelled waiter must not run the Apple container CLI")
         }
@@ -259,6 +306,29 @@ fn podman_inspection(status: &str, session_id: &str, managed: &str) -> CommandOu
 fn a_missing_podman_is_reported_as_a_command_that_could_not_run() {
     struct NoPodman;
     impl CommandExecutor for NoPodman {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             Err(anyhow::Error::new(std::io::Error::from(
                 std::io::ErrorKind::NotFound,
@@ -389,6 +459,29 @@ fn podman_preflight_reports_unparsable_info() {
 fn docker_preflight_says_in_one_sentence_why_docker_cannot_run_sessions() {
     struct NoDocker;
     impl CommandExecutor for NoDocker {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             Err(anyhow::Error::new(std::io::Error::from(
                 std::io::ErrorKind::NotFound,
@@ -764,7 +857,7 @@ fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
 }
 
 #[test]
-fn managed_resource_identity_args_build_container_labels_and_ec2_tags() {
+fn managed_resource_identity_args_build_container_labels() {
     let instance = mj_core::config::instance_identity();
     assert_eq!(
         managed_resource_identity_args(ManagedResourceKind::Container, SESSION),
@@ -775,15 +868,6 @@ fn managed_resource_identity_args_build_container_labels_and_ec2_tags() {
             "dev.mj.managed=true".to_owned(),
             "--label".to_owned(),
             format!("dev.mj.instance={instance}"),
-        ]
-    );
-    assert_eq!(
-        managed_resource_identity_args(ManagedResourceKind::Ec2Instance, SESSION),
-        vec![
-            "--tag-specifications".to_owned(),
-            format!(
-                "ResourceType=instance,Tags=[{{Key=dev.mj.session,Value=018f9dd2-a3b4-7c8d-9000-123456789abc}},{{Key=dev.mj.managed,Value=true}},{{Key=dev.mj.instance,Value={instance}}}]"
-            ),
         ]
     );
 }
@@ -1474,7 +1558,7 @@ fn a_never_policy_is_not_pre_pulled() {
 
 /// Apple's `container` CLI spells both commands differently from Podman and
 /// Docker: `image pull` rather than `pull`, no `--format` on `image inspect`,
-/// no `--platform` (it runs native images only) and no verified prune.
+/// no `--platform` (it runs native images only), and no `-f` on `image prune`.
 // Hard-won: 8c5355ea: Auto images left first Create waiting for a background download.
 #[test]
 fn an_apple_container_image_refresh_uses_the_container_cli() {
@@ -1497,7 +1581,8 @@ fn an_apple_container_image_refresh_uses_the_container_cli() {
         refresh.image_id.args,
         ["image", "inspect", "ghcr.io/example/dev:latest"]
     );
-    assert!(refresh.prune.is_none(), "{:?}", refresh.prune);
+    assert_eq!(refresh.prune.program, "container");
+    assert_eq!(refresh.prune.args, ["image", "prune"]);
 }
 
 /// A launch never waits on a registry under the default policy. The daemon
@@ -2369,6 +2454,48 @@ fn host_capacity_probe_measures_storage_beside_cpu_and_memory() {
     assert!(usage.memory_total_bytes > 0);
     assert!(!usage.storage.is_empty());
     assert!(usage.storage[0].filesystems[0].total_bytes > 0);
+    assert!(!usage.memory_pool);
+
+    // A Nitro host appends the engine's report, and the pool replaces host RAM
+    // as the total. The engine and `sudo` are stand-ins that record nothing:
+    // the point is the line the probe adds and how it is read.
+    let home = tempfile::tempdir().unwrap();
+    let engine = home.path().join(mj_core::targets::MICROVM_ENGINE_WORKER);
+    std::fs::create_dir_all(engine.parent().unwrap()).unwrap();
+    std::fs::write(
+        &engine,
+        "#!/bin/sh\nprintf '{\\n \"engine_version\":\"2.70.0\",\"state_format\":1,\"firecracker_version\":\"1.18.0\",\"kernel_version\":\"6.18.56\",\\n \"memory_pool_total_mib\":49152,\"memory_pool_free_mib\":45054,\"slots_in_use\":1,\"slots_total\":80,\"cpus\":16}\\n'\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fakes = tempfile::tempdir().unwrap();
+    mj_core::test_hooks::install_fake_command(
+        fakes.path(),
+        "sudo",
+        "#!/bin/sh\nshift\nexec \"$@\"\n",
+    );
+    let nitro = ssh_nitro_host_capacity_command(&ssh, &[".cache/mjolnir".into()]);
+    let mut probe =
+        CommandSpec::new("sh", ["-c", nitro.args.last().unwrap()]).purpose("test Nitro host probe");
+    probe
+        .env
+        .insert("HOME".into(), home.path().display().to_string());
+    probe.env.insert(
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fakes.path().display()),
+    );
+    let output = ProcessExecutor.execute(&probe).unwrap();
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let usage = parse_host_capacity(&output.stdout, "host").unwrap();
+    assert!(usage.memory_pool);
+    assert_eq!(usage.memory_total_bytes, 49152 << 20);
+    assert_eq!(usage.memory_used_bytes, 4098 << 20);
 }
 
 #[test]
@@ -2580,17 +2707,6 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
             },
             "create SSH session workspace",
         ),
-        (
-            TargetTemplate::AwsEc2(AwsTemplate {
-                profile: "work".to_owned(),
-                region: "us-east-2".to_owned(),
-                launch_template: "hel-dev".to_owned(),
-                launch_template_version: None,
-                instance_type: None,
-                ssh: ssh(),
-            }),
-            "launch EC2 session instance",
-        ),
     ];
     for (template, purpose) in creating {
         let plan = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
@@ -2620,12 +2736,11 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
             plan.commands.len()
         );
         // Cloning a bundle happens against a target that already exists.
-        assert_eq!(
+        assert!(
             remainder
                 .commands
                 .iter()
-                .any(|command| command.purpose.starts_with("clone ")),
-            !matches!(template, TargetTemplate::AwsEc2(_)),
+                .any(|command| command.purpose.starts_with("clone "))
         );
     }
 
@@ -2640,27 +2755,7 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
 }
 
 #[test]
-fn aws_plan_tags_instance_and_close_uses_recorded_id() {
-    let template = TargetTemplate::AwsEc2(AwsTemplate {
-        profile: "work".to_owned(),
-        region: "us-east-2".to_owned(),
-        launch_template: "hel-dev".to_owned(),
-        launch_template_version: Some("3".to_owned()),
-        instance_type: Some("m8i-flex.2xlarge".into()),
-        ssh: ssh(),
-    });
-    let provision = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
-    assert_eq!(provision.commands.len(), 1);
-    assert!(
-        provision.commands[0].args.windows(2).any(|args| args
-            == managed_resource_identity_args(ManagedResourceKind::Ec2Instance, SESSION))
-    );
-    assert!(
-        provision.commands[0]
-            .args
-            .windows(2)
-            .any(|args| { args == ["--instance-type", "m8i-flex.2xlarge"] })
-    );
+fn legacy_ec2_close_uses_recorded_id() {
     let close = close_plan(
         &TargetLocator::AwsEc2 {
             profile: "work".to_owned(),
@@ -2673,7 +2768,7 @@ fn aws_plan_tags_instance_and_close_uses_recorded_id() {
     )
     .unwrap();
     assert_eq!(
-        close.commands[0].args.last().unwrap(),
+        close.scripts()[0].args.last().unwrap(),
         "i-0123456789abcdef0"
     );
 }
@@ -2688,7 +2783,9 @@ fn aws_clone_receives_github_token_on_stdin_only() {
         workspace: format!(".local/share/hel/workspaces/{SESSION}"),
     };
     let token = "ghs_secret-token";
-    let plan = provision_on_locator_plan(&locator, SESSION, &bundle(), Some(token)).unwrap();
+    let mut repositories = bundle();
+    repositories.repositories[0].url = Some("https://github.com/example/app.git".into());
+    let plan = provision_on_locator_plan(&locator, SESSION, &repositories, Some(token)).unwrap();
     let clones = plan
         .commands
         .iter()
@@ -2698,7 +2795,7 @@ fn aws_clone_receives_github_token_on_stdin_only() {
     for command in clones {
         let remote = command.args.last().unwrap();
         assert!(unwrapped_remote_line(remote).starts_with("'sh' '-c' 'IFS= read -r GH_TOKEN"));
-        assert!(remote.contains("'credential.helper=' '-c' 'credential.helper=!f()"));
+        assert!(remote.contains("'credential.https://github.com.helper=' '-c' 'credential.https://github.com.helper=!f()"));
         assert!(remote.contains("'git' '-c'") && remote.contains("'clone'"));
         assert!(!format!("{command:?}").contains(token));
     }
@@ -2714,6 +2811,66 @@ fn aws_clone_receives_github_token_on_stdin_only() {
     );
 }
 
+// Hard-won: 6dbb3ac44: withholding worker credentials also removed private-checkout authentication.
+#[test]
+fn checkout_authentication_uses_real_git_without_persisting_the_token() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().to_string_lossy().into_owned();
+    let config = directory.path().join(".gitconfig");
+    let original = "[credential \"https://github.com\"]\nhelper = \"!f() { echo username=old; echo password=old; }; f\"\n";
+    std::fs::write(&config, original).unwrap();
+    let token = "checkout-only-secret";
+    let (args, mut input) = clone_with_github_token(
+        vec!["git".into(), "credential".into(), "fill".into()],
+        token,
+    );
+    input.extend_from_slice(b"protocol=https\nhost=github.com\n\n");
+    let mut command = CommandSpec::new(&args[0], args[1..].to_vec()).with_sensitive_stdin(input);
+    command.clear_env = true;
+    command.env.extend([
+        ("PATH".into(), std::env::var("PATH").unwrap()),
+        ("HOME".into(), home),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            config.to_string_lossy().into_owned(),
+        ),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+    ]);
+    let output = ProcessExecutor.execute(&command).unwrap();
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains(&format!("password={token}"))
+    );
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+    assert!(!format!("{command:?}").contains(token));
+
+    let mut bundle = bundle();
+    bundle.repositories[0].url = Some("https://github.com/example/app.git".into());
+    bundle.repositories[1].url = Some("https://example.invalid/non-github.git".into());
+    let commands = clone_commands(&bundle, "/workspace", Some(token), |args| {
+        CommandSpec::new(&args[0], args[1..].to_vec())
+    });
+    let clone = |purpose: &str| {
+        commands
+            .iter()
+            .find(|command| command.purpose == purpose)
+            .unwrap()
+    };
+    assert_eq!(
+        clone("clone app").sensitive_stdin(),
+        Some(b"checkout-only-secret\n".as_slice())
+    );
+    assert!(clone("clone libs/lib").sensitive_stdin().is_none());
+}
+
 fn cutoff_bundle(reference: Option<&str>) -> ProjectBundleSpec {
     let mut bundle = bundle();
     bundle.repositories.truncate(1);
@@ -2727,7 +2884,7 @@ fn cutoff_bundle(reference: Option<&str>) -> ProjectBundleSpec {
 
 #[test]
 fn a_history_cutoff_initializes_and_fetches_by_object_id_instead_of_cloning() {
-    let commands = clone_commands(&cutoff_bundle(None), "/workspace", |args| {
+    let commands = clone_commands(&cutoff_bundle(None), "/workspace", None, |args| {
         CommandSpec::new(args[0].clone(), args[1..].to_vec())
     });
     let argv = commands
@@ -2769,6 +2926,7 @@ fn a_history_cutoff_initializes_and_fetches_by_object_id_instead_of_cloning() {
     let commands = clone_commands(
         &cutoff_bundle(Some("/run/hel/git-cache/key.bundle")),
         "/workspace",
+        None,
         |args| CommandSpec::new(args[0].clone(), args[1..].to_vec()),
     );
     assert!(commands.iter().all(|command| {
@@ -2798,8 +2956,9 @@ fn aws_cutoff_fetch_receives_github_token_on_stdin_only() {
         workspace: format!(".local/share/hel/workspaces/{SESSION}"),
     };
     let token = "ghs_secret-token";
-    let plan =
-        provision_on_locator_plan(&locator, SESSION, &cutoff_bundle(None), Some(token)).unwrap();
+    let mut repositories = cutoff_bundle(None);
+    repositories.repositories[0].url = Some("https://github.com/example/app.git".into());
+    let plan = provision_on_locator_plan(&locator, SESSION, &repositories, Some(token)).unwrap();
     let with_token = plan
         .commands
         .iter()
@@ -2838,7 +2997,11 @@ fn tilde_workspace_prefix_becomes_home_relative() {
 #[test]
 fn shell_arguments_are_single_quoted_at_ssh_boundary() {
     let hostile = "repo'; touch /tmp/pwned; echo '";
-    let command = ssh_command(&ssh(), ["git", "clone", "--", hostile]);
+    let command = ssh_command(
+        SshTrafficClass::Control,
+        &ssh(),
+        ["git", "clone", "--", hostile],
+    );
     assert_eq!(
         unwrapped_remote_line(command.args.last().unwrap()),
         "'git' 'clone' '--' 'repo'\\''; touch /tmp/pwned; echo '\\'''"
@@ -2875,7 +3038,7 @@ fn bare_project_plan_leaves_project_validation_to_dialog_and_launch() {
     };
     let close = close_plan(&locator, SESSION).unwrap();
     assert!(
-        !close.commands[0]
+        !close.scripts()[0]
             .args
             .last()
             .unwrap()
@@ -2907,120 +3070,29 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
     .unwrap();
 
     assert_eq!(
-        remote.commands[0].purpose,
+        remote.scripts()[0].purpose,
         "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state"
     );
 
     for script in [
-        local.commands[0].args[1].clone(),
-        remote.commands[0].args.last().unwrap().clone(),
+        local.scripts()[0].args[1].clone(),
+        remote.scripts()[0].args.last().unwrap().clone(),
     ] {
-        let kill = script
-            .find("hel_signal TERM")
-            .expect("cleanup signals the worker");
+        let stop = script
+            .find("worker stop --kill --root")
+            .expect("cleanup stops the worker through its installed binary");
         let remove = script.find("rm -rf").expect("cleanup removes the root");
-        assert!(kill < remove, "the worker must die before its root does");
-        // The pidfile is the identity check; a reused PID running
-        // something else must survive.
-        assert!(script.contains("worker.pid"));
-        assert!(script.contains(r#"hel_match="hel worker run --root $hel_root""#));
-        assert!(script.contains(r#"hel_match_home="hel worker run --root $HOME/$hel_root""#));
-        assert!(script.contains("hel_is_worker"));
-        assert!(script.contains("hel_signal KILL"));
-        assert!(script.contains("worker still running after stop"));
-        assert!(
-            !script.contains("grep -F"),
-            "leftover detection must not grep the match string; grep's own argv contains it"
-        );
+        assert!(stop < remove, "the worker must die before its root does");
+        assert!(script.contains("--kill"), "retirement kills at once");
         assert!(!script.contains("pkill"));
     }
     assert!(
-        remote.commands[0]
+        remote.scripts()[0]
             .args
             .last()
             .unwrap()
             .contains(&format!(".local/share/hel/workers/{SESSION}")),
     );
-}
-
-// Hard-won: ed3e0b29: Stop failed after a successful worker kill because grep matched itself.
-#[cfg(unix)]
-#[test]
-fn stop_worker_script_kills_a_matching_daemon_and_is_idempotent() {
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::process::ExitStatusExt;
-
-    let directory = tempfile::Builder::new()
-        .prefix("hel-stop-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let worker_root = directory.path().canonicalize().unwrap().join("worker");
-    std::fs::create_dir_all(&worker_root).unwrap();
-    let fake_hel = worker_root.join("hel");
-    std::fs::write(&fake_hel, "#!/bin/sh\nwhile true; do sleep 1; done\n").unwrap();
-    std::fs::set_permissions(&fake_hel, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let root = worker_root.to_str().unwrap();
-    // Interpret the fixture so a concurrent fork retaining its write fd cannot
-    // make the kernel reject a freshly written executable with ETXTBSY.
-    let mut child = std::process::Command::new("sh")
-        .arg(&fake_hel)
-        .args(["worker", "run", "--root", root, "--config", "launch.json"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("start fake worker");
-    std::fs::write(worker_root.join("worker.pid"), format!("{}\n", child.id())).unwrap();
-
-    let liveness = std::process::Command::new("sh")
-        .args(["-c", &worker_daemon_liveness_script(root)])
-        .output()
-        .expect("probe starting fake worker");
-    assert!(liveness.status.success());
-    assert_eq!(liveness.stdout, b"starting\n");
-
-    let _relay = std::os::unix::net::UnixListener::bind(worker_root.join("control.sock"))
-        .expect("publish fake worker relay socket");
-    let liveness = std::process::Command::new("sh")
-        .args(["-c", &worker_daemon_liveness_script(root)])
-        .output()
-        .expect("probe live fake worker");
-    assert!(liveness.status.success());
-    assert_eq!(liveness.stdout, b"alive\n");
-
-    let script = stop_worker_daemon_script(root);
-    let output = std::process::Command::new("sh")
-        .args(["-c", &script])
-        .output()
-        .expect("run stop script");
-    assert!(
-        output.status.success(),
-        "stop must kill the matching daemon: status={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let status = child.wait().expect("reap fake worker");
-    assert!(
-        !status.success() || status.signal().is_some(),
-        "fake worker should have been signaled, got {status:?}"
-    );
-
-    let output = std::process::Command::new("sh")
-        .args(["-c", &script])
-        .output()
-        .expect("run stop script again");
-    assert!(
-        output.status.success(),
-        "second stop must be a no-op: status={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let liveness = std::process::Command::new("sh")
-        .args(["-c", &worker_daemon_liveness_script(root)])
-        .output()
-        .expect("probe stopped fake worker");
-    assert!(liveness.status.success());
-    assert_eq!(liveness.stdout, b"dead\n");
 }
 
 /// Resume reuses a bare target's worker root, so anything left writing
@@ -3035,13 +3107,15 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
         SESSION,
     )
     .unwrap()
-    .expect("raw localhost reuses its worker root");
+    .expect("raw localhost reuses its worker root")
+    .scripts()[0]
+        .clone();
     assert_eq!(
         local.purpose,
         "stop a leaked local Mjolnir worker and clear its relay state"
     );
     let script = &local.args[1];
-    assert!(script.contains("hel_signal TERM"));
+    assert!(script.contains("worker stop --root"));
     assert!(script.contains(&format!(
         "rm -rf -- '/var/lib/hel/workers/{SESSION}/relay-state.json' \
              '/var/lib/hel/workers/{SESSION}/relay-journal'"
@@ -3056,7 +3130,9 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
         SESSION,
     )
     .unwrap()
-    .expect("an SSH host reuses its worker root");
+    .expect("an SSH host reuses its worker root")
+    .scripts()[0]
+        .clone();
     assert_eq!(
         remote.purpose,
         "stop a leaked remote Mjolnir worker and clear its relay state"
@@ -3113,7 +3189,9 @@ fn resume_cleanup_unlinks_a_linked_staged_home_and_keeps_a_real_one() {
             SESSION,
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .scripts()[0]
+            .clone();
         let output = ProcessExecutor.execute(&cleanup).unwrap();
 
         assert_eq!(
@@ -3145,7 +3223,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         SESSION,
         &format!("{local_root}/profile"),
     )
-    .unwrap();
+    .unwrap()
+    .scripts()[0]
+        .clone();
     assert_eq!(
         local.purpose,
         "reset the worker root for an in-place harness replacement"
@@ -3153,7 +3233,7 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
     assert_eq!(local.stage, Some(ProvisionStage::Syncing));
     assert_eq!(local.program, "sh");
     let script = &local.args[1];
-    assert!(script.contains("hel_signal TERM"), "{script}");
+    assert!(script.contains("worker stop --root"), "{script}");
     assert!(
         script.contains(&format!(
             "rm -rf -- '{local_root}/relay-state.json' '{local_root}/relay-journal'"
@@ -3182,7 +3262,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         SESSION,
         &format!(".local/share/hel/profiles/{SESSION}"),
     )
-    .unwrap();
+    .unwrap()
+    .scripts()[0]
+        .clone();
     assert_eq!(remote.program, "ssh");
     let remote_script = remote.args.last().unwrap();
     assert!(
@@ -3208,7 +3290,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         SESSION,
         &format!("/var/lib/hel/profiles/{SESSION}"),
     )
-    .unwrap();
+    .unwrap()
+    .scripts()[0]
+        .clone();
     assert_eq!(container.program, "podman");
     assert_eq!(
         container.args[..4],
@@ -3248,7 +3332,9 @@ fn in_place_reset_unlinks_a_linked_profile_home_without_following_it() {
         SESSION,
         &format!("{worker_root}/profile"),
     )
-    .unwrap();
+    .unwrap()
+    .scripts()[0]
+        .clone();
     let output = ProcessExecutor.execute(&reset).unwrap();
 
     assert_eq!(
@@ -3271,14 +3357,17 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
 
     let profile = |kind: HarnessKind, home: &str| HarnessProfile {
         enabled: true,
-        kind,
-        home: std::path::PathBuf::from(home),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
+        claude_permission_mode: None,
+        aws: None,
+        ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
     };
     let worker_root = format!("/var/lib/hel/workers/{SESSION}");
     let local = TargetLocator::LocalBare {
@@ -3350,14 +3439,17 @@ fn a_session_never_runs_from_the_profile_home_itself() {
 
     let profile = |kind: HarnessKind, home: &str| HarnessProfile {
         enabled: true,
-        kind,
-        home: std::path::PathBuf::from(home),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
+        claude_permission_mode: None,
+        aws: None,
+        ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
     };
     let local = TargetLocator::LocalBare {
         worker_root: format!("/var/lib/hel/workers/{SESSION}"),
@@ -3395,15 +3487,18 @@ fn podman_cleanup_ignores_an_already_absent_container() {
         SESSION,
     )
     .unwrap();
-    assert_eq!(local.commands[0].program, "sh");
-    let local_script = &local.commands[0].args[1];
+    assert_eq!(local.scripts()[0].program, "sh");
+    let local_script = &local.scripts()[0].args[1];
     assert!(local_script.contains("podman rm --force --ignore"));
-    assert_eq!(local.commands[0].args.last().unwrap(), SESSION);
+    assert_eq!(local.scripts()[0].args.last().unwrap(), SESSION);
     assert_eq!(
-        local.commands[2].purpose,
+        local.scripts()[2].purpose,
         "remove Podman session Git cache snapshot"
     );
-    assert_eq!(local.commands[2].stage, Some(ProvisionStage::CleaningCache));
+    assert_eq!(
+        local.scripts()[2].stage,
+        Some(ProvisionStage::CleaningCache)
+    );
 
     let remote = close_plan(
         &TargetLocator::SshPodman {
@@ -3416,17 +3511,17 @@ fn podman_cleanup_ignores_an_already_absent_container() {
     )
     .unwrap();
     assert!(
-        remote.commands[0]
+        remote.scripts()[0]
             .args
             .last()
             .unwrap()
             .contains("podman rm --force --ignore")
     );
     assert_eq!(
-        remote.commands[2].purpose,
+        remote.scripts()[2].purpose,
         "remove Podman session Git cache snapshot"
     );
-    assert!(remote.commands[2].args.last().unwrap().contains(SESSION));
+    assert!(remote.scripts()[2].args.last().unwrap().contains(SESSION));
 }
 
 #[test]
@@ -3445,22 +3540,22 @@ fn podman_cleanup_removes_container_before_workspace_storage() {
     )
     .unwrap();
 
-    assert_eq!(plan.commands.len(), 4);
+    assert_eq!(plan.scripts().len(), 4);
     assert_eq!(
-        plan.commands[0].stage,
+        plan.scripts()[0].stage,
         Some(ProvisionStage::RemovingContainer)
     );
     assert_eq!(
-        plan.commands[1].stage,
+        plan.scripts()[1].stage,
         Some(ProvisionStage::RemovingStorage)
     );
     assert_eq!(
-        plan.commands[2].stage,
+        plan.scripts()[2].stage,
         Some(ProvisionStage::RemovingStorage)
     );
-    assert_eq!(plan.commands[3].stage, Some(ProvisionStage::CleaningCache));
-    assert!(plan.commands[1].args.contains(&volume));
-    assert!(plan.commands[1].args[1].contains("dev.mj.session"));
+    assert_eq!(plan.scripts()[3].stage, Some(ProvisionStage::CleaningCache));
+    assert!(plan.scripts()[1].args.contains(&volume));
+    assert!(plan.scripts()[1].args[1].contains("dev.mj.session"));
 }
 
 #[test]
@@ -3483,6 +3578,95 @@ fn podman_quiesce_stops_and_confirms_the_owned_container_without_removing_it() {
     assert!(!command.args[1].contains("podman rm"));
 }
 
+// Hard-won: 770a4e74c: exec could not stop writers in an existing stopped container.
+#[cfg(unix)]
+#[test]
+fn container_retirement_uses_the_engine_and_retains_files_until_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = r#"#!/bin/sh
+set -eu
+state=$MJ_ENGINE_TEST_ROOT
+[ ! -e "$state/unavailable" ] || exit 17
+printf '%s\n' "$*" >>"$state/commands"
+case $1 in
+    container)
+        case $* in
+            *State.Running*) cat "$state/running" ;;
+            *) printf 'true|%s\n' "$MJ_ENGINE_TEST_SESSION" ;;
+        esac ;;
+    list) if [ "$(cat "$state/running")" = true ]; then printf '%s\n' "$MJ_ENGINE_TEST_CONTAINER"; fi ;;
+    stop) printf 'false\n' >"$state/running" ;;
+    *) exit 99 ;;
+esac
+"#;
+    for engine in ["docker", "container"] {
+        mj_core::test_hooks::install_fake_command(&bin, engine, script);
+    }
+    let container_id = resource_name(SESSION).unwrap();
+    for target in [
+        TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+        },
+        TargetLocator::AppleContainer {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+        },
+    ] {
+        for running in [false, true] {
+            std::fs::write(root.path().join("running"), running.to_string()).unwrap();
+            let mut plan = stop_container_plan(&target, SESSION).unwrap().unwrap();
+            for command in &mut plan.commands {
+                command.env.insert(
+                    "PATH".into(),
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                );
+                command.env.insert(
+                    "MJ_ENGINE_TEST_ROOT".into(),
+                    root.path().display().to_string(),
+                );
+                command
+                    .env
+                    .insert("MJ_ENGINE_TEST_SESSION".into(), SESSION.into());
+                command
+                    .env
+                    .insert("MJ_ENGINE_TEST_CONTAINER".into(), container_id.clone());
+            }
+            std::fs::write(
+                root.path().join("worker-files"),
+                "retain until every writer stops",
+            )
+            .unwrap();
+            plan.execute(&ProcessExecutor).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("running"))
+                    .unwrap()
+                    .trim(),
+                "false"
+            );
+            assert!(root.path().join("worker-files").exists());
+            std::fs::write(root.path().join("unavailable"), "offline").unwrap();
+            assert!(
+                plan.execute(&ProcessExecutor).is_err(),
+                "an unavailable engine cannot prove termination"
+            );
+            std::fs::remove_file(root.path().join("unavailable")).unwrap();
+        }
+    }
+    assert!(
+        !std::fs::read_to_string(root.path().join("commands"))
+            .unwrap()
+            .lines()
+            .any(|line| line.starts_with("exec "))
+    );
+}
+
 #[test]
 fn docker_cleanup_removes_container_then_volumes_then_overlay_backing_files() {
     let name = resource_name(SESSION).unwrap();
@@ -3494,7 +3678,7 @@ fn docker_cleanup_removes_container_then_volumes_then_overlay_backing_files() {
         SESSION,
     )
     .unwrap();
-    let command = &close.commands[0];
+    let command = &close.scripts()[0];
     assert_eq!(command.program, "sh");
     let script = &command.args[1];
     let remove_container = script.find("docker rm --force").unwrap();
@@ -3738,7 +3922,7 @@ fn native_temporary_storage_is_initialized_and_cleanup_is_repeatable() {
 
         let close = close_plan(&temporary_storage_locator(engine, &name), SESSION).unwrap();
         for _ in 0..2 {
-            for command in &close.commands {
+            for command in close.scripts() {
                 let output = execute_with_fake_docker(&environment, command, &env);
                 assert_eq!(
                     output.status,
@@ -3886,7 +4070,7 @@ fn temporary_storage_refuses_foreign_volumes_during_launch_and_cleanup() {
         );
         let close = close_plan(&temporary_storage_locator(engine, &name), SESSION).unwrap();
         let failure = close
-            .commands
+            .scripts()
             .iter()
             .map(|command| execute_with_fake_docker(&environment, command, &env))
             .find(|output| output.status != 0)
@@ -3948,7 +4132,7 @@ fn retiring_a_podman_generation_preserves_the_destination_temporary_volume() {
     std::fs::write(state.join("volumes"), volumes).unwrap();
     let close =
         retire_move_target_plan(&temporary_storage_locator("podman", &name), SESSION).unwrap();
-    for command in &close.commands {
+    for command in close.scripts() {
         let output = execute_with_fake_docker(&environment, command, &env);
         assert_eq!(
             output.status,
@@ -4013,12 +4197,16 @@ test -s /tmp/mj-perf.txt
 "#;
         execute_checked(
             &ProcessExecutor,
-            &locator_command(&locator, vec!["sh".into(), "-c".into(), script.into()]),
+            &locator_command(
+                SshTrafficClass::Control,
+                &locator,
+                vec!["sh".into(), "-c".into(), script.into()],
+            ),
         )?;
         Ok(())
     })();
-    for command in close_plan(&locator, &session).unwrap().commands {
-        execute_checked(&ProcessExecutor, &command).unwrap();
+    for command in close_plan(&locator, &session).unwrap().scripts() {
+        execute_checked(&ProcessExecutor, command).unwrap();
     }
     result.unwrap();
 }
@@ -4099,7 +4287,7 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
             Ok(())
         })();
         let cleanup = close_plan(&locator, &session).unwrap();
-        for command in &cleanup.commands {
+        for command in cleanup.scripts() {
             execute_checked(&ProcessExecutor, &with_runtime(command.clone())).unwrap();
         }
         result.unwrap();
@@ -4165,7 +4353,7 @@ fn podman_session_container_survives_signals_sent_to_pid_1() {
         Ok(())
     })();
     let cleanup = close_plan(&locator, &session).unwrap();
-    for command in &cleanup.commands {
+    for command in cleanup.scripts() {
         execute_checked(&ProcessExecutor, command).unwrap();
     }
     result.unwrap();
@@ -4214,7 +4402,7 @@ fn docker_cleanup_preserves_owned_state_when_container_removal_fails() {
 
     let output = execute_with_fake_docker(
         &environment,
-        &close.commands[0],
+        &close.scripts()[0],
         &[("FAKE_DOCKER_FAIL_RM", "1")],
     );
     assert_ne!(output.status, 0);
@@ -4336,6 +4524,29 @@ struct StageRecordingExecutor {
 }
 
 impl CommandExecutor for StageRecordingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         assert!(
             self.active.borrow().contains(&ProvisionStage::RecoveryCopy),
@@ -4417,6 +4628,29 @@ fn scoped_stage_reports_completion_after_controlled_error() {
 }
 
 impl CommandExecutor for FakeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let index = self.seen.borrow().len();
         self.seen.borrow_mut().push(command.clone());
@@ -4454,6 +4688,29 @@ struct SyncFakeExecutor {
 }
 
 impl CommandExecutor for SyncFakeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let mut seen = self.seen.lock().unwrap();
         let index = seen.len();
@@ -4475,6 +4732,29 @@ struct BarrierExecutor {
 }
 
 impl CommandExecutor for BarrierExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.seen.lock().unwrap().push(command.clone());
         self.barrier.wait();
@@ -4520,6 +4800,29 @@ struct OrderSensitiveFailureExecutor {
 }
 
 impl CommandExecutor for OrderSensitiveFailureExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.seen.lock().unwrap().push(command.clone());
         match command.purpose.as_str() {
@@ -4824,7 +5127,7 @@ fn ssh_apple_container_closes_the_container_and_snapshot_over_ssh() {
         container_id: resource_name(SESSION).unwrap(),
     };
     let plan = close_plan(&locator, SESSION).unwrap();
-    let command = &plan.commands[0];
+    let command = &plan.scripts()[0];
     assert_eq!(command.program, "ssh");
     let remote = command.args.last().unwrap();
     assert!(remote.contains("container rm --force"), "{remote}");
@@ -5061,7 +5364,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
         &session,
     )
     .unwrap();
-    for command in &close.commands {
+    for command in close.scripts() {
         execute_checked(&ProcessExecutor, command).unwrap();
     }
     result.unwrap();
@@ -5116,7 +5419,7 @@ fn docker_cleanup_retains_backing_volume_when_overlay_removal_fails() {
     .unwrap();
     let output = execute_with_fake_docker(
         &environment,
-        &close.commands[0],
+        &close.scripts()[0],
         &[("FAKE_DOCKER_FAIL_VOLUME_RM", "1")],
     );
     assert_eq!(output.status, 43);
@@ -5172,8 +5475,8 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
     reconnect_plan(&locator, BORROWED_CHILD).expect("a child reconnects through its parent");
 
     let cleanup = borrowed_worker_cleanup_plan(&locator, BORROWED_CHILD).unwrap();
-    assert_eq!(cleanup.commands.len(), 1);
-    let script = cleanup.commands[0]
+    assert_eq!(cleanup.scripts().len(), 1);
+    let script = cleanup.scripts()[0]
         .args
         .iter()
         .find(|argument| argument.contains("rm -rf"))
@@ -5213,6 +5516,7 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
         &[],
         None,
         &destination_name,
+        None,
     )
     .unwrap();
     assert!(plan.commands[0].args.contains(&destination_name));
@@ -5227,12 +5531,12 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
     let cleanup = retire_move_target_plan(&locator, SESSION).unwrap();
     assert!(
         cleanup
-            .commands
+            .scripts()
             .iter()
             .all(|command| command.stage != Some(ProvisionStage::CleaningCache))
     );
-    assert!(cleanup.commands[0].args.contains(&destination_name));
-    assert!(!cleanup.commands[0].args.contains(&source_name));
+    assert!(cleanup.scripts()[0].args.contains(&destination_name));
+    assert!(!cleanup.scripts()[0].args.contains(&source_name));
 }
 
 /// The command an SSH remote line runs, without the macOS system PATH prefix
@@ -5242,4 +5546,173 @@ pub(crate) fn unwrapped_remote_line(remote: &str) -> &str {
     remote
         .strip_prefix(prefix.as_str())
         .unwrap_or_else(|| panic!("{remote:?} does not run under the macOS system PATH"))
+}
+
+// Hard-won: #1508: a failed process probe was reported as worker death, allowing duplicate boots.
+#[cfg(unix)]
+#[test]
+fn worker_liveness_does_not_report_death_when_the_probe_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let workers = tempfile::tempdir().unwrap();
+    let root = workers.path().join("0123456789abcdef");
+    std::fs::create_dir(&root).unwrap();
+    // The root has a `hel`, so a worker could have run there.
+    std::fs::write(root.join("hel"), "").unwrap();
+    // The staged control worker is what answers, and its probe fails.
+    let control = std::path::PathBuf::from(control_worker_path(root.to_str().unwrap()));
+    std::fs::create_dir_all(control.parent().unwrap()).unwrap();
+    std::fs::write(
+        &control,
+        "#!/bin/sh\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            worker_daemon_liveness_script(root.to_str().unwrap()).unstaged_script(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(71));
+    assert!(output.stdout.is_empty(), "{output:?}");
+
+    // A control worker that was never staged is reported, never read as death.
+    std::fs::remove_file(&control).unwrap();
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            worker_daemon_liveness_script(root.to_str().unwrap()).unstaged_script(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(WORKER_CONTROL_UNSTAGED_STATUS));
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires rootless Podman and cached ghcr.io/brokkai/mjolnir/agent-dev:latest image"]
+fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout() {
+    struct ContainerGuard(String);
+    impl Drop for ContainerGuard {
+        fn drop(&mut self) {
+            let command = CommandSpec::new("podman", ["rm", "--force", "--ignore", &self.0]);
+            let _ = ProcessExecutor.execute_cleanup(&command);
+        }
+    }
+
+    let session = mj_core::state::new_session_id().unwrap();
+    let name = resource_name(&session).unwrap();
+    let _guard = ContainerGuard(name.clone());
+
+    let run = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            [
+                "run",
+                "-d",
+                "--name",
+                &name,
+                "--label",
+                "dev.mj.managed=true",
+                "--label",
+                &format!("dev.mj.session={session}"),
+                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "sleep",
+                "300",
+            ],
+        ))
+        .unwrap();
+    assert_eq!(run.status, 0, "{}", String::from_utf8_lossy(&run.stderr));
+    let cid = String::from_utf8_lossy(&run.stdout).trim().to_owned();
+
+    let exec = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            ["exec", "-d", &name, "sleep", "300"],
+        ))
+        .unwrap();
+    assert_eq!(exec.status, 0, "{}", String::from_utf8_lossy(&exec.stderr));
+    let exec_id = String::from_utf8_lossy(&exec.stdout).trim().to_owned();
+
+    // Give conmon a moment to register, then kill the exec session's conmon
+    // and its exec'd process so Podman hits readExecExitCode()'s 5s timeout.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let ps = ProcessExecutor
+        .execute(&CommandSpec::new("ps", ["-eo", "pid,comm,args"]))
+        .unwrap();
+    assert_eq!(ps.status, 0);
+    let exec_conmon = String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .find(|line| {
+            let mut parts = line.split_whitespace();
+            let _pid = parts.next();
+            let comm = parts.next();
+            comm == Some("conmon")
+                && line.contains(&cid)
+                && line.contains(&exec_id)
+                && line.contains(" -e ")
+        })
+        .and_then(|line| line.split_whitespace().next())
+        .expect("exec conmon pid")
+        .to_owned();
+    let kill_conmon = ProcessExecutor
+        .execute(&CommandSpec::new("kill", ["-9", &exec_conmon]))
+        .unwrap();
+    assert_eq!(kill_conmon.status, 0);
+
+    let kill_exec_proc = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            [
+                "exec",
+                &name,
+                "sh",
+                "-c",
+                "for p in $(pgrep sleep); do [ \"$p\" != 1 ] && kill -9 \"$p\"; done",
+            ],
+        ))
+        .unwrap();
+    assert_eq!(kill_exec_proc.status, 0);
+
+    let locator = TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: name.clone(),
+        workspace_storage: Default::default(),
+    };
+
+    let quiesce = quiesce_plan(&locator, &session).unwrap().unwrap();
+    let outputs = quiesce.execute(&ProcessExecutor).unwrap();
+    let stderr = String::from_utf8_lossy(&outputs[0].stderr);
+    assert!(
+        stderr.contains("timed out waiting for file"),
+        "expected Podman's exec-exit timeout warning on stderr, got: {stderr}"
+    );
+    let running = ProcessExecutor
+        .execute(&CommandSpec::new(
+            "podman",
+            [
+                "container",
+                "inspect",
+                "--format",
+                "{{.State.Running}}",
+                &name,
+            ],
+        ))
+        .unwrap();
+    assert_eq!(running.status, 0);
+    assert_eq!(String::from_utf8_lossy(&running.stdout).trim(), "false");
+
+    let cleanup = podman_cleanup_plan(&locator, &session).unwrap();
+    let remove_output = mj_core::targets::checked_command_output(
+        &cleanup.commands[0],
+        ProcessExecutor.execute(&cleanup.commands[0]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(remove_output.status, 0);
+    let exists = ProcessExecutor
+        .execute(&CommandSpec::new("podman", ["container", "exists", &name]))
+        .unwrap();
+    assert_eq!(exists.status, 1, "container should be absent after removal");
 }

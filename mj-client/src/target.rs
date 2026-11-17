@@ -4,11 +4,8 @@ use anyhow::{Result, bail};
 use mj_core::config::{Config, TargetTemplate, is_bare_project_target};
 use mj_core::state::{Checkout, ManagedWorktreeTarget, SessionRecord};
 
-// Published from containers/Containerfile.agent-dev by
-// .github/workflows/publish-agent-dev-image.yml. It already carries Node, Rust,
-// Git, gh, and the pinned ACP bridges, so a first session does not have to
-// install them.
-pub use mj_core::config::DEFAULT_CONTAINER_IMAGE as DEFAULT_IMAGE;
+// Session tools and harnesses are installed after cloning the project.
+pub use mj_core::config::DEFAULT_SESSION_IMAGE as DEFAULT_IMAGE;
 
 /// Convert a configured bare target to the durable target identity stored on
 /// managed worktrees.
@@ -108,7 +105,7 @@ pub fn resume_compatibility_with_checkout(
         if session
             .project
             .as_ref()
-            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+            .is_some_and(|project| project.primary_is_plain_directory())
         {
             return Err(format!(
                 "{directory} is a directory project without a committed Git checkout; resume it on a local bare target"
@@ -156,6 +153,15 @@ fn workspace_to_raw_compatibility(
     session: &SessionRecord,
     config: &Config,
 ) -> Result<ResumePlan, String> {
+    // A host checkout can share or clone later history. Keep cutoff sessions
+    // in their independent bundle workspace, just as they started at launch.
+    if session
+        .checkout
+        .as_ref()
+        .is_some_and(|checkout| checkout.no_later_history)
+    {
+        return Ok(ResumePlan::InPlace);
+    }
     let Some(bundle) = session.project_bundle(config) else {
         return Err(BUNDLE_ON_LOCAL_BARE.to_owned());
     };

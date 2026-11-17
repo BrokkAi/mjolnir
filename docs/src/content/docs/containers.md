@@ -19,10 +19,7 @@ flag, OpenCode's `"permission": "allow"` config setting, or DSH's
 `permission_mode` `allow`.
 Muse stages `:ask-me`, selects `allowAll` approvals, turns muse-acp's auto-review
 off, and disables only the sandbox (`--disable-sandbox`), so it runs without
-permission checks like OpenCode. A Muse profile with `muse_auto_review = true`
-opts back into the reviewer (`promptUnmatched` approvals with auto-review on),
-which answers each approval without prompting you, so critical actions can
-still be denied. Every other harness's control approves every call. Note that Kimi Code's
+permission checks like OpenCode. Every other harness's control approves every call. Note that Kimi Code's
 mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 
@@ -89,54 +86,53 @@ separate static musl binaries: both Linux architectures are bundled beside
 the worker matching the container or remote host. macOS bundles also include
 a native `mj-worker` for local bare sessions.
 
-## Get the agent-dev image
+## Session images
 
-Mjolnir ships a reference container image with everything a session needs
-pre-installed: Rust, Go, cargo-nextest, Node 24, OpenJDK 25, Python 3 with its
-native development headers and library, uv, Git, GitHub CLI, the `slopcop`
-check CLI, and every harness Mjolnir launches at its pinned version: the Codex
-and Claude ACP bridges, Muse Code with `muse-acp`, Kimi Code, Grok,
-OpenCode, and dsh-acp. It also carries
-Playwright's Chromium system libraries and the pre-installed Chromium headless
-shell in `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
-privileged install and no run-time browser download, and the profiling tools
-`perf`, `cargo-flamegraph`, `samply`, and `heaptrack`. Mjolnir adds
-`--cap-add=PERFMON` to local and SSH Podman containers, including replacements
-that retain session storage. Rootless Podman still needs the host's
-`kernel.perf_event_paranoid` set to 1 or lower for per-process profiling with
-the default events. The runtime's seccomp profile must also permit
-`perf_event_open` with `CAP_PERFMON`; some packaged profiles have conflicting
-deny rules that block it despite that capability. Mjolnir does not expose a
-container-capability override. Optional local coverage tooling includes the
-`llvm-tools-preview` component, pinned `cargo-llvm-cov`, and `lcov` for
-`genhtml`. It's published as
-`ghcr.io/brokkai/mjolnir/agent-dev`, public and
-multi-arch for both `linux/amd64` and `linux/arm64`, so the same image name
-works whether Mjolnir is running it through Podman, Docker, Apple's `container`
-runtime, or an arm64 SSH host. Master publishes the floating `:latest` tag, and
-each release publishes an immutable tag for its own version, such as
-`agent-dev:2.36.0`.
+The default session image is `docker.io/library/buildpack-deps:noble`, Ubuntu
+24.04 with Git, compilers and common development headers. Mjolnir installs its
+matching worker and the selected harness, including Node.js when needed.
+After cloning, **Install project tools** runs mise against the repository's
+recipe and version files, such as `mise.toml`, `rust-toolchain.toml` and
+`.nvmrc`. A failed tools install produces a visible notice with the log path;
+the harness still starts.
+
+Declare dependencies in [Project environments](/project-environments/). To
+avoid installing them in every new container, use `mj image build` to publish
+a project image and `mj image status` to check its assignment. Project images
+override the target's image for their platform. You can also set a target's
+`image` directly; see [Custom images](/custom-images/).
+
+Local and SSH Podman containers receive `--cap-add=PERFMON`. Rootless Podman
+profiling also needs the host's `kernel.perf_event_paranoid` set to 1 or lower
+and a seccomp profile that permits `perf_event_open` with `CAP_PERFMON`.
+Install profiling tools in the project's recipe when needed.
+
+## The release image
+
+Mjolnir also publishes `ghcr.io/brokkai/mjolnir/agent-dev` for `linux/amd64`
+and `linux/arm64`. Releases use an immutable version tag; development builds
+use `:latest`. This image carries Mjolnir, its worker, and pinned harnesses.
+[Daemon-container mode](/daemon-container/) uses this release image by default.
+It is separate from the default session image.
 
 The daemon also uses this image for quota checks that start a harness: the
 Codex app-server, Grok's agent, and Claude Code's login refresh. With
-`[quota] runtime = "auto"`, the default, those checks run in the image of your
-enabled local Podman runtime, else your enabled local Docker runtime, when its
-engine is installed. With no such runtime they run on this machine. A machine
+`[quota] runtime = "auto"`, the default, a check runs on this machine when the
+machine already has that harness: Mjolnir's managed Codex installation, or a
+`grok` or `claude` on `PATH` (Grok also finds the copy in the profile's home).
+Otherwise the check runs in the release image using your enabled local Podman
+runtime, else your enabled local Docker runtime, when its engine is installed; with no
+such runtime it runs on this machine and reports the missing harness. A machine
 that runs every session in containers therefore needs no harness installed to
-show its quota, and the check uses the image the daemon already keeps
-downloaded for that runtime. The profile's account directory is mounted at its
-own path, so a refreshed login lands where the host keeps it. Set `runtime` to
-`podman` or `docker` to insist on one engine (with that runtime's image, or the
-release's agent-dev image when none is configured), or to `host` to never use a
-container. A check never downloads the image; the daemon downloads it in the
-background, and until then the check reports that it is waiting for it.
+show its quota, and the daemon keeps the release image downloaded for quota
+checks. The profile's account directory is mounted at its own path, so a refreshed login lands where the host keeps it. Set `runtime` to
+`podman` or `docker` to insist on one engine (with the release's agent-dev
+image), or to `host` to never use a container. A check never downloads the image; the daemon downloads it in the
+background, and until then the check reports that it is waiting for it. The
+runtime's `pull_policy` governs that download too: with `never`, the daemon
+leaves the image to you, and a check that finds it missing says so.
 Claude Code on macOS always checks on the host, because its login lives in the
 Keychain.
-
-The standard local targets already use this published image: an installed
-release names the image built for its own version, while a development build
-names `:latest`. Podman, Docker, and Apple's container runtime pull it
-automatically when first needed.
 
 The image also carries the session worker, built from the same commit at
 `/opt/mjolnir/mj-worker` and labelled `org.brokk.mjolnir.worker-build`. A release
@@ -149,6 +145,9 @@ Upgrading `mj` reconnects to compatible existing workers and preserves their
 containers. Supported worker-only upgrades happen inside the existing container
 under the worker's atomic idle reservation. New sessions use the new default
 image; existing sessions keep their image until an explicit user operation.
+An explicit upgrade of a session recorded on the old default agent-dev image
+moves it to the current session default and installs its project tools after
+the checkout is reattached.
 **Restart agent** always retains the current container and its filesystem.
 
 **Upgrade container and restart…** is available from the session menu and as an
@@ -194,7 +193,7 @@ A plain image such as `ubuntu:24.04` still works if you enter it here: Mjolnir
 installs Git and GitHub CLI through the image package manager and downloads
 Node and harness artifacts itself the first time a session needs them. That
 work runs inside each new container, which slows down the start of the session.
-The default agent-dev image avoids most of that cost.
+A prebuilt project image avoids repeating project tool installation.
 
 Container targets default to `pull_policy = "auto"`. Podman and Docker launches
 do not wait on a registry under that default: they start from the image the host
@@ -360,10 +359,12 @@ The cache directory lives on the container host and is mounted read-write into
 the container at the same absolute path. Mjolnir atomically copies the resolved
 host executable to `<cache>/.mjolnir/bin/mbx` inside that directory, then checks
 that this copy runs in the container and reports the expected version before
-installing mbx's Cargo launcher. Session start, resume, and periodic machine
-reconciliation refresh the copy when the native mbx version or file size
-changes. A replacement uses a same-directory temporary file and atomic rename,
-so running processes keep using the inode they already opened. If native mbx
+installing mbx's Cargo launcher. Session start and resume refresh the copy
+when the native mbx version or file size changes. So does applying a machine's
+build cache settings, which happens when the daemon starts, when the settings
+or the sessions using the cache change, and after an mbx install. A
+replacement uses a same-directory temporary file and atomic rename, so running
+processes keep using the inode they already opened. If native mbx
 is absent or too old, the old copy is left in place and new sessions run
 without the cache. Nothing is synchronized between hosts, and Mjolnir never
 runs mbx garbage collection: the host's own mbx and the automatic collection
@@ -420,7 +421,7 @@ syncs its active GitHub token into every live non-local session. That includes
 managed containers, EC2, SSH Podman, and raw SSH targets, and lets `gh` and
 HTTPS Git pushes work without copying SSH keys. The token never goes into a
 recovery archive. Raw SSH targets are therefore inside the token's trust
-boundary; raw localhost sessions are deliberately excluded. A slopcop login on
+boundary; localhost sessions are deliberately excluded. A slopcop login on
 that machine reaches the same sessions the same way, so an agent can run
 `slopcop` checks there without signing in again.
 

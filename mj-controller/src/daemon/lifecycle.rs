@@ -1,6 +1,10 @@
 use super::*;
+use crate::recovery_gate::SessionAdmission;
+
+pub(super) use crate::recovery_gate::LifecycleOrigin;
 
 pub(super) struct LifecycleStart {
+    pub(super) origin: LifecycleOrigin,
     pub(super) resume_workspace_id: Option<String>,
     pub(super) request_key: Option<String>,
     /// The control the caller keeps to cancel or commit the operation; a new
@@ -12,23 +16,90 @@ pub(super) struct LifecycleStart {
     /// Work nobody asked for, which the next daemon starts again, uses it;
     /// anything a person asked for holds the handoff instead.
     pub(super) deferrable_admission: Option<&'static str>,
+    /// The requester was already answered "accepted" and holds handoff
+    /// admission for this operation, as an accepted destroy does (#1191). A
+    /// draining daemon answers a queued request "not started" so its client
+    /// retries; it must not say that to this one. It queues and preempts
+    /// through the drain, and the stop or handoff waits for it under the
+    /// bound of the admission it holds.
+    pub(super) holds_through_drain: bool,
+}
+
+impl LifecycleStart {
+    pub(super) fn automatic(mut self) -> Self {
+        self.origin = LifecycleOrigin::Automatic;
+        self
+    }
+
+    pub(super) fn holding_through_drain(mut self) -> Self {
+        self.holds_through_drain = true;
+        self
+    }
+
+    pub(super) fn request(
+        key: String,
+        workspace: Option<String>,
+        control: Option<LifecycleControl>,
+    ) -> Self {
+        Self {
+            origin: LifecycleOrigin::Person,
+            resume_workspace_id: workspace,
+            request_key: Some(key),
+            control,
+            phase: LifecyclePhase::Executing,
+            move_operation_id: None,
+            deferrable_admission: None,
+            holds_through_drain: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdmissionMode {
+    /// Identical selections join running work; a completed attempt may retry.
+    FreshRequest,
+    /// Durable caller keys also identify a previously completed request.
+    Replay,
+}
+
+struct LifecycleAdmissionOptions {
+    queued: bool,
+    mode: AdmissionMode,
+    acceptance: Option<LifecycleAcceptance>,
 }
 
 impl RuntimeState {
-    pub(super) fn start_or_join_lifecycle<F, Fut>(
+    pub(super) async fn start_or_join_lifecycle<F, Fut>(
         self: &Arc<Self>,
         session_id: String,
         kind: LifecycleKind,
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.start_or_join_lifecycle_for_workspace(session_id, kind, None, work)
+            .await
     }
 
-    pub(super) fn start_or_join_lifecycle_for_workspace<F, Fut>(
+    pub(super) async fn start_automatic_lifecycle<F, Fut>(
+        self: &Arc<Self>,
+        session_id: String,
+        kind: LifecycleKind,
+        work: F,
+    ) -> Result<LifecycleWatch>
+    where
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+    {
+        let mut start = LifecycleStart::request(String::new(), None, None);
+        start.request_key = None;
+        start.origin = LifecycleOrigin::Automatic;
+        self.admit_lifecycle(session_id, kind, start, work).await
+    }
+
+    pub(super) async fn start_or_join_lifecycle_for_workspace<F, Fut>(
         self: &Arc<Self>,
         session_id: String,
         kind: LifecycleKind,
@@ -36,13 +107,14 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.start_or_join_lifecycle_with_key(session_id, kind, resume_workspace_id, None, work)
+            .await
     }
 
-    pub(super) fn start_or_join_lifecycle_with_key<F, Fut>(
+    pub(super) async fn start_or_join_lifecycle_with_key<F, Fut>(
         self: &Arc<Self>,
         session_id: String,
         kind: LifecycleKind,
@@ -51,7 +123,7 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.start_or_join_lifecycle_controlled(
@@ -62,9 +134,10 @@ impl RuntimeState {
             None,
             work,
         )
+        .await
     }
 
-    pub(super) fn start_or_join_lifecycle_controlled<F, Fut>(
+    pub(super) async fn start_or_join_lifecycle_controlled<F, Fut>(
         self: &Arc<Self>,
         session_id: String,
         kind: LifecycleKind,
@@ -74,25 +147,39 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.admit_lifecycle(
             session_id,
             kind,
             LifecycleStart {
+                origin: if matches!(
+                    kind,
+                    LifecycleKind::Cleanup
+                        | LifecycleKind::StartupCleanup
+                        | LifecycleKind::Park
+                        | LifecycleKind::Unpark
+                        | LifecycleKind::StopSubagent
+                ) {
+                    LifecycleOrigin::Automatic
+                } else {
+                    LifecycleOrigin::Person
+                },
                 resume_workspace_id,
                 request_key,
                 control,
                 phase: LifecyclePhase::Executing,
                 move_operation_id: None,
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             work,
         )
+        .await
     }
 
-    pub(super) fn admit_lifecycle<F, Fut>(
+    pub(super) async fn admit_lifecycle<F, Fut>(
         self: &Arc<Self>,
         session_id: String,
         kind: LifecycleKind,
@@ -100,21 +187,268 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
+        self.admit_lifecycle_mode(session_id, kind, start, None, AdmissionMode::Replay, work)
+            .await
+            .map(|started| started.result)
+    }
+
+    pub(super) async fn admit_prepared_lifecycle<F, Fut>(
+        self: &Arc<Self>,
+        session_id: String,
+        kind: LifecycleKind,
+        start: LifecycleStart,
+        acceptance: Option<LifecycleAcceptance>,
+        work: F,
+    ) -> Result<StartedLifecycle>
+    where
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+    {
+        self.admit_lifecycle_mode(
+            session_id,
+            kind,
+            start,
+            acceptance,
+            AdmissionMode::FreshRequest,
+            work,
+        )
+        .await
+    }
+
+    // A typed future breaks the supervision cycle: a completed lifecycle may
+    // start its deferred cleanup through this same admission entry.
+    fn admit_lifecycle_mode<F, Fut>(
+        self: &Arc<Self>,
+        session_id: String,
+        kind: LifecycleKind,
+        start: LifecycleStart,
+        acceptance: Option<LifecycleAcceptance>,
+        mode: AdmissionMode,
+        work: F,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StartedLifecycle>> + Send + '_>>
+    where
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+    {
+        Box::pin(async move {
+            let mut revisions = self.revisions.subscribe();
+            let ticket = Arc::new(());
+            let _queued = LifecycleIntent {
+                state: self.clone(),
+                session_id: session_id.clone(),
+                ticket: ticket.clone(),
+            };
+            let preempt = start.origin == LifecycleOrigin::Person
+                && matches!(
+                    kind,
+                    LifecycleKind::ForceDestroy | LifecycleKind::StopSubagent
+                );
+            {
+                let mut owner = self.owner();
+                owner.ensure_available()?;
+                if start.origin == LifecycleOrigin::Automatic {
+                    ensure!(
+                        !owner.lifecycle_intents.contains_key(&session_id),
+                        "a person's lifecycle request is waiting for session {session_id}"
+                    );
+                }
+                let queue = owner
+                    .lifecycle_intents
+                    .entry(session_id.clone())
+                    .or_default();
+                if preempt {
+                    // Destroy is the escape hatch, ahead of ordinary FIFO intents.
+                    queue.push_front(ticket.clone());
+                } else {
+                    queue.push_back(ticket.clone());
+                }
+            }
+            let yields_to_drain = !start.holds_through_drain;
+            let mut previous = String::new();
+            let mut waited = false;
+            loop {
+                if let Some(control) = &start.control {
+                    ensure!(
+                        !control.cancelled.load(Ordering::Acquire),
+                        "operation cancelled while waiting for lifecycle admission"
+                    );
+                }
+                let waiting = {
+                    let mut owner = self.owner();
+                    owner.ensure_available()?;
+                    let first = owner
+                        .lifecycle_intents
+                        .get(&session_id)
+                        .and_then(|queue| queue.front())
+                        .is_some_and(|front| Arc::ptr_eq(front, &ticket));
+                    let child_close = kind == LifecycleKind::Suspend
+                        && owner.controller().state.subagents.contains_key(&session_id);
+                    if let Some(active) = owner
+                        .lifecycle
+                        .get_mut(&session_id)
+                        .filter(|active| active.is_running())
+                    {
+                        let identical = active
+                            .check_request(
+                                &session_id,
+                                kind,
+                                start.request_key.as_deref(),
+                                start.resume_workspace_id.as_deref(),
+                                child_close,
+                            )
+                            .is_ok();
+                        if identical {
+                            return self.admit_lifecycle_locked(
+                                &mut owner,
+                                session_id,
+                                kind,
+                                start,
+                                LifecycleAdmissionOptions {
+                                    queued: waited && yields_to_drain,
+                                    mode,
+                                    acceptance,
+                                },
+                                work,
+                            );
+                        } else {
+                            ensure!(
+                                start.origin == LifecycleOrigin::Person,
+                                "another lifecycle operation is already running for session {session_id}"
+                            );
+                            if first && preempt {
+                                (
+                                    None,
+                                    None,
+                                    Some(super::resume::LifecyclePreemption::begin(
+                                        active,
+                                        &session_id,
+                                    )),
+                                )
+                            } else {
+                                if active.origin == LifecycleOrigin::Automatic
+                                    && !active.control.is_committed()
+                                {
+                                    active.request_cancel(
+                                        &session_id,
+                                        "person's lifecycle request superseded automatic work",
+                                    );
+                                }
+                                (
+                                    Some(active.result.clone()),
+                                    Some((active.operation_id.clone(), active.kind)),
+                                    None,
+                                )
+                            }
+                        }
+                    } else if first {
+                        return self.admit_lifecycle_locked(
+                            &mut owner,
+                            session_id,
+                            kind,
+                            start,
+                            LifecycleAdmissionOptions {
+                                queued: waited && yields_to_drain,
+                                mode,
+                                acceptance,
+                            },
+                            work,
+                        );
+                    } else {
+                        (None, None, None)
+                    }
+                };
+                let (result, holder, preemption) = waiting;
+                if let Some(preemption) = preemption {
+                    waited = true;
+                    tokio::select! {
+                        biased;
+                        () = crate::upgrade::gate().wait_until_draining(), if yields_to_drain => {
+                            return Err(Refusal::precondition("daemon upgrade handoff is waiting; the queued lifecycle request was not started")
+                                .with_code(crate::upgrade::HANDOFF_REFUSAL_CODE).into());
+                        }
+                        result = preemption.wait(self, &session_id) => { result?; }
+                    }
+                    continue;
+                }
+                waited = true;
+                if let Some((operation_id, kind)) = holder {
+                    use crate::upgrade::Describe;
+                    let detail = LifecycleHold {
+                        state: Arc::downgrade(self),
+                        session_id: session_id.clone(),
+                        operation_id,
+                        kind,
+                    }
+                    .describe();
+                    let notice = format!(
+                        "Waiting for {}{}",
+                        detail.subject,
+                        detail
+                            .stage
+                            .map(|stage| format!(": {stage}"))
+                            .unwrap_or_default()
+                    );
+                    if notice != previous {
+                        self.push_notice(&session_id, notice.clone());
+                        previous = notice;
+                    }
+                }
+                let cancellation = async {
+                    match &start.control {
+                        Some(control) => {
+                            crate::recovery_gate::wait_until_cancelled(&control.cancelled).await
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    () = crate::upgrade::gate().wait_until_draining(), if yields_to_drain => {
+                        return Err(Refusal::precondition("daemon upgrade handoff is waiting; the queued lifecycle request was not started")
+                            .with_code(crate::upgrade::HANDOFF_REFUSAL_CODE).into());
+                    }
+                    _ = async { if let Some(result) = result { let _ = Self::wait_lifecycle_result(result).await; } else { std::future::pending::<()>().await; } } => {}
+                    changed = revisions.changed() => { changed?; }
+                    () = cancellation => {}
+                }
+            }
+        })
+    }
+
+    fn admit_lifecycle_locked<F, Fut>(
+        self: &Arc<Self>,
+        lifecycle_owner: &mut super::owner::RuntimeStateOwner,
+        session_id: String,
+        kind: LifecycleKind,
+        start: LifecycleStart,
+        options: LifecycleAdmissionOptions,
+        work: F,
+    ) -> Result<StartedLifecycle>
+    where
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+    {
+        let LifecycleAdmissionOptions {
+            queued,
+            mode,
+            acceptance,
+        } = options;
         let LifecycleStart {
+            origin,
             resume_workspace_id,
             request_key,
             control,
             mut phase,
             move_operation_id,
             deferrable_admission,
+            holds_through_drain: _,
         } = start;
         let mut work = Some(work);
         let mut superseded_restart_intent = None;
-        let result = {
-            let mut lifecycle_owner = self.owner();
+        let (result, receipt, acceptance) = {
             lifecycle_owner.ensure_available()?;
             ensure!(
                 matches!(
@@ -152,7 +486,8 @@ impl RuntimeState {
             // request just because its original waiter disappeared.
             let completed_other_request = lifecycle.get(&session_id).is_some_and(|active| {
                 !active.is_running()
-                    && (active.kind != kind
+                    && (mode == AdmissionMode::FreshRequest
+                        || active.kind != kind
                         || active.request_key != request_key
                         || kind == LifecycleKind::UpgradeContainer)
             });
@@ -178,41 +513,89 @@ impl RuntimeState {
                 });
             }
             if let Some(active) = lifecycle.get(&session_id) {
-                ensure!(
-                    child_close || active.request_key == request_key,
-                    "another lifecycle request with different selections is already running for session {session_id}"
-                );
-                ensure!(
-                    active.kind == kind,
-                    "another lifecycle operation is already running for session {session_id}"
-                );
-                ensure!(
-                    resume_workspace_id.is_none()
-                        || active.resume_workspace_id == resume_workspace_id,
-                    "session {session_id} is already resuming into another workspace"
-                );
-                active.result.clone()
+                active.check_request(
+                    &session_id,
+                    kind,
+                    request_key.as_deref(),
+                    resume_workspace_id.as_deref(),
+                    child_close,
+                )?;
+                (
+                    active.result.clone(),
+                    LifecycleReceipt {
+                        session_id: session_id.clone(),
+                        operation_id: active.operation_id.clone(),
+                    },
+                    active.acceptance.clone(),
+                )
             } else {
                 // A destroy is waited for by a stop or handoff, up to a bound;
                 // other lifecycles hold the handoff until they finish.
-                let admitted = if let Some(label) = deferrable_admission {
-                    crate::upgrade::activity_unless_draining(label)?
-                } else if kind == LifecycleKind::StartupCleanup {
-                    crate::upgrade::activity_unless_draining("failed startup cleanup")?
-                } else if kind == LifecycleKind::ForceDestroy {
-                    crate::upgrade::destroy_activity(&session_id)?
-                } else if kind == LifecycleKind::Unpark {
-                    crate::upgrade::activity_unless_draining("subagent unpark admission")?
-                } else if child_close {
-                    crate::upgrade::activity("subagent close admission")?
-                } else {
-                    crate::upgrade::activity("session lifecycle")?
+                // The operation's own id is also what a failure reports as its
+                // reference, so a person holding "the suspension did not finish"
+                // can find the daemon-log entry that says why.
+                let operation_reference = new_command_id("lifecycle")?;
+                // The wait notice asks the lifecycle registry for the stage
+                // when it renders; the gate keeps no copy.
+                let describer: Arc<dyn crate::upgrade::Describe> = Arc::new(LifecycleHold {
+                    state: Arc::downgrade(self),
+                    session_id: session_id.clone(),
+                    operation_id: operation_reference.clone(),
+                    kind,
+                });
+                // A create is safe to stop and starts again under the next
+                // daemon from its durable create intent, so it does not hold
+                // the handoff: the handoff stops it. Only its short commit
+                // write takes admission, under its own label.
+                let resumable = kind == LifecycleKind::Create;
+                let admit = || -> Result<crate::upgrade::Work> {
+                    Ok(if let Some(label) = deferrable_admission {
+                        crate::upgrade::activity_unless_draining_described(label, describer)?
+                    } else if kind == LifecycleKind::StartupCleanup {
+                        crate::upgrade::activity_unless_draining_described(
+                            "failed startup cleanup",
+                            describer,
+                        )?
+                    } else if kind == LifecycleKind::ForceDestroy {
+                        if queued {
+                            crate::upgrade::destroy_activity_unless_draining(&session_id)?
+                        } else {
+                            crate::upgrade::destroy_activity(&session_id)?
+                        }
+                    } else if kind == LifecycleKind::Unpark {
+                        crate::upgrade::activity_unless_draining_described(
+                            "subagent unpark admission",
+                            describer,
+                        )?
+                    } else {
+                        let label = if child_close {
+                            "subagent close admission"
+                        } else {
+                            "session lifecycle"
+                        };
+                        if queued {
+                            crate::upgrade::activity_unless_draining_described(label, describer)?
+                        } else {
+                            crate::upgrade::activity_described(label, describer)?
+                        }
+                    })
                 };
-                let upgrade_work = Arc::new(Mutex::new(Some(admitted)));
+                let _queued_create_admission = if resumable && queued {
+                    Some(crate::upgrade::activity_unless_draining(
+                        "queued create admission",
+                    )?)
+                } else {
+                    None
+                };
+                let admitted = if resumable { None } else { Some(admit()?) };
+                let upgrade_work = Arc::new(Mutex::new(admitted));
                 let control = control.unwrap_or_default();
                 // Decided under the owner lock, before anyone else can see the
                 // control, so a cancel can never be accepted first.
                 if lifecycle_starts_committed(kind, durable)
+                    // Automatic teardown completes an already accepted stop;
+                    // there is no rollback once it owns the environment.
+                    || (origin == LifecycleOrigin::Automatic && kind.is_teardown())
                     || (kind == LifecycleKind::UpgradeContainer
                         && matches!(phase, LifecyclePhase::RetiringContainer))
                 {
@@ -220,13 +603,12 @@ impl RuntimeState {
                 }
                 let cancelled = control.cancelled.clone();
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
-                // The operation's own id is also what a failure reports as its
-                // reference, so a person holding "the suspension did not finish"
-                // can find the daemon-log entry that says why.
-                let operation_reference = new_command_id("lifecycle")?;
+                let acceptance =
+                    acceptance.unwrap_or_else(|| tokio::sync::watch::channel(Some(Ok(()))).1);
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
+                        origin,
                         move_operation_id: move_operation_id.clone(),
                         restart_intent: None,
                         upgrade_work: upgrade_work.clone(),
@@ -236,6 +618,7 @@ impl RuntimeState {
                         kind,
                         started_at_epoch_seconds: epoch_seconds(),
                         active_stages: BTreeMap::new(),
+                        last_stage_change: tokio::time::Instant::now(),
                         resume_workspace_id,
                         resume_destination: None,
                         notice: None,
@@ -244,11 +627,21 @@ impl RuntimeState {
                             .then(|| MoveMutationGuard::reserve(&session_id))
                             .transpose()?,
                         result: result_rx.clone(),
+                        acceptance: acceptance.clone(),
                     },
                 );
+                if mode == AdmissionMode::FreshRequest
+                    && matches!(kind, LifecycleKind::Suspend | LifecycleKind::ForceStop)
+                {
+                    lifecycle_owner.close_requested.insert(session_id.clone());
+                }
                 self.publish_revision();
                 let state = Arc::clone(self);
                 let operation_session_id = session_id.clone();
+                let receipt = LifecycleReceipt {
+                    session_id: session_id.clone(),
+                    operation_id: operation_reference.clone(),
+                };
                 let operation = work.take().expect("new lifecycle operation has work");
                 let completed_channel = result_rx.clone();
                 tokio::spawn(async move {
@@ -263,7 +656,50 @@ impl RuntimeState {
                     // daemon's `blocking` helper is not used because it would
                     // add an admission hold of its own.
                     let cleanup_state = state.clone();
-                    let mut result = match mj_core::runtime::spawn_off_async_workers(async move {
+                    let executor = DaemonStageReportingExecutor::new(
+                        CancellableProcessExecutor::new(cancelled.clone()),
+                        operation_state.clone(),
+                        operation_id.clone(),
+                    );
+                    let foreground = async {
+                        if kind == LifecycleKind::Unpark {
+                            executor.begin_resumable_work()?;
+                        }
+                        operation_state
+                            .recovery_observer
+                            .gate
+                            .enter_foreground(
+                                &operation_id,
+                                if kind == LifecycleKind::Move
+                                    && origin == LifecycleOrigin::Automatic
+                                {
+                                    "automatic Move"
+                                } else {
+                                    kind.label()
+                                },
+                                origin,
+                                &cancelled,
+                                &executor,
+                            )
+                            .await
+                    }
+                    .await;
+                    let mut foreground_hold = None;
+                    let mut result = match foreground {
+                        // A Move cancelled before it owned the session did no
+                        // source work. It ends as it does when the cancel
+                        // lands in the startup delivery wait below: cancelled,
+                        // not failed.
+                        Err(_)
+                            if kind == LifecycleKind::Move && cancelled.load(Ordering::Acquire) =>
+                        {
+                            Ok(DaemonLifecycleResult::Done)
+                        }
+                        Err(error) => Err(LifecycleFailure::of(&error)),
+                        Ok(admission) => {
+                            foreground_hold = Some(admission.clone());
+                            let session_admission = SessionAdmission::Foreground(admission);
+                            match mj_core::runtime::spawn_off_async_workers(async move {
                         if let Some(intent_id) = superseded_restart_intent {
                             if matches!(
                                 kind,
@@ -275,8 +711,13 @@ impl RuntimeState {
                                         && intent.operation_id == intent_id
                                 })
                                 .and_then(|intent| intent.container_upgrade)
+                                && let Err(error) = plan.retire_backup_for_destroy(&operation_id, &ProcessExecutor)
                             {
-                                plan.retire_backup_for_destroy(&operation_id, &ProcessExecutor)?;
+                                if kind != LifecycleKind::ForceDestroy {
+                                    return Err(error);
+                                }
+                                tracing::warn!(session_id = %operation_id, error = format!("{error:#}"), "Destroy could not remove retained container upgrade resources");
+                                cleanup_state.push_public_notice(&operation_id, format!("Cleanup of retained container upgrade resources failed during Destroy for session {operation_id}. Resources may remain; details are in the daemon logs."));
                             }
                             cleanup_state
                                 .release_restart_intent(&operation_id, &intent_id)
@@ -302,7 +743,7 @@ impl RuntimeState {
                         } else {
                             None
                         };
-                        operation(operation_state, operation_id, cancelled).await
+                        operation(operation_state, operation_id, cancelled, session_admission).await
                     })
                     .await
                     {
@@ -313,6 +754,8 @@ impl RuntimeState {
                         Err(error) => Err(LifecycleFailure::internal(format!(
                             "daemon lifecycle task failed: {error}"
                         ))),
+                            }
+                        }
                     };
                     if matches!(
                         kind,
@@ -360,6 +803,7 @@ impl RuntimeState {
                         LifecycleKind::Suspend
                             | LifecycleKind::Restart
                             | LifecycleKind::UpgradeContainer
+                            | LifecycleKind::Create
                     ) && state
                         .owner()
                         .lifecycle
@@ -405,22 +849,33 @@ impl RuntimeState {
                         && matches!(
                             kind,
                             LifecycleKind::Suspend
+                                | LifecycleKind::ForceStop
                                 | LifecycleKind::Restart
                                 | LifecycleKind::UpgradeContainer
                         )
                     {
-                        state
-                            .record_lifecycle_failure(
-                                &operation_session_id,
-                                &operation_reference,
-                                failure,
-                                if kind == LifecycleKind::UpgradeContainer {
-                                    mj_core::state::CONTAINER_UPGRADE_FAILURE_PREFIX
-                                } else {
-                                    mj_core::state::CLOSE_FAILURE_PREFIX
-                                },
-                            )
-                            .await;
+                        if matches!(kind, LifecycleKind::Suspend | LifecycleKind::ForceStop) {
+                            state
+                                .record_failed_close(
+                                    &operation_session_id,
+                                    &operation_reference,
+                                    failure,
+                                )
+                                .await;
+                        } else {
+                            state
+                                .record_lifecycle_failure(
+                                    &operation_session_id,
+                                    &operation_reference,
+                                    failure,
+                                    if kind == LifecycleKind::UpgradeContainer {
+                                        mj_core::state::CONTAINER_UPGRADE_FAILURE_PREFIX
+                                    } else {
+                                        mj_core::state::CLOSE_FAILURE_PREFIX
+                                    },
+                                )
+                                .await;
+                        }
                     }
                     if let Err(failure) = &result
                         && matches!(
@@ -450,7 +905,12 @@ impl RuntimeState {
                     if handed_off_lifecycle {
                         tracing::info!(session_id = %operation_session_id, ?kind, "lifecycle operation yielded to the replacement daemon");
                     } else if let Err(error) = &result {
-                        tracing::warn!(session_id = %operation_session_id, ?kind, reference = %operation_reference, %error, "lifecycle operation failed");
+                        let cancel_cause = state
+                            .owner()
+                            .lifecycle
+                            .get(&operation_session_id)
+                            .and_then(|active| active.control.cancel_cause());
+                        tracing::warn!(session_id = %operation_session_id, ?kind, reference = %operation_reference, ?cancel_cause, %error, "lifecycle operation failed");
                     }
                     // Serialize final Move refusal disposition against any late
                     // startup enqueue, including cancellation before source work.
@@ -505,12 +965,14 @@ impl RuntimeState {
                         result_tx.send_replace(Some(result));
                     }
                     drop(_startup_enqueue);
+                    drop(foreground_hold);
                     // Hand off under daemon ownership even if the requesting
                     // client disconnects. The completed close remains visible
                     // until the cleanup replaces it in the lifecycle map.
                     if deferred_cleanup
-                        && let Err(error) =
-                            state.start_deferred_cleanup(operation_session_id.clone())
+                        && let Err(error) = state
+                            .start_deferred_cleanup(operation_session_id.clone())
+                            .await
                     {
                         tracing::warn!(session_id = %operation_session_id, %error, "could not start retained cleanup");
                         state.push_notice(&operation_session_id, "Container cleanup could not start; retry cleanup from the stopped session.");
@@ -521,10 +983,14 @@ impl RuntimeState {
                     }
                     state.publish_revision();
                 });
-                result_rx
+                (result_rx, receipt, acceptance)
             }
         };
-        Ok(result)
+        Ok(StartedLifecycle {
+            receipt,
+            result,
+            acceptance,
+        })
     }
 
     pub(super) async fn wait_lifecycle_result(
@@ -548,10 +1014,10 @@ impl RuntimeState {
         work: F,
     ) -> Result<DaemonLifecycleResult>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
-        let result = self.start_or_join_lifecycle(session_id, kind, work)?;
+        let result = self.start_or_join_lifecycle(session_id, kind, work).await?;
         let channel = result.clone();
         let outcome = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&channel);
@@ -568,6 +1034,33 @@ impl RuntimeState {
     }
 }
 
+/// Names a lifecycle's hold on the upgrade gate. It reads the session, kind and
+/// stage from the lifecycle registry each time, so it can never disagree with it.
+struct LifecycleHold {
+    state: std::sync::Weak<RuntimeState>,
+    session_id: String,
+    operation_id: String,
+    kind: LifecycleKind,
+}
+
+impl crate::upgrade::Describe for LifecycleHold {
+    fn describe(&self) -> crate::upgrade::HoldDetail {
+        let stages = self
+            .state
+            .upgrade()
+            .map(|state| state.lifecycle_stage_labels(&self.session_id, &self.operation_id))
+            .unwrap_or_default();
+        crate::upgrade::HoldDetail {
+            subject: format!(
+                "{} {}",
+                self.kind.label(),
+                mj_core::state::short_id(&self.session_id)
+            ),
+            stage: (!stages.is_empty()).then(|| stages.join(" + ")),
+        }
+    }
+}
+
 struct LifecycleAdmission(Arc<Mutex<Option<crate::upgrade::Work>>>);
 impl Drop for LifecycleAdmission {
     fn drop(&mut self) {
@@ -575,5 +1068,25 @@ impl Drop for LifecycleAdmission {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+    }
+}
+
+/// Arrival order lives with the lifecycle registry. Dropping a cancelled
+/// request removes its intent and wakes its successor.
+struct LifecycleIntent {
+    state: Arc<RuntimeState>,
+    session_id: String,
+    ticket: Arc<()>,
+}
+impl Drop for LifecycleIntent {
+    fn drop(&mut self) {
+        let mut owner = self.state.owner();
+        if let Some(queue) = owner.lifecycle_intents.get_mut(&self.session_id) {
+            queue.retain(|ticket| !Arc::ptr_eq(ticket, &self.ticket));
+            if queue.is_empty() {
+                owner.lifecycle_intents.remove(&self.session_id);
+            }
+        }
+        self.state.publish_revision();
     }
 }

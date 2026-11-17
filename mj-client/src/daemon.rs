@@ -1,5 +1,8 @@
 //! Authenticated local daemon protocol and client transport.
 mod chunk_bytes;
+pub mod connector;
+pub mod login_terminal;
+pub mod ssh;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
@@ -58,6 +61,19 @@ pub struct DaemonMetadata {
     /// owner, and a container daemon can report it on every platform.
     #[serde(skip)]
     pub placement: DaemonPlacement,
+}
+
+/// Process-private credentials returned by `mj daemon endpoint --json`.
+/// This is not local PID metadata and must never be written to daemon.json.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DaemonEndpoint {
+    #[serde(default)]
+    pub config_path: Option<std::path::PathBuf>,
+    pub protocol_version: u32,
+    pub build_version: String,
+    pub control_address: SocketAddr,
+    pub token: String,
+    pub instance_id: String,
 }
 
 /// Where the daemon runs, as the daemon itself reports it.
@@ -389,10 +405,14 @@ pub struct WorkspaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSessionView {
+    pub attention: mj_core::attention::SessionAttention,
+    /// Config selectors owned by the target permission policy.
+    #[serde(default)]
+    pub policy_config_keys: Vec<String>,
     pub session_id: String,
     pub projection_ordinal: u64,
     pub projection_digest: String,
-    pub operational: Option<RelayOperationalState>,
+    pub operational: Option<mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>,
     pub latest_credential_sync_signal: Option<CredentialSyncSignal>,
     pub connected: bool,
     pub error: Option<ViewError>,
@@ -412,6 +432,8 @@ impl RuntimeSessionView {
                 });
         Self {
             session_id,
+            attention: view.attention,
+            policy_config_keys: Vec::new(),
             projection_ordinal,
             projection_digest,
             operational,
@@ -480,6 +502,86 @@ pub struct ResumeSessionRequest {
     pub repository_preflight: Option<ResumeRepositorySourceReceipt>,
 }
 
+/// A lifecycle mutation whose execution belongs to the daemon after acceptance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation", content = "options")]
+pub enum SessionLifecycleRequest {
+    Suspend {
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
+    },
+    Restart {
+        session_id: String,
+        acknowledge_container_recreation: bool,
+    },
+    Resume(Box<ResumeSessionRequest>),
+    Move(Box<MoveSessionRequest>),
+    Discard {
+        session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
+    },
+    DestroyStopped {
+        session_id: String,
+        delete_branch: bool,
+    },
+    ForceDestroy {
+        session_id: String,
+        delete_branch: bool,
+    },
+}
+
+impl SessionLifecycleRequest {
+    pub fn session_id(&self) -> &str {
+        match self {
+            Self::Suspend { session_id, .. }
+            | Self::Restart { session_id, .. }
+            | Self::Discard { session_id, .. }
+            | Self::DestroyStopped { session_id, .. }
+            | Self::ForceDestroy { session_id, .. } => session_id,
+            Self::Resume(request) => &request.session_id,
+            Self::Move(request) => &request.preparation.selection.session_id,
+        }
+    }
+}
+
+/// A lost acceptance reply never proves that the daemon refused this mutation.
+#[derive(Debug)]
+pub struct LifecycleAdmissionUnconfirmed(pub String);
+
+impl std::fmt::Display for LifecycleAdmissionUnconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Could not confirm daemon acceptance for session {}; inspect session status before retrying",
+            self.0
+        )
+    }
+}
+impl std::error::Error for LifecycleAdmissionUnconfirmed {}
+
+/// Observation was lost; this says nothing about the mutation's outcome.
+#[derive(Debug)]
+pub struct LifecycleObservationUnavailable(pub LifecycleReceipt);
+
+impl std::fmt::Display for LifecycleObservationUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Observation of operation {} for session {} is unavailable; inspect session status for its current state",
+            self.0.operation_id, self.0.session_id
+        )
+    }
+}
+impl std::error::Error for LifecycleObservationUnavailable {}
+
+/// Identifies the admitted operation, independently of later work on its session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleReceipt {
+    pub session_id: String,
+    pub operation_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateSessionRequest {
@@ -517,6 +619,10 @@ pub struct CreateSessionRequest {
         deserialize_with = "mj_core::subagent::deserialize_optional_policy"
     )]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Omitted follows `[review]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<mj_core::config::SessionReview>,
@@ -528,6 +634,9 @@ pub struct CreateSessionRequest {
     /// `mj_core::state::SessionRecord::no_github_events`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -583,6 +692,13 @@ pub struct DraftPreview {
     pub saved_at: String,
 }
 
+/// One workspace's detached drafts, without their text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDrafts {
+    pub workspace_id: String,
+    pub drafts: Vec<DraftPreview>,
+}
+
 /// `Ping`, `Status`, and `Stop` form the frozen management subset: their wire
 /// encoding — together with `RequestEnvelope`, `ResponseEnvelope`,
 /// `DaemonStatus`, and `WebViewerStatus` — must never change shape, because
@@ -594,6 +710,94 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    DismissNotification {
+        session_id: String,
+        target: mj_core::attention::NotificationDismissal,
+    },
+    ProveIdentity {
+        nonce: String,
+    },
+    LoginTerminal {
+        profile_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    PreviewBuildCache {
+        machine: mj_core::config::Machine,
+    },
+    InstallMbx {
+        machine: mj_core::config::Machine,
+    },
+    PreflightNewSession {
+        request: NewSessionPreflightRequest,
+    },
+    ValidateProjectDirectory {
+        target_id: String,
+        directory: PathBuf,
+    },
+    CheckpointArchiveSizes {
+        paths: std::collections::BTreeMap<String, PathBuf>,
+    },
+    SaveSpinnerStyle {
+        style: mj_core::config::SpinnerStyle,
+    },
+    SetQuotaPreferences {
+        prefer: Vec<String>,
+    },
+    TestTarget {
+        target_id: String,
+    },
+    ProfileLoginStatuses,
+    CheckAvailability,
+    DiscoverSetup {
+        scope: crate::discovery::DetectScope,
+        machines: Vec<(String, mj_core::config::Machine)>,
+    },
+    CompletePath {
+        host: mj_core::path_completion::CompletionHost,
+        prefix: String,
+        kind: mj_core::path_completion::CompletionKind,
+    },
+    CheckProjectDirectories {
+        paths: Vec<std::path::PathBuf>,
+    },
+    DiscoverProjects {
+        request: mj_core::project_picker::ProjectDiscoveryRequest,
+    },
+    ResolveContainerPath {
+        target_id: String,
+        source: std::path::PathBuf,
+    },
+    ResolveSetupPath {
+        machine: mj_core::config::Machine,
+        source: std::path::PathBuf,
+    },
+    ValidateMountSource {
+        target_id: String,
+        source: std::path::PathBuf,
+    },
+    ValidateSessionMounts {
+        target_id: String,
+        mounts: Vec<mj_core::targets::AdditionalMount>,
+    },
+    /// Raw file fragments. Completion supplies the SHA-256 of all bytes.
+    UploadChunk {
+        #[serde(with = "chunk_bytes")]
+        bytes: Vec<u8>,
+        sha256: Option<String>,
+    },
+    InstallAttachment {
+        session_id: String,
+        reference: mj_core::attachment::AttachmentRef,
+        blob: String,
+    },
+    TranscriptionAvailable {
+        preferred_profile: String,
+    },
+    TranscribeAudio {
+        preferred_profile: String,
+        blob: String,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
@@ -649,6 +853,7 @@ pub enum DaemonAction {
     },
     Status,
     WebViewerAccess,
+    ApiCredential,
     /// The daemon host's Git commit author, which its sessions inherit.
     GitIdentity,
     /// Write the daemon host's global Git commit author.
@@ -659,6 +864,9 @@ pub enum DaemonAction {
     RecoverWebViewer(crate::web::WebViewerRecovery),
     InspectWebListener,
     ListWorkspaces,
+    /// Every workspace's detached drafts, without their text: the workspace
+    /// manager's details answer. Added in protocol 100.
+    ListWorkspaceDrafts,
     CreateWorkspace {
         name: String,
     },
@@ -678,12 +886,6 @@ pub enum DaemonAction {
     DeleteWorkspace {
         workspace_id: String,
     },
-    /// Turn this connection into a node connection (`mj_core::node`). After
-    /// the `Done` reply the daemon speaks HTTP/2 on it as the client and the
-    /// node serves.
-    NodeConnect {
-        node_id: String,
-    },
     /// Take or renew a client's attachment lease.
     Attach {
         client_id: String,
@@ -697,12 +899,11 @@ pub enum DaemonAction {
         session_id: String,
         through: u64,
     },
-    PersistDetachedSessionState {
+    PersistTerminalDraft {
         client_id: String,
-        workspace_id: String,
         session_id: String,
-        through: u64,
         owner_pid: u32,
+        revision: u64,
         draft: mj_core::storage::DetachedSessionDraft,
     },
     RecordAbandonedPrompt {
@@ -722,7 +923,8 @@ pub enum DaemonAction {
         workspace_id: String,
         layout: mj_core::workspace::ConversationLayout,
     },
-    PersistImportedSession {
+    ImportSession {
+        blob: String,
         session: Box<SessionRecord>,
         /// A project the import synthesized. The daemon writes it with the
         /// session, so a client never edits the daemon's configuration.
@@ -733,14 +935,17 @@ pub enum DaemonAction {
         session_id: String,
         title: String,
     },
+    SetSessionNotificationsIgnored {
+        session_id: String,
+        ignored: bool,
+    },
     SetSessionWorkspace {
         session_id: String,
         workspace_id: String,
     },
     SetSessionContainerSettings {
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
     },
@@ -880,10 +1085,20 @@ pub enum DaemonAction {
         workspace_id: String,
         last_session_id: Option<String>,
     },
+    /// Every host and fleet with the capacity service's latest CPU, RAM and
+    /// filesystem readings. Added in protocol 101.
+    HostCapacity,
     /// Ask the daemon's quota poller to probe now. The daemon is the only
     /// process that probes; the result arrives in the runtime feed. Added in
     /// protocol 43.
     RefreshQuota,
+    /// Probe exactly these profiles once, even disabled ones, and serve their
+    /// reports in the runtime feed. Added in protocol 99; `forced` (probe now,
+    /// off the profile's schedule, even with a fresh report) in protocol 100.
+    ProbeQuotaProfiles {
+        profile_ids: Vec<String>,
+        forced: bool,
+    },
     /// Discover eligible subagent models in the daemon, which owns the cache.
     SubagentOptions {
         profile: String,
@@ -964,6 +1179,8 @@ pub enum DaemonAction {
         session_id: String,
         resolution: Resolution,
     },
+    StartSessionLifecycle(SessionLifecycleRequest),
+    WaitSessionLifecycle(LifecycleReceipt),
     SuspendSession {
         session_id: String,
         #[serde(default)]
@@ -1044,6 +1261,32 @@ impl std::fmt::Display for DaemonRefusal {
 
 impl std::error::Error for DaemonRefusal {}
 
+/// The connection to the daemon dropped after the request was sent and before
+/// an answer arrived. The daemon may or may not have acted on it, so only a
+/// read-only request may be repeated on that evidence. Failing to connect, a
+/// protocol mismatch and a refusal are different errors and never carry this.
+#[derive(Debug)]
+pub struct DaemonTransportLost;
+
+impl std::fmt::Display for DaemonTransportLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("lost the daemon connection before it answered")
+    }
+}
+
+impl std::error::Error for DaemonTransportLost {}
+
+/// Mark a failure of the established stream as a lost transport. An error that
+/// did not come from the socket (an oversized frame, an undecodable reply)
+/// stays as it is.
+fn transport_lost(error: anyhow::Error) -> anyhow::Error {
+    if error.chain().any(|cause| cause.is::<std::io::Error>()) {
+        error.context(DaemonTransportLost)
+    } else {
+        error
+    }
+}
+
 /// An existing startup ID belongs to another immutable request. Its original
 /// work may already be accepted, so this never proves that work was refused.
 #[derive(Debug)]
@@ -1078,6 +1321,36 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    IdentityProof {
+        mac: Vec<u8>,
+    },
+    LoginTerminalReady,
+    BuildCachePreview(Option<mj_core::state::BuildCachePreview>, bool),
+    MbxInstalled(String),
+    CheckpointArchiveSizes(
+        std::collections::BTreeMap<String, std::result::Result<Option<u64>, String>>,
+    ),
+    SetupDiscovery(Box<crate::discovery::SetupDetection>),
+    Availability(
+        #[serde(deserialize_with = "deserialize_availability")]
+        crate::availability::AvailabilityChecked,
+    ),
+    ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
+    NewSessionPreflight(PreflightNew),
+    PathCompletion(mj_core::path_completion::PathCompletion),
+    ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
+    ProjectDiscovery(mj_core::project_picker::ProjectDiscovery),
+    ResolvedPath(std::path::PathBuf),
+    MountValidation(std::path::PathBuf, Option<String>),
+    SessionMountValidation(Option<(String, String)>),
+    TranscriptionAvailable(bool),
+    Transcription(String),
+    BlobUploaded(String),
+    AttachmentInstalled(mj_core::attachment::AttachmentRef),
+    LifecycleAccepted(LifecycleReceipt),
+    /// Only a captured operation result may report this failure.
+    LifecycleFailed(String),
+    LifecycleObservationUnavailable(LifecycleReceipt),
     NativeAgentHistory(mj_core::native_agent::NativeAgentHistoryPage),
     Pong,
     UpgradePending,
@@ -1092,16 +1365,23 @@ pub enum DaemonReply {
     ProjectSource(mj_core::state::ProjectSourceIdentity),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
+    ApiCredential(String),
     GitIdentity(GitIdentity),
     WebListeners(Vec<crate::web::WebListenerProcess>),
     SubagentOptions(mj_core::subagent::SubagentOptions),
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
+    /// Every workspace's detached drafts, without their text.
+    WorkspaceDrafts(Vec<WorkspaceDrafts>),
+    HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
     Snapshot(WorkspaceSnapshot),
     DashboardStartup(Box<DashboardStartup>),
     WorkspaceLayouts(WorkspaceLayouts),
     StoredSessionMetadata(StoredSessionMetadata),
-    StoredProjectionTail(Option<Box<MaterializedSession>>),
+    StoredProjectionTail(
+        #[serde(serialize_with = "crate::runtime_feed::serialize_client_projection")]
+        Option<Box<MaterializedSession>>,
+    ),
     StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
     SavedSetup(Box<Config>),
     ArchiveSpacePreview(ArchiveSpacePreview),
@@ -1525,12 +1805,18 @@ fn read_metadata_at(path: &std::path::Path) -> Result<DaemonMetadata> {
     Ok(metadata)
 }
 
-pub async fn write_frame<T: Serialize>(stream: &mut TcpStream, value: &T) -> Result<()> {
+pub async fn write_frame<T: Serialize>(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    value: &T,
+) -> Result<()> {
     let body = serde_json::to_vec(value)?;
     write_encoded_frame(stream, &body).await
 }
 
-pub async fn write_encoded_frame(stream: &mut TcpStream, body: &[u8]) -> Result<()> {
+pub async fn write_encoded_frame(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    body: &[u8],
+) -> Result<()> {
     ensure!(
         body.len() <= MAX_FRAME_BYTES,
         "daemon frame is too large: {} bytes exceeds {MAX_FRAME_BYTES}",
@@ -1542,7 +1828,9 @@ pub async fn write_encoded_frame(stream: &mut TcpStream, body: &[u8]) -> Result<
     Ok(())
 }
 
-pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> Result<T> {
+pub async fn read_frame<T: for<'de> Deserialize<'de>>(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> Result<T> {
     let length = stream.read_u32().await? as usize;
     ensure!(
         length <= MAX_FRAME_BYTES,
@@ -1593,8 +1881,10 @@ pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
 }
 
 pub struct DaemonClient {
+    ssh_lease: Option<std::sync::Arc<ssh::SshLease>>,
+    connector: Option<std::sync::Arc<connector::DaemonConnector>>,
     metadata: DaemonMetadata,
-    stream: TcpStream,
+    stream: Option<TcpStream>,
     next_request_id: u64,
 }
 
@@ -1606,8 +1896,45 @@ impl DaemonClient {
                 .context("time out connecting to Mjolnir daemon")??;
         Ok(Self {
             metadata,
-            stream,
+            stream: Some(stream),
             next_request_id: 1,
+            connector: None,
+            ssh_lease: None,
+        })
+    }
+
+    /// Connect through an SSH tunnel's local port and require the daemon to
+    /// prove it holds the token on this very connection before any request
+    /// carries the token. The tunnel may have exited since an earlier proof,
+    /// and another process may now hold its port.
+    pub(crate) async fn connect_proven(metadata: DaemonMetadata) -> Result<Self> {
+        let mut client = Self::connect(metadata).await?;
+        let mut stream = client.take_stream()?;
+        ensure!(
+            ssh::prove_stream(&mut stream, &client.metadata.token).await?,
+            "the SSH tunnel's local port {} did not prove it reaches the daemon",
+            client.metadata.address
+        );
+        client.stream = Some(stream);
+        Ok(client)
+    }
+
+    /// Connector-owned SSH origin; never inferred from daemon-host placement.
+    pub fn connector(&self) -> Option<&std::sync::Arc<connector::DaemonConnector>> {
+        self.connector.as_ref()
+    }
+
+    /// Describe the authenticated endpoint, retaining the address actually
+    /// dialed (including a container's published loopback port).
+    pub async fn endpoint(&mut self) -> Result<DaemonEndpoint> {
+        let identity = self.identity().await?;
+        Ok(DaemonEndpoint {
+            config_path: None,
+            protocol_version: self.metadata.protocol_version,
+            build_version: identity.build_version,
+            control_address: self.metadata.address,
+            token: self.metadata.token.clone(),
+            instance_id: identity.instance_id,
         })
     }
 
@@ -1615,7 +1942,12 @@ impl DaemonClient {
     /// requests must reach daemons of any protocol version, and the frozen
     /// subset encodes identically across all of them.
     pub async fn request(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        let connector = self.connector.clone();
+        let previous = self.metadata.clone();
         self.request_with_reconnect(action, || async {
+            if let Some(connector) = &connector {
+                return connector.refresh(&previous).await;
+            }
             loop {
                 if let Ok(client) = connect_existing().await {
                     return Ok(client);
@@ -1650,12 +1982,166 @@ impl DaemonClient {
         }
     }
 
+    /// Streams raw bytes on this connection. The returned blob is connection-scoped;
+    /// consume it before disconnecting. Delivery failures are never replayed.
+    pub async fn upload(
+        &mut self,
+        reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut stream = self.take_stream()?;
+        let mut digest = Sha256::new();
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buffer).await?;
+            digest.update(&buffer[..n]);
+            write_frame(
+                &mut stream,
+                &RequestEnvelope {
+                    protocol_version: self.metadata.protocol_version,
+                    request_id,
+                    token: self.metadata.token.clone(),
+                    action: DaemonAction::UploadChunk {
+                        bytes: buffer[..n].to_vec(),
+                        sha256: (n == 0).then(|| {
+                            digest
+                                .clone()
+                                .finalize()
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        }),
+                    },
+                },
+            )
+            .await?;
+            if n == 0 {
+                break;
+            }
+        }
+        let response = self.finish_exchange(stream, request_id).await?;
+        match response.result.map_err(anyhow::Error::msg)? {
+            DaemonReply::BlobUploaded(blob) => Ok(blob),
+            reply => bail!("unexpected blob upload reply {reply:?}"),
+        }
+    }
+
+    /// Upload and consume on one connection. Only explicit non-admission permits
+    /// replay; a transport error may hide acceptance and is returned to the caller.
+    pub async fn upload_and_consume<R, A>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+    {
+        self.upload_and_consume_with_reconnect(reader, action, reconnect_after_upload_refusal)
+            .await
+    }
+
+    async fn upload_and_consume_with_reconnect<R, A, F, Fut>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        mut reconnect: F,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Self>>,
+    {
+        self.upload_and_consume_observed_with_reconnect(
+            reader,
+            action,
+            &mut reconnect,
+            |_| std::future::ready(Ok(())),
+            std::future::pending(),
+        )
+        .await
+    }
+
+    /// Report each phase; cancellation is observed only during byte upload.
+    pub async fn upload_and_consume_observed<R, A, P, PF, C>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        phase: P,
+        cancel: C,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        P: FnMut(bool) -> PF,
+        PF: Future<Output = Result<()>>,
+        C: Future<Output = ()>,
+    {
+        self.upload_and_consume_observed_with_reconnect(
+            reader,
+            action,
+            reconnect_after_upload_refusal,
+            phase,
+            cancel,
+        )
+        .await
+    }
+
+    async fn upload_and_consume_observed_with_reconnect<R, A, F, Fut, P, PF, C>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        mut reconnect: F,
+        mut phase: P,
+        cancel: C,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Self>>,
+        P: FnMut(bool) -> PF,
+        PF: Future<Output = Result<()>>,
+        C: Future<Output = ()>,
+    {
+        tokio::pin!(cancel);
+        use tokio::io::AsyncSeekExt;
+        let start = reader.stream_position().await?;
+        phase(true).await?;
+        loop {
+            let blob = tokio::select! {
+                biased;
+                _ = &mut cancel => bail!("upload cancelled"),
+                result = self.upload(reader) => result?,
+            };
+            phase(false).await?;
+            let reply = self.request_once(action(blob)).await?;
+            if !matches!(reply, DaemonReply::UpgradePending) {
+                return Ok(reply);
+            }
+            phase(true).await?;
+            *self = tokio::select! {
+                biased;
+                _ = &mut cancel => bail!("upload cancelled"),
+                result = async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    reconnect().await
+                } => result?,
+            };
+            reader.seek(std::io::SeekFrom::Start(start)).await?;
+        }
+    }
+
     async fn request_once(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        let mut stream = self.take_stream()?;
         let protocol_version = self.metadata.protocol_version;
         let request_id = self.next_request_id;
         self.next_request_id += 1;
         write_frame(
-            &mut self.stream,
+            &mut stream,
             &RequestEnvelope {
                 protocol_version,
                 request_id,
@@ -1663,19 +2149,40 @@ impl DaemonClient {
                 action,
             },
         )
-        .await?;
-        let response = read_response(&mut self.stream).await?;
+        .await
+        .map_err(transport_lost)?;
+        self.finish_exchange(stream, request_id)
+            .await?
+            .result
+            .map_err(|message| anyhow::Error::new(DaemonRefusal(message)))
+    }
+
+    // The exchange owns framing until a complete, checked response arrives.
+    // Cancellation or an I/O error drops the stream instead of leaving it reusable.
+    fn take_stream(&mut self) -> Result<TcpStream> {
+        self.stream
+            .take()
+            .context("connection lost to an interrupted request")
+            .context(DaemonTransportLost)
+    }
+
+    async fn finish_exchange(
+        &mut self,
+        mut stream: TcpStream,
+        request_id: u64,
+    ) -> Result<ResponseEnvelope> {
+        let response = read_response(&mut stream).await.map_err(transport_lost)?;
         ensure!(
-            response.protocol_version == protocol_version,
+            response.protocol_version == self.metadata.protocol_version,
             "daemon changed protocol"
         );
         ensure!(
             response.request_id == request_id,
-            "daemon crossed request IDs"
+            "daemon crossed request IDs: expected {request_id}, received {}",
+            response.request_id
         );
-        response
-            .result
-            .map_err(|message| anyhow::Error::new(DaemonRefusal(message)))
+        self.stream = Some(stream);
+        Ok(response)
     }
 
     pub async fn identity(&mut self) -> Result<DaemonIdentity> {
@@ -1759,6 +2266,14 @@ impl DaemonClient {
         }
     }
 
+    /// Obtain the HTTP bearer credential from its daemon owner.
+    pub async fn api_credential(&mut self) -> Result<String> {
+        match self.request(DaemonAction::ApiCredential).await? {
+            DaemonReply::ApiCredential(token) => Ok(token),
+            reply => bail!("unexpected API credential reply: {reply:?}"),
+        }
+    }
+
     pub async fn web_access(&mut self) -> Result<crate::web::WebViewerAccess> {
         match self.request(DaemonAction::WebViewerAccess).await? {
             DaemonReply::WebViewerAccess(access) => Ok(access),
@@ -1821,12 +2336,50 @@ impl DaemonClient {
         }
     }
 
+    /// Every workspace's detached drafts, without their text.
+    pub async fn list_workspace_drafts(&mut self) -> Result<Vec<WorkspaceDrafts>> {
+        match self.request(DaemonAction::ListWorkspaceDrafts).await? {
+            DaemonReply::WorkspaceDrafts(drafts) => Ok(drafts),
+            reply => bail!("unexpected daemon workspace-drafts reply {reply:?}"),
+        }
+    }
+
+    /// The capacity service's latest reading of every host and fleet. This
+    /// reads what the daemon holds and never probes.
+    pub async fn host_capacity(&mut self) -> Result<Vec<mj_core::targets::HostCapacityRow>> {
+        match self.request(DaemonAction::HostCapacity).await? {
+            DaemonReply::HostCapacity(rows) => Ok(rows),
+            reply => bail!("unexpected host-capacity reply {reply:?}"),
+        }
+    }
+
     /// Ask the daemon to probe every profile that is not on hold. Returns when
     /// the daemon has accepted the request, not when the probes finish.
     pub async fn refresh_quota(&mut self) -> Result<()> {
         match self.request(DaemonAction::RefreshQuota).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected refresh-quota reply {reply:?}"),
+        }
+    }
+
+    /// Ask the daemon to probe exactly these profiles once, even disabled
+    /// ones. `forced` probes now, off each profile's schedule, even with a
+    /// fresh report. Returns when the daemon has queued the probes, not when
+    /// they finish; the reports arrive in the runtime feed.
+    pub async fn probe_quota_profiles(
+        &mut self,
+        profile_ids: Vec<String>,
+        forced: bool,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::ProbeQuotaProfiles {
+                profile_ids,
+                forced,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected probe-quota reply {reply:?}"),
         }
     }
 
@@ -1959,28 +2512,26 @@ impl DaemonClient {
         }
     }
 
-    pub async fn persist_detached_session_state(
+    pub async fn persist_terminal_draft(
         &mut self,
         client_id: String,
-        workspace_id: String,
         session_id: String,
-        through: u64,
         owner_pid: u32,
+        revision: u64,
         draft: mj_core::storage::DetachedSessionDraft,
     ) -> Result<()> {
         match self
-            .request(DaemonAction::PersistDetachedSessionState {
+            .request(DaemonAction::PersistTerminalDraft {
                 client_id,
-                workspace_id,
                 session_id,
-                through,
                 owner_pid,
+                revision,
                 draft,
             })
             .await?
         {
             DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected detached-session-state reply {reply:?}"),
+            reply => bail!("unexpected terminal-draft reply {reply:?}"),
         }
     }
 
@@ -2008,6 +2559,17 @@ impl DaemonClient {
         match self.request(DaemonAction::SaveSidebarSize { size }).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected sidebar-size save reply {reply:?}"),
+        }
+    }
+
+    /// Write the load-balancing preference order, most preferred first.
+    pub async fn set_quota_preferences(&mut self, prefer: Vec<String>) -> Result<()> {
+        match self
+            .request(DaemonAction::SetQuotaPreferences { prefer })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected quota-preference save reply {reply:?}"),
         }
     }
 
@@ -2045,15 +2607,17 @@ impl DaemonClient {
         }
     }
 
-    pub async fn persist_imported_session(
+    pub async fn import_session(
         &mut self,
         session: SessionRecord,
         bundle: Option<ImportedBundle>,
+        reader: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin),
     ) -> Result<()> {
         match self
-            .request(DaemonAction::PersistImportedSession {
-                session: Box::new(session),
-                bundle,
+            .upload_and_consume(reader, |blob| DaemonAction::ImportSession {
+                blob,
+                session: Box::new(session.clone()),
+                bundle: bundle.clone(),
             })
             .await?
         {
@@ -2069,6 +2633,23 @@ impl DaemonClient {
         {
             DaemonReply::Text(title) => Ok(title),
             reply => bail!("unexpected session-title reply {reply:?}"),
+        }
+    }
+
+    pub async fn set_session_notifications_ignored(
+        &mut self,
+        session_id: String,
+        ignored: bool,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::SetSessionNotificationsIgnored {
+                session_id,
+                ignored,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected notifications-ignored reply {reply:?}"),
         }
     }
 
@@ -2092,16 +2673,14 @@ impl DaemonClient {
     pub async fn set_session_container_settings(
         &mut self,
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
     ) -> Result<()> {
         match self
             .request(DaemonAction::SetSessionContainerSettings {
                 session_id,
-                cpus,
-                memory,
+                resource_allocation,
                 mounts,
                 mount_history,
             })
@@ -2621,10 +3200,10 @@ impl DaemonClient {
         }
     }
 
-    /// Ask the daemon to review the turn this session just finished.
+    /// Ask the daemon to review committed work through the push gate.
     ///
-    /// The refusal is a sentence for a person -- "prompts are queued", "set
-    /// [review] profile in config.toml" -- so it travels as text rather than
+    /// The refusal includes how to proceed, such as committing tracked
+    /// changes or choosing a harness with push-gate support. It travels as text rather than
     /// as a code every surface would have to translate.
     pub async fn start_turn_review(&mut self, session_id: String) -> Result<()> {
         match self
@@ -2632,24 +3211,7 @@ impl DaemonClient {
             .await?
         {
             DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected turn-review reply {reply:?}"),
-        }
-    }
-
-    pub async fn resolve_turn_review(
-        &mut self,
-        session_id: String,
-        resolution: Resolution,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::ResolveTurnReview {
-                session_id,
-                resolution,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected turn-review resolution reply {reply:?}"),
+            reply => bail!("unexpected review reply {reply:?}"),
         }
     }
 
@@ -2715,6 +3277,54 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected background task stop reply {reply:?}"),
+        }
+    }
+
+    /// Submit once and retain the receipt; a lost reply does not permit replay.
+    pub async fn start_session_lifecycle(
+        &mut self,
+        request: SessionLifecycleRequest,
+    ) -> Result<LifecycleReceipt> {
+        let session_id = request.session_id().to_owned();
+        let reply = self
+            .request(DaemonAction::StartSessionLifecycle(request))
+            .await
+            .map_err(|error| {
+                if error.is::<DaemonRefusal>() {
+                    error
+                } else {
+                    anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id.clone()))
+                        .context(error)
+                }
+            })?;
+        match reply {
+            DaemonReply::LifecycleAccepted(receipt) => Ok(receipt),
+            reply => Err(
+                anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id))
+                    .context(format!("unexpected lifecycle acceptance reply {reply:?}")),
+            ),
+        }
+    }
+
+    /// Observe exactly this operation. Dropping the observer never cancels it.
+    pub async fn wait_session_lifecycle(
+        &mut self,
+        receipt: LifecycleReceipt,
+    ) -> Result<DaemonReply> {
+        let reply = self
+            .request(DaemonAction::WaitSessionLifecycle(receipt.clone()))
+            .await
+            .map_err(|error| {
+                anyhow::Error::new(LifecycleObservationUnavailable(receipt.clone())).context(error)
+            })?;
+        match reply {
+            reply @ (DaemonReply::Done | DaemonReply::MoveOutcome(_)) => Ok(reply),
+            DaemonReply::LifecycleFailed(detail) => Err(DaemonRefusal(detail).into()),
+            DaemonReply::LifecycleObservationUnavailable(receipt) => {
+                Err(LifecycleObservationUnavailable(receipt).into())
+            }
+            reply => Err(anyhow::Error::new(LifecycleObservationUnavailable(receipt))
+                .context(format!("unexpected lifecycle completion reply {reply:?}"))),
         }
     }
 
@@ -2792,9 +3402,14 @@ impl DaemonClient {
         }
     }
 
+    /// Wait for a session's creation to end. Answered from durable state, so
+    /// any daemon gives the same answer; the wait is read-only and repeatable.
+    /// One attempt with no internal reconnect: a daemon that stops drops the
+    /// connection, which carries [`DaemonTransportLost`], and the caller
+    /// starts the next daemon and asks again.
     pub async fn wait_create_session(&mut self, session_id: String) -> Result<()> {
         match self
-            .request(DaemonAction::WaitCreateSession { session_id })
+            .request_once(DaemonAction::WaitCreateSession { session_id })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -2899,10 +3514,10 @@ impl DaemonClient {
 }
 
 pub async fn connect_existing() -> Result<DaemonClient> {
-    let metadata = tokio::task::spawn_blocking(read_metadata)
+    connector::DaemonConnector::shared()
+        .await?
+        .connect_existing()
         .await
-        .context("read daemon metadata task failed")??;
-    DaemonClient::connect(metadata).await
 }
 
 /// A handle to whatever daemon the metadata file advertises, regardless of its
@@ -3003,7 +3618,39 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
 // SessionReview::Inherit adds a value older API clients cannot deserialize.
-pub const PROTOCOL_VERSION: u32 = 82;
+// Client views no longer decode forwarding phases or turn-review resolutions;
+// reviewer capture actions no longer carry turn scope or baselines.
+// RuntimeSessionView carries policy-owned config keys; older strict readers reject them.
+// Terminal draft persistence carries per-client revisions and clear tombstones.
+// The host node is gone: NodeConnect is no longer an action.
+// Lifecycle submission acknowledges ownership separately from completion.
+// Clients obtain the HTTP API credential over control with ApiCredential.
+// The dashboard's path, project and preflight work are daemon actions, and
+// closing a cancellable action's connection cancels it.
+// Version 91: unauthenticated nonce proof before SSH tunnel credentials.
+// Authenticated chunked client uploads and daemon-owned attachment installation.
+// Daemon-owned voice credential discovery and uploaded-audio transcription.
+// Version 92: streamed uploads, client imports and daemon voice actions.
+// Version 93: Antigravity harness identities in session and profile snapshots.
+// Version 94: served unread attention, notification dismissal targets and
+// unread frontiers.
+// Version 95: authenticated daemon-owned login terminal streams.
+// Version 95: milestone-4 setup discovery, availability, login status and machine actions.
+// Version 97: the daemon decides which sessions are notifications.
+// Version 98: container settings use the single resource allocation.
+// Version 99: one-shot quota probes for profiles outside the enabled set.
+// Version 100: a one-shot quota probe can be forced off the profile's
+// schedule; the daemon answers one all-workspaces draft listing.
+// Version 101: the daemon answers the capacity service's per-host readings.
+// Version 102: review views carry the writing_brief phase and brief-writer role.
+// Version 103: configuration carries the top-level `[images]` section (project
+// images built by `mj image build`), which older clients' strict config reader
+// rejects.
+// Version 104: clients read configuration keys they have no field for, so a
+// configuration key added later needs no protocol version of its own; only
+// the configuration file refuses a key no field reads. `SubagentChoice` is
+// the exception and still refuses unknown keys everywhere.
+pub const PROTOCOL_VERSION: u32 = 104;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3084,6 +3731,114 @@ impl DaemonClient {
     }
 }
 
+impl DaemonAction {
+    /// Disposable machine work uses dedicated connections. Closing one or
+    /// handing off the daemon cancels it; interrupted installs can be rerun.
+    pub fn is_cancellable_machine_action(&self) -> bool {
+        if let Self::PreflightNewSession { request } = self
+            && !request.remote_repairs.is_empty()
+        {
+            return false;
+        }
+        matches!(
+            self,
+            Self::InstallMbx { .. }
+                | Self::PreviewBuildCache { .. }
+                | Self::CheckpointArchiveSizes { .. }
+                | Self::TestTarget { .. }
+                | Self::ProfileLoginStatuses
+                | Self::CheckAvailability
+                | Self::DiscoverSetup { .. }
+                | Self::PreflightNewSession { .. }
+                | Self::ValidateProjectDirectory { .. }
+                | Self::CompletePath { .. }
+                | Self::CheckProjectDirectories { .. }
+                | Self::DiscoverProjects { .. }
+                | Self::ResolveContainerPath { .. }
+                | Self::ResolveSetupPath { .. }
+                | Self::ValidateMountSource { .. }
+                | Self::ValidateSessionMounts { .. }
+        )
+    }
+}
+
+/// One configured repository's network clone and publication destinations.
+/// URLs have already been passed through the shared display sanitizer before
+/// they reach a phone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightRepository {
+    pub id: String,
+    pub fetch_url: String,
+    pub default_branch: String,
+    pub push_urls: Vec<String>,
+}
+
+/// What a preflight found. Isolated sessions expose their complete network
+/// source plan so the person can review it before creation. Raw-local targets
+/// leave the plan empty because they use the selected checkout directly;
+/// isolated targets set `local_changes_excluded` to make the copy boundary
+/// explicit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightNew {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub managed_worktree: mj_core::state::ManagedWorktreeOptions,
+    #[serde(default)]
+    pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    #[serde(default)]
+    pub dirty_repositories: Vec<String>,
+    #[serde(default)]
+    pub remote_repositories: Vec<PreflightRepository>,
+    pub local_changes_excluded: bool,
+    /// Why creating this session turns its review off, when it will.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewSessionPreflightRequest {
+    #[serde(default)]
+    pub additional_mounts: Vec<mj_core::targets::AdditionalMount>,
+    #[serde(default)]
+    pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    #[serde(default)]
+    pub workspace_id: String,
+    pub profile_id: String,
+    pub bundle_id: String,
+    pub target_id: String,
+    #[serde(default)]
+    pub project_directory: Option<PathBuf>,
+}
+
+/// Domain-separated proof shared by the daemon and SSH transport.
+pub fn identity_proof(token: &str, nonce: &str) -> hmac::Hmac<sha2::Sha256> {
+    use hmac::Mac;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts arbitrary key lengths");
+    mac.update(b"mj-daemon-identity-v1");
+    mac.update(nonce.as_bytes());
+    mac
+}
+
+async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
+    loop {
+        if let Ok(client) = connect_existing().await {
+            return Ok(client);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn deserialize_availability<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<crate::availability::AvailabilityChecked, D::Error> {
+    mj_core::config::with_environment_sources_only(|| serde::Deserialize::deserialize(deserializer))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3138,6 +3893,179 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let error = read_metadata_at(&path).unwrap_err();
         assert!(daemon_not_running(&error).is_none());
+    }
+
+    // Hard-won: #1566: a cancelled request left its reply for the next request on a reused daemon connection.
+    #[tokio::test]
+    async fn cancelled_request_cannot_reuse_a_complete_or_partial_response() {
+        // Cancel before the reply, within its length header, within its body,
+        // and between fragments of a chunked response.
+        for prefix in [0, 2, 8, usize::MAX] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let metadata = cancellation_metadata(listener.local_addr().unwrap());
+            let (received, waiting) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: ping.protocol_version,
+                        request_id: ping.request_id,
+                        result: Ok(DaemonReply::Done),
+                    },
+                )
+                .await
+                .unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(request.action, DaemonAction::Identity));
+                let response = ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::Done),
+                };
+                let body = serde_json::to_vec(&response).unwrap();
+                let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+                frame.extend(body);
+                let prefix = if prefix == usize::MAX {
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: request.protocol_version,
+                            request_id: request.request_id,
+                            result: Ok(DaemonReply::ReplyChunk {
+                                bytes: vec![b'{'],
+                                finished: false,
+                            }),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    0
+                } else {
+                    stream.write_all(&frame[..prefix]).await.unwrap();
+                    prefix
+                };
+                received.send(()).unwrap();
+                released.await.unwrap();
+                // Cancellation may already have closed the socket. Either result
+                // is valid; the client must never consume this abandoned reply.
+                let _late_reply = stream.write_all(&frame[prefix..]).await;
+            });
+            let mut client = DaemonClient::connect(metadata).await.unwrap();
+            client.request(DaemonAction::Ping).await.unwrap();
+            {
+                let request = client.identity();
+                tokio::pin!(request);
+                tokio::select! {
+                    biased;
+                    result = &mut request => panic!("reply was not released: {result:?}"),
+                    result = waiting => result.unwrap(),
+                }
+            }
+            release.send(()).unwrap();
+            server.await.unwrap();
+            let error = client.request(DaemonAction::Ping).await.unwrap_err();
+            assert!(format!("{error:#}").contains("connection lost to an interrupted request"));
+            assert!(error.downcast_ref::<DaemonTransportLost>().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_upload_cannot_reuse_its_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = cancellation_metadata(listener.local_addr().unwrap());
+        let (received, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut total = 0;
+            while total < 128 * 1024 {
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                let DaemonAction::UploadChunk { bytes, sha256 } = request.action else {
+                    panic!("expected upload chunk");
+                };
+                assert!(sha256.is_none());
+                total += bytes.len();
+            }
+            received.send(()).unwrap();
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        });
+        let (mut writer, mut reader) = tokio::io::duplex(128 * 1024);
+        writer.write_all(&vec![42; 128 * 1024]).await.unwrap();
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        {
+            let upload = client.upload(&mut reader);
+            tokio::pin!(upload);
+            tokio::select! {
+                result = &mut upload => panic!("upload source remains open: {result:?}"),
+                result = waiting => result.unwrap(),
+            }
+        }
+        let error = client.request(DaemonAction::Ping).await.unwrap_err();
+        assert!(format!("{error:#}").contains("connection lost to an interrupted request"));
+        server.await.unwrap();
+    }
+
+    fn cancellation_metadata(address: std::net::SocketAddr) -> DaemonMetadata {
+        DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address,
+            token: "cancelled-exchange".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        }
+    }
+
+    /// Only a connection that dropped after the request was sent is marked as
+    /// a lost transport; a daemon's answer, even an error, is not.
+    #[tokio::test]
+    async fn only_a_connection_dropped_after_the_request_is_marked_as_lost() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "transport-lost-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            write_frame(
+                &mut stream,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Err("create failed: clone refused".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+            // The second request is read and then the connection is dropped.
+            let _: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+        });
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let refused = client
+            .wait_create_session("session-1".into())
+            .await
+            .unwrap_err();
+        assert!(refused.downcast_ref::<DaemonRefusal>().is_some());
+        assert!(refused.downcast_ref::<DaemonTransportLost>().is_none());
+        let dropped = client
+            .wait_create_session("session-1".into())
+            .await
+            .unwrap_err();
+        assert!(dropped.downcast_ref::<DaemonTransportLost>().is_some());
+        assert!(dropped.downcast_ref::<DaemonRefusal>().is_none());
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -3385,6 +4313,130 @@ mod tests {
         server.await.unwrap();
     }
 
+    // Hard-won: #1514: a refused consumer reused a blob from the old connection.
+    #[tokio::test]
+    async fn refused_blob_consumer_reuploads_before_single_acceptance() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let bytes = vec![42; 192 * 1024];
+        let expected = bytes.clone();
+        let server = tokio::spawn(async move {
+            let mut accepted = 0;
+            for attempt in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut received: Vec<u8> = Vec::new();
+                let upload = loop {
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                    let DaemonAction::UploadChunk { bytes, sha256 } = &request.action else {
+                        panic!("expected upload before consuming action");
+                    };
+                    received.extend(bytes);
+                    if sha256.is_some() {
+                        break request;
+                    }
+                };
+                assert_eq!(received, expected);
+                let blob = format!("connection-{attempt}");
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: upload.protocol_version,
+                        request_id: upload.request_id,
+                        result: Ok(DaemonReply::BlobUploaded(blob.clone())),
+                    },
+                )
+                .await
+                .unwrap();
+                let consume: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                let DaemonAction::InstallAttachment { blob: actual, .. } = consume.action else {
+                    panic!("expected consumer");
+                };
+                assert_eq!(actual, blob);
+                if attempt == 2 {
+                    continue;
+                } // Lost ACK must not reconnect or replay.
+                let reply = if attempt == 0 || attempt == 3 {
+                    DaemonReply::UpgradePending
+                } else {
+                    accepted += 1;
+                    DaemonReply::Done
+                };
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: consume.protocol_version,
+                        request_id: consume.request_id,
+                        result: Ok(reply),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            assert_eq!(accepted, 1);
+        });
+        let reference = mj_core::attachment::AttachmentRef {
+            sha256: "a".repeat(64),
+            mime_type: "image/png".into(),
+            size: bytes.len(),
+            width: 1,
+            height: 1,
+        };
+        let action = |blob| DaemonAction::InstallAttachment {
+            session_id: "session".into(),
+            reference: reference.clone(),
+            blob,
+        };
+        let mut reader = std::io::Cursor::new(bytes);
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let reply = client
+            .upload_and_consume_with_reconnect(&mut reader, action, || {
+                DaemonClient::connect(metadata.clone())
+            })
+            .await
+            .unwrap();
+        assert!(matches!(reply, DaemonReply::Done));
+        reader.set_position(0);
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        assert!(
+            client
+                .upload_and_consume_with_reconnect(&mut reader, action, || async {
+                    panic!("lost acknowledgement cannot authorize replay");
+                })
+                .await
+                .is_err()
+        );
+        // Hard-won: af709d6e2: cancellation was ignored during refused-upload reconnection.
+        reader.set_position(0);
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let reconnecting = tokio::sync::Notify::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.upload_and_consume_observed_with_reconnect(
+                &mut reader,
+                action,
+                || async {
+                    reconnecting.notify_one();
+                    std::future::pending::<Result<DaemonClient>>().await
+                },
+                |_| std::future::ready(Ok(())),
+                reconnecting.notified(),
+            ),
+        )
+        .await
+        .expect("cancellation must interrupt reconnection");
+        assert!(result.unwrap_err().to_string().contains("upload cancelled"));
+        server.await.unwrap();
+    }
+
     // Hard-won: 25fee3db784d: protocol-mismatch advice omitted which installed mj the user ran
     #[test]
     fn unsupported_protocol_message_names_both_binaries_and_versions() {
@@ -3438,5 +4490,105 @@ mod tests {
             message.contains("this client runs /home/dev/.cargo/bin/mj (version 2.9.0)"),
             "{message}"
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_lifecycle_observation_distinguishes_disconnect_from_operation_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "lifecycle-observation".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let receipt = LifecycleReceipt {
+            session_id: "observed-session".into(),
+            operation_id: "accepted-operation".into(),
+        };
+        let server = tokio::spawn(async move {
+            for phase in 0..5 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(
+                    (&request.action, phase),
+                    (DaemonAction::WaitSessionLifecycle(_), 0 | 1 | 4)
+                        | (DaemonAction::StartSessionLifecycle(_), 2 | 3)
+                ));
+                if matches!(phase, 1 | 3 | 4) {
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: request.protocol_version,
+                            request_id: request.request_id,
+                            result: if phase == 4 {
+                                Ok(DaemonReply::LifecycleFailed(
+                                    "checkpoint verification failed".into(),
+                                ))
+                            } else {
+                                Err("daemon is shutting down; retry to reach a fresh daemon".into())
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let error = client
+            .wait_session_lifecycle(receipt.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<LifecycleObservationUnavailable>()
+                .unwrap()
+                .0,
+            receipt
+        );
+        drop(client);
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let error = client
+            .wait_session_lifecycle(receipt.clone())
+            .await
+            .unwrap_err();
+        assert!(error.is::<LifecycleObservationUnavailable>());
+        assert!(format!("{error:#}").contains("daemon is shutting down"));
+        drop(client);
+        for disconnected in [true, false] {
+            let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+            let error = client
+                .start_session_lifecycle(SessionLifecycleRequest::Suspend {
+                    session_id: "observed-session".into(),
+                    acknowledge_unpublished_work: true,
+                    ignore_nested_repositories: false,
+                })
+                .await
+                .unwrap_err();
+            if disconnected {
+                assert_eq!(
+                    error
+                        .downcast_ref::<LifecycleAdmissionUnconfirmed>()
+                        .unwrap()
+                        .0,
+                    "observed-session"
+                );
+                assert!(!error.is::<DaemonRefusal>());
+            } else {
+                assert!(error.is::<DaemonRefusal>());
+                assert!(!error.is::<LifecycleAdmissionUnconfirmed>());
+            }
+        }
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let error = client.wait_session_lifecycle(receipt).await.unwrap_err();
+        assert!(error.is::<DaemonRefusal>());
+        assert!(!error.is::<LifecycleObservationUnavailable>());
+        assert!(error.to_string().contains("checkpoint verification failed"));
+        drop(client);
+        server.await.unwrap();
     }
 }

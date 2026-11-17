@@ -21,9 +21,10 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 const INSTALL_LOCK_FILE: &str = ".install.lock";
 const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+// Bounds a harness command that hangs, including version probes; a slow
+// container start must not fail preparation, and the user can cancel it.
 const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_NODE_DIST_URL: &str = "https://nodejs.org/dist";
 const ARTIFACT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
@@ -99,7 +100,7 @@ pub fn spawn_gc_on(
             interval.tick().await;
             let root = root.clone();
             let result = tokio::task::spawn_blocking(move || {
-                gc_harness_root(&root.join(harness.id()), pin(harness).install_id)
+                collect_obsolete_installs(&root.join(harness.id()), pin(harness).install_id)
             })
             .await;
             match result {
@@ -163,9 +164,10 @@ impl Located {
 /// where a harness comes from; sessions, the model-discovery probe, `mj login`
 /// and quota checks all ask it.
 ///
-/// `environment` is already resolved: the caller merged the account's login
-/// environment into it, so this never starts a login shell. `command` and
-/// `args` are the launch the controller described. A command
+/// `environment` is already resolved: worker callers include the account's
+/// login environment, while interactive login callers pass their terminal
+/// environment. This function never starts a login shell. `command` and `args`
+/// are the launch the controller described. A command
 /// that is not Mjolnir's built-in launch ([`crate::harness_runtime::fallback_launch`]
 /// or a bare npm bridge name) is the profile's own and is kept as given.
 ///
@@ -186,6 +188,9 @@ pub async fn locate(
     let bridge = npm_bridge(harness).filter(|bridge| bridge.matches_launcher(command, args));
     let built_in = bridge.is_some()
         || crate::harness_runtime::is_fallback_launch(harness, execution_policy, command, args);
+    if harness == HarnessKind::Antigravity && !built_in {
+        return Ok(Located::unchosen(command, args));
+    }
     match policy {
         HarnessRuntimePolicy::Image if built_in => {
             locate_in_image(harness, execution_policy, environment).await
@@ -201,6 +206,27 @@ pub async fn locate(
                 .map(Located::managed)
         }
         HarnessRuntimePolicy::Ambient if !built_in => Ok(Located::unchosen(command, args)),
+        HarnessRuntimePolicy::Ambient if harness == HarnessKind::Antigravity => {
+            if let Some(program) =
+                crate::program_path::find_antigravity_program(environment).await?
+                && antigravity_matches_pin(&program, environment).await?
+            {
+                return Ok(Located {
+                    command: program.clone(),
+                    args: native_acp_args(harness, execution_policy, environment)?,
+                    environment: BTreeMap::from([(
+                        "AGY_CLI_DISABLE_AUTO_UPDATE".into(),
+                        "true".into(),
+                    )]),
+                    entrypoint: Some(program.clone()),
+                    cli_entrypoint: Some(program),
+                    managed: None,
+                });
+            }
+            resolve_with_environment(harness, execution_policy, environment)
+                .await
+                .map(Located::managed)
+        }
         HarnessRuntimePolicy::Ambient => {
             if let Some(bridge) = bridge {
                 if let Some(selected) = compatible_bridge(harness, bridge, environment).await? {
@@ -232,6 +258,38 @@ pub async fn locate(
     }
 }
 
+fn native_acp_args(
+    harness: HarnessKind,
+    policy: ExecutionPolicy,
+    environment: &BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    let mut args: Vec<String> = harness
+        .bridge_args(policy)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    args.extend(harness.home_cli_args_from_environment(environment)?);
+    Ok(args)
+}
+
+async fn antigravity_matches_pin(
+    program: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<bool> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .arg("--version")
+        .env_clear()
+        .envs(environment)
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+    let output = crate::subprocess::capture(&mut command)
+        .await
+        .context("check target agy version")?;
+    Ok(output.status.success()
+        && String::from_utf8_lossy(&output.stdout).trim()
+            == crate::harness_runtime::ANTIGRAVITY_VERSION)
+}
+
 /// The image's own programs for `harness`, by the names the agent-dev image
 /// installs on `PATH`: the ACP bridge, the native harness the launch runs, and
 /// the harness's command-line program.
@@ -243,6 +301,7 @@ fn image_programs(harness: HarnessKind) -> (&'static str, &'static str, &'static
         HarnessKind::Kimi => ("kimi", "kimi", "kimi"),
         HarnessKind::Grok => ("grok", "grok", "grok"),
         HarnessKind::OpenCode => ("opencode", "opencode", "opencode"),
+        HarnessKind::Antigravity => ("agy", "agy", "agy"),
         HarnessKind::Dsh => ("dsh-acp", "dsh-acp", "dsh-acp"),
     }
 }
@@ -306,7 +365,7 @@ async fn locate_in_image(
         HarnessKind::Dsh => {
             let mut probe = tokio::process::Command::new(&bridge);
             probe.arg("--version").env_clear().envs(environment);
-            let output = crate::subprocess::run_bounded(&mut probe, 4096, Duration::from_secs(10))
+            let output = crate::subprocess::run_bounded(&mut probe, 4096, HARNESS_COMMAND_TIMEOUT)
                 .await
                 .context("check the image's dsh-acp version")?;
             let reported = String::from_utf8_lossy(&output.stdout);
@@ -329,27 +388,38 @@ async fn locate_in_image(
                 ],
             )
         }
+        HarnessKind::Antigravity => {
+            ensure!(
+                antigravity_matches_pin(&bridge, environment).await?,
+                "the daemon's image must provide agy {}; use an agent-dev image of this release",
+                crate::harness_runtime::ANTIGRAVITY_VERSION
+            );
+            (
+                bridge,
+                native_acp_args(harness, execution_policy, environment)?,
+            )
+        }
         HarnessKind::Kimi | HarnessKind::Grok => (
             bridge,
-            harness
-                .bridge_args(execution_policy)
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            native_acp_args(harness, execution_policy, environment)?,
         ),
     };
     Ok(Located {
         command,
         args,
-        environment: BTreeMap::new(),
+        environment: if harness == HarnessKind::Antigravity {
+            BTreeMap::from([("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into())])
+        } else {
+            BTreeMap::new()
+        },
         entrypoint: Some(entrypoint),
         cli_entrypoint: Some(cli),
         managed: None,
     })
 }
 
-/// The target's `bridge` on `PATH` when it is usable: present, and for Codex,
-/// the pinned version.
+/// The target's `bridge` on `PATH` when it is usable: present, and for Codex
+/// and Claude, the pinned version their worker-side protocol handling requires.
 async fn compatible_bridge(
     harness: HarnessKind,
     bridge: crate::harness_runtime::NpmBridge,
@@ -363,7 +433,7 @@ async fn compatible_bridge(
     let Some(selected) = selected else {
         return Ok(None);
     };
-    if harness != HarnessKind::Codex {
+    if !matches!(harness, HarnessKind::Codex | HarnessKind::Claude) {
         return Ok(Some(selected));
     }
     let mut probe = tokio::process::Command::new(&selected);
@@ -371,12 +441,16 @@ async fn compatible_bridge(
     if let Some(home) = environment.get("HOME") {
         probe.current_dir(home);
     }
-    let output = crate::subprocess::run_bounded(&mut probe, 64 * 1024, Duration::from_secs(10))
+    let output = crate::subprocess::run_bounded(&mut probe, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
         .await
-        .context("check installed Codex bridge version")?;
+        .with_context(|| format!("check installed {} bridge version", harness.display_name()))?;
+    let expected = if harness == HarnessKind::Claude {
+        bridge.version.to_owned()
+    } else {
+        format!("{} {}", bridge.package, bridge.version)
+    };
     let compatible = output.status.success()
-        && String::from_utf8_lossy(&output.stdout).trim_end_matches('\n')
-            == format!("{} {}", bridge.package, bridge.version);
+        && String::from_utf8_lossy(&output.stdout).trim_end_matches('\n') == expected;
     Ok(compatible.then_some(selected))
 }
 
@@ -391,7 +465,11 @@ fn target_native_harness_is_available(
         HarnessKind::Kimi => "kimi",
         HarnessKind::Grok => "grok",
         HarnessKind::OpenCode => "opencode",
-        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse | HarnessKind::Dsh => {
+        HarnessKind::Codex
+        | HarnessKind::Claude
+        | HarnessKind::Muse
+        | HarnessKind::Dsh
+        | HarnessKind::Antigravity => {
             return Ok(false);
         }
     };
@@ -548,9 +626,7 @@ async fn resolve_at_async(
                     return Err(error).context("lock invalid managed harness for repair");
                 }
             };
-            std::fs::remove_dir_all(&install).with_context(|| {
-                format!("remove incomplete managed harness {}", install.display())
-            })?;
+            set_aside_incomplete(&harness_root, &install, "managed harness")?;
         }
         install_into(&harness_root, &install, harness, selected, &environment).await?;
     }
@@ -603,6 +679,9 @@ async fn resolve_at_async(
     if harness == HarnessKind::OpenCode {
         launch_environment.insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
     }
+    if harness == HarnessKind::Antigravity {
+        launch_environment.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into());
+    }
     // Muse launches its adapter the way the other npm bridges do: the target's
     // own `muse-acp` when present, otherwise npx fetches the pinned package.
     let (command, args) = if harness == HarnessKind::Muse {
@@ -632,11 +711,7 @@ async fn resolve_at_async(
     } else {
         (
             install.join(selected.entrypoint),
-            harness
-                .bridge_args(execution_policy)
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            native_acp_args(harness, execution_policy, &environment)?,
         )
     };
     Ok(ManagedHarness {
@@ -654,7 +729,9 @@ async fn resolve_at_async(
 
 async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> {
     let started = Instant::now();
+    let cancellation = crate::subprocess::preparation_cancellation();
     loop {
+        anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
         let result = if shared {
             file.try_lock_shared()
         } else {
@@ -673,10 +750,18 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
                 INSTALL_LOCK_TIMEOUT.as_secs()
             );
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+            _ = cancellation.cancelled() => bail!("preparation cancelled"),
+        }
     }
 }
 
+/// Delete the staging and set-aside directories earlier installers and repairs
+/// left in `harness_root`. The caller holds the install lock, so no installer
+/// is still writing into them. A directory that will not go is reported and
+/// retried by the next resolution; it must not block a launch, because
+/// nothing but this sweep ever looks at it.
 fn remove_abandoned_staging(harness_root: &Path) -> Result<()> {
     for entry in std::fs::read_dir(harness_root)
         .with_context(|| format!("scan managed harness staging in {}", harness_root.display()))?
@@ -688,12 +773,36 @@ fn remove_abandoned_staging(harness_root: &Path) -> Result<()> {
         if !name.starts_with(".install-") || !entry.file_type()?.is_dir() {
             continue;
         }
-        std::fs::remove_dir_all(entry.path()).with_context(|| {
-            format!(
-                "remove abandoned harness staging {}",
-                entry.path().display()
-            )
-        })?;
+        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+            tracing::warn!(%error, path = %entry.path().display(), "could not remove abandoned harness staging");
+        }
+    }
+    Ok(())
+}
+
+/// Take an unusable installation out of the way so a fresh one can be
+/// published at `install`. The caller holds the install lock and the
+/// installation's exclusive lease, so no session runs from it and no installer
+/// writes into it. The directory is renamed to a unique sibling that
+/// [`remove_abandoned_staging`] owns, then deleted; `rename` is atomic, so
+/// nothing else that still names `install` (an older release's collector, for
+/// one) can reach the tree being deleted. A directory that cannot be deleted
+/// now is left for the next sweep.
+fn set_aside_incomplete(parent: &Path, install: &Path, what: &str) -> Result<()> {
+    let aside = tempfile::Builder::new()
+        .prefix(".install-abandoned-")
+        .tempdir_in(parent)
+        .with_context(|| format!("create set-aside directory in {}", parent.display()))?
+        .keep();
+    std::fs::rename(install, &aside).with_context(|| {
+        format!(
+            "set aside incomplete {what} {} as {}",
+            install.display(),
+            aside.display()
+        )
+    })?;
+    if let Err(error) = std::fs::remove_dir_all(&aside) {
+        tracing::warn!(%error, path = %aside.display(), "could not remove incomplete {what}; the next installation will retry");
     }
     Ok(())
 }
@@ -734,6 +843,7 @@ async fn install_into(
         HarnessKind::Grok => install_grok(staging.path(), environment).await?,
         HarnessKind::Muse => install_muse_native(staging.path(), environment).await?,
         HarnessKind::OpenCode => install_opencode(staging.path(), environment).await?,
+        HarnessKind::Antigravity => install_antigravity(staging.path(), environment).await?,
         HarnessKind::Dsh => {
             unreachable!("DSH has no managed installation; resolve returns before installing")
         }
@@ -743,13 +853,13 @@ async fn install_into(
     open_lock(&staging.path().join(LEASE_FILE))?;
     let manifest = ManagedHarnessManifest::for_install(harness, selected.install_id);
     let body = serde_json::to_vec_pretty(&manifest)?;
+    // The receipt goes in before the rename: a published directory is always
+    // complete, so nothing can observe or collect a half-installed tree.
+    crate::config::atomic_write(&staging.path().join(MANIFEST_FILE), &body)?;
     let staging_path = staging.keep();
     match std::fs::rename(&staging_path, final_path) {
-        Ok(()) => {
-            validate_entrypoint(final_path, selected, harness)
-                .context("validate relocated managed harness")?;
-            crate::config::atomic_write(&final_path.join(MANIFEST_FILE), &body)
-        }
+        Ok(()) => validate_entrypoint(final_path, selected, harness)
+            .context("validate relocated managed harness"),
         Err(error) if final_path.exists() => {
             std::fs::remove_dir_all(&staging_path).with_context(|| {
                 format!("remove losing harness staging {}", staging_path.display())
@@ -896,6 +1006,50 @@ fn pending_install_scripts(stdout: &str) -> Result<Vec<String>> {
     Ok(pending)
 }
 
+/// The Linux artifacts are static musl builds, verified to have no ELF program
+/// interpreter. They run on glibc and musl targets regardless of the worker's
+/// own compilation target. Metadata acquisition also verified Google's SHA-512.
+async fn install_antigravity(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    let metadata = serde_json::from_str(include_str!("../assets/antigravity/runtime.json"))?;
+    install_antigravity_from_metadata(staging, environment, &metadata).await
+}
+
+async fn install_antigravity_from_metadata(
+    staging: &Path,
+    environment: &BTreeMap<String, String>,
+    metadata: &serde_json::Value,
+) -> Result<()> {
+    ensure!(
+        metadata["version"] == crate::harness_runtime::ANTIGRAVITY_VERSION,
+        "Antigravity download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("Antigravity has no managed runtime for {key}"))?;
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .with_context(|| format!("missing Antigravity artifact field {name}"))
+    };
+    let archive = staging.join("agy.tar.gz");
+    download_verified_async(field("url")?, &archive, field("sha256")?, environment).await?;
+    let bin = staging.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let executable = bin.join("agy");
+    let archive_for_extract = archive.clone();
+    let output = executable.clone();
+    tokio::task::spawn_blocking(move || {
+        extract_archive_file(&archive_for_extract, Path::new("antigravity"), &output)
+    })
+    .await
+    .context("Antigravity extraction task failed")??;
+    std::fs::remove_file(archive)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
 /// Install the native Muse server a managed Muse session drives.
 ///
 /// The `@brokkai/muse-acp` adapter comes from its pinned npm package, which
@@ -1016,7 +1170,9 @@ async fn download_verified_async(
     expected: &str,
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let result = async {
+    let cancellation = crate::subprocess::preparation_cancellation();
+    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    let work = async {
         download_verified_inner(url, destination, environment).await?;
         let actual = crate::worker_launch::worker_executable_digest(destination)?;
         anyhow::ensure!(
@@ -1025,8 +1181,11 @@ async fn download_verified_async(
             destination.display()
         );
         Ok(())
-    }
-    .await;
+    };
+    let result = tokio::select! {
+        result = work => result,
+        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+    };
     if result.is_err() {
         let _ = std::fs::remove_file(destination);
     }
@@ -1138,6 +1297,49 @@ fn artifact_redirect_policy() -> reqwest::redirect::Policy {
 /// Mjolnir's shared cache and prepended to PATH for this launch. `Ok(None)`
 /// means the system runtime was retained; `Ok(Some(path))` names the managed
 /// installation.
+/// Use the image's mise or atomically publish the verified static Linux pin.
+/// The install lock serializes workers sharing the same image cache.
+pub async fn ensure_mise_runtime(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
+    if let Some(command) = find_command_path(Path::new("mise"), environment)? {
+        return Ok(command);
+    }
+    ensure!(
+        std::env::consts::OS == "linux",
+        "mise has no managed runtime for {}",
+        std::env::consts::OS
+    );
+    let artifact = crate::session_image::pinned_mise(std::env::consts::ARCH)?;
+    let root = managed_harness_cache_root(
+        environment.get("XDG_CACHE_HOME").map(OsStr::new),
+        environment.get("HOME").map(OsStr::new),
+    )?
+    .parent()
+    .context("managed cache has no parent")?
+    .join("mise");
+    std::fs::create_dir_all(&root)?;
+    let _lock = lock_file(
+        open_lock(&root.join(INSTALL_LOCK_FILE))?,
+        false,
+        "managed mise installer",
+    )
+    .await?;
+    let install = root.join(crate::harness_runtime::MISE_VERSION);
+    let executable = install.join("mise");
+    if entrypoint_is_executable(&executable) {
+        return Ok(executable);
+    }
+    let staging = tempfile::Builder::new()
+        .prefix(".install-")
+        .tempdir_in(&root)?;
+    let downloaded = staging.path().join("mise");
+    download_verified_async(&artifact.url, &downloaded, &artifact.sha256, environment).await?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&downloaded, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::create_dir_all(&install)?;
+    std::fs::rename(downloaded, &executable).context("publish managed mise executable")?;
+    Ok(executable)
+}
+
 pub async fn ensure_node_runtime(
     environment: &mut BTreeMap<String, String>,
 ) -> Result<Option<ManagedNodeRuntime>> {
@@ -1215,9 +1417,7 @@ async fn install_managed_node(
                     return Err(error).context("lock invalid managed Node.js for repair");
                 }
             };
-            std::fs::remove_dir_all(&install).with_context(|| {
-                format!("remove incomplete managed Node.js {}", install.display())
-            })?;
+            set_aside_incomplete(root, &install, "managed Node.js")?;
         }
 
         let staging = tempfile::Builder::new()
@@ -1498,7 +1698,7 @@ async fn bounded_env_output(
     environment: &BTreeMap<String, String>,
 ) -> Result<std::process::Output> {
     command.env_clear().envs(environment);
-    crate::subprocess::run_bounded(command, 64 * 1024, NODE_PROBE_TIMEOUT)
+    crate::subprocess::run_bounded(command, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
         .await
         .context("probe Node.js runtime")
 }
@@ -1800,6 +2000,28 @@ fn open_lock(path: &Path) -> Result<File> {
         .with_context(|| format!("open managed harness lock {}", path.display()))
 }
 
+/// Collect the obsolete installations in `harness_root` under the install
+/// lock, the same lock that publishes and repairs them, so a collector never
+/// removes an installation another process is publishing. It skips the pass
+/// when an installer holds the lock; the next tick collects.
+fn collect_obsolete_installs(harness_root: &Path, keep_install_id: &str) -> Result<()> {
+    if !harness_root.is_dir() {
+        return Ok(());
+    }
+    let lock = open_lock(&harness_root.join(INSTALL_LOCK_FILE))?;
+    match lock.try_lock() {
+        Ok(()) => {
+            let _lock = FileLock::new(lock);
+            gc_harness_root(harness_root, keep_install_id)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(()),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(error).context("lock managed harness installer for collection")
+        }
+    }
+}
+
+/// The caller holds the install lock for `root`.
 fn gc_harness_root(root: &Path, keep_install_id: &str) -> Result<()> {
     for entry in std::fs::read_dir(root)
         .with_context(|| format!("scan managed harness cache {}", root.display()))?
@@ -1921,9 +2143,13 @@ mod tests {
         ))
         .unwrap();
 
+        // The installed file was just written by this process, so it runs
+        // through `/bin/sh` rather than being exec'd: see `install_fake_command`
+        // on ETXTBSY.
+        let launcher = staging.join("bin/kimi");
+        assert!(entrypoint_is_executable(&launcher));
         let output =
-            crate::subprocess::run_with_input(&mut Command::new(staging.join("bin/kimi")), &[])
-                .unwrap();
+            crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&launcher), &[]).unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"kimi-fixture\n");
     }
@@ -1958,6 +2184,9 @@ mod tests {
         .unwrap();
         std::fs::rename(&staging, &relocated).unwrap();
 
+        // The launchers were just written by this process, so they run through
+        // `/bin/sh` rather than being exec'd: see `install_fake_command` on
+        // ETXTBSY. `sh` still opens `agent` through its relative link.
         for launcher in ["grok", "agent"] {
             let path = relocated.join("bin").join(launcher);
             if launcher == "agent" {
@@ -1965,10 +2194,229 @@ mod tests {
             } else {
                 assert!(path.is_file());
             }
-            let output = crate::subprocess::run_with_input(&mut Command::new(path), &[]).unwrap();
+            assert!(entrypoint_is_executable(&path));
+            let output =
+                crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&path), &[]).unwrap();
             assert!(output.status.success());
             assert_eq!(output.stdout, b"grok-fixture\n");
         }
+    }
+
+    #[test]
+    fn antigravity_archive_is_verified_before_extracting_the_native_entrypoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("fixture.tar.gz");
+        let body = b"#!/bin/sh\nprintf 'agy-fixture\\n'\n";
+        let encoder = flate2::write::GzEncoder::new(
+            File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "antigravity", &body[..])
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        let server = ArtifactServer::serve(std::fs::read(&archive).unwrap());
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/antigravity/runtime.json")).unwrap();
+        metadata["platforms"][current_node_platform()]["url"] = server.url.clone().into();
+        metadata["platforms"][current_node_platform()]["sha256"] =
+            crate::worker_launch::worker_executable_digest(&archive)
+                .unwrap()
+                .into();
+        let staging = temp.path().join("install");
+        std::fs::create_dir(&staging).unwrap();
+        run_async(install_antigravity_from_metadata(
+            &staging,
+            &BTreeMap::new(),
+            &metadata,
+        ))
+        .unwrap();
+        // Just extracted by this process, so it runs through `/bin/sh` rather
+        // than being exec'd: see `install_fake_command` on ETXTBSY.
+        let entrypoint = staging.join("bin/agy");
+        assert!(entrypoint_is_executable(&entrypoint));
+        let output =
+            crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&entrypoint), &[])
+                .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"agy-fixture\n");
+        let failed = temp.path().join("failed");
+        std::fs::create_dir(&failed).unwrap();
+        metadata["platforms"][current_node_platform()]["sha256"] = "wrong".into();
+        let error = run_async(install_antigravity_from_metadata(
+            &failed,
+            &BTreeMap::new(),
+            &metadata,
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert!(!failed.join("agy.tar.gz").exists());
+        assert!(!failed.join("bin/agy").exists());
+    }
+
+    // Hard-won: #1520: Antigravity bypassed managed preparation and failed on empty targets.
+    #[test]
+    fn antigravity_runtime_policies_resolve_one_pinned_cli_and_preserve_the_account() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("account with spaces");
+        let cache = temp.path().join("cache");
+        let root = cache.join("mjolnir/harnesses/antigravity");
+        let selected = pin(HarnessKind::Antigravity);
+        std::fs::create_dir_all(&root).unwrap();
+        complete_fake(
+            &root,
+            HarnessKind::Antigravity,
+            selected.install_id,
+            selected.entrypoint,
+        );
+        let managed_path = root.join(selected.install_id).join(selected.entrypoint);
+        let tools = temp.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        let environment = BTreeMap::from([
+            ("HOME".into(), temp.path().to_string_lossy().into_owned()),
+            (
+                "XDG_CACHE_HOME".into(),
+                cache.to_string_lossy().into_owned(),
+            ),
+            ("PATH".into(), tools.to_string_lossy().into_owned()),
+            (
+                "MJ_ANTIGRAVITY_HOME".into(),
+                home.to_string_lossy().into_owned(),
+            ),
+        ]);
+        let policy = ExecutionPolicy::Unconstrained;
+        let (command, args) =
+            crate::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
+        let resolve = |runtime| {
+            run_async(locate(
+                runtime,
+                HarnessKind::Antigravity,
+                policy,
+                Path::new(&command),
+                &args,
+                &environment,
+            ))
+        };
+        let missing = resolve(HarnessRuntimePolicy::Ambient).unwrap();
+        assert_eq!(missing.command, managed_path);
+        assert!(missing.managed.is_some());
+        assert_eq!(missing.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
+        assert!(
+            missing
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--gemini-dir", home.to_str().unwrap()])
+        );
+        assert!(
+            missing
+                .args
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions")
+        );
+        let ambient = tools.join("agy");
+        // Lookup canonicalizes executable symlinks; use a real script rather
+        // than the shared fake-command dispatcher's symlink.
+        std::fs::write(
+            &ambient,
+            format!(
+                "#!/bin/sh\n[ \"$AGY_CLI_DISABLE_AUTO_UPDATE\" = true ] || exit 23\necho {}\n",
+                crate::harness_runtime::ANTIGRAVITY_VERSION
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ambient, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let matching = resolve(HarnessRuntimePolicy::Ambient).unwrap();
+        // Canonical, like the lookup: macOS keeps temporary directories under
+        // the /var -> /private/var link.
+        assert_eq!(matching.command, ambient.canonicalize().unwrap());
+        assert!(matching.managed.is_none());
+        let managed = resolve(HarnessRuntimePolicy::Managed).unwrap();
+        assert_eq!(managed.command, managed_path);
+        std::fs::write(&ambient, "#!/bin/sh\necho 0.0.0\n").unwrap();
+        assert_eq!(
+            resolve(HarnessRuntimePolicy::Ambient).unwrap().command,
+            managed_path
+        );
+        assert!(
+            resolve(HarnessRuntimePolicy::Image)
+                .unwrap_err()
+                .to_string()
+                .contains("image must provide agy")
+        );
+        let custom = run_async(locate(
+            HarnessRuntimePolicy::Managed,
+            HarnessKind::Antigravity,
+            policy,
+            Path::new("/custom/agy"),
+            &[],
+            &environment,
+        ))
+        .unwrap();
+        assert_eq!(custom.command, Path::new("/custom/agy"));
+        assert!(custom.managed.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads the pinned Antigravity artifact into an isolated cache"]
+    async fn antigravity_real_install_is_concurrent_reusable_and_keeps_its_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = BTreeMap::from([
+            ("HOME".into(), temp.path().to_string_lossy().into_owned()),
+            (
+                "XDG_CACHE_HOME".into(),
+                temp.path().join("cache").to_string_lossy().into_owned(),
+            ),
+            (
+                "MJ_ANTIGRAVITY_HOME".into(),
+                temp.path()
+                    .join("login with spaces")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ]);
+        let policy = ExecutionPolicy::ConfiguredApprovals;
+        let (command, args) =
+            crate::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
+        let resolve = || {
+            locate(
+                HarnessRuntimePolicy::Managed,
+                HarnessKind::Antigravity,
+                policy,
+                Path::new(&command),
+                &args,
+                &environment,
+            )
+        };
+        let (first, second) = tokio::join!(resolve(), resolve());
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.command, second.command);
+        let mut probe = tokio::process::Command::new(&first.command);
+        probe.arg("--version").envs(&first.environment);
+        let output = crate::subprocess::capture(&mut probe).await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            crate::harness_runtime::ANTIGRAVITY_VERSION
+        );
+        let managed = first.managed.as_ref().unwrap();
+        let root = managed.cache_root.join("antigravity");
+        gc_harness_root(&root, "a-newer-pin").unwrap();
+        assert!(first.command.exists());
+        let third = resolve().await.unwrap();
+        assert_eq!(third.command, first.command);
+        let executable = first.command.clone();
+        drop(first);
+        drop(second);
+        drop(third);
+        gc_harness_root(&root, "a-newer-pin").unwrap();
+        assert!(!executable.exists());
     }
 
     #[test]
@@ -2456,6 +2904,74 @@ mod tests {
         }
     }
 
+    // Hard-won: #1477: upgrading a retained container's worker left its older Claude bridge in use.
+    #[test]
+    fn an_older_container_claude_bridge_selects_the_managed_pin_without_replacing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_home = temp.path().join("cache");
+        let cache = managed_harness_cache_root(Some(cache_home.as_os_str()), None).unwrap();
+        let selected = pin(HarnessKind::Claude);
+        let root = cache.join(HarnessKind::Claude.id());
+        complete_fake(
+            &root,
+            HarnessKind::Claude,
+            selected.install_id,
+            selected.entrypoint,
+        );
+        let install = root.join(selected.install_id);
+        executable(
+            &install.join(HarnessKind::Claude.extra_managed_entrypoint().unwrap()),
+            "#!/bin/sh\nexit 0\n",
+        );
+        let mut environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            cache_home.to_string_lossy().into_owned(),
+        );
+        environment.insert("HOME".into(), temp.path().to_string_lossy().into_owned());
+        let image_bridge = temp.path().join("bin/claude-agent-acp");
+        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bridge-version.sh");
+        std::os::unix::fs::symlink(&probe, &image_bridge).unwrap();
+        environment.insert("MJ_TEST_BRIDGE_VERSION".into(), "0.99.0".into());
+        let (command, args) = crate::harness_runtime::fallback_launch(
+            HarnessKind::Claude,
+            ExecutionPolicy::ConfiguredApprovals,
+        );
+        let located = run_async(locate(
+            HarnessRuntimePolicy::Ambient,
+            HarnessKind::Claude,
+            ExecutionPolicy::ConfiguredApprovals,
+            Path::new(&command),
+            &args,
+            &environment,
+        ))
+        .unwrap();
+        assert!(located.managed.is_some());
+        assert_eq!(located.command, install.join(selected.entrypoint));
+        assert_eq!(
+            located.environment["CLAUDE_CODE_EXECUTABLE"],
+            install.join(selected.cli_entrypoint).to_string_lossy(),
+        );
+        assert_eq!(std::fs::read_link(&image_bridge).unwrap(), probe);
+        drop(located);
+
+        environment.insert(
+            "MJ_TEST_BRIDGE_VERSION".into(),
+            npm_bridge(HarnessKind::Claude).unwrap().version.into(),
+        );
+        let located = run_async(locate(
+            HarnessRuntimePolicy::Ambient,
+            HarnessKind::Claude,
+            ExecutionPolicy::ConfiguredApprovals,
+            Path::new(&command),
+            &args,
+            &environment,
+        ))
+        .unwrap();
+        assert!(located.managed.is_none());
+        assert_eq!(located.command, image_bridge.canonicalize().unwrap());
+    }
+
     /// The daemon container's only harness source is its image: a missing
     /// program is an error naming the image, a complete image is used as is,
     /// and neither case touches a managed cache under `HOME`.
@@ -2471,6 +2987,10 @@ mod tests {
                     home.path().to_string_lossy().into_owned(),
                 ),
                 ("PATH".to_owned(), path.to_string_lossy().into_owned()),
+                (
+                    "MJ_ANTIGRAVITY_HOME".to_owned(),
+                    home.path().to_string_lossy().into_owned(),
+                ),
             ])
         };
         for harness in HarnessKind::ALL {
@@ -2493,7 +3013,15 @@ mod tests {
         }
         let codex = npm_bridge(HarnessKind::Codex).unwrap();
         let versions = [
+            (
+                "agy",
+                crate::harness_runtime::ANTIGRAVITY_VERSION.to_owned(),
+            ),
             ("codex-acp", format!("{} {}", codex.package, codex.version)),
+            (
+                "claude-agent-acp",
+                crate::harness_runtime::CLAUDE_ACP_VERSION.to_owned(),
+            ),
             (
                 "dsh-acp",
                 format!("dsh-acp {}", crate::harness_runtime::DSH_ACP_VERSION),
@@ -2526,6 +3054,15 @@ mod tests {
             ))
             .unwrap_or_else(|error| panic!("{}: {error:#}", harness.display_name()));
             assert!(located.managed.is_none());
+            if harness == HarnessKind::Antigravity {
+                assert_eq!(located.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
+                assert!(
+                    located
+                        .args
+                        .windows(2)
+                        .any(|pair| pair == ["--gemini-dir", home.path().to_str().unwrap()])
+                );
+            }
             assert!(
                 located
                     .cli_entrypoint
@@ -2806,6 +3343,107 @@ mod tests {
 
         assert!(!abandoned.exists());
         assert!(managed.command.exists());
+    }
+
+    // Hard-won: #1434: repairing an incomplete install deleted it in place and
+    // failed with ENOTEMPTY while an older release's collector recreated files in it.
+    #[test]
+    fn repair_of_an_incomplete_install_survives_a_writer_in_the_old_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let install = managed_harness_install_dir(&cache, HarnessKind::Codex);
+        let install_counter = temp.path().join("installs");
+        let environment = fake_node_tools(temp.path(), &install_counter);
+        // A tree with many entries and no receipt: what a collector that
+        // removed half of a fresh installation leaves behind.
+        for index in 0..200 {
+            let directory = install.join(format!("node_modules/package-{index}"));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("index.js"), b"partial").unwrap();
+        }
+        let stop = std::sync::atomic::AtomicBool::new(false);
+
+        let managed = std::thread::scope(|scope| {
+            // The older collector opens `.lease` with create on every pass.
+            let writer = scope.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = open_lock(&install.join(LEASE_FILE));
+                    let _ = std::fs::write(install.join("late-file"), b"late");
+                }
+            });
+            let managed = resolve_at(
+                &cache,
+                HarnessKind::Codex,
+                ExecutionPolicy::ConfiguredApprovals,
+                &environment,
+            );
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            writer.join().unwrap();
+            managed.unwrap()
+        });
+
+        assert!(managed.command.exists());
+        assert!(complete_install(&install, HarnessKind::Codex, pin(HarnessKind::Codex)).unwrap());
+        assert!(!install.join("node_modules/package-0").exists());
+    }
+
+    // Hard-won: #1434: a directory the repair could not delete failed the launch.
+    #[test]
+    fn repair_proceeds_when_the_set_aside_tree_cannot_be_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let install = managed_harness_install_dir(&cache, HarnessKind::Codex);
+        let locked = install.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("file"), b"partial").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Root ignores directory permissions, so deletion would succeed.
+        let can_delete_anyway = std::fs::remove_file(locked.join("file")).is_ok();
+        if !can_delete_anyway {
+            let install_counter = temp.path().join("installs");
+            let environment = fake_node_tools(temp.path(), &install_counter);
+            let managed = resolve_at(
+                &cache,
+                HarnessKind::Codex,
+                ExecutionPolicy::ConfiguredApprovals,
+                &environment,
+            )
+            .unwrap();
+            assert!(managed.command.exists());
+            assert!(!install.join("locked").exists());
+        }
+        // Allow the temporary directory to be removed.
+        for entry in std::fs::read_dir(cache.join(HarnessKind::Codex.id())).unwrap() {
+            let leftover = entry.unwrap().path().join("locked");
+            if leftover.exists() {
+                std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+        }
+    }
+
+    // Hard-won: #1434: the collector removed a newer installation while its installer held the lock.
+    #[test]
+    fn collector_leaves_installations_alone_while_an_installer_holds_the_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("codex");
+        std::fs::create_dir_all(&root).unwrap();
+        complete_fake(&root, HarnessKind::Codex, "newer", "bin/bridge");
+        let installer = lock_file_blocking(&root.join(INSTALL_LOCK_FILE));
+
+        collect_obsolete_installs(&root, "older").unwrap();
+        assert!(root.join("newer").exists());
+
+        drop(installer);
+        collect_obsolete_installs(&root, "older").unwrap();
+        assert!(!root.join("newer").exists());
+    }
+
+    fn lock_file_blocking(path: &Path) -> FileLock {
+        let file = open_lock(path).unwrap();
+        file.lock().unwrap();
+        FileLock::new(file)
     }
 
     #[test]

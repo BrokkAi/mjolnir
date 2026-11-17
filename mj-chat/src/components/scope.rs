@@ -376,7 +376,11 @@ impl<K: Copy + Eq> Form<K> {
     ) -> super::FormViewport {
         // A newly focused control may not have registered in this render yet.
         let focused = self.pending_focus.or_else(|| self.focused());
-        let reveal = self.viewport_reveal || self.viewport_focus != focused;
+        let reveal = self.viewport_reveal
+            || self.viewport_focus != focused
+            || self
+                .viewport
+                .is_some_and(|(previous, _)| previous.area() != area);
         let previous = self.viewport.map_or(0, |(viewport, _)| viewport.offset());
         let viewport = super::FormViewport::new(
             area,

@@ -1,0 +1,306 @@
+{
+  "id": "L2810",
+  "title": "Opencode",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "c27f713e5f7177bc869217987b7c5f79",
+    "session_title": "mjolnir via claude2",
+    "reply_position": 13462,
+    "captured_at": "2026-11-06T11:59:19.997Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:6016",
+          "role": "user",
+          "text": "revamp review models; isntead of a concurrent reviewrs count that multiples a single reviewer type, allow specifying up to 3 review agents; add an Autoconfigure button (replacing \"auto\" as a per-reviewer choice)\n\nautoconfigure depends on profiles available\n\nonly codex: terra/xhigh + sol/medium\nonly claude: haiku/xhigh + haiku/xhigh\ncodex + claude: terra/xhigh + sol/medium + haiku/high\nonly dsh: dsf/high + dsf/high\nonly grok: grok/high\nonly kimi: k3.1/high\nanything else: autoconfigure disabled\n\nany questions?"
+        },
+        {
+          "id": "user:6143",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nAuto upgrade: Autoconfigure on load (Recommended)\nMatching: Best row, ignore extras\nSame harness: all we care about is model availablity in my list, load balance across all profiles that share them using existing lb code\nAuto-run: Only the button (Recommended)"
+        },
+        {
+          "id": "user:6172",
+          "role": "user",
+          "text": "Should each reviewer slot be just model + effort, with the profile chosen at review time by the sub-agent load balancer, like [subagents] straightforward/subtle?\n\nSlot shape: Model + effort only (Recommended)"
+        },
+        {
+          "id": "user:6276",
+          "role": "user",
+          "text": "push and install when complete"
+        },
+        {
+          "id": "agent:11689",
+          "role": "assistant",
+          "text": "Round 9 has 17 findings, overlapping into 12 issues. Four are the design points I've already decided, raised again. One contradicts a round-7 finding. The other seven are new and real, though mostly narrow.\n\n**Fix:**\n1. **Luna fast mode:** reviewers on a Luna model now get `fast_mode` from the shared selection. The old resolver never turned it on. Reviewers should keep it off.\n2. **`mj new --review turn` with no reviewers configured:** this arms a session that can never review. Following AGENTS.md:125-131, create the session with review off and say why.\n3. **Cold-start fallback:** when no matching profile is ready, the fallback waits on discovery of every profile. It should take the first profile that offers the model.\n4. **Grace period:** the 2-second grace should be one window across all earlier candidates, not 2 seconds per candidate.\n5. **TUI efforts:** an unrelated profile's failure makes a model's efforts unknown. Only failures of profiles that offer that model should count.\n6. **TUI Autoconfigure:** a model added to the preset while waiting needs its own effort probe.\n7. **Named-profile upgrade:** when the old effort is dropped, report it in the notice.\n\n**Override:**\n- the four repeated design points (no preset → off, legacy count, Kimi K3.1+, persisting while an unrelated profile fails)\n- \"wait for pending profiles before choosing a preset\", which directly reverses round 7's \"use completed profiles while others are pending\""
+        },
+        {
+          "id": "agent:11789",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- Round 9 contains a direct reversal: \"wait for pending profiles before choosing a preset\" undoes round 7's \"use completed profiles while others are pending\". Independent reviewers each optimize a different property, such as best preset versus responsiveness. Once the code satisfies one, the other gets flagged. A written override is the right way to settle that kind of trade-off.\n- The Luna fast-mode finding comes from reusing the sub-agent selector, which returns `fast_mode` because spawn wants it for Luna. Sharing one mechanism is still right. The caller has to decide which outputs apply to reviewers.\n`─────────────────────────────────────────────────`\n\nOne child is fixing the seven new round-9 defects (G1–G7).\n\n**Where this stands:** this is the ninth review round. The core feature has been done since round 1:\n\n- up to 3 reviewers, each with its own model and effort\n- the load-balanced profile choice\n- Autoconfigure in the terminal and on the web\n- the old-config upgrade\n\nEvery round since has found narrower edge cases, mostly in the one-time upgrade and in partial profile discovery, and now the reviewers' findings contradict each other. After this round, I'll override the repeated and contradicting design findings with their reasons and push, unless a new finding is a real defect of similar weight to the data-loss bug in round 8.\n\n**Two things need your answer:**\n1. **Breaking store migration (revision 110):** may the install apply it to your live store? After it, older mj builds can't open the store. I won't install without your approval.\n2. **If you'd rather I stop iterating sooner** and push after this round no matter what the reviewers say, tell me.\n\nWaiting on the round-9 child."
+        },
+        {
+          "id": "agent:11930",
+          "role": "assistant",
+          "text": "The round-9 child stopped partway. Done: G1 (fast mode off), G2 (the no-reviewers rule), G4 (one shared grace window) and G7 (named-profile effort fallback). G5 needed no change, because the shared options code already attributes effort failures only to profiles that offer the model.\n\nStill open: the legacy part of G3, G6, checking the CLI notice, and the full tests and clippy. I'm asking it to finish."
+        },
+        {
+          "id": "agent:11964",
+          "role": "assistant",
+          "text": "I've asked the child, in the same session, to finish:\n\n- the legacy part of G3: use the profiles that have answered by the deadline\n- G6: request efforts for models newly added to the preset\n- a test showing the \"review is off for this session\" notice reaches `mj new` and `mj import` users\n- the full suite and clippy\n\nWhen it reports, I'll run the full validation, commit, and request review. Then I'll override the repeated and contradicting design findings with their reasons and push.\n\n**Still needs your answer:**\n1. May the install apply the breaking store migration (revision 110) to your live store? I won't install without your approval.\n2. If you'd rather I stop iterating and push after this round no matter what the reviewers say, tell me.\n\nWaiting on the round-9 child."
+        },
+        {
+          "id": "user:12020",
+          "role": "user",
+          "text": "Breaking migration is fine. Continue to fix legit problems, if any remain, but ignore nitpicks. "
+        },
+        {
+          "id": "agent:12023",
+          "role": "assistant",
+          "text": "You've approved the breaking migration, so I'll install after pushing. From here I'll fix only real defects and override nitpicks with a short reason. Waiting on the round-9 child to finish its remaining items."
+        },
+        {
+          "id": "agent:12058",
+          "role": "assistant",
+          "text": "Round 9 is complete: G1–G7 are done, the full suites for mj-core, mj-controller, mj-tui, mj-client and mj-cli pass, and clippy is clean. I'm running the full default-member validation once on the combined tree before committing."
+        },
+        {
+          "id": "agent:12082",
+          "role": "assistant",
+          "text": "I've closed the round-9 child. The full test suite and web unit tests are running. If they pass, I'll commit and request review. Then I'll fix any real defects and override nitpicks and the repeated design points, push, and install.\n\nWaiting on the test run."
+        },
+        {
+          "id": "agent:12110",
+          "role": "assistant",
+          "text": "Everything passes: format, all 45 test binaries and the web unit tests. Clippy passed in the child's final run on this tree. I'm committing and requesting review."
+        },
+        {
+          "id": "agent:12127",
+          "role": "assistant",
+          "text": "The round-9 fixes are committed as `ea3c41b79`, and the tenth review request covers all ten commits (89 files).\n\nWhen the verdict arrives, I'll handle it as you asked:\n\n- **Real defects** (data loss, broken reviews, wrong behaviour for common setups): I'll fix them.\n- **Nitpicks, repeated design points and contradicting findings:** I'll override them with a short reason.\n\nAfter that I'll push and run the install, including the breaking store migration you approved.\n\nWaiting on the review verdict."
+        },
+        {
+          "id": "agent:12167",
+          "role": "assistant",
+          "text": "As you asked, I'm fixing only real defects. My triage:\n\n**Fix (real, can break reviews):**\n1. **An explicit `reviewers: []` arms a session that can never review.** An API request like `{\"mode\":\"turn\",\"reviewers\":[]}` passes validation, but the no-reviewers rule only checks for an omitted list. One-line fix in the same rule.\n2. **The cold-start fallback gives up too early.** It returns the first ready profile even when that profile can't serve the effort, while a profile that can serve it is still discovering. The review then fails.\n3. **Two cheap TUI fixes:**\n   - An unrelated profile's failure still makes a model's efforts look unknown in the Autoconfigure path.\n   - A legacy draft doesn't clear its marker before requesting efforts for newly added models, so their probes never start.\n\n**Override as repeats or nitpicks:**\n- no preset → review off\n- persisting while an unrelated profile fails\n- the legacy count edge\n- waiting for pending profiles, which reverses round 7\n- Kimi K3.1 or newer"
+        },
+        {
+          "id": "agent:12241",
+          "role": "assistant",
+          "text": "One child is making the four real fixes. When it's done, I'll validate, commit and request review once more. On that verdict I'll override the repeated design points and nitpicks, unless something serious appears. Then I'll push and run the install with the breaking migration you approved.\n\nWaiting on the fix child."
+        },
+        {
+          "id": "agent:12281",
+          "role": "assistant",
+          "text": "The child reported \"completed\", but its message says it is still waiting on suites. I'm checking its report directory to see whether the work is done."
+        },
+        {
+          "id": "agent:12316",
+          "role": "assistant",
+          "text": "The stash list is empty and the `events.rs` fix is in place, so nothing was lost. I'll wait for the child's `done` marker rather than polling."
+        },
+        {
+          "id": "agent:12337",
+          "role": "assistant",
+          "text": "I've set a background wait that tells me when the child's suites finish (core, controller, TUI, CLI review tests, clippy). When they're done, I'll check the results, commit, request the final review, override the repeated design points, push and install.\n\nWaiting on those suites."
+        },
+        {
+          "id": "agent:12425",
+          "role": "assistant",
+          "text": "I've closed the round-10 child. Its four fixes are in the tree. Running now: format, workspace clippy, the full default-member suite (`TZ=UTC`, `--no-fail-fast`) and the web unit tests. If they pass, I'll commit, request the final review, override the repeated design points, push and install.\n\nWaiting on the validation run."
+        },
+        {
+          "id": "agent:12455",
+          "role": "assistant",
+          "text": "Tests, clippy and web tests pass, and this time the ETXTBSY flake didn't recur. Only the format check failed. I'm applying `cargo fmt` and confirming it changes formatting only."
+        },
+        {
+          "id": "agent:12474",
+          "role": "assistant",
+          "text": "Formatting is fixed, and only whitespace and layout changed, in three files. I'm committing and requesting the final review."
+        },
+        {
+          "id": "agent:12492",
+          "role": "assistant",
+          "text": "The round-10 fixes are committed as `4821b4965`, and the final review request covers all eleven commits (89 files).\n\n**Validation:** all 45 test binaries (`TZ=UTC --no-fail-fast`), workspace clippy and the web unit tests pass. Formatting was fixed before the commit.\n\nWhen the verdict arrives, I'll fix any real defect. I'll override the repeated design points and nitpicks with short reasons:\n\n- no preset → review off\n- persisting while an unrelated profile fails\n- the legacy count edge\n- waiting for pending profiles, which reverses round 7\n- Kimi K3.1 or newer\n\nThen I'll push and run the install with the breaking migration you approved.\n\nWaiting on the review verdict."
+        },
+        {
+          "id": "agent:12540",
+          "role": "assistant",
+          "text": "Round 11 has 14 findings, overlapping into 8 issues. Five are the same repeated design points. Three are new:\n\n1. **An inherited empty global list arms a session.** A hand-edited `trigger = \"turn\"` with `reviewers = []` arms new sessions that can never review. It's real, and it's a two-line extension of the rule I already have, so I'll fix it.\n2. **Two reviewer slots on the same non-default Muse model** with explicit efforts can cancel each other's discovery. That needs a hand-built config, because Autoconfigure never picks Muse models. When it happens, the review fails visibly and retrying works. This is a narrow edge case, so I'll override it.\n3. **A stalled ready probe uses the whole 20-second window,** so profiles discovered during it aren't considered. It's another timing edge case in an already bounded path, so I'll override it."
+        },
+        {
+          "id": "agent:12637",
+          "role": "assistant",
+          "text": "The override is accepted. Before pushing, I'm fetching to see whether `origin/master` has moved."
+        },
+        {
+          "id": "agent:12691",
+          "role": "assistant",
+          "text": "I overrode the final review verdict with the eight reasons above, and merged the 6 new upstream commits (the 2.68.0 release and dashboard work) cleanly. Clippy and the mj-tui and mj-cli suites are now running on the merged tree. If they pass, I'll push, then run the install, which applies the breaking store migration you approved.\n\nWaiting on that run."
+        },
+        {
+          "id": "agent:12728",
+          "role": "assistant",
+          "text": "The merged tree passes: clippy is clean, and all 19 mj-tui and mj-cli test binaries pass. Next I'm pushing."
+        },
+        {
+          "id": "agent:12742",
+          "role": "assistant",
+          "text": "The push gate refused because the merge produced a new tree, and that tree hasn't been reviewed. I'm requesting review of the merged HEAD."
+        },
+        {
+          "id": "agent:12771",
+          "role": "assistant",
+          "text": "The push succeeded (`928194681..b0a239fd4`). Before installing, I'm reading my two install notes: one about not committing during the build, and one about how the daemon handoff is triggered."
+        },
+        {
+          "id": "agent:12799",
+          "role": "assistant",
+          "text": "The installed `mj` is `2.67.1+68bbe47`, and no install is running. I'm confirming that build is part of our history, so installing doesn't roll back another session's newer work."
+        },
+        {
+          "id": "agent:12868",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The push gate reviews *trees*, not commits. Merging upstream created a new tree, so the gate wanted one more review. That review covered only the merge (`changed_file_count: 0`) and came back clean at once.\n- Each binary from the install stamps the git HEAD from the moment it was compiled. A commit or merge during the build would split `mj` and the musl worker across two builds, and the daemon would refuse the worker. That's why I'm leaving git alone until the install finishes.\n`─────────────────────────────────────────────────`\n\nThe work is pushed to `origin/master` as `b0a239fd4`, merged with the 2.68.0 release. The install is running in the background.\n\nWhen it finishes, I'll trigger the daemon handoff with an ordinary `mj` command from the new build. Then I'll check that the store migrated to revision 110, that the daemon stays up, and whether your old `[review] count = 2` config was upgraded to explicit reviewers.\n\nWaiting on the install."
+        },
+        {
+          "id": "agent:12940",
+          "role": "assistant",
+          "text": "The install finished, but the binary carries commit `e7449e0f`, not our pushed HEAD `b0a239fd`. Either HEAD moved during the build or another session installed over it. I'm checking which."
+        },
+        {
+          "id": "agent:13038",
+          "role": "assistant",
+          "text": "That command worked, so the new build reached a daemon. Following my notes, I'm waiting about a minute before checking the daemon's build, the store migration, the daemon log, and your config."
+        },
+        {
+          "id": "agent:13058",
+          "role": "assistant",
+          "text": "The install succeeded, and `~/.cargo/bin/mj` is `2.68.0+b0a239fd`, our pushed HEAD. I ran `mj sessions` from the new build to trigger the daemon handoff. In about a minute, a background check will report:\n\n- whether the daemon now runs the new build\n- whether the store migration to revision 110 was applied\n- any errors in the daemon log\n- whether the daemon upgraded your old `[review] count = 2` config to explicit reviewers\n\nWaiting on that check."
+        },
+        {
+          "id": "agent:13133",
+          "role": "assistant",
+          "text": "That was the node process's log (pid 2087561). The daemon itself is pid 2087559, which has its own log. I'm searching that one."
+        },
+        {
+          "id": "agent:13207",
+          "role": "assistant",
+          "text": "There's also an `openrouter` profile, which is a Codex-kind profile pointed at OpenRouter. I'm checking which profiles advertise each Terra, Sol and Haiku ID."
+        },
+        {
+          "id": "agent:13251",
+          "role": "assistant",
+          "text": "All three requested efforts are offered: Terra `xhigh`, Sol `medium` and Haiku `high`. I'm saving a backup of your config, then replacing only the three reviewer model IDs."
+        },
+        {
+          "id": "agent:13291",
+          "role": "assistant",
+          "text": "The work is pushed and installed, but checking the live install turned up a problem.\n\n**Done:**\n- Pushed to `origin/master` as `b0a239fd4`. The final review verdict was overridden with written reasons, as you allowed for nitpicks, and the commit is merged with the 2.68.0 release.\n- Installed. The daemon runs `2.68.0+b0a239fd`, and the store migrated from revision 109 to 110 (`database migrations applied from_revision=109 to_revision=110`).\n- The one-time upgrade ran at 11:50:06 and wrote 3 reviewers to your config.toml.\n\n**Problem:** the reviewers it wrote are OpenRouter aliases, not your subscription models:\n- `openrouter/~openai/gpt-terra-latest` (xhigh)\n- `openrouter/~openai/gpt-sol-latest` (medium)\n- `openrouter/~anthropic/claude-haiku-latest` (high)\n\nThe `ds8bit` OpenCode-on-OpenRouter profile advertises the whole OpenRouter catalog, and the version ranking places `latest` aliases above your Codex and Claude models. Each reviewer only runs on profiles that offer its exact model ID, so **push reviews now run on paid OpenRouter**, not your subscriptions.\n\nA child is fixing the rule: prefer models that subscription profiles offer, as the old Auto did. With your profiles that gives `gpt-6.1-terra` xhigh, `gpt-6.1-sol` medium and `haiku` high. I checked with `mj models` that all three efforts are offered. After it passes review, I'll push and reinstall.\n\n**Decision needed:** I tried to replace the three model IDs in your config.toml myself, but the permission system blocked the edit. Until that's done, push reviews keep using paid OpenRouter. You can choose:\n1. Change the three `model =` lines under `[[review.reviewers]]` (lines 419, 423 and 427) to `\"gpt-6.1-terra\"`, `\"gpt-6.1-sol\"` and `\"haiku\"`. You can do it in Settings › Code Review or by editing the file.\n2. Allow me to make that edit, and I'll back up the file first.\n3. Leave it until the fixed build is installed, then press Autoconfigure in Settings › Code Review."
+        },
+        {
+          "id": "agent:13462",
+          "role": "assistant",
+          "text": "You already answered the store question (\"Breaking migration is fine\"), and the migration has been applied. One decision is still open: your live config currently sends push reviews to paid OpenRouter."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Breaking migration is fine. Continue to fix legit problems, if any remain, but ignore nitpicks. ",
+    "assistant_text_tail": "You already answered the store question (\"Breaking migration is fine\"), and the migration has been applied. One decision is still open: your live config currently sends push reviews to paid OpenRouter.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      13462
+    ],
+    "user_position": 12020,
+    "input_rationale": "The reply flags a decision for the user about the live [review] config (upgrade wrote paid OpenRouter alias reviewers) and the agent could not edit config.toml itself. The next user message is the answer form, and the user chose 'Let me edit it'.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:13462"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T12:05:31.597Z",
+        "kind": "user",
+        "text": "The one-time upgrade wrote OpenRouter alias reviewers (openrouter/~openai/gpt-terra-latest, …gpt-sol-latest, …claude-haiku-latest) into your config.toml, so push reviews currently run on the paid ds8b"
+      },
+      {
+        "at": "2026-11-06T12:06:42.160Z",
+        "kind": "agent",
+        "text": "I fixed your live review config, so push reviews now run on your Codex and Claude subscriptions instead of paid OpenRouter. The new reviewers in `~/.config/mjolnir/config.toml` are `gpt-6.1-terra` (xh"
+      },
+      {
+        "at": "2026-11-06T12:14:39.182Z",
+        "kind": "user",
+        "text": "> Your ds8bit profile advertises the whole OpenRouter catalog  can we easily fix this?"
+      },
+      {
+        "at": "2026-11-06T12:14:43.896Z",
+        "kind": "agent",
+        "text": "I'll check that profile's OpenCode config before answering."
+      },
+      {
+        "at": "2026-11-06T12:14:56.515Z",
+        "kind": "agent",
+        "text": "Yes, very likely, and the change is small. The profile's `opencode.json` already limits OpenCode to the `openrouter` provider (`enabled_providers`) but doesn't limit models, so OpenCode advertises eve"
+      },
+      {
+        "at": "2026-11-06T12:16:09.026Z",
+        "kind": "user",
+        "text": "yes, and mj doctor should warn on unrestricted openrouter"
+      }
+    ]
+  }
+}

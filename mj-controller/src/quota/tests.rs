@@ -26,10 +26,14 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
             .into_iter()
             .collect(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
+        claude_permission_mode: None,
+        aws: None,
     }
 }
 
@@ -175,6 +179,8 @@ fn golden_quota_compact_row() {
         error: Option<&str>,
     ) -> ProfileQuota {
         ProfileQuota {
+            paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: profile_id.into(),
             harness,
@@ -183,6 +189,7 @@ fn golden_quota_compact_row() {
             error: error.map(str::to_owned),
             refreshed_at_epoch_seconds: 0,
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         }
     }
     fn row(report: &ProfileQuota) -> String {
@@ -398,6 +405,7 @@ fn codex_quota_request(
         environment,
         cwd: directory.to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
@@ -457,7 +465,7 @@ printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
 printf '%s\n' '{"id":3,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
-printf '%s\n' '{"id":4,"result":{"rateLimitResetCredits":{"availableCount":1},"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+printf '%s\n' '{"id":4,"result":{"rateLimitResetCredits":{"availableCount":1},"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300},"credits":{"hasCredits":true,"unlimited":false,"balance":"12.75"}}}}'
 "#,
     );
 
@@ -465,6 +473,10 @@ printf '%s\n' '{"id":4,"result":{"rateLimitResetCredits":{"availableCount":1},"r
 
     assert_eq!(outcome.report.error, None);
     assert_eq!(outcome.report.banked_resets, Some(1));
+    assert_eq!(
+        outcome.report.paid_credits,
+        mj_client::quota::PaidCredits::limited(12.75)
+    );
     assert_eq!(
         outcome.report.five_hour_window().unwrap().remaining_percent,
         Some(75)
@@ -482,6 +494,160 @@ printf '%s\n' '{"id":4,"result":{"rateLimitResetCredits":{"availableCount":1},"r
     assert_eq!(messages[3]["method"], "account/read");
     assert_eq!(messages[3]["params"]["refreshToken"], false);
     assert_eq!(messages[4]["method"], "account/rateLimits/read");
+}
+
+#[cfg(unix)]
+// Hard-won: #1485: separate daemons could concurrently spend one Codex refresh token
+#[tokio::test]
+async fn codex_quota_processes_share_refresh_ownership_and_recheck_expiry() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    const CHILD_HOME: &str = "MJ_CODEX_QUOTA_TRANSACTION_HOME";
+    const CHILD_ENV: &str = "MJ_CODEX_QUOTA_TRANSACTION_ENV";
+    if let Some(home) = std::env::var_os(CHILD_HOME) {
+        let environment = serde_json::from_str(&std::env::var(CHILD_ENV).unwrap()).unwrap();
+        let outcome = poll_codex_profile(Path::new(&home), environment).await;
+        assert_eq!(outcome.report.error, None);
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let unrelated = tempfile::tempdir().unwrap();
+    write_codex_auth(
+        directory.path(),
+        Duration::from_secs(600),
+        Duration::from_secs(3_000),
+    );
+    write_codex_auth(
+        unrelated.path(),
+        Duration::from_secs(10 * 3_600),
+        Duration::from_secs(3_600),
+    );
+    // The first app-server stops inside its refresh RPC. The socket gives the
+    // parent ownership of the interleaving; no live provider is contacted.
+    let socket_path = directory.path().join("refresh.sock");
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let script = r#"#!/usr/bin/python3
+import json, os, socket, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    with open(os.environ['CODEX_USAGE_TEST_LOG'], 'a') as log:
+        log.write(line)
+    method = message.get('method')
+    if method == 'initialized':
+        continue
+    if method == 'account/read':
+        if message['params']['refreshToken']:
+            with socket.socket(socket.AF_UNIX) as control:
+                control.connect(os.environ['CODEX_REFRESH_SOCKET'])
+                control.sendall(b'R')
+                assert control.recv(1) == b'G'
+            with open(os.environ['CODEX_FRESH_AUTH']) as source:
+                fresh = source.read()
+            with open(os.environ['CODEX_AUTH_FILE'], 'w') as target:
+                target.write(fresh)
+        result = {'account': {'type': 'chatgpt'}}
+    elif method == 'account/rateLimits/read':
+        result = {'rateLimits': {'primary': {'usedPercent': 25, 'windowDurationMins': 300}}}
+    else:
+        result = {}
+    print(json.dumps({'id': message['id'], 'result': result}), flush=True)
+"#;
+    // Fake commands are read by /bin/sh, so invoke Python explicitly rather
+    // than relying on the source file's shebang.
+    let python_script = directory.path().join("quota-server.py");
+    std::fs::write(&python_script, script).unwrap();
+    let launcher = format!(
+        "exec /usr/bin/python3 {} \"$@\"\n",
+        mj_core::targets::posix_quote(python_script.to_str().unwrap())
+    );
+    let (mut environment, first_log) = fake_codex_app_server(directory.path(), &launcher);
+    environment.insert(
+        "CODEX_REFRESH_SOCKET".into(),
+        socket_path.to_string_lossy().into_owned(),
+    );
+    environment.insert(
+        "CODEX_FRESH_AUTH".into(),
+        unrelated
+            .path()
+            .join("auth.json")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let child = crate::controller::test_support::IsolatedTest::new(
+        crate::controller::test_support::test_name(
+            module_path!(),
+            "codex_quota_processes_share_refresh_ownership_and_recheck_expiry",
+        ),
+    )
+    .env(CHILD_HOME, directory.path())
+    .env(CHILD_ENV, serde_json::to_string(&environment).unwrap())
+    .isolated_store(&directory.path().join("child-instance"));
+    let mut child = tokio::task::spawn_blocking(move || child.output());
+    let (mut control, _) = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(20), listener.accept()) => {
+            result.expect("first process entered its refresh").unwrap()
+        }
+        result = &mut child => {
+            let output = result.unwrap();
+            panic!(
+                "first quota process exited before its refresh: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    };
+    assert_eq!(control.read_u8().await.unwrap(), b'R');
+
+    let second_log = directory.path().join("second.jsonl");
+    environment.insert(
+        "CODEX_USAGE_TEST_LOG".into(),
+        second_log.to_string_lossy().into_owned(),
+    );
+    let second = poll_codex_profile(directory.path(), environment);
+    tokio::pin!(second);
+    // Poll the contender while the first process is paused before writing.
+    // Keep the future alive: a cancelled probe would not prove the reread.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut second)
+            .await
+            .is_err()
+    );
+    assert!(!second_log.exists(), "waiting must precede app-server RPCs");
+
+    let (unrelated_environment, _) = fake_codex_app_server(unrelated.path(), &launcher);
+    let independent = tokio::time::timeout(
+        Duration::from_secs(20),
+        poll_codex_profile(unrelated.path(), unrelated_environment),
+    )
+    .await
+    .expect("a different credential home must not wait");
+    assert_eq!(independent.report.error, None);
+
+    control.write_all(b"G").await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(20), &mut second)
+        .await
+        .expect("the waiting probe resumes after the first transaction");
+    assert_eq!(second.report.error, None);
+    let child = child.await.unwrap();
+    assert!(
+        child.status.success(),
+        "first quota process failed: {}\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let rotations = |log: &Path| {
+        codex_request_log(log)
+            .iter()
+            .filter(|message| message["params"]["refreshToken"] == true)
+            .count()
+    };
+    assert_eq!(rotations(&first_log), 1);
+    assert_eq!(
+        rotations(&second_log),
+        0,
+        "expiry must be reread after waiting"
+    );
 }
 
 #[cfg(unix)]
@@ -759,6 +925,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
             )]),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
+            opencode_usage_priced: false,
             runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
@@ -821,6 +988,7 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     let mut manager = QuotaManager::default();
@@ -926,6 +1094,7 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     // Lines logged at exactly info that contain `text`.
@@ -1048,6 +1217,8 @@ fn retry_after_is_seconds_or_an_http_date_and_the_hold_is_bounded() {
 
 fn quota_report(refreshed_at: u64, remaining: Option<u8>) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: "claude".into(),
         harness: HarnessKind::Claude,
@@ -1068,6 +1239,7 @@ fn quota_report(refreshed_at: u64, remaining: Option<u8>) -> ProfileQuota {
         error: remaining.is_none().then(|| "unavailable".to_owned()),
         refreshed_at_epoch_seconds: refreshed_at,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -1123,6 +1295,7 @@ async fn expired_claude_credentials_report_login_expired() {
             environment: BTreeMap::new(),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
+            opencode_usage_priced: false,
             runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
@@ -1334,92 +1507,6 @@ async fn kimi_quota_accepts_an_api_key_without_oauth_credentials() {
     server.abort();
 }
 
-/// Backdate the lock directory the way a holder that stopped heartbeating
-/// leaves it behind.
-fn age_kimi_lock(path: &Path, age: Duration) {
-    touch_kimi_lock(path, SystemTime::now() - age).expect("backdate lock directory");
-}
-
-#[tokio::test]
-#[cfg_attr(windows, ignore = "#1299: Windows file locking and directory times")]
-async fn a_kimi_refresh_lock_left_by_a_crashed_holder_is_broken_and_reacquired() {
-    let home = tempfile::tempdir().unwrap();
-    let lock = home.path().join("oauth/kimi-code.lock");
-    std::fs::create_dir_all(&lock).unwrap();
-    age_kimi_lock(&lock, KIMI_LOCK_STALE_AFTER + Duration::from_secs(60));
-
-    let started = std::time::Instant::now();
-    let held = KimiRefreshLock::acquire(home.path(), Duration::from_secs(10))
-        .await
-        .expect("an orphaned lock must not block a refresh");
-    let waited = started.elapsed();
-
-    assert!(
-        waited < Duration::from_secs(5),
-        "acquisition waited {waited:?}"
-    );
-    drop(held);
-    assert!(!lock.exists(), "the released lock must be gone");
-}
-
-#[tokio::test]
-async fn a_heartbeating_kimi_refresh_lock_is_not_broken_by_a_waiter() {
-    let home = tempfile::tempdir().unwrap();
-    let lock = home.path().join("oauth/kimi-code.lock");
-    std::fs::create_dir_all(&lock).unwrap();
-
-    let error = KimiRefreshLock::acquire(home.path(), Duration::from_millis(600))
-        .await
-        .err()
-        .expect("a lock with a live holder must be waited out, not stolen");
-
-    assert!(
-        error.to_string().contains("kimi-code.lock"),
-        "the timeout must name the lock: {error}"
-    );
-    assert!(lock.exists(), "a live holder's lock must survive a waiter");
-}
-
-/// The Kimi Code CLI breaks a lock whose modification time is more than
-/// five seconds old, so Mjolnir's beats have to be frequent enough that a
-/// stalled heartbeat task still cannot cost it a live lock.
-#[tokio::test]
-#[cfg_attr(windows, ignore = "#1299: Windows file locking and directory times")]
-async fn a_held_kimi_lock_republishes_its_mtime_several_times_per_cli_break_window() {
-    let home = tempfile::tempdir().unwrap();
-    let held = KimiRefreshLock::acquire(home.path(), KIMI_LOCK_WAIT)
-        .await
-        .unwrap();
-    let lock = home.path().join("oauth/kimi-code.lock");
-
-    // Half the peer's break window: two beats have to land inside it, so
-    // Mjolnir publishes at least four times per window and can miss several in
-    // a row and still hold the lock.
-    const KIMI_CLI_LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
-    let watched = KIMI_CLI_LOCK_STALE_AFTER / 2;
-    let deadline = tokio::time::Instant::now() + watched;
-    let mut published = vec![kimi_lock_mtime(&lock).unwrap().expect("the created lock")];
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let observed = kimi_lock_mtime(&lock).unwrap().expect("a held lock");
-        if published.last() != Some(&observed) {
-            published.push(observed);
-        }
-        assert_eq!(
-            std::fs::read_dir(&lock).unwrap().count(),
-            0,
-            "the CLI releases this lock with a plain rmdir, so it must stay empty"
-        );
-    }
-
-    assert!(
-        published.len() >= 3,
-        "the lock's modification time moved {} times in {watched:?}; the Kimi Code CLI breaks a lock after {KIMI_CLI_LOCK_STALE_AFTER:?} without a beat",
-        published.len() - 1
-    );
-    drop(held);
-}
-
 #[cfg(unix)]
 fn process_is_gone(pid: i32) -> bool {
     // SAFETY: signal 0 only probes whether the process exists.
@@ -1465,6 +1552,7 @@ while IFS= read -r line; do :; done
         ]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
 
@@ -1646,4 +1734,76 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
             .unwrap(),
         1
     );
+}
+
+/// An OpenCode credential database with one row, matching the shape
+/// `opencode_logins` reads.
+fn write_opencode_login(home: &Path, integration: &str, value: &str) {
+    let data = home.join(".data/opencode");
+    std::fs::create_dir_all(&data).unwrap();
+    let connection = rusqlite::Connection::open(data.join("opencode.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL, \
+             value text NOT NULL, connector_id text, method_id text, active integer, \
+             time_created integer NOT NULL, time_updated integer NOT NULL)",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO credential VALUES ('cred_1', ?1, 'login', ?2, NULL, NULL, 1, 1, 1)",
+            rusqlite::params![integration, value],
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn opencode_reports_api_for_a_profile_signed_in_only_with_a_stored_api_key() {
+    let home = tempfile::tempdir().unwrap();
+    write_opencode_login(home.path(), "openrouter", r#"{"type":"key","key":"sk-1"}"#);
+    let profile = HarnessProfile {
+        enabled: true,
+        ..HarnessProfile::new(HarnessKind::OpenCode, home.path().to_path_buf())
+    };
+    let request = QuotaRefreshRequest::for_profile(
+        "ds8bit",
+        &profile,
+        home.path().to_path_buf(),
+        QuotaRuntimeConfig::host(),
+    );
+    assert!(
+        request.opencode_usage_priced,
+        "a stored login that is itself a plain API key is still billed by usage"
+    );
+    let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
+    assert_eq!(outcome.report.extra.as_deref(), Some(API_LABEL));
+}
+
+#[tokio::test]
+async fn opencode_stays_unreported_when_a_stored_login_is_oauth() {
+    let home = tempfile::tempdir().unwrap();
+    write_opencode_login(
+        home.path(),
+        "anthropic",
+        r#"{"type":"oauth","refresh":"r","access":"a","expires":1}"#,
+    );
+    let profile = HarnessProfile {
+        enabled: true,
+        environment: [("OPENROUTER_API_KEY".to_owned(), "sk-env".to_owned())]
+            .into_iter()
+            .collect(),
+        ..HarnessProfile::new(HarnessKind::OpenCode, home.path().to_path_buf())
+    };
+    let request = QuotaRefreshRequest::for_profile(
+        "mixed",
+        &profile,
+        home.path().to_path_buf(),
+        QuotaRuntimeConfig::host(),
+    );
+    assert!(
+        !request.opencode_usage_priced,
+        "an OAuth login leaves billing unknown even beside an environment key for another provider"
+    );
+    let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
+    assert_eq!(outcome.report.extra.as_deref(), Some(NOT_REPORTED_LABEL));
 }

@@ -16,6 +16,12 @@ pub(super) async fn list_sessions(
     State(state): State<ServerState>,
     Query(query): Query<SessionListQuery>,
 ) -> Result<Json<SessionListResponse>, ApiFailure> {
+    let login_errors = state
+        .subagent
+        .as_ref()
+        .map(|backend| backend.profile_login_errors())
+        .transpose()?
+        .unwrap_or_default();
     let snapshot = state.snapshot_rx.borrow();
     Ok(Json(SessionListResponse {
         sessions: snapshot
@@ -28,7 +34,11 @@ pub(super) async fn list_sessions(
                         .as_ref()
                         .is_none_or(|id| &session.workspace_id == id)
             })
-            .map(ApiSession::from)
+            .map(|record| {
+                let mut session = ApiSession::from(record);
+                session.profile_login_error = login_errors.get(&session.profile_id).cloned();
+                session
+            })
             .collect(),
     }))
 }
@@ -37,11 +47,13 @@ pub(super) async fn get_session(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<ApiSession>, ApiFailure> {
-    let mut session = {
+    let (mut session, enforcement) = {
         let snapshot = state.snapshot_rx.borrow();
-        ApiSession::from(require_session_record(&snapshot, &session_id)?)
+        let record = require_session_record(&snapshot, &session_id)?;
+        (ApiSession::from(record), record.execution_enforcement)
     };
     if let Ok(backend) = backend(&state) {
+        session.profile_login_error = backend.profile_login_errors()?.remove(&session.profile_id);
         if let Some(turn) = backend.turn_state(session_id.clone()).await? {
             session.last_turn_diagnostic = turn
                 .last_turn_outcome
@@ -53,15 +65,20 @@ pub(super) async fn get_session(
             let view = handle.view();
             if let Some(snapshot) = view.snapshot {
                 // Use the setter's live configuration source; the dashboard can lag.
-                let options = crate::server::session_config_view(
+                let mut options = crate::server::session_config_view(
                     session.harness_kind.parse()?,
                     &snapshot.operational,
                 );
-                if !options.is_empty() {
+                crate::server::filter_policy_config_options(
+                    &mut options,
+                    enforcement,
+                    &snapshot.operational.config_options,
+                );
+                if !snapshot.operational.config_options.is_empty() {
                     session.config_options = options;
                 }
                 if view.connected {
-                    session.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+                    session.background_work = Some(ApiBackgroundWork::from(&*snapshot.operational));
                     session.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
                 }
             }
@@ -116,7 +133,7 @@ pub(super) async fn start_session(
     let (profile_hint, target_id) = resolve_launch(&state, &request)?;
     // An unnamed profile plus a named model is the CLI's model-first path.
     // Consider every configured, usable profile; a saved default profile is
-    // only the quota ranking anchor for ties.
+    // only the ordering anchor for candidates without a usable draw weight.
     let model_selection = if request.profile_id.is_none() {
         match request.model.as_deref() {
             Some(model) => Some(
@@ -218,9 +235,12 @@ pub(super) async fn start_session(
         base: request.base.clone(),
         no_later_history: request.no_later_history,
         subagents: request.subagents,
+        oracle: request.oracle,
+        oracle_choice: request.oracle_choice,
         review: request.review.clone(),
         no_project_memory: request.no_project_memory,
         no_github_events: request.no_github_events,
+        no_github_credentials: request.no_github_credentials,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,
         bundle_id,
@@ -261,7 +281,9 @@ pub(super) async fn start_session(
         .start_followup(
             session_id.clone(),
             StartFollowup {
-                model: request.model,
+                model: model_selection
+                    .map(|selection| selection.model)
+                    .or(request.model),
                 effort: request.effort,
                 prompt: request.prompt,
                 ..Default::default()
@@ -314,7 +336,11 @@ fn resolve_launch(
     )?;
     if !model_first
         && let Some(profile_id) = profile_id.as_deref()
-        && let Err(error) = crate::server::require_profile(&snapshot, profile_id)
+        && let Err(error) = if request.profile_id.is_some() {
+            crate::server::require_named_profile(&snapshot, profile_id)
+        } else {
+            crate::server::require_profile(&snapshot, profile_id).map(|_| ())
+        }
     {
         return Err(if request.profile_id.is_some() {
             error.into()
@@ -375,10 +401,8 @@ pub(super) async fn resume(
         if !session.capabilities.resume {
             return Err(ApiFailure::conflict(resume_refusal(session)));
         }
-        // The daemon's resume restores a checkpoint and nothing else. Without
-        // one it could only fail after this route had answered, where the
-        // caller never sees why (launch finding R6-1).
-        if !session.has_checkpoint {
+        // Failed sessions can repair their retained environment without an archive.
+        if !session.has_resume_source() {
             return Err(ApiFailure::conflict(no_checkpoint_refusal(session)));
         }
         let resolved = |named: Option<String>, recorded: &str, field: &str| match named {
@@ -493,6 +517,10 @@ pub(super) fn resume_refusal(session: &ViewerSession) -> String {
         ViewerLifecycleCategory::Live => {
             "this session is already running; to restart it, suspend it first (`mj suspend`), then resume it".to_owned()
         }
+        ViewerLifecycleCategory::Suspended | ViewerLifecycleCategory::Failed
+            if !session.has_resume_source() => {
+                no_checkpoint_refusal(session)
+            }
         ViewerLifecycleCategory::Suspended | ViewerLifecycleCategory::Failed => {
             "this session has an operation running; wait for it to finish, then resume".to_owned()
         }
@@ -626,7 +654,7 @@ pub(super) async fn wiki_restore(
     Json(request): Json<WikiRestoreBody>,
 ) -> Result<(StatusCode, Json<StartSessionResponse>), ApiFailure> {
     let backend = backend(&state)?.clone();
-    crate::server::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
+    crate::server::require_named_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
     // Also requires a launchable target.
     let resource_allocation = new_session_allocation(&state, &request.target_id, None, None)?;
     let session_id = backend

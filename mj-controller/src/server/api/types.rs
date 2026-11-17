@@ -28,6 +28,13 @@ pub struct MailboxEventResponse {
 pub struct SessionMessageResponse {
     pub session_id: String,
     pub via: String,
+    /// Worker-reported delivery timing for mailbox messages. Omitted when
+    /// the live worker has not published this capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_delivery: Option<mj_core::mailbox::MailboxDeliveryMode>,
+    /// Human-readable explanation when delivery waits for the recipient turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
     /// Internal routing detail used to preserve the shipped child-tool result
@@ -97,6 +104,8 @@ impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    #[serde(default)]
+    pub attention: mj_core::attention::SessionAttention,
     /// Tasks currently observed by the daemon, including their stop capability.
     #[serde(default)]
     pub background_tasks: Vec<crate::server::ViewerBackgroundTask>,
@@ -148,6 +157,9 @@ pub struct ApiSession {
     /// Why this session's target cannot take writes: its disk is full.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_problem: Option<String>,
+    /// Profile login failure reported by the daemon, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_login_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// How the last finished prompt ended. Absent unless the caller asked for
@@ -168,6 +180,7 @@ pub struct ApiSession {
 impl From<&ViewerSession> for ApiSession {
     fn from(session: &ViewerSession) -> Self {
         Self {
+            attention: session.attention,
             background_tasks: session.background_tasks.clone(),
             assessment: None,
             subagents: session.subagents.clone(),
@@ -191,12 +204,13 @@ impl From<&ViewerSession> for ApiSession {
             has_error: session.has_error,
             error: session.launch_error.clone(),
             storage_problem: session.storage_problem.clone(),
+            profile_login_error: None,
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,
             last_turn_diagnostic: None,
             config_options: session.config_options.clone(),
-            turn_controls: session.turn_controls.clone(),
+            turn_controls: session.turn_controls.as_deref().cloned(),
             pending_elicitations: session.pending_elicitations.clone(),
         }
     }
@@ -276,9 +290,14 @@ pub struct StartSessionRequest {
     /// Omitted uses the selected profile's subagent setting.
     #[serde(default)]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
-    /// Turn review for this session. Omitted follows `[review]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "super::super::actions::deserialize_session_review")]
+    pub oracle: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_choice: Option<mj_core::config::SubagentChoice>,
+    /// Review for this session: `off`, `push` or `inherit`. Omitted follows
+    /// `[review]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "super::super::actions::deserialize_api_session_review")]
     pub review: Option<mj_core::config::SessionReview>,
     /// Start the session with no project memory: nothing from the workspace's
     /// project memory is injected and the harness is offered no memory
@@ -288,6 +307,9 @@ pub struct StartSessionRequest {
     /// Exclude this session and its children from GitHub watcher delivery targets.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     #[serde(default)]
     pub workspace_id: Option<String>,
     /// Omitted follows the saved default, or anchors model-based profile
@@ -385,6 +407,9 @@ pub struct StartSessionResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnSubagentRequest {
+    /// Withhold credentials from this child; a parent's opt-out is always inherited.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     pub task_name: String,
     pub instructions: String,
     #[serde(default)]
@@ -393,28 +418,7 @@ pub struct SpawnSubagentRequest {
     pub working_directory: Option<PathBuf>,
 }
 
-/// A candidate's last quota reading, scored for the requested model when
-/// candidates are ranked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CandidateQuota {
-    /// No report, a failed one, or one with no windows.
-    Unknown,
-    /// Billed per use, with no allowance to run out of.
-    UsagePriced,
-    Windows(Vec<crate::quota::QuotaWindow>),
-}
-
-/// A candidate profile with its discovered choices and last quota reading.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubagentCandidate {
-    pub profile_id: String,
-    pub harness: mj_core::config::HarnessKind,
-    pub choices: mj_core::worker_launch::ProfileConfig,
-    pub quota: CandidateQuota,
-    /// The models this profile should not run now, by model id, from
-    /// provider failures its sessions just had (#1361).
-    pub unhealthy: std::collections::BTreeMap<String, crate::profile_health::Unhealthy>,
-}
+pub use crate::profile_scheduler::{CandidateQuota, SubagentCandidate};
 
 /// Candidate profiles split into those whose choices are known and those
 /// whose discovery failed, with the reason.
@@ -848,14 +852,6 @@ pub struct StartReviewResponse {
     pub started: bool,
 }
 
-/// What `POST /sessions/{id}/review/{resolution}` was accepted as.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolveReviewResponse {
-    pub session_id: String,
-    /// `forward`, `dismiss`, or `cancel`.
-    pub resolution: String,
-}
-
 /// The turn review a session has open, as `GET /sessions/{id}/review`
 /// reports it: the same view a phone renders, or `None` when no review is
 /// open (none was asked for, or the last one has closed).
@@ -865,6 +861,24 @@ pub struct ReviewStatusResponse {
     pub session_id: String,
     #[serde(default)]
     pub review: Option<crate::server::ViewerTurnReview>,
+}
+
+/// Selects the finished review `GET /sessions/{id}/reviews` returns. Without
+/// `review`, the most recently finished review is returned.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinishedReviewQuery {
+    #[serde(default)]
+    pub review: Option<String>,
+}
+
+/// A finished review's per-reviewer output, readable after the reviewer
+/// sessions have been destroyed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinishedReviewResponse {
+    pub session_id: String,
+    #[serde(default)]
+    pub review: Option<crate::database::FinishedReview>,
 }
 
 // ---------------------------------------------------------------------------

@@ -69,6 +69,7 @@ impl DashboardState {
         if self.navigation.layout().focused() != pane {
             return;
         }
+        self.attention_navigation = None;
         self.mark_layout_modified();
         self.clamp_selections();
     }
@@ -200,8 +201,13 @@ impl DashboardState {
         }
     }
 
-    pub fn take_navigation_session(&mut self) -> Option<String> {
-        self.navigation_session.take()
+    /// The session a finished workspace switch should open, if the move that
+    /// asked for the switch wanted it opened rather than only selected.
+    pub fn take_session_to_open(&mut self) -> Option<String> {
+        self.pending_navigation
+            .take()
+            .filter(|navigation| navigation.open)
+            .map(|navigation| navigation.session_id)
     }
 
     pub fn reveal_pane(&mut self, pane: PaneId) {
@@ -359,6 +365,7 @@ impl DashboardState {
             .entry(workspace_id.to_owned())
             .or_insert_with(|| WorkspaceViewState {
                 sessions_scroll: 0,
+                sessions_wheel_scrolled_from: None,
                 targets_scroll: 0,
                 quota_scroll: 0,
                 capacity_index: 0,

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acp::SessionConfigChoice;
 use crate::config::Config;
+use crate::model_catalog;
 use crate::subagent::SubagentOptions;
 use crate::worker_launch::ProfileConfig;
 
@@ -32,30 +33,39 @@ pub struct ProfileCapabilitiesSnapshot {
 }
 
 impl ProfileCapabilitiesSnapshot {
-    /// None means required hydration is still in flight, including effort
-    /// discovery. A model's efforts are discovered only once it is selected
-    /// or asked for, so an absent entry is not yet discovered either.
-    /// Successful empty choices and failures are terminal states.
+    /// Completed profiles contribute choices while pending profiles remain
+    /// unknown. None means no profile has completed discovery yet.
     pub fn options(&self, config: &Config, model: Option<&str>) -> Option<SubagentOptions> {
+        let identity = model.map(|model| self.model_id(config, model));
         let mut options = SubagentOptions::default();
+        let mut completed = false;
         for (id, profile) in config.enabled_profiles() {
-            let entry = self.profiles.get(&profile.capabilities_key(id))?;
+            let Some(entry) = self.profiles.get(&profile.capabilities_key(id)) else {
+                options.unavailable.push(format!("{id}: discovery pending"));
+                continue;
+            };
             match &entry.choices {
-                CapabilityState::Pending => return None,
+                CapabilityState::Pending => {
+                    options.unavailable.push(format!("{id}: discovery pending"))
+                }
                 CapabilityState::Failed(error) => {
+                    completed = true;
                     options.unavailable.push(format!("{id}: {error}"))
                 }
                 CapabilityState::Ready(choices) => {
-                    merge_choices(&mut options.models, &choices.models);
-                    if let Some(model) = model
-                        .filter(|model| choices.models.iter().any(|choice| choice.value == *model))
-                    {
-                        match entry.efforts.get(model)? {
-                            CapabilityState::Pending => return None,
-                            CapabilityState::Ready(efforts) => {
-                                merge_choices(&mut options.efforts, efforts)
+                    completed = true;
+                    options.models.extend(choices.models.iter().cloned());
+                    if let Some(offer) = identity.as_deref().and_then(|identity| {
+                        model_catalog::offer(&choices.models, identity, model.unwrap_or(identity))
+                    }) {
+                        match entry.efforts.get(&offer.value) {
+                            None | Some(CapabilityState::Pending) => options
+                                .unavailable
+                                .push(format!("{id}: effort discovery pending")),
+                            Some(CapabilityState::Ready(efforts)) => {
+                                merge_efforts(&mut options.efforts, efforts)
                             }
-                            CapabilityState::Failed(error) => {
+                            Some(CapabilityState::Failed(error)) => {
                                 options.unavailable.push(format!("{id}: {error}"))
                             }
                         }
@@ -63,7 +73,77 @@ impl ProfileCapabilitiesSnapshot {
                 }
             }
         }
-        Some(options)
+        options.models = model_catalog::merged_choices(options.models);
+        completed.then_some(options)
+    }
+
+    /// The models completed enabled profiles offer, one offer per value, with
+    /// `usage_priced` saying which profiles are billed per use.
+    pub fn model_offers(
+        &self,
+        config: &Config,
+        usage_priced: impl Fn(&str) -> bool,
+    ) -> Vec<crate::review::autoconfigure::ModelOffer> {
+        let ready = config
+            .enabled_profiles()
+            .filter_map(|(id, profile)| {
+                match &self.profiles.get(&profile.capabilities_key(id))?.choices {
+                    CapabilityState::Ready(choices) => {
+                        Some((choices.models.as_slice(), usage_priced(id)))
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        crate::review::autoconfigure::model_offers(ready)
+    }
+
+    /// Why `model`'s efforts are not fully known: a profile that has not
+    /// finished discovery (it may offer the model), or one that offers the
+    /// model whose effort discovery is pending or failed. A profile whose own
+    /// discovery failed is not listed: nothing shows that it offers the model.
+    pub fn effort_blockers(&self, config: &Config, model: &str) -> Vec<String> {
+        let identity = self.model_id(config, model);
+        let mut blockers = Vec::new();
+        for (id, profile) in config.enabled_profiles() {
+            let Some(entry) = self.profiles.get(&profile.capabilities_key(id)) else {
+                blockers.push(format!("{id}: discovery pending"));
+                continue;
+            };
+            match &entry.choices {
+                CapabilityState::Pending => blockers.push(format!("{id}: discovery pending")),
+                CapabilityState::Failed(_) => {}
+                CapabilityState::Ready(choices) => {
+                    if let Some(offer) = model_catalog::offer(&choices.models, &identity, model) {
+                        match entry.efforts.get(&offer.value) {
+                            None | Some(CapabilityState::Pending) => {
+                                blockers.push(format!("{id}: effort discovery pending"))
+                            }
+                            Some(CapabilityState::Ready(_)) => {}
+                            Some(CapabilityState::Failed(error)) => {
+                                blockers.push(format!("{id}: {error}"))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        blockers
+    }
+
+    /// Resolve once over the ready enabled profiles in this publication.
+    pub fn model_id(&self, config: &Config, wanted: &str) -> String {
+        let models = config
+            .enabled_profiles()
+            .filter_map(|(id, profile)| {
+                match &self.profiles.get(&profile.capabilities_key(id))?.choices {
+                    CapabilityState::Ready(choices) => Some(choices.models.iter().cloned()),
+                    _ => None,
+                }
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        model_catalog::model_id(&models, wanted)
     }
 
     /// Limit a public projection to saved enabled profiles. Draft identities
@@ -79,9 +159,31 @@ impl ProfileCapabilitiesSnapshot {
                 .collect(),
         }
     }
+
+    /// Whether every enabled profile in `config` has ready model choices and
+    /// every model `config` selects on it has ready effort choices.
+    pub fn covers(&self, config: &Config) -> bool {
+        config.enabled_profiles().all(|(id, profile)| {
+            let Some(entry) = self.profiles.get(&profile.capabilities_key(id)) else {
+                return false;
+            };
+            let CapabilityState::Ready(choices) = &entry.choices else {
+                return false;
+            };
+            config.selected_models(id).into_iter().all(|wanted| {
+                let Some(offer) = model_catalog::resolve(&choices.models, &wanted) else {
+                    return true;
+                };
+                matches!(
+                    entry.efforts.get(&offer.value),
+                    Some(CapabilityState::Ready(_))
+                )
+            })
+        })
+    }
 }
 
-fn merge_choices(into: &mut Vec<SessionConfigChoice>, choices: &[SessionConfigChoice]) {
+fn merge_efforts(into: &mut Vec<SessionConfigChoice>, choices: &[SessionConfigChoice]) {
     for choice in choices {
         if !into.iter().any(|existing| existing.value == choice.value) {
             into.push(choice.clone());
@@ -94,17 +196,104 @@ mod tests {
     use super::*;
     use crate::config::{HarnessKind, HarnessProfile};
 
+    // Hard-won: #1534: settings ignored equivalent harness IDs when collecting efforts.
+    #[test]
+    fn alias_efforts_use_profile_launch_keys_and_exclude_stale_versions() {
+        let recorded: BTreeMap<String, Vec<SessionConfigChoice>> = serde_json::from_str(
+            include_str!("../tests/fixtures/claude-antigravity-models.json"),
+        )
+        .unwrap();
+        let mut config = Config::default();
+        let mut snapshot = ProfileCapabilitiesSnapshot::default();
+        for (id, kind, mut models, launch, state) in [
+            (
+                "claude",
+                HarnessKind::Claude,
+                recorded["claude"].clone(),
+                "sonnet",
+                CapabilityState::Pending,
+            ),
+            (
+                "gemini",
+                HarnessKind::Antigravity,
+                recorded["antigravity"].clone(),
+                "claude-sonnet-5-5",
+                CapabilityState::Ready(vec![SessionConfigChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                    description: None,
+                }]),
+            ),
+            (
+                "a-stale",
+                HarnessKind::Claude,
+                recorded["claude"].clone(),
+                "sonnet",
+                CapabilityState::Pending,
+            ),
+        ] {
+            if id == "a-stale" {
+                models[1].name = "Sonnet 5".into();
+            }
+            let profile = HarnessProfile::new(kind, format!("/profiles/{id}"));
+            snapshot.profiles.insert(
+                profile.capabilities_key(id),
+                ProfileCapabilities {
+                    choices: CapabilityState::Ready(ProfileConfig {
+                        model: None,
+                        models,
+                        efforts: vec![],
+                        observed_at: 0,
+                    }),
+                    efforts: BTreeMap::from([(launch.into(), state)]),
+                },
+            );
+            config.profiles.insert(id.into(), profile);
+        }
+        assert_eq!(snapshot.model_id(&config, "sonnet"), "claude-sonnet-5-5");
+        let options = snapshot.options(&config, Some("sonnet")).unwrap();
+        options
+            .validate(&crate::config::SubagentChoice {
+                model: "sonnet".into(),
+                effort: Some("high".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            snapshot.effort_blockers(&config, "sonnet"),
+            ["claude: effort discovery pending"]
+        );
+        config.profiles.get_mut("claude").unwrap().enabled = false;
+        config.profiles.get_mut("a-stale").unwrap().enabled = false;
+        let options = snapshot.options(&config, Some("sonnet")).unwrap();
+        options
+            .validate(&crate::config::SubagentChoice {
+                model: "sonnet".into(),
+                effort: Some("high".into()),
+            })
+            .unwrap();
+        // The older alias sorts first; without identity-preserving merging
+        // it would hide the newer profile when Gemini is disabled.
+        config.profiles.get_mut("claude").unwrap().enabled = true;
+        config.profiles.get_mut("a-stale").unwrap().enabled = true;
+        config.profiles.get_mut("gemini").unwrap().enabled = false;
+        let options = snapshot
+            .options(&config, Some("claude-sonnet-5-5"))
+            .unwrap();
+        options
+            .validate(&crate::config::SubagentChoice {
+                model: "claude-sonnet-5-5".into(),
+                effort: None,
+            })
+            .unwrap();
+        assert_eq!(
+            model_catalog::model_id(&options.models, "sonnet"),
+            "claude-sonnet-5-5"
+        );
+    }
+
     fn fixture() -> (Config, ProfileCapabilitiesSnapshot) {
         let profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: "/profiles/parent".into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            legacy_subagents: Default::default(),
+            ..HarnessProfile::new(HarnessKind::Codex, "/profiles/parent")
         };
         let choice = |value: &str| SessionConfigChoice {
             value: value.into(),
@@ -152,5 +341,27 @@ mod tests {
         config.profiles.get_mut("parent").unwrap().home = "/another/home".into();
         assert_ne!(config.profiles_discovery_key(), original);
         assert!(snapshot.options(&config, None).is_none());
+    }
+
+    #[test]
+    fn completed_profile_remains_usable_while_another_profile_is_pending() {
+        let (mut config, snapshot) = fixture();
+        let second = config.profiles["parent"].clone();
+        config.profiles.insert("other".into(), second);
+        let models = snapshot.options(&config, None).unwrap();
+        assert!(models.models.iter().any(|choice| choice.value == "a"));
+        assert!(
+            models
+                .unavailable
+                .iter()
+                .any(|reason| reason.contains("other: discovery pending"))
+        );
+        let efforts = snapshot.options(&config, Some("a")).unwrap();
+        assert!(
+            efforts
+                .unavailable
+                .iter()
+                .any(|reason| reason.contains("other: discovery pending"))
+        );
     }
 }

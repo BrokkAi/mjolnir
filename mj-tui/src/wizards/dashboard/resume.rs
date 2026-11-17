@@ -44,11 +44,12 @@ impl DashboardState {
                     self.mode = Mode::Resume(wizard);
                     return DashboardAction::None;
                 }
+                wizard.mounts.history_selection = 0;
                 wizard.mounts.history = mount_history_host(&self.config.targets[&target_id])
                     .and_then(|host| self.state.mount_history.get(host))
                     .cloned()
                     .unwrap_or_default();
-                wizard.mounts.history_index = 0;
+                wizard.mounts.selected_mount = 0;
                 wizard.step = if wizard.skips_review() {
                     WizardStep::Launching
                 } else {
@@ -106,6 +107,15 @@ impl DashboardState {
         let subagents = wizard.subagent_change(self);
         let action = DashboardAction::MoveSession {
             subagents,
+            oracle: wizard
+                .subagents
+                .oracle_available()
+                .then(|| self.session_record(&wizard.session_id))
+                .flatten()
+                .and_then(|record| {
+                    (record.oracle != wizard.subagents.oracle).then_some(wizard.subagents.oracle)
+                }),
+            oracle_choice: None,
             workspace_selection: wizard.files.selection.clone(),
             session_id: wizard.session_id.clone(),
             profile_id,
@@ -203,11 +213,16 @@ impl DashboardState {
             }
             let action = DashboardAction::MoveSession {
                 subagents: selection.subagents.clone(),
+                oracle: selection.oracle,
+                oracle_choice: selection.oracle_choice.clone(),
                 workspace_selection: selection.workspace.clone(),
                 session_id: selection.session_id.clone(),
                 profile_id: selection.profile_id.clone().unwrap(),
                 target_template_id: selection.target_template_id.clone().unwrap(),
-                additional_mounts: selection.additional_mounts.clone().unwrap_or_default(),
+                additional_mounts: selection
+                    .additional_mounts
+                    .clone()
+                    .unwrap_or_else(|| wizard.mounts.mounts.clone()),
                 resource_allocation: selection.resource_allocation.clone(),
                 clear_resource_allocation: selection.clear_resource_allocation,
                 preparation_request_id: None,
@@ -347,7 +362,10 @@ impl DashboardState {
         {
             return false;
         }
-        if wizard.resource_allocation != preparation.selection.resource_allocation {
+        if (preparation.selection.clear_resource_allocation
+            || preparation.selection.resource_allocation.is_some())
+            && wizard.resource_allocation != preparation.selection.resource_allocation
+        {
             wizard.resource_allocation = preparation.selection.resource_allocation.clone();
             wizard
                 .resource_editor
@@ -420,7 +438,7 @@ impl DashboardState {
                     .iter()
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
-                    wizard.mounts.history_index = index;
+                    wizard.mounts.selected_mount = index;
                     if prepare_selected_mount_editor(&mut wizard.mounts) {
                         wizard.step = WizardStep::Mounts;
                     }
@@ -438,7 +456,7 @@ impl DashboardState {
                     .iter()
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
-                    wizard.mounts.history_index = index;
+                    wizard.mounts.selected_mount = index;
                     if prepare_selected_mount_editor(&mut wizard.mounts) {
                         wizard.step = WizardStep::Mounts;
                     }

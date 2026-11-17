@@ -68,10 +68,16 @@ impl std::fmt::Display for StoreSchemaMismatch {
 
 impl std::error::Error for StoreSchemaMismatch {}
 
+/// How far a prompt search reaches. Wider scopes list the asking session's
+/// matches first, then the rest of the project's, then other projects', each
+/// newest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryScope {
-    Project,
+    /// This session's prompts and nothing else.
     Session,
+    /// This session's prompts, then other sessions in the project.
+    Project,
+    /// This session, then the project, then every other project.
     All,
 }
 
@@ -199,28 +205,62 @@ pub struct TranscriptRetention {
     pub remaining: bool,
 }
 
-/// How far this session has been reviewed.
-///
-/// `baselines` are Git tree ids by repository root: the working tree as of the
-/// last completed review. They advance only when a review resolves, which is
-/// what makes a cancelled review lossless -- the next one covers both turns.
+/// A declined finding and the repositories whose review range it covers. An
+/// entry stored before repositories were recorded has none and covers every
+/// repository until any review base moves.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DeclinedFinding {
+    #[serde(flatten)]
+    pub entry: crate::subagent::ReviewOverride,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<std::path::PathBuf>,
+}
+
+impl DeclinedFinding {
+    /// Whether a review of `root` must be told not to repeat this finding.
+    pub fn covers(&self, root: &std::path::Path) -> bool {
+        self.repositories.is_empty() || self.repositories.iter().any(|covered| covered == root)
+    }
+}
+
+impl std::ops::Deref for DeclinedFinding {
+    type Target = crate::subagent::ReviewOverride;
+    fn deref(&self) -> &Self::Target {
+        &self.entry
+    }
+}
+
+impl PartialEq<crate::subagent::ReviewOverride> for DeclinedFinding {
+    fn eq(&self, other: &crate::subagent::ReviewOverride) -> bool {
+        self.entry == *other
+    }
+}
+
+/// How a review ended, recorded beside its per-reviewer output so the output
+/// remains readable after the reviewer sessions are destroyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishedReviewResolution {
+    /// Every reviewer settled and the verdict was delivered.
+    Completed,
+    /// The review could not reach a usable verdict.
+    Failed,
+    /// The user stopped the review before it resolved.
+    Cancelled,
+}
+
+/// Durable review work, findings and declined findings for this session.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewState {
+    /// Findings the author declined to fix with `override_review`, newest last.
+    /// Every before-push review of this session tells its reviewers not to
+    /// report them again in those repositories. A baseline move removes that
+    /// repository from their coverage. Bounded to `DECLINED_FINDINGS_BYTES`.
     #[serde(default)]
-    pub child_session_id: Option<String>,
-    pub baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
-    pub reviewed_through_ordinal: u64,
-    /// The last forwarded verdict, which turns the next review into a
-    /// verification pass. Cleared once that pass consumes it.
-    pub prior_review: Option<crate::review::lanes::PriorReviewContext>,
+    pub declined_findings: Vec<DeclinedFinding>,
     /// A review that was running when the daemon stopped. On recovery it is
     /// cleared without advancing the baseline.
     pub active: Option<String>,
-    /// A corrective prompt that was submitted while its relay acceptance was
-    /// still ambiguous. It survives a daemon restart so the exact command can
-    /// be retried and reconciled without losing the findings.
-    #[serde(default)]
-    pub pending_forward: Option<crate::review::driver::PendingForward>,
     /// The exact trees covered by the last before-push findings verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_findings: Option<PushFindingsRecord>,
@@ -229,12 +269,97 @@ pub struct TurnReviewState {
     pub active_group: Option<ActiveReviewGroup>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// How many bytes of declined findings and reasons a session keeps. The
+/// oldest entries go first.
+pub const DECLINED_FINDINGS_BYTES: usize = 24 * 1024;
+
+impl TurnReviewState {
+    /// Stop covering the repositories whose review base moved, dropping entries
+    /// left with none. An entry without recorded repositories is dropped.
+    pub fn advance_review_bases(&mut self, moved: &[std::path::PathBuf]) {
+        if moved.is_empty() {
+            return;
+        }
+        self.declined_findings.retain_mut(|entry| {
+            entry.repositories.retain(|root| !moved.contains(root));
+            !entry.repositories.is_empty()
+        });
+    }
+
+    /// Adds findings the author declined, then drops the oldest entries until
+    /// the list fits `DECLINED_FINDINGS_BYTES`.
+    pub fn decline_findings(
+        &mut self,
+        entries: impl IntoIterator<Item = crate::subagent::ReviewOverride>,
+        repositories: Vec<std::path::PathBuf>,
+    ) {
+        for entry in entries {
+            let entry = DeclinedFinding {
+                entry,
+                repositories: repositories.clone(),
+            };
+            if !self.declined_findings.contains(&entry) {
+                self.declined_findings.push(entry);
+            }
+        }
+        let size = |entry: &DeclinedFinding| {
+            entry.entry.finding.len()
+                + entry.entry.reason.len()
+                + entry
+                    .repositories
+                    .iter()
+                    .map(|root| root.as_os_str().len())
+                    .sum::<usize>()
+        };
+        let mut total: usize = self.declined_findings.iter().map(size).sum();
+        let mut drop = 0;
+        while total > DECLINED_FINDINGS_BYTES && drop < self.declined_findings.len() {
+            total -= size(&self.declined_findings[drop]);
+            drop += 1;
+        }
+        self.declined_findings.drain(..drop);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(from = "ActiveReviewGroupInput")]
 pub struct ActiveReviewGroup {
     pub driver: crate::review::driver::ReviewDriverSnapshot,
-    pub reviewer: crate::review::settings::ResolvedReviewSettings,
-    pub scope: crate::relay::CaptureScope,
+    pub reviewers: Vec<crate::review::settings::ResolvedReviewSettings>,
     pub registrations: Vec<ReviewerRegistration>,
+    /// The resolved brief writer, when this review has one. Its registration
+    /// is in `registrations` under `BRIEF_WRITER_ROLE`.
+    pub brief_writer: Option<crate::review::settings::ResolvedReviewSettings>,
+}
+
+#[derive(serde::Deserialize)]
+struct ActiveReviewGroupInput {
+    driver: crate::review::driver::ReviewDriverSnapshot,
+    #[serde(default)]
+    reviewers: Vec<crate::review::settings::ResolvedReviewSettings>,
+    #[serde(default)]
+    reviewer: Option<crate::review::settings::ResolvedReviewSettings>,
+    registrations: Vec<ReviewerRegistration>,
+    #[serde(default)]
+    brief_writer: Option<crate::review::settings::ResolvedReviewSettings>,
+}
+impl From<ActiveReviewGroupInput> for ActiveReviewGroup {
+    fn from(input: ActiveReviewGroupInput) -> Self {
+        let reviewers = if input.reviewers.is_empty() {
+            input
+                .reviewer
+                .map(|reviewer| vec![reviewer; input.driver.roles.len()])
+                .unwrap_or_default()
+        } else {
+            input.reviewers
+        };
+        Self {
+            driver: input.driver,
+            reviewers,
+            registrations: input.registrations,
+            brief_writer: input.brief_writer,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -252,15 +377,29 @@ pub struct PushFindingsRecord {
     pub synthesis: String,
 }
 
-/// What a bounded prompt search found, and whether it stopped early.
+/// Prompt-history queries shorter than this many characters match nothing:
+/// the trigram index behind the search cannot answer them.
+pub const MIN_HISTORY_QUERY_CHARS: usize = 3;
+
+/// Where a prompt search resumes: the tier it reached, counted from the
+/// asking session outward; the newest-row position below which it continues;
+/// and the newest history row when the search began, past which it reads
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryCursor {
+    pub tier: u8,
+    pub before: i64,
+    pub through: i64,
+}
+
+/// One page of a prompt search. `next` is `None` once nothing more matches.
 ///
-/// The flag is not decoration. Without it a caller cannot tell twenty matches
-/// from the first twenty of many, and will present a partial answer as a whole
-/// one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundedPromptHistory {
+/// Without `next` a caller cannot tell eight matches from the first eight of
+/// many, and would present a partial answer as a whole one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptHistoryPage {
     pub entries: Vec<PromptHistoryEntry>,
-    pub truncated: bool,
+    pub next: Option<HistoryCursor>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +412,12 @@ pub struct UsageCoverage {
     /// Started turns for which no completion report has been recorded.
     #[serde(default)]
     pub unfinished_turns: u64,
+    #[serde(default)]
+    pub provider_cost_turns: u64,
+    #[serde(default)]
+    pub estimated_cost_turns: u64,
+    #[serde(default)]
+    pub missing_cost_turns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +438,9 @@ pub struct UsagePage {
     pub coverage: UsageCoverage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_cost: Option<ProviderCost>,
+    /// Sum of priced whole turns, in 10^-10 USD. Partial when cost coverage is missing.
+    #[serde(default)]
+    pub turn_cost_usd_ticks: u64,
     #[serde(default)]
     pub turn_selections: BTreeMap<String, UsageSelection>,
     #[serde(default)]
@@ -320,6 +468,9 @@ pub struct UsageSummary {
     pub by_model: Vec<UsageModelTotal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_cost: Option<ProviderCost>,
+    /// Sum of priced whole turns, in 10^-10 USD. Partial when cost coverage is missing.
+    #[serde(default)]
+    pub turn_cost_usd_ticks: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -460,4 +611,97 @@ pub struct ApiEventPage {
     pub events: Vec<ApiEvent>,
     pub next_after_seq: u64,
     pub latest_seq: u64,
+}
+
+// Scope is a persisted compatibility field, never an orchestration decision.
+impl serde::Serialize for ActiveReviewGroup {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct(
+            "ActiveReviewGroup",
+            4 + usize::from(self.brief_writer.is_some()),
+        )?;
+        value.serialize_field("driver", &self.driver)?;
+        value.serialize_field("reviewers", &self.reviewers)?;
+        value.serialize_field("registrations", &self.registrations)?;
+        value.serialize_field("scope", "pushable_commits")?;
+        if let Some(writer) = &self.brief_writer {
+            value.serialize_field("brief_writer", writer)?;
+        }
+        value.end()
+    }
+}
+
+#[cfg(test)]
+mod declined_findings_tests {
+    use super::*;
+    use crate::subagent::ReviewOverride;
+
+    fn entry(finding: &str, reason: &str) -> ReviewOverride {
+        ReviewOverride {
+            finding: finding.into(),
+            reason: reason.into(),
+        }
+    }
+
+    // Hard-won: 9ebd246b2: clearing one repository erased other ranges.
+    #[test]
+    fn a_base_move_stops_covering_only_its_own_repository() {
+        let mut state: TurnReviewState = serde_json::from_value(serde_json::json!({
+            "active": null, "declined_findings": [{"finding": "legacy", "reason": "all repositories"}]
+        })).unwrap();
+        assert!(state.declined_findings[0].covers(std::path::Path::new("/b")));
+        state.decline_findings([entry("scoped", "both")], vec!["/a".into(), "/b".into()]);
+        state.decline_findings([entry("scoped", "both")], vec!["/a".into(), "/b".into()]);
+        assert_eq!(
+            state.declined_findings.len(),
+            2,
+            "a retried override is not duplicated"
+        );
+        state.advance_review_bases(&["/a".into()]);
+        assert_eq!(
+            state.declined_findings.len(),
+            1,
+            "an unscoped entry ends at any move"
+        );
+        assert_eq!(
+            state.declined_findings[0].repositories,
+            vec![std::path::PathBuf::from("/b")]
+        );
+        let restored: TurnReviewState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored, state);
+        state.advance_review_bases(&["/b".into()]);
+        assert!(state.declined_findings.is_empty());
+    }
+
+    #[test]
+    fn the_declined_list_keeps_the_newest_entries_within_its_byte_budget() {
+        let mut state = TurnReviewState::default();
+        state.decline_findings([entry("first", "kept order")], vec![]);
+        state.decline_findings([entry("second", "kept order")], vec![]);
+        assert_eq!(
+            state.declined_findings.len(),
+            2,
+            "within budget nothing goes"
+        );
+
+        let half = DECLINED_FINDINGS_BYTES / 2 - 2;
+        state.decline_findings(
+            [entry(&"a".repeat(half), "x"), entry(&"b".repeat(half), "y")],
+            vec![],
+        );
+        let kept: Vec<_> = state
+            .declined_findings
+            .iter()
+            .map(|entry| entry.finding.chars().next().unwrap())
+            .collect();
+        assert_eq!(kept, vec!['a', 'b'], "the oldest entries are dropped first");
+        let size: usize = state
+            .declined_findings
+            .iter()
+            .map(|entry| entry.finding.len() + entry.reason.len())
+            .sum();
+        assert!(size <= DECLINED_FINDINGS_BYTES);
+    }
 }

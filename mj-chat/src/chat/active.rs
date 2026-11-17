@@ -22,7 +22,7 @@ use crate::components::{EventResult, render_scrollbar, scrollbar_geometry};
 use crate::selection::{SurfaceFrame, SurfaceId};
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, TranscriptItem, config_command_text};
-use mj_core::storage::{HistoryScope, PromptHistoryEntry};
+use mj_core::storage::PromptHistoryEntry;
 
 use mj_client::session::{
     ManagedSessionView, SessionControl as SessionManagerControl,
@@ -65,8 +65,8 @@ use crate::clipboard::ClipboardContent;
 /// What the chat asks the controller daemon to do.
 ///
 /// The chat runs in the terminal process, which owns no session state and no
-/// database: everything here crosses to the daemon, which does. Review actions
-/// travel this way too -- the review runs there.
+/// database: everything here crosses to the daemon, which does. Review start
+/// requests travel this way too -- the review runs there.
 pub enum ChatDaemonRequest {
     RecordAbandonedPrompt {
         session_id: String,
@@ -75,11 +75,6 @@ pub enum ChatDaemonRequest {
     },
     /// Review the turn this session just finished.
     StartTurnReview { session_id: String },
-    /// Forward the findings, dismiss them, or cancel the review.
-    ResolveTurnReview {
-        session_id: String,
-        resolution: mj_core::review::driver::Resolution,
-    },
 }
 
 const MAX_DIFFSTAT_TASKS: usize = 2;
@@ -97,7 +92,10 @@ enum ChatIoUpdate {
             String,
         >,
     },
-    ProjectHistoryPrefetched(std::result::Result<Vec<PromptHistoryEntry>, String>),
+    SessionHistoryListed {
+        generation: u64,
+        result: std::result::Result<Vec<PromptHistoryEntry>, String>,
+    },
     /// The history a large session did not convert when it opened, built off
     /// the event loop. `attempt` counts the tries so far, so a transcript that
     /// keeps changing under the conversion cannot retry for ever.
@@ -126,6 +124,27 @@ enum ChatIoUpdate {
 /// tail. Compaction rewriting the history under a pending conversion is rare,
 /// and one rebuild against the current snapshot normally lands.
 const MAX_PREFIX_CONVERSION_ATTEMPTS: u32 = 3;
+
+fn dispatch_session_history_request(
+    session: ManagedSessionHandle,
+    chat: &mut ChatState,
+    updates: &tokio::sync::mpsc::UnboundedSender<ChatIoUpdate>,
+) {
+    let Some(generation) = chat.take_session_history_request() else {
+        return;
+    };
+    let updates = updates.clone();
+    tokio::spawn(async move {
+        let result = session
+            .session_prompts()
+            .await
+            .map_err(|error| format!("{error:#}"));
+        if let Err(error) = updates.send(ChatIoUpdate::SessionHistoryListed { generation, result })
+        {
+            tracing::debug!(%error, "session history result dropped because the chat closed");
+        }
+    });
+}
 
 fn dispatch_history_search_request(session: ManagedSessionHandle, chat: &mut ChatState) {
     let Some(request) = chat.take_history_search_request() else {
@@ -269,10 +288,16 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
                 chat.set_notice(format!("Earlier messages failed to load: {error}"));
             }
         },
-        ChatIoUpdate::ProjectHistoryPrefetched(Ok(entries)) => chat.set_project_history(entries),
-        ChatIoUpdate::ProjectHistoryPrefetched(Err(error)) => {
-            tracing::warn!(%error, "project chat history prefetch failed");
-            chat.set_project_history_unavailable(error);
+        ChatIoUpdate::SessionHistoryListed {
+            generation,
+            result: Ok(entries),
+        } => chat.set_session_history(generation, entries),
+        ChatIoUpdate::SessionHistoryListed {
+            generation,
+            result: Err(error),
+        } => {
+            tracing::warn!(%error, "session chat history listing failed");
+            chat.set_session_history_unavailable(generation, error);
         }
         ChatIoUpdate::ToolDiffstats {
             tool_call_id,
@@ -412,10 +437,8 @@ pub struct ActiveChat {
     voice_updates_tx: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
     voice_updates_rx: tokio::sync::mpsc::UnboundedReceiver<VoiceUpdate>,
     voice_cancel: Option<std::sync::mpsc::Sender<crate::speech::VoiceCommand>>,
-    voice_auth: Option<std::path::PathBuf>,
     voice_probe_at: Option<std::time::Instant>,
     voice_probe_pending: bool,
-    voice_probe_paths: Vec<std::path::PathBuf>,
     /// Why the last availability probe found dictation unavailable, as the
     /// sentence the dictation key shows. `None` until a probe says.
     voice_unavailable: Option<String>,
@@ -649,20 +672,8 @@ impl ActiveChat {
         state.restore_draft(draft);
         state.notices = notices;
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
-        {
-            let updates = chat_io_tx.clone();
-            let history_session = session.clone();
-            let bundle_id = bundle_id.to_owned();
-            tokio::spawn(async move {
-                let result = history_session
-                    .search_prompts(bundle_id, HistoryScope::Project, String::new())
-                    .await
-                    .map_err(|error| format!("{error:#}"));
-                if let Err(error) = updates.send(ChatIoUpdate::ProjectHistoryPrefetched(result)) {
-                    tracing::debug!(%error, "project history result dropped because the chat closed");
-                }
-            });
-        }
+        state.request_session_history();
+        dispatch_session_history_request(session.clone(), &mut state, &chat_io_tx);
         if let Some(pending) = pending_prefix {
             spawn_transcript_prefix(pending, 1, chat_io_tx.clone());
         }
@@ -699,10 +710,8 @@ impl ActiveChat {
             voice_updates_tx,
             voice_updates_rx,
             voice_cancel: None,
-            voice_auth: None,
             voice_probe_at: None,
             voice_probe_pending: false,
-            voice_probe_paths: Vec::new(),
             voice_unavailable: None,
             voice_finishing: false,
             remote_open: true,
@@ -717,6 +726,15 @@ impl ActiveChat {
         };
         chat.refresh_voice_availability();
         chat
+    }
+
+    /// Reconcile transferred local state with this attachment's authoritative view.
+    pub fn adopt_live_composer(&mut self, composer: super::LiveComposer) {
+        self.state.adopt_live_composer(composer);
+        // The view may have advanced while the composer was parked. Applying
+        // it restores the authoritative queue and uses the same submission
+        // reconciliation as every feed update, without retaining another copy.
+        self.apply_session_view(Ok(self.session.view()));
     }
 
     /// Transfer native result ownership together with its pending submission rows.
@@ -934,44 +952,79 @@ impl Drop for ActiveChat {
 }
 
 enum VoiceUpdate {
-    /// The probed auth paths, and either the auth file dictation would use or
-    /// the sentence saying why it cannot start.
-    Availability(
-        Vec<std::path::PathBuf>,
-        anyhow::Result<Result<std::path::PathBuf, String>>,
-    ),
+    Availability(anyhow::Result<Result<(), String>>),
     Status(String),
     Finished(anyhow::Result<String>),
 }
 
 fn spawn_dictation(
-    auth_path: std::path::PathBuf,
+    preferred_profile: String,
     updates: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
     cancel: std::sync::mpsc::Receiver<crate::speech::VoiceCommand>,
 ) {
     tokio::spawn(async move {
-        let worker_updates = updates.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let updates = worker_updates;
-            let status_updates = updates.clone();
-            crate::speech::run_dictation(
-                &auth_path,
-                |_| {},
-                |_| {},
-                move |status| {
-                    if let Err(error) = status_updates.send(VoiceUpdate::Status(status)) {
-                        tracing::debug!(%error, "voice status dropped because the chat closed");
-                    }
-                },
-                cancel,
-            )
-        })
-        .await
-        .unwrap_or_else(|error| Err(anyhow::anyhow!("dictation task failed: {error}")));
+        let result = dictation_handoff(preferred_profile, updates.clone(), cancel).await;
         if let Err(error) = updates.send(VoiceUpdate::Finished(result)) {
             tracing::debug!(%error, "voice result dropped because the chat closed");
         }
     });
+}
+
+async fn dictation_handoff(
+    preferred_profile: String,
+    updates: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
+    cancel: std::sync::mpsc::Receiver<crate::speech::VoiceCommand>,
+) -> anyhow::Result<String> {
+    let (recording, cancel) = tokio::task::spawn_blocking(move || {
+        let recording = tempfile::NamedTempFile::new()?;
+        let path = recording.path().to_owned();
+        crate::speech::run_dictation(
+            &path,
+            |_| {},
+            |_| {},
+            move |status| {
+                if let Err(error) = updates.send(VoiceUpdate::Status(status)) {
+                    tracing::debug!(%error, "voice status receiver closed");
+                }
+            },
+            &cancel,
+        )?;
+        Ok::<_, anyhow::Error>((recording, cancel))
+    })
+    .await??;
+    let cancelled = async move {
+        loop {
+            match cancel.try_recv() {
+                Ok(crate::speech::VoiceCommand::Finish) => {}
+                Ok(crate::speech::VoiceCommand::Cancel)
+                | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
+                }
+            }
+        }
+    };
+    let transcribe = async {
+        let mut client = mj_client::daemon::connect_existing().await?;
+        let mut file = tokio::fs::File::open(recording.path()).await?;
+        match client
+            .upload_and_consume(&mut file, |blob| {
+                mj_client::daemon::DaemonAction::TranscribeAudio {
+                    preferred_profile: preferred_profile.clone(),
+                    blob,
+                }
+            })
+            .await?
+        {
+            mj_client::daemon::DaemonReply::Transcription(text) => Ok(text),
+            reply => Err(anyhow::anyhow!("unexpected transcription reply: {reply:?}")),
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = cancelled => Err(anyhow::anyhow!("voice dictation cancelled")),
+        result = transcribe => result,
+    }
 }
 
 fn append_dictation(prefix: &str, transcript: &str) -> String {

@@ -1,0 +1,61 @@
+{
+  "commits": [
+    {
+      "intro": "43553e0d358d58fd725d108b4e25e9236f98824b",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-98087c39"
+          ],
+          "summary": "The new required sink_files field is missing from the production candidate plan initializer, preventing compilation.",
+          "verdict": "confirmed",
+          "severity": "high",
+          "evidence": "At intro, crates/bifrost-policy/src/taint_policy.rs:367-382 defines PreparedTaintPlan with the new required sink_files field. The unconditional mod candidate at taint_policy.rs:131 compiles candidate.rs, whose PreparedTaintPlan literal at crates/bifrost-policy/src/taint_policy/candidate.rs:566-576 omits that field and has no struct update expression. Rust therefore rejects the literal with a missing-field error even if the candidate path is never called. The base had no such field. Later fix dbd3ec88e7c69427155afd37241f97569a3666ab computes policy-wide sink files and supplies sink_files in this initializer.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "5053bc5bea1ac33fb6e5ee71ffa46cc0f34429e6",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-e6b647fa",
+            "f-0f846e04"
+          ],
+          "summary": "Deleting the shared scan-budget regression test reduces coverage but does not introduce the claimed incorrect query result.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/semantic_model/callable_values.rs:140-146 initializes Unknown coverage and one examined counter; :156-167 consumes the fact budget; :170-178 passes that same counter into collect_coverage; :193-200 reports RecordBudgetExhausted before admitting another coverage record. Thus one matching fact, one coverage record, and max_records=1 still returns the fact, no coverage claims, Unknown executable coverage, and the exhaustion gap. The diff removes tests only and does not reset the counter. The findings posit a future regression rather than a concrete failing input at intro. Later e3f2640c58426437ef7abb8ff2151231b3080107 restores the bounded-scan test, supporting its coverage value but not demonstrating a runtime defect in this diff.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-27f55995",
+            "f-fa0c8191"
+          ],
+          "summary": "Test deletions leave incorrectly indented module closures and blank lines that fail the CI formatting check.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/semantic_model/callable_values.rs:375 closes the top-level tests module with four spaces of indentation and :278 contains an extra blank line. crates/bifrost-analysis/src/analyzer/semantic_model/catalog/mod.rs:6239 similarly closes its top-level generated_production_cache_version_tests module with four spaces. These are the deleted tests' closing braces retained as module closures; the base had correctly unindented module closures. The CI Check formatting step at .github/workflows/ci.yml:107-108 runs cargo fmt --check, which rejects these formatting differences. Later 724fe67a3c815516a19e6273a05fe8530b3e2510 corrects callable_values.rs's closure indentation and extra blank lines. Verified by source inspection only, without running a formatter, build, or tests.",
+          "confidence": "high"
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-15cb7edf",
+            "f-7237e55b"
+          ],
+          "summary": "Deleting the retry-deadline test reduces coverage but leaves the deadline enforcement intact.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/semantic_model/catalog/db.rs:115-116 supplies BUSY_TIMEOUT to retry_initialization_with. That helper records the start time at :124 and returns the transient error when elapsed >= deadline at :130-133, bounds its sleep by remaining time at :134, and checks the deadline again at :135-136. BUSY and PROTOCOL are classified as transient at :147-154. Persistent transient errors therefore still stop at the deadline; Duration::ZERO returns on the first transient error without sleeping. This diff deletes the test at :733-734 but does not change the helper. An unbounded retry requires a hypothetical subsequent code regression. Later ab8b8ffeabd0d251df041700aca18da8690cedb0 restores the deadline test with a hardwon annotation, supporting its usefulness but not showing a new runtime hang at intro.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

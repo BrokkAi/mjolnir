@@ -60,13 +60,13 @@ An image-baked `opencode` must be OpenCode 2, because each session imports its
 logins with `opencode auth import` before it starts.
 
 DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
-`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.5.0`,
+`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.6.0`,
 using Node.js 22 or newer with npm and npx; the npm package bundles the release
 binaries. An older `dsh-acp` on `PATH` is likewise skipped, so the image needs
-the same Node.js tools for the fallback unless its binary is 0.5.0 or newer.
+the same Node.js tools for the fallback unless its binary is 0.6.0 or newer.
 Mjolnir supplies the pinned Node runtime when the image has no compatible one.
 To bake it in, run
-`npm install -g @brokkai/dsh-acp@0.5.0`
+`npm install -g @brokkai/dsh-acp@0.6.0`
 (Node.js 22 or newer), or put the `dsh-acp` binary from a release archive at
 <https://github.com/BrokkAi/dsh-acp/releases> on `PATH`. The Linux binaries
 need glibc 2.34 or newer, so musl images such as Alpine cannot run DSH.
@@ -93,6 +93,21 @@ the matching checksum-verified native binary as managed workers do. Copy the
 manifest and script into your image build and run the installer with the
 manifest path and destination bin directory. It needs Python 3.11 or newer and
 curl.
+
+## Project tools
+
+After the clone, the worker installs each repository's mise recipe (see
+[Project environments](/project-environments/)) in your image too. It uses a
+`mise` on the image's `PATH` if there is one; otherwise it downloads Mjolnir's
+pinned static mise, which runs on glibc and musl images alike. Images that
+set `MISE_DATA_DIR`, `RUSTUP_HOME` or `CARGO_HOME` keep their values, so tools
+you preinstalled with mise are reused. Repositories without a recipe leave
+your image's environment untouched. `[bootstrap.packages]` needs root or
+passwordless `sudo` and a package manager mise supports.
+
+Mjolnir starts its own Node-based bridges with the Node it resolved for them,
+not whichever `node` comes first on `PATH`, so a project that pins an older
+Node does not affect the harness.
 
 ## Workspace and Mjolnir's own files
 

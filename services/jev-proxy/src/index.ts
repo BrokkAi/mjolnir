@@ -1,26 +1,35 @@
+import { githubItemGlideRequest, githubItemGlideQuestions } from "./github-item.ts";
+import eotQuestions from "../../../mj-core/src/activity/eot_glide_questions.json" with { type: "json" };
+import { glide } from "./glide.ts";
+import handbackQuestions from "../../../mj-core/src/activity/handback_questions.json" with { type: "json" };
 import { continuationRequestV2, continuationAnswersV2, continuationQuestionsV2, continuationRequest, continuationAnswers, continuationQuestions, type ContinuationEvidence } from "./continuation.ts";
-import questionsV1 from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
-import questionsV2 from "../../../mj-core/src/activity/verdict_questions_v2.json" with { type: "json" };
-import questionsV3 from "../../../mj-core/src/activity/verdict_questions_v3.json" with { type: "json" };
-import questionsV4 from "../../../mj-core/src/activity/verdict_questions_v4.json" with { type: "json" };
-import questionsV5 from "../../../mj-core/src/activity/verdict_questions_v5.json" with { type: "json" };
-import questionsV6 from "../../../mj-core/src/activity/verdict_questions_v6.json" with { type: "json" };
-import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
-import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
-import { githubItemRequest, githubItemAnswers, githubItemQuestions, type GithubItemEvidence } from "./github-item.ts";
-import { effortRequest, effortAnswers, effortQuestions, type EffortRequest } from "./effort.ts";
+import questionsV1 from "./verdict_questions_v1.json" with { type: "json" };
+import questionsV2 from "./verdict_questions_v2.json" with { type: "json" };
+import questionsV3 from "./verdict_questions_v3.json" with { type: "json" };
+import questionsV4 from "./verdict_questions_v4.json" with { type: "json" };
+import questionsV5 from "./verdict_questions_v5.json" with { type: "json" };
+import questionsV6 from "./verdict_questions_v6.json" with { type: "json" };
+import questions from "./verdict_questions.json" with { type: "json" };
+import { githubItemRequest, githubItemAnswers, githubItemQuestions, githubItemRequestV2, githubItemAnswersV2, githubItemQuestionsV2, type GithubItemEvidence, type GithubItemEvidenceV2 } from "./github-item.ts";
+import { questionLocatorRequest, questionLocatorAnswers, questionLocatorQuestions, type QuestionLocatorRequest } from "./question-locator.ts";
+import { afkQuestionGlideQuestions, afkQuestionGlideProbabilities } from "./afk-question-glide.ts";
+import { questionLocatorGlideQuestions, questionLocatorGlideProbabilities } from "./question-locator-glide.ts";
+import { afkQuestionRequest, afkQuestionAnswers, afkQuestionQuestions, type AfkQuestionRequest } from "./afk-question.ts";
 
 export interface Env {
   TYPESAFE_API_KEY: string;
+  FASTINO_API_KEY?: string;
   TURN_RATE_LIMITER: RateLimit;
-  HELP_RATE_LIMITER?: RateLimit;
   CONTINUATION_RATE_LIMITER?: RateLimit;
   GITHUB_ITEM_RATE_LIMITER?: RateLimit;
-  EFFORT_RATE_LIMITER?: RateLimit;
 }
 
 const UPSTREAM = "https://api.typesafe.ai/v1/systemone";
 const MAX_BODY_BYTES = 64 * 1024;
+// GLiDE documents 65,536 tokens per question (docs.fastino.ai, GLiDE API
+// notes). Four UTF-8 bytes per token gives a conservative 256 KiB request
+// body bound; tokenization is provider-owned, so this is a transport bound.
+const GLIDE_BODY_BYTES = 65_536 * 4;
 const UPSTREAM_TIMEOUT_MS = 8_000;
 const encoder = new TextEncoder();
 
@@ -50,9 +59,14 @@ type TurnEvidenceV6 = TurnEvidenceV4 & {
 // v6 adds background process evidence, so Jev can judge whether anyone still
 // depends on those commands (the `background` question).
 function evidenceV6(value: unknown): value is TurnEvidenceV6 {
+  return evidenceV6Shape(value, true);
+}
+
+function evidenceV6Shape(value: unknown, bounded: boolean): value is TurnEvidenceV6 {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value)) return false;
   const { background, final_tool_calls, ...ordinary } = value;
-  if (!evidenceV5(ordinary)) return false;
+  if (!evidenceV5Shape(ordinary, bounded)) return false;
   if (final_tool_calls !== undefined && !(Array.isArray(final_tool_calls) && final_tool_calls.length <= 16
     && final_tool_calls.every(item => object(item) && Object.keys(item).length === 2
       && text(item.name, 128) && text(item.status, 32)))) return false;
@@ -98,9 +112,14 @@ function answersWithQuestions(
 }
 
 function evidenceV5(value: unknown): value is TurnEvidenceV4 {
+  return evidenceV5Shape(value, true);
+}
+
+function evidenceV5Shape(value: unknown, bounded: boolean): value is TurnEvidenceV4 {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value)) return false;
   const { authorization, ...ordinary } = value;
-  if (!evidenceV4(ordinary) || (ordinary.phase === "replied" && !ordinary.completion)) return false;
+  if (!evidenceV4Shape(ordinary, bounded) || (ordinary.phase === "replied" && !ordinary.completion)) return false;
   if (authorization === undefined) return true;
   if (!object(authorization) || typeof authorization.authorization_complete !== "boolean"
     || typeof authorization.assistant_history_omitted !== "boolean"
@@ -116,7 +135,7 @@ function evidenceV5(value: unknown): value is TurnEvidenceV4 {
     else if (m.role === "assistant") assistants += encoder.encode(m.text).length;
     else return false;
   }
-  return users <= 32 * 1024 && assistants <= 16 * 1024;
+  return !bounded || (users <= 32 * 1024 && assistants <= 16 * 1024);
 }
 
 function answersV5(value: unknown): Record<string, unknown> | null {
@@ -143,7 +162,19 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function text(value: unknown, limit: number): value is string {
+const text = boundedText;
+
+// GLiDE uses the overall transport bound and the provider's token refusal.
+// Reuse the evidence shape checks while omitting legacy per-field byte limits.
+function stringShape(value: unknown, _limit: number): value is string {
+  return typeof value === "string";
+}
+
+function glideEvidence(value: unknown): value is TurnEvidenceV6 {
+  return evidenceV6Shape(value, false);
+}
+
+function boundedText(value: unknown, limit: number): value is string {
   return typeof value === "string" && encoder.encode(value).length <= limit;
 }
 
@@ -156,6 +187,11 @@ function probability(value: unknown): value is number {
 }
 
 function evidence(value: unknown): value is TurnEvidence {
+  return evidenceShape(value, true);
+}
+
+function evidenceShape(value: unknown, bounded: boolean): value is TurnEvidence {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value)) return false;
   const fields = [
     "harness", "phase", "silent_for_s", "tools_in_flight", "recent_tools",
@@ -174,16 +210,26 @@ function evidence(value: unknown): value is TurnEvidence {
 }
 
 function evidenceV2(value: unknown): value is TurnEvidenceV2 {
+  return evidenceV2Shape(value, true);
+}
+
+function evidenceV2Shape(value: unknown, bounded: boolean): value is TurnEvidenceV2 {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value) || !("transcript_summary" in value) || "recent_tools" in value
     || !text(value.transcript_summary, 48 * 1024)) return false;
   const { transcript_summary: _summary, ...rest } = value;
-  return evidence({ ...rest, recent_tools: [] });
+  return evidenceShape({ ...rest, recent_tools: [] }, bounded);
 }
 
 function evidenceV4(value: unknown): value is TurnEvidenceV4 {
+  return evidenceV4Shape(value, true);
+}
+
+function evidenceV4Shape(value: unknown, bounded: boolean): value is TurnEvidenceV4 {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value)) return false;
   const { completion, ...ordinary } = value;
-  if (!evidenceV2(ordinary)) return false;
+  if (!evidenceV2Shape(ordinary, bounded)) return false;
   if (completion === undefined) return true;
   if (value.phase !== "replied" || !object(completion)
     || Object.keys(completion).length !== 2
@@ -246,9 +292,9 @@ function error(code: string, status: number, headers: Record<string, string> = {
   return json({ error: code }, status, headers);
 }
 
-async function readBounded(message: Request | Response): Promise<unknown> {
+async function readBounded(message: Request | Response, limit = MAX_BODY_BYTES): Promise<unknown> {
   const length = message.headers.get("Content-Length");
-  if (length !== null && Number(length) > MAX_BODY_BYTES) {
+  if (length !== null && Number(length) > limit) {
     await message.body?.cancel();
     throw new BodyTooLarge();
   }
@@ -261,7 +307,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         await reader.cancel();
         throw new BodyTooLarge();
       }
@@ -279,7 +325,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | HelpSearchRequest | ContinuationEvidence | GithubItemEvidence | EffortRequest, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 = 1, continuationV2 = false): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | ContinuationEvidence | GithubItemEvidence | GithubItemEvidenceV2 | QuestionLocatorRequest | AfkQuestionRequest, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 = 1, continuationV2 = false, githubV2 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -292,9 +338,10 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
     return await Promise.race([
       deadline,
       (async () => {
-        const questionsForState = "task_name" in state ? effortQuestions
-          : "item" in state ? githubItemQuestions
-          : "entries" in state ? helpQuestions(state)
+        const questionsForState = "current_question" in state ? afkQuestionQuestions
+          : "latest_user_message" in state ? questionLocatorQuestions(state)
+          : githubV2 ? githubItemQuestionsV2
+            : "item" in state ? githubItemQuestions
             : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions)
               : version === 7 ? questions
                 : version === 6 ? questionsV6
@@ -316,16 +363,17 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
           return error("upstream_unavailable", 502);
         }
         const body = await readBounded(upstream);
-        const result = "task_name" in state ? effortAnswers(body)
-          : "item" in state ? githubItemAnswers(body)
-          : "entries" in state ? helpAnswers(body, state)
+        const result = "current_question" in state ? afkQuestionAnswers(body)
+          : "latest_user_message" in state ? questionLocatorAnswers(body, state)
+          : githubV2 ? githubItemAnswersV2(body)
+            : "item" in state ? githubItemAnswers(body)
             : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body))
               : version === 7 ? answersV7(body)
                 : version === 6 ? answersV6(body)
                 : version === 5 ? answersV5(body)
                   : version === 4 ? answersV4(body)
                     : version === 3 ? answersV3(body) : answers(body);
-        return result ? json("entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
+        return result ? json("current_question" in state || "latest_user_message" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
   } catch (cause) {
@@ -337,22 +385,98 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
   }
 }
 
+/// GLiDE's handback categories for one report. Provider errors, including
+/// backpressure and its Retry-After, pass through without retries.
+async function handbackVerdict(state: unknown, key: string): Promise<Response> {
+  const response = await glide(state, handbackQuestions, key);
+  if (!response.ok) return response;
+  try {
+    const value: unknown = await response.json();
+    const answers = object(value) && object(value.answers) ? value.answers : {};
+    const answer = object(answers.handback) ? answers.handback : {};
+    const scores = answer.probabilities;
+    const allowed = Object.keys(handbackQuestions.handback.criteria);
+    if (!object(scores) || Object.keys(scores).length !== allowed.length
+      || !allowed.every(k => probability(scores[k]))
+      || Math.abs((Object.values(scores) as number[]).reduce((a,b) => a+b,0)-1) > 0.03) return error("invalid_upstream_response", 502);
+    return json({ probabilities: scores });
+  } catch { return error("invalid_upstream_response", 502); }
+}
+
+/// GLiDE's V0 locator question for one worker state. Provider errors, including
+/// backpressure and its Retry-After, pass through without retries.
+async function questionLocatorGlideVerdict(state: QuestionLocatorRequest, key: string): Promise<Response> {
+  const response = await glide(state, questionLocatorGlideQuestions(state), key);
+  if (!response.ok) return response;
+  try {
+    const probabilities = questionLocatorGlideProbabilities(await response.json(), state);
+    return probabilities ? json({ probabilities }) : error("invalid_upstream_response", 502);
+  } catch { return error("invalid_upstream_response", 502); }
+}
+
+/// GLiDE's repeated-question check for one worker state. Provider errors,
+/// including backpressure and its Retry-After, pass through without retries.
+async function afkQuestionGlideVerdict(state: unknown, key: string): Promise<Response> {
+  const response = await glide(state, afkQuestionGlideQuestions, key);
+  if (!response.ok) return response;
+  try {
+    const probabilities = afkQuestionGlideProbabilities(await response.json());
+    return probabilities ? json({ probabilities }) : error("invalid_upstream_response", 502);
+  } catch { return error("invalid_upstream_response", 502); }
+}
+
+// Evidence projection adds only worker-observed facts and recent message text.
+function eotEvidence(value: unknown): boolean {
+  if (!object(value)) return false;
+  const { latest_user_message, current_assistant_replies, runtime_observations, ...base } = value;
+  return glideEvidence(base) && base.phase === "replied"
+    && typeof latest_user_message === "string"
+    && Array.isArray(current_assistant_replies) && current_assistant_replies.every(v => typeof v === "string")
+    && Array.isArray(runtime_observations) && runtime_observations.every(v => typeof v === "string");
+}
+
+async function eotVerdict(state: unknown, key: string): Promise<Response> {
+  const response = await glide(state, eotQuestions, key);
+  if (!response.ok) return response;
+  try {
+    const value = await readBounded(response);
+    const answers = object(value) && object(value.answers) ? value.answers : {};
+    for (const [axis, question] of Object.entries(eotQuestions)) {
+      const answer = answers[axis];
+      const scores = object(answer) ? answer.probabilities : undefined;
+      const allowed = Object.keys(question.criteria);
+      if (!object(scores) || Object.keys(scores).length !== allowed.length
+        || !allowed.every(k => probability(scores[k]))
+        || Math.abs((Object.values(scores) as number[]).reduce((a, b) => a + b, 0) - 1) > 0.03)
+        return error("invalid_upstream_response", 502);
+    }
+    return json({ answers });
+  } catch { return error("invalid_upstream_response", 502); }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const search = url.pathname === "/v1/help-search";
+    const eot = url.pathname === "/v1/glide-turn-verdict";
+    const handback = url.pathname === "/v1/handback-verdict";
+    const questionLocator = url.pathname === "/v1/question-locator";
+    const questionLocatorGlide = url.pathname === "/v1/question-locator-glide";
+    const afkQuestionGlide = url.pathname === "/v1/afk-question-glide";
+    const afkQuestion = url.pathname === "/v1/afk-question-verdict";
     const githubItem = url.pathname === "/v1/github-item-verdict";
-    const effort = url.pathname === "/v1/effort-verdict";
+    const githubGlide = url.pathname === "/v1/github-item-glide";
+    const githubItemV2 = url.pathname === "/v2/github-item-verdict";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!search && !githubItem && !effort && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!eot && !handback && !afkQuestion && !afkQuestionGlide && !questionLocator && !questionLocatorGlide && !githubItem && !githubItemV2 && !githubGlide && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
     }
-    const key = env.TYPESAFE_API_KEY?.trim();
+    // Handback and completed-turn GLiDE checks use Fastino.
+    const key = ((handback || eot || githubGlide || questionLocatorGlide || afkQuestionGlide) ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
     const ip = request.headers.get("CF-Connecting-IP");
-    const limiter = effort ? env.EFFORT_RATE_LIMITER : githubItem ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
+    const limiter = (githubItem || githubItemV2 || githubGlide) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : env.TURN_RATE_LIMITER;
     if (!key || !ip || !limiter) return error("service_unavailable", 503);
     try {
       const { success } = await limiter.limit({ key: ip });
@@ -362,17 +486,30 @@ export default {
     }
     let state: unknown;
     try {
-      state = await readBounded(request);
+      state = await readBounded(request, (eot || handback || questionLocatorGlide || afkQuestionGlide) ? GLIDE_BODY_BYTES : MAX_BODY_BYTES);
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
+    if (eot) return eotEvidence(state) ? eotVerdict(state, key) : error("invalid_evidence", 400);
+    if (handback) return glideEvidence(state) ? handbackVerdict(state, key) : error("invalid_evidence", 400);
+    if (questionLocatorGlide) return questionLocatorRequest(state) ? questionLocatorGlideVerdict(state, key) : error("invalid_evidence", 400);
+    if (afkQuestionGlide) return afkQuestionRequest(state) ? afkQuestionGlideVerdict(state, key) : error("invalid_evidence", 400);
+    if (githubGlide) {
+      if (!githubItemGlideRequest(state)) return error("invalid_github_item_request", 400);
+      const response = await glide(state, githubItemGlideQuestions, key);
+      if (!response.ok) return response;
+      try {
+        const answers = githubItemAnswersV2(await response.json());
+        if (!answers) return error("invalid_upstream_response", 502);
+        return json({ probability: (answers.interested as { noul: number }).noul });
+      } catch { return error("invalid_upstream_response", 502); }
+    }
     if (githubItem) return githubItemRequest(state) ? classify(state, key) : error("invalid_github_item_request", 400);
-    if (effort) return effortRequest(state) ? classify(state, key) : error("invalid_effort_request", 400);
+    if (githubItemV2) return githubItemRequestV2(state) ? classify(state, key, 1, false, true) : error("invalid_github_item_request", 400);
+    if (questionLocator) return questionLocatorRequest(state) ? classify(state, key) : error("invalid_evidence", 400);
+    if (afkQuestion) return afkQuestionRequest(state) ? classify(state, key) : error("invalid_evidence", 400);
     if (continuationV2) return continuationRequestV2(state) ? classify(state, key, 1, true) : error("invalid_continuation_request", 400);
     if (continuation) return continuationRequest(state) ? classify(state, key) : error("invalid_continuation_request", 400);
-    if (search) {
-      return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);
-    }
     if (url.pathname === "/v7/turn-verdict") {
       return evidenceV6(state) ? classify(state, key, 7) : error("invalid_evidence", 400);
     }

@@ -1,0 +1,36 @@
+{
+  "cycles": 6,
+  "profiles": [
+    {
+      "profile": "codex4",
+      "harness": "codex",
+      "billing": "subscription",
+      "enabled": true,
+      "probing": false,
+      "report": {
+        "paid_credits": {
+          "kind": "limited",
+          "balance": 0.0
+        },
+        "banked_resets": 1,
+        "profile_id": "codex4",
+        "harness": "codex",
+        "windows": [
+          {
+            "label": "Week",
+            "remaining_percent": 99,
+            "duration_seconds": 604800,
+            "used": null,
+            "limit": null,
+            "resets": "22:42 Nov 23",
+            "resets_at_epoch_seconds": 1795495361
+          }
+        ],
+        "extra": null,
+        "error": null,
+        "refreshed_at_epoch_seconds": 1794891172
+      },
+      "detail": "Week 99% left, resets 6d 23h [1] · credits $0.0 left"
+    }
+  ]
+}

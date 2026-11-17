@@ -1,5 +1,6 @@
 use super::*;
 use mj_core::hex::lower_hex;
+use mj_core::targets::SshTrafficClass;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Replace `{worker_root}/hel` with the worker this controller would install:
@@ -62,7 +63,12 @@ impl LiveStaging {
         // A snapshot must remain current until its sweep finishes. Other
         // registrations wait here before creating their first directory entry.
         let gate = super::store::store_gate(locator, &format!("{root}/staging"));
-        let _owner = super::store::lock_gate(executor, &gate)?;
+        let _owner = super::store::lock_gate(
+            executor,
+            &gate,
+            session_id,
+            "register and sweep private worker staging",
+        )?;
         let (live, names) = Self::register(session_id, name);
         execute_checked(
             executor,
@@ -131,7 +137,8 @@ done"#;
         worker_root.to_owned(),
     ];
     args.extend(live.iter().cloned());
-    targets::locator_command(locator, args).purpose("remove stale private worker staging")
+    targets::locator_command(SshTrafficClass::Control, locator, args)
+        .purpose("remove stale private worker staging")
 }
 
 impl<E: CommandExecutor> PreparedWorkerBinary<'_, E> {
@@ -215,6 +222,7 @@ pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecu
     // cancelled upload removes its partial `.next` file on the way out.
     let prepared = PreparedWorkerBinary {
         cleanup: targets::locator_command(
+            SshTrafficClass::Control,
             locator,
             vec![
                 "rm".into(),
@@ -260,6 +268,7 @@ pub(in crate::controller) fn install_staged_worker_binary(
     execute_checked(
         executor,
         targets::locator_command(
+            SshTrafficClass::Control,
             locator,
             vec![
                 "sh".into(),
@@ -361,13 +370,21 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
     let result = (|| -> Result<()> {
         execute_checked(
             executor,
-            crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &staging_root])
-                .purpose("clear managed harness preparation staging"),
+            crate::targets::ssh_command(
+                SshTrafficClass::Control,
+                ssh,
+                ["rm", "-rf", "--", &staging_root],
+            )
+            .purpose("clear managed harness preparation staging"),
         )?;
         execute_checked(
             executor,
-            crate::targets::ssh_command(ssh, ["mkdir", "-p", &staging_root])
-                .purpose("create managed harness preparation staging"),
+            crate::targets::ssh_command(
+                SshTrafficClass::Control,
+                ssh,
+                ["mkdir", "-p", &staging_root],
+            )
+            .purpose("create managed harness preparation staging"),
         )?;
         let staging_name = Path::new(&staging_root)
             .file_name()
@@ -390,6 +407,7 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
         execute_checked(
             executor,
             crate::targets::ssh_command(
+                SshTrafficClass::Control,
                 ssh,
                 [
                     staging_binary.as_str(),
@@ -410,8 +428,12 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
     })?;
     execute_checked(
         executor,
-        crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &staging_root])
-            .purpose("remove managed harness preparation staging"),
+        crate::targets::ssh_command(
+            SshTrafficClass::Control,
+            ssh,
+            ["rm", "-rf", "--", &staging_root],
+        )
+        .purpose("remove managed harness preparation staging"),
     )
     .context("clean managed harness preparation staging")?;
     Ok(())
@@ -443,6 +465,7 @@ fn prepare_container_harness_for_upgrade(
         execute_checked(
             executor,
             targets::locator_command(
+                SshTrafficClass::Control,
                 locator,
                 vec!["mkdir".into(), "-p".into(), staging_root.clone()],
             )
@@ -467,6 +490,7 @@ fn prepare_container_harness_for_upgrade(
         execute_checked(
             executor,
             targets::locator_command(
+                SshTrafficClass::Control,
                 locator,
                 vec![
                     staging_binary,
@@ -489,6 +513,7 @@ fn prepare_container_harness_for_upgrade(
     execute_checked(
         executor,
         targets::locator_command(
+            SshTrafficClass::Control,
             locator,
             vec!["rm".into(), "-rf".into(), "--".into(), staging_root],
         )
@@ -498,7 +523,7 @@ fn prepare_container_harness_for_upgrade(
     Ok(())
 }
 
-pub(super) fn prepare_installed_managed_harness(
+pub(in crate::controller) fn prepare_installed_managed_harness(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -519,6 +544,7 @@ pub(super) fn prepare_installed_managed_harness(
     let worker_binary = format!("{worker_root}/hel");
     let launch_config = format!("{worker_root}/launch.json");
     let command = targets::locator_command(
+        SshTrafficClass::Control,
         locator,
         vec![
             worker_binary,
@@ -560,6 +586,7 @@ pub(super) fn worker_binary_upload_plan(
                 description: format!("link the image's Mjolnir worker for session {session_id}"),
                 commands: vec![
                     targets::locator_command(
+                        SshTrafficClass::Control,
                         locator,
                         vec![
                             "ln".into(),
@@ -570,6 +597,7 @@ pub(super) fn worker_binary_upload_plan(
                     )
                     .purpose("stage a link to the image's Mjolnir worker"),
                     targets::locator_command(
+                        SshTrafficClass::Control,
                         locator,
                         vec!["mv".into(), "-f".into(), "--".into(), staged, installed],
                     )
@@ -644,10 +672,18 @@ pub(super) fn worker_binary_upload_plan(
         | targets::TargetLocator::SshBare { ssh, .. } => vec![
             crate::targets::scp_upload(ssh, worker_binary, &staged, false)
                 .purpose("stage replacement Mjolnir worker"),
-            crate::targets::ssh_command(ssh, ["mv", "-f", "--", &staged, &installed])
-                .purpose("replace installed Mjolnir worker"),
-            crate::targets::ssh_command(ssh, ["chmod", "700", &installed])
-                .purpose("make replaced Mjolnir worker executable"),
+            crate::targets::ssh_command(
+                SshTrafficClass::Control,
+                ssh,
+                ["mv", "-f", "--", &staged, &installed],
+            )
+            .purpose("replace installed Mjolnir worker"),
+            crate::targets::ssh_command(
+                SshTrafficClass::Control,
+                ssh,
+                ["chmod", "700", &installed],
+            )
+            .purpose("make replaced Mjolnir worker executable"),
         ],
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
@@ -656,6 +692,9 @@ pub(super) fn worker_binary_upload_plan(
             ssh, container_id, ..
         }
         | targets::TargetLocator::SshAppleContainer {
+            ssh, container_id, ..
+        }
+        | targets::TargetLocator::SshNitro {
             ssh, container_id, ..
         } => {
             let engine = locator
@@ -669,51 +708,92 @@ pub(super) fn worker_binary_upload_plan(
                     crate::session_manager::new_command_id("worker-upload")?
                 ),
             };
-            vec![
-                crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
-                    .purpose("create remote replacement worker staging"),
-                match remote_source {
-                    Some(_) => crate::targets::ssh_command(ssh, ["true"]),
-                    None => crate::targets::scp_upload(ssh, worker_binary, &upload, false),
-                }
-                .purpose("stage replacement Mjolnir worker"),
-                crate::targets::ssh_command(
-                    ssh,
-                    [engine, "cp", &upload, &format!("{container_id}:{staged}")],
-                )
-                .purpose("stage replacement Mjolnir worker"),
-                crate::targets::ssh_command(
-                    ssh,
-                    std::iter::once(engine.to_owned()).chain(container_upload_ownership_args(
-                        engine,
-                        container_id,
-                        &worker_root,
-                        &[&staged],
-                    )),
-                )
-                .purpose("match replacement worker to the worker directory owner"),
-                crate::targets::ssh_command(
-                    ssh,
-                    [
-                        engine,
-                        "exec",
-                        container_id,
-                        "mv",
-                        "-f",
-                        "--",
-                        &staged,
-                        &installed,
+            let mut commands = Vec::new();
+            let mut steps = Vec::new();
+            let staging = vec![
+                "mkdir".into(),
+                "-p".into(),
+                targets::REMOTE_UPLOAD_STAGING.into(),
+            ];
+            if remote_source.is_none() {
+                commands.push(
+                    crate::targets::ssh_command_owned(SshTrafficClass::Control, ssh, staging)
+                        .purpose("create remote replacement worker staging"),
+                );
+                commands.push(
+                    crate::targets::scp_upload(ssh, worker_binary, &upload, false)
+                        .purpose("stage replacement Mjolnir worker"),
+                );
+            } else {
+                steps.push(targets::CommandStep::new(
+                    "create remote replacement worker staging",
+                    staging,
+                ));
+            }
+            for (purpose, args) in [
+                (
+                    "stage replacement Mjolnir worker",
+                    vec![
+                        engine.into(),
+                        "cp".into(),
+                        upload.clone(),
+                        format!("{container_id}:{staged}"),
                     ],
-                )
-                .purpose("replace installed Mjolnir worker"),
-                crate::targets::ssh_command(
+                ),
+                (
+                    "match replacement worker to the worker directory owner",
+                    std::iter::once(engine.to_owned())
+                        .chain(container_upload_ownership_args(
+                            engine,
+                            container_id,
+                            &worker_root,
+                            &[&staged],
+                        ))
+                        .collect(),
+                ),
+                (
+                    "replace installed Mjolnir worker",
+                    vec![
+                        engine.into(),
+                        "exec".into(),
+                        container_id.clone(),
+                        "mv".into(),
+                        "-f".into(),
+                        "--".into(),
+                        staged,
+                        installed.clone(),
+                    ],
+                ),
+                (
+                    "make replaced Mjolnir worker executable",
+                    vec![
+                        engine.into(),
+                        "exec".into(),
+                        container_id.clone(),
+                        "chmod".into(),
+                        "700".into(),
+                        installed,
+                    ],
+                ),
+            ] {
+                steps.push(targets::CommandStep::new(
+                    purpose,
+                    targets::with_engine_argv(args),
+                ));
+            }
+            steps.push(targets::CommandStep::new(
+                "remove remote replacement worker staging",
+                ["rm", "-f", "--", &upload],
+            ));
+            commands.push(
+                crate::targets::ssh_command_owned(
+                    SshTrafficClass::Bulk,
                     ssh,
-                    [engine, "exec", container_id, "chmod", "700", &installed],
+                    targets::step_script(steps),
                 )
-                .purpose("make replaced Mjolnir worker executable"),
-                crate::targets::ssh_command(ssh, ["rm", "-f", "--", &upload])
-                    .purpose("remove remote replacement worker staging"),
-            ]
+                .purpose("stage replacement Mjolnir worker"),
+            );
+            commands
         }
     };
     Ok(CommandPlan {
@@ -732,6 +812,7 @@ pub(super) fn installed_file_digest_command(
     // the digest first, which is the contract the refresh gate consumes.
     let script = "case $(uname -s) in Darwin) exec shasum -a 256 -- \"$1\";; Linux) exec sha256sum -- \"$1\";; *) echo 'unsupported target operating system for worker digest' >&2; exit 1;; esac";
     targets::locator_command(
+        SshTrafficClass::Control,
         locator,
         vec![
             "sh".into(),
@@ -778,8 +859,12 @@ fn write_launch_config_command(
     let staged_arg = targets::join_remote_command(&[staged]);
     let installed_arg = targets::join_remote_command(&[installed.to_owned()]);
     let script = format!("umask 077; cat > {staged_arg} && mv -f -- {staged_arg} {installed_arg}");
-    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .with_sensitive_stdin(body)
+    targets::locator_command(
+        SshTrafficClass::Bulk,
+        locator,
+        vec!["sh".into(), "-c".into(), script],
+    )
+    .with_sensitive_stdin(body)
 }
 
 /// Plan a refresh without resolving or hashing a worker binary. Both happen

@@ -1,5 +1,6 @@
 //! Finding a program on a PATH value the way the operating system would run it.
 
+use anyhow::Context;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
@@ -54,6 +55,71 @@ pub fn find_program_on_path(program: &str, path: Option<&OsStr>) -> Option<PathB
     })
 }
 
+/// Whether `path` is a file this process could run: on Unix, one with an
+/// execute bit set.
+pub fn is_executable_file(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// The program a spawn of `program` with `path` as its PATH would run: like
+/// [`find_program_on_path`], but skipping files that are not executable, as
+/// the system's own search does.
+pub fn find_executable_on_path(program: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    let path = path?;
+    let names = candidate_names(program);
+    std::env::split_paths(path).find_map(|directory| {
+        names
+            .iter()
+            .map(|name| directory.join(name))
+            .find(|candidate| is_executable_file(candidate))
+    })
+}
+
+/// An ambient Antigravity CLI (`agy`), including its conventional install
+/// directory when a login shell has not added that directory to PATH.
+pub async fn find_antigravity_program(
+    environment: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<Option<PathBuf>> {
+    let search = environment.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Option<PathBuf>> {
+        let path = search
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os("PATH"));
+        if let Some(path) = find_executable_on_path("agy", path.as_deref()) {
+            return path
+                .canonicalize()
+                .map(Some)
+                .context("resolve Antigravity executable");
+        }
+        let home = search
+            .get("HOME")
+            .map(PathBuf::from)
+            .or_else(crate::path_input::user_home);
+        if let Some(home) = home {
+            let bin = home.join(".local/bin");
+            if let Some(path) = find_executable_on_path("agy", Some(bin.as_os_str())) {
+                return path
+                    .canonicalize()
+                    .map(Some)
+                    .context("resolve Antigravity executable");
+            }
+        }
+        Ok(None)
+    })
+    .await
+    .context("find target Antigravity task failed")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +151,24 @@ mod tests {
             "{found:?}"
         );
         assert_eq!(find_program_on_path("podman", Some(&path)), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_search_skips_files_without_an_execute_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let plain = tempfile::tempdir().unwrap();
+        let runnable = tempfile::tempdir().unwrap();
+        std::fs::write(plain.path().join("tool"), b"").unwrap();
+        let program = runnable.path().join("tool");
+        std::fs::write(&program, b"").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let only_plain = std::env::join_paths([plain.path()]).unwrap();
+        assert!(find_program_on_path("tool", Some(&only_plain)).is_some());
+        assert_eq!(find_executable_on_path("tool", Some(&only_plain)), None);
+
+        let both = std::env::join_paths([plain.path(), runnable.path()]).unwrap();
+        assert_eq!(find_executable_on_path("tool", Some(&both)), Some(program));
     }
 }

@@ -1,0 +1,228 @@
+{
+  "id": "W181",
+  "title": "AFK install approval pending",
+  "category": "waiting-with-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "e8566ee44d5a562c41deb74d72243980",
+    "session_title": "mjolnir via claude",
+    "reply_position": 25918,
+    "captured_at": "2026-10-27T09:20:25.738Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:22185",
+          "role": "user",
+          "text": "I want to add an AFK feature where, when it's active, a question or a permissions check from an agent should first tell the agent that the operator is away, and does it have any productive work to do in the meantime instead of waiting for the answer. If the agent performs the same action a second time, then we'll block for the operator, and the agent should be told that this is what will happen. Open question: how to wire this up in the TUI and Web UI."
+        },
+        {
+          "id": "user:22910",
+          "role": "user",
+          "text": "sgtm, pls make it so; push and install when complete\n\n(i want afk mode to show a big dialog in the TUI that says AFK in ascii art and in desaturated text explains what that means; closing the window (x button) dismisses afk)"
+        },
+        {
+          "id": "user:23223",
+          "role": "user",
+          "text": "oh: and when afk ends, message the sessions that got an autoreply that the op is back and they can retry their Qs now. but only if they didn't end up blocking later.\n\nand show in the AFK dialog a list of the sessions that do end up blocking"
+        },
+        {
+          "id": "agent:24434",
+          "role": "assistant",
+          "text": "The live test found one blocking bug. Turning AFK off does not work.\n\n**Bug: AFK cannot be turned off.**\n- `mj daemon afk off` exits 0 and prints \"Operator away: on\".\n- Esc and the × button in the TUI fail the same way.\n- The store still has `away=1`, and no \"operator is back\" messages were queued.\n- The daemon logged nothing during the command.\n\nThe cause is not yet known. I've given the daemon child four possible causes to check against each other. It will first reproduce the bug in a test that goes through the real action path, then fix it.\n\n**What worked**, with real Claude sessions:\n- The first `touch` request was refused. The refusal ended Claude's turn.\n- The \"operator is away\" message then arrived as a new turn.\n- S1 first said the refusal was not an away notice. Then, in that new turn, it repeated the exact same command, which blocked and showed as `!`.\n- S2 followed its \"don't retry\" instruction.\n- The AFK dialog listed only S1.\n- After a daemon restart, AFK stayed on, the dialog reopened, and a new request was refused again.\n- Isolation held: the copied credentials were deleted, the real profile directories were unchanged, and no processes were left running.\n\n**Two smaller fixes**, also sent to the daemon child:\n- The transcript line cuts off the command (\"…requests permission:\"). It should reuse the summary text the session row already shows.\n- The \"operator is back\" message must appear in the transcript.\n\n`★ Insight ─────────────────────────────────────`\n- **Two paths failed the same way.** Both the TUI and the CLI reported success while nothing changed. That points to the daemon side, not the TUI.\n- **Why the tests missed it.** The bug only appeared when real sessions were present, including one with a pending request. The earlier tests that called the setter with hand-made rows did not cover that. This is why the new test must go through the real action path, and why I wanted a live run before committing.\n- **Claude's behaviour is as designed.** Claude's adapter ends the turn on a refusal. The mailbox message then starts a new turn. This shows the AFK notice reaches the agent even when the refusal ends its turn.\n`─────────────────────────────────────────────────`\n\nStill running: afk-suites, the daemon fixes (AFK off, then the revision number) and the TUI revision fix. After those, I'll run a second, shorter live test of the off path and the \"back\" message. The question about installing with a breaking migration is still open."
+        },
+        {
+          "id": "agent:24611",
+          "role": "assistant",
+          "text": "The full-suite run is done, on the code from before the current fixes:\n\n| Suite | Result |\n|---|---|\n| Worker | 699 passed, 2 failed. Both failures passed when rerun one at a time. Neither touches AFK: one is about a Node.js lease, the other about model discovery during Clear. I'm treating them as failures caused by host load. |\n| TUI | 563 passed |\n| Web unit | 57 passed |\n| Workspace clippy | passed (`brokk-mj-desktop` excluded; it cannot build on this host) |\n\nOnce the current fixes land, I'll rerun only the affected tests and clippy, not the full suites. Still running: the daemon child (first the AFK-off bug, then the revision number) and the TUI child (revision fix). After those comes a short second live test."
+        },
+        {
+          "id": "agent:24670",
+          "role": "assistant",
+          "text": "The TUI revision fix is done:\n\n- **Closing.** The dialog remembers the revision it closed at. A snapshot with that same revision keeps it in \"Returning\", older snapshots are ignored, and any newer revision is shown as it is. So off-then-on now reopens the dialog for the new AFK period, even if the TUI never saw the \"off\".\n- **Late failures.** If an \"off\" request from an earlier AFK period fails late, it can no longer reopen a newer period you already closed.\n- **Tests.** The TUI suite passes: 563 tests. Both AFK tests pass, and the state test now covers the off-then-on race. Clippy passes for `mj-tui` and `mj-cli`. The dialog's golden file is unchanged.\n\nOnly the daemon child is still running: first the AFK-off bug, then the rest of the revision work. After that, I'll run the targeted tests again and a short second live test."
+        },
+        {
+          "id": "agent:24744",
+          "role": "assistant",
+          "text": "The daemon child found the cause of the AFK-off bug and fixed it. The setter first checked whether the change was a no-op. It read the flag from a worker-only copy of the state, which never includes daemon-wide settings, so AFK always looked off there. \"Off\" was therefore treated as \"nothing to do\" and answered `Done` before the database was touched.\n\nOnly the database writer now decides whether a change happened. A new test, marked \"Hard-won\", fails with the old check and passes with the fix.\n\nThe same mistake could exist elsewhere: other code reading AFK from that worker-only copy. Before I accept the fix, I'm checking every place that reads the flag."
+        },
+        {
+          "id": "agent:24827",
+          "role": "assistant",
+          "text": "While those run, I'm checking which files belong in the commit."
+        },
+        {
+          "id": "agent:24849",
+          "role": "assistant",
+          "text": "All 79 changed files and the 5 new files belong to the AFK work. The commit will list them by name, not use `git add -A`. The child reports live under `.mj/`, which git ignores.\n\nTwo children are running:\n\n| Child | Task |\n|---|---|\n| afk-live-test (round 2) | fresh test root and instance. Checks: the transcript line shows the command; Esc ends AFK; only S2 gets \"operator is back\"; CLI on/off; closing with × |\n| afk-suites (round 2) | the full validation, once: seven crate suites, workspace clippy, rustfmt and `git diff --check` |\n\nWhen both pass, I'll commit and push. The question about installing with breaking migration 99 is still open. The install will wait for your answer."
+        },
+        {
+          "id": "agent:24925",
+          "role": "assistant",
+          "text": "The second live round passed every check, and the capture shows the dialog working with real sessions. It lists \"AFK S1 (AFK / project)\" as waiting for you, while S2, which did not retry, is not listed.\n\n| Step | Result |\n|---|---|\n| S1 refused, then exact repeat blocks; S2 told and does not retry | pass |\n| Transcript line includes the command (`touch afk-s1-created.txt`) | pass |\n| Esc turns AFK off; store has `away=0`, `revision=2` | pass |\n| S2 gets exactly one waking \"operator is back\" and continues; S1 gets none | pass |\n| CLI on/off, and closing with × by mouse click | pass |\n| Later empty AFK periods send no duplicate messages | pass |\n| Cleanup: credentials deleted, real profile directories unchanged | pass |\n\nSeparately, the live-test child noticed that the root filesystem is nearly full. `df` shows `/dev/sdh` at 98%, with 26 GB free. This is not caused by this work, but it may affect builds soon.\n\nI'm waiting for the final validation run. Then I'll commit and push."
+        },
+        {
+          "id": "agent:25013",
+          "role": "assistant",
+          "text": "Two worker test failures happened again when rerun on their own. The child called them unrelated to AFK, but I don't accept that yet. Both tests are about a daemon attaching to a worker, and the daemon now sends `SetOperatorAway` when a worker connects. I'm reading the failure details."
+        },
+        {
+          "id": "agent:25055",
+          "role": "assistant",
+          "text": "Final validation results:\n\n| Suite | Passed | Failed |\n|---|---|---|\n| core | 555 | 0 |\n| client | 43 | 0 |\n| transcript | 89 | 0 |\n| controller | 2,150 | 1 (passed when rerun on its own) |\n| worker | 695 | 6 (4 passed on rerun; **2 fail again**) |\n| CLI | 273 | 0 |\n| TUI | 563 | 0 |\n\nClippy, rustfmt and `git diff --check` pass.\n\nThe two worker tests that fail again are:\n\n- `blocking_preparation_deadline_fails_step_while_hello_and_attach_keep_working`\n- `checkpoint_only_daemon_preserves_work_and_seals_without_a_harness`\n\nThe child said they were unrelated to AFK, but the evidence points the other way. Both passed in round 1, before the revision work. Both now fail every time with a timeout. Both are about a daemon attaching to a worker, and that is exactly where the daemon now sends `SetOperatorAway`. The other explanation is host load: the root disk is 98% full, and a live test was running at the same time. The daemon child will check both tests on HEAD to tell these apart, then fix the cause if it is ours.\n\nI won't commit until this is resolved. The install question is still open."
+        },
+        {
+          "id": "agent:25142",
+          "role": "assistant",
+          "text": "The daemon child ruled out a regression:\n\n- Both tests pass on their own on the current tree (0.36 s and 0.37 s). They also pass on clean HEAD in a separate worktree.\n- Both failed before any AFK code ran: one before Hello/Attach, the other while waiting for the socket. The code they exercise is byte-identical to HEAD (checked by SHA-256).\n- At the time, host load average was about 200, and I/O pressure was high.\n\nI accept that these failures were caused by host load. Next I'll commit. First I'm checking that no install is running, since a commit during an install build splits the build stamps."
+        },
+        {
+          "id": "agent:25194",
+          "role": "assistant",
+          "text": "No install is running; the binaries in `~/.cargo/bin` were last written yesterday at 20:35. I'm checking that the working tree still holds only our changes, then committing."
+        },
+        {
+          "id": "agent:25218",
+          "role": "assistant",
+          "text": "Committed as `f740a8699`. Now I'm fetching to check whether `master` on the remote has moved before I push."
+        },
+        {
+          "id": "agent:25239",
+          "role": "assistant",
+          "text": "Pushed: `5914ed2b9..f740a8699` on `master`. The remote had not moved, so no merge was needed."
+        },
+        {
+          "id": "agent:25258",
+          "role": "assistant",
+          "text": "AFK mode is built, live-tested, committed as `f740a8699` and pushed to `master`. **It is not installed.** Installing needs your yes first (see the end).\n\n**How it works**\n- **First request while AFK is on.** A question, permission request or plan approval from a top-level session is refused without showing it to you. The agent then gets a waking message: you are away, it should do other useful work, and if it asks again the request will wait for you.\n- **Repeat.** The same request again is shown to you and waits, as requests do today. \"The same\" means the same tool and input from the same agent, or any second question or plan approval from it.\n- **When AFK ends.** Each session that was refused and did not repeat a request gets an \"operator is back, ask again now\" message that wakes it. Sessions that are already waiting for you don't get one.\n- **TUI.** \"Go AFK\" is in the command palette. While AFK is on, a large dialog shows \"AFK\" in ASCII art and a dimmed explanation, and lists the sessions waiting for you. Closing it with × or Esc ends AFK.\n- **Web UI.** \"Go AFK\" / \"End AFK\" are in the header menu. While AFK is on, the header shows an AFK label; tapping it ends AFK.\n- **CLI.** `mj daemon afk on|off|status`.\n\n**What was checked**\n- **Live test, two rounds.** It ran in an isolated instance with real Claude sessions and the TUI in tmux.\n  - Round 1 found that AFK could not be turned off. The fix is in, and round 2 passed every step, including Esc, the × button and the CLI.\n  - In the live runs, Claude's turn ended on each refusal, and the AFK message started a new turn. One session repeated its request and blocked. The other followed its \"don't retry\" instruction and later got the \"back\" message.\n- **Review.** An independent review found three races. All three came from the AFK flag being a bare true/false value. I fixed them by giving every change a revision number.\n- **Tests and lint.** All seven crate suites, clippy, rustfmt and the web tests pass. Seven tests failed in the full run. Five passed when rerun on their own. The other two worker tests failed again on rerun. They then passed on both this commit and the previous HEAD. Their failure point is before any AFK code, so I attribute them to host load (load average about 200, high I/O pressure).\n\n**Known limits**\n- When a request is refused, a session can show as waiting for a moment. Notifications are delayed, so you shouldn't be alerted. Questions forwarded from child sessions to their parent already behave the same way.\n- Workers that predate this build keep showing every request to you until they are replaced while idle.\n\n**Needs your decision: install**\nMigration 99 is **breaking**: older daemons cannot read the new mailbox messages. After install, an older Mjolnir build will refuse to open your store, so you cannot go back to an older build. AGENTS.md says a feature request does not authorize that for the live store. Should I install?\n\nSeparately, the root filesystem is at 98% (26 GB free), which could start to affect builds."
+        },
+        {
+          "id": "user:25457",
+          "role": "user",
+          "text": "Pls clean up /tmp using the 48h script in ~"
+        },
+        {
+          "id": "agent:25490",
+          "role": "assistant",
+          "text": "Quick status: I haven't found the script yet. No file in `~` has an obvious name. I'm checking `.bashrc` for a function or alias, and the shell history for how you ran it before."
+        },
+        {
+          "id": "agent:25528",
+          "role": "assistant",
+          "text": "I couldn't find a 48-hour `/tmp` cleanup script in `~`, so I haven't deleted anything. I looked in:\n\n- the files at the top level of `~`, including hidden ones;\n- `~/bin` and `~/.local/bin`;\n- scripts up to three levels deep with \"tmp\" or \"clean\" in the name;\n- `.bashrc` and `.bash_history`.\n\nThe closest names are `~/tmp`, which is a JSON list of chat sessions from June 2025, and the `.last-cleanup` marker files in the `.claude*` profile directories.\n\nNote that `.bashrc` sets `TMPDIR=/mnt/optane/tmp`. So \"temp\" may mean `/mnt/optane/tmp` rather than `/tmp`, and the script may be aimed at that directory.\n\nWhat is the script's path or name? I'll read it before running it."
+        },
+        {
+          "id": "user:25591",
+          "role": "user",
+          "text": "Try the session search tool"
+        },
+        {
+          "id": "agent:25678",
+          "role": "assistant",
+          "text": "The dry run is slow because it scans every file under `/tmp` for its newest time. It is now running in the background, with its output going to `/mnt/optane/tmp/clean-tmp-dryrun.txt`. Nothing has been deleted.\n\nWhen it finishes, I'll check the list for anything that is clearly still in use before running `--delete`. Right now `/` is at 96%, with 47 GB free."
+        },
+        {
+          "id": "agent:25784",
+          "role": "assistant",
+          "text": "The deletion is running in the background. It should remove about 340 GB in 16,434 entries. The run log goes to `/mnt/optane/tmp/clean-tmp-run.txt`, outside `/tmp` so the script cannot delete its own log. I'll report the space freed and any entries it could not delete when it finishes.\n\n`★ Insight ─────────────────────────────────────`\n- **Why the script was missing.** Session 5b9275ef wrote `~/clean-tmp.sh` while it was running on **precision-3260**, so `~` meant that host's home directory. I copied the file here and the SHA-256 hashes match, so next time it will be found in `~` on this host too.\n- **Why the dry run was slow.** The script looks at every file's time, not just the top-level folder's, so that one recent file inside an old folder keeps the whole folder. With about 19,000 entries holding hundreds of gigabytes, that scan took more than 10 minutes.\n- **What I checked before deleting.** File times can be old while something still uses the files, so I checked two more things. No running process has its working directory in an entry on the list, and no listening Unix socket is in one either.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:25918",
+          "role": "assistant",
+          "text": "`/tmp` is cleaned. The root filesystem went from 96% full (47 GB free) to **61% (374 GB free)**.\n\n- **Where the script was:** session search showed `~/clean-tmp.sh` had been written on precision-3260, not on this host. I copied it to `~/clean-tmp.sh` here, and the SHA-256 hashes match.\n- **Deleted:** 16,469 entries, about 340 GB. Everything in `/tmp` and `/tmp/lanes` whose newest file was more than 48 hours old. Before deleting, I checked that no running process had its working directory in any of them and no listening socket was inside one.\n- **Script limit:** seven of those entries contained read-only directories, mostly Go module caches (about 1.1 GB). The script could not delete them, so I made them writable and deleted them.\n- **Left in place:** `/tmp/hsperfdata_root` and `/tmp/kmem-report`, about 59 MB. Both are owned by root and need `sudo rm -rf` to delete.\n- **Kept:** 2,651 entries newer than 48 hours.\n\nI also saved a note on where the script lives and how to run it, so next time I won't need to search for it.\n\nThe AFK install is still waiting for your answer. Migration 99 is breaking: once installed, older Mjolnir builds will refuse to open your store. Should I install?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Try the session search tool",
+    "assistant_text_tail": "`/tmp` is cleaned. The root filesystem went from 96% full (47 GB free) to **61% (374 GB free)**.\n\n- **Where the script was:** session search showed `~/clean-tmp.sh` had been written on precision-3260, not on this host. I copied it to `~/clean-tmp.sh` here, and the SHA-256 hashes match.\n- **Deleted:** 16,469 entries, about 340 GB. Everything in `/tmp` and `/tmp/lanes` whose newest file was more than 48 hours old. Before deleting, I checked that no running process had its working directory in any of them and no listening socket was inside one.\n- **Script limit:** seven of those entries contained read-only directories, mostly Go module caches (about 1.1 GB). The script could not delete them, so I made them writable and deleted them.\n- **Left in place:** `/tmp/hsperfdata_root` and `/tmp/kmem-report`, about 59 MB. Both are owned by root and need `sudo rm -rf` to delete.\n- **Kept:** 2,651 entries newer than 48 hours.\n\nI also saved a note on where the script lives and how to run it, so next time I won't need to search for it.\n\nThe AFK install is still waiting for your answer. Migration 99 is breaking: once installed, older Mjolnir builds will refuse to open your store. Should I install?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      25918
+    ],
+    "user_position": null,
+    "judgment": "Closing reply at transcript position 25918 leaves a direct user decision unresolved: ",
+    "next": "n/a",
+    "input_rationale": "The reply explicitly requests a user decision and no later user response is present in the captured turn.",
+    "request_message_ids": [
+      "agent:25918"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-27T13:32:56.433Z",
+        "kind": "system",
+        "text": "Clearing context…"
+      },
+      {
+        "at": "2026-10-27T13:33:00.639Z",
+        "kind": "system",
+        "text": "Context cleared — a new conversation starts here."
+      },
+      {
+        "at": "2026-10-27T13:33:37.833Z",
+        "kind": "user",
+        "text": "pls upgrade claude code and claude-acp to latest stable; check for changes that might break mj and fix them, especially in the acp bridge"
+      },
+      {
+        "at": "2026-10-27T13:33:46.766Z",
+        "kind": "agent",
+        "text": "I'll start by finding where mj pins the Claude Code and claude-acp versions."
+      },
+      {
+        "at": "2026-10-27T13:33:54.554Z",
+        "kind": "agent",
+        "text": "Current pins: claude-agent-acp 0.94.0 and Claude Code 2.1.306. Let me look at how past upgrades were done and what the latest stable versions are."
+      },
+      {
+        "at": "2026-10-27T13:35:25.208Z",
+        "kind": "agent",
+        "text": "The dist diff is about 2,100 lines of JavaScript across 45 files, so I'll hand the review to two investigators in parallel while I do the mechanical pin bump."
+      }
+    ]
+  }
+}

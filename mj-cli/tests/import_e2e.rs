@@ -22,6 +22,25 @@ use mj_controller::controller::Controller;
 use mj_controller::session_manager::{StandaloneSession, new_command_id};
 use mj_core::relay::RelayCommand;
 
+/// The owner capability the daemon hands the controller for a lifecycle
+/// operation. These cases drive the controller without a daemon, as its own
+/// fixtures do, so each close takes it from a gate of its own.
+async fn session_admission(
+    session_id: &str,
+) -> anyhow::Result<mj_controller::recovery_gate::SessionAdmission> {
+    let gate = std::sync::Arc::new(mj_controller::recovery_gate::RecoveryGate::default());
+    Ok(mj_controller::recovery_gate::SessionAdmission::Foreground(
+        gate.enter_foreground(
+            session_id,
+            "import test close",
+            mj_controller::recovery_gate::LifecycleOrigin::Person,
+            &std::sync::atomic::AtomicBool::new(false),
+            &mj_controller::targets::ProcessExecutor,
+        )
+        .await?,
+    ))
+}
+
 fn mj_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_mj") {
         return PathBuf::from(path);
@@ -73,6 +92,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         .env("CLAUDE_CONFIG_DIR", &claude_home))?;
 
     let mut config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -87,7 +107,6 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -97,15 +116,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         profiles: BTreeMap::from([(
             "claude-e2e".into(),
             HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Claude,
-                home: claude_home,
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, claude_home)
             },
         )]),
         bundles: BTreeMap::new(),
@@ -181,7 +192,9 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         },
     )
     .await?;
-    controller.suspend_session(session_id).await?;
+    controller
+        .suspend_session(&session_admission(session_id).await?, session_id)
+        .await?;
     let final_state = mj_controller::database::load_state()?;
     let checkpoint = final_state.sessions[session_id]
         .checkpoint
@@ -206,6 +219,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     let repository = std::env::var("MJ_IMPORT_E2E_KIMI_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -220,7 +234,6 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -230,15 +243,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         profiles: BTreeMap::from([(
             "kimi-e2e".into(),
             HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Kimi,
-                home: kimi_home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Kimi, kimi_home.clone())
             },
         )]),
         bundles: BTreeMap::from([(
@@ -319,7 +324,9 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         },
     )
     .await?;
-    controller.suspend_session(session_id).await?;
+    controller
+        .suspend_session(&session_admission(session_id).await?, session_id)
+        .await?;
     let final_state = mj_controller::database::load_state()?;
     read_archive_verified(
         &final_state.sessions[session_id]
@@ -346,6 +353,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     let repository = std::env::var("MJ_IMPORT_E2E_GROK_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -360,7 +368,6 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -370,15 +377,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         profiles: BTreeMap::from([(
             "grok-e2e".into(),
             HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Grok,
-                home: grok_home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Grok, grok_home.clone())
             },
         )]),
         bundles: BTreeMap::from([(
@@ -459,7 +458,9 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         },
     )
     .await?;
-    controller.suspend_session(session_id).await?;
+    controller
+        .suspend_session(&session_admission(session_id).await?, session_id)
+        .await?;
     let final_state = mj_controller::database::load_state()?;
     read_archive_verified(
         &final_state.sessions[session_id]
@@ -593,6 +594,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     let repository = std::env::var("MJ_IMPORT_E2E_CODEX_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -607,7 +609,6 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -617,15 +618,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         profiles: BTreeMap::from([(
             "codex-e2e".into(),
             HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Codex,
-                home: codex_home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, codex_home.clone())
             },
         )]),
         bundles: BTreeMap::from([(
@@ -706,7 +699,9 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         },
     )
     .await?;
-    controller.suspend_session(session_id).await?;
+    controller
+        .suspend_session(&session_admission(session_id).await?, session_id)
+        .await?;
     let final_state = mj_controller::database::load_state()?;
     read_archive_verified(
         &final_state.sessions[session_id]

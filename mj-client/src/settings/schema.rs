@@ -6,7 +6,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "github":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "github":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -20,14 +20,13 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         "notify" => {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
-        "review" => {
-            json!({"trigger":"off","profile":null,"model":null,"effort":null})
-        }
-        "continuation" => json!({"enabled":true}),
+        // Only the section itself: its reviewer entries are SubagentChoice
+        // tables, which reject unknown keys.
+        "review" if path.len() == 1 => json!({}),
         "github" if path.len() == 1 => json!({"watch":{}}),
         "github" if key == "watch" => {
             let watch = mj_core::config::GithubWatchConfig::default();
-            json!({"enabled":watch.enabled,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
+            json!({"enabled":watch.enabled,"use_gpu":watch.use_gpu,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
         }
         "jev" => json!({"enabled":true}),
         "quota" => json!({"runtime":"auto"}),
@@ -36,13 +35,27 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null}})
+            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null},"use_same_on_all_targets":true,"yolo":{"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null}}})
         }
-        "subagents" if path.len() == 2 && matches!(key, "straightforward" | "subtle") => {
+        "subagents"
+            if path.len() == 2
+                && (matches!(key, "straightforward" | "subtle" | "oracle") || key == "yolo") =>
+        {
+            if key == "yolo" {
+                json!({"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null}})
+            } else {
+                json!({"model":null,"effort":null})
+            }
+        }
+        "subagents"
+            if path.len() == 3
+                && path[1] == "yolo"
+                && matches!(key, "straightforward" | "subtle" | "oracle") =>
+        {
             json!({"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null})
+            profile_defaults(value["kind"].as_str().unwrap_or("codex"))
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
         // The build cache is its own page, and the saved file keeps only the
@@ -79,6 +92,26 @@ fn scheduler_defaults() -> Value {
 
 /// The fields one machine kind needs. A machine owns the host settings every
 /// runtime on it shares, which is why the build cache lives here.
+/// The fields one profile kind uses. Profile validation rejects another
+/// kind's fields, so the editor never offers them.
+fn profile_defaults(kind: &str) -> Value {
+    let mut fields = json!({"enabled":true,"kind":kind,"home":"","environment":{},"context_window_bytes":null,
+               "load_balancing_may_consume_credits":false});
+    let object = fields.as_object_mut().unwrap();
+    match kind {
+        "codex" => {
+            object.insert("guardian_review_model".to_owned(), Value::Null);
+            object.insert("codex_profile".to_owned(), Value::Null);
+        }
+        "claude" => {
+            object.insert("claude_permission_mode".to_owned(), Value::Null);
+        }
+        _ => {}
+    }
+    object.insert("models".to_owned(), json!([]));
+    fields
+}
+
 fn machine_defaults(kind: &str) -> Value {
     let mut fields = json!({"kind":kind});
     let object = fields.as_object_mut().unwrap();
@@ -92,9 +125,6 @@ fn machine_defaults(kind: &str) -> Value {
                 .unwrap()
                 .clone(),
             );
-        }
-        "aws-ec2" => {
-            object.extend(json!({"aws_profile":null,"region":"","launch_template":"","launch_template_version":null,"ssh_user":"ubuntu","address_source":"public-dns","identity_file":null,"ssh_args":[]}).as_object().unwrap().clone());
         }
         // This machine, which has nothing to connect to.
         _ => {
@@ -259,8 +289,8 @@ pub fn label(key: &str) -> String {
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
-        "continuation" => "Continuation",
         "watch" => "Watcher",
+        "use_gpu" => "Use GPU for GitHub relevance",
         "jev" => "Jev (hosted service)",
         "quota" => "Quota checks",
         "daemon" => "Daemon",
@@ -269,8 +299,11 @@ pub fn label(key: &str) -> String {
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
+        "use_same_on_all_targets" => "Use the same subagents on all targets",
+        "yolo" => "YOLO Target Subagents",
         "straightforward" => "Straightforward",
         "subtle" => "Subtle",
+        "oracle" => "Oracle",
         "build_cache" => "Build caches",
         "scheduler" => "Compile scheduling",
         "directory" => "Cache directory",
@@ -290,6 +323,9 @@ pub fn label(key: &str) -> String {
         "context_window_bytes" => "Context budget (bytes)",
         "guardian_review_model" => "Guardian review model",
         "codex_profile" => "Codex profile",
+        "claude_permission_mode" => "Claude permission mode",
+        "load_balancing_may_consume_credits" => "Load balancing may consume credits",
+        "models" => "Offered models",
         "bind" => "Listen address and port",
         "tailscale_detect" => "Detect Tailscale",
         "tls_cert" => "TLS certificate file",
@@ -336,7 +372,13 @@ pub fn field_label(path: &[String]) -> String {
     {
         ["github"] => "GitHub events".to_owned(),
         ["subagents", task, field]
-            if ["straightforward", "subtle"].contains(task)
+            if ["straightforward", "subtle", "oracle"].contains(task)
+                && ["model", "effort"].contains(field) =>
+        {
+            format!("{} {}", label(task), field)
+        }
+        ["subagents", "yolo", task, field]
+            if ["straightforward", "subtle", "oracle"].contains(task)
                 && ["model", "effort"].contains(field) =>
         {
             format!("{} {}", label(task), field)
@@ -351,6 +393,35 @@ pub fn field_label(path: &[String]) -> String {
     }
 }
 
+/// The `_subagent_options` key for a sub-agent task path. The shared set uses
+/// the task name; the YOLO set is prefixed so its model's efforts are
+/// discovered independently.
+pub fn subagent_options_key(path: &[String]) -> Option<String> {
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["subagents", task, ..] if matches!(*task, "straightforward" | "subtle" | "oracle") => {
+            Some((*task).to_owned())
+        }
+        ["subagents", "yolo", task, ..]
+            if matches!(*task, "straightforward" | "subtle" | "oracle") =>
+        {
+            Some(format!("yolo.{task}"))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a subagent model/effort path belongs to the YOLO set.
+pub fn is_yolo_subagent_path(path: &[String]) -> bool {
+    path.len() >= 3 && path[0] == "subagents" && path[1] == "yolo"
+}
+
+/// Whether the Sub-agents page uses one set for every target. A missing value
+/// is the default, which shares.
+pub fn shared_subagents(value: &Value) -> bool {
+    value["use_same_on_all_targets"].as_bool().unwrap_or(true)
+}
+
 /// What an empty (JSON null) value means for this setting: the effect the
 /// value actually has, never a placeholder. A value the runtime resolves from
 /// the host is filled in by the caller through `value_summary`'s `automatic`
@@ -358,7 +429,7 @@ pub fn field_label(path: &[String]) -> String {
 pub fn null_label(path: &[String], draft: &Value) -> String {
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
-        ["subagents", _, "model"] => "None".to_owned(),
+        ["subagents", _, "model"] | ["subagents", "yolo", _, "model"] => "None".to_owned(),
         ["machines", _, "build_cache", "tools_directory"] => {
             "~/.cache/mjolnir/build on the machine".to_owned()
         }
@@ -371,8 +442,13 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             "{} (default)",
             mj_core::config::NotifyConfig::default().delay_seconds
         ),
-        ["subagents", task, "effort"] if matches!(*task, "straightforward" | "subtle") => {
-            if draft["_subagent_options"][task][super::discovery::EFFORTS_PENDING] == true {
+        ["subagents", task, "effort"] | ["subagents", "yolo", task, "effort"]
+            if matches!(*task, "straightforward" | "subtle" | "oracle") =>
+        {
+            let options = subagent_options_key(path)
+                .and_then(|key| draft["_subagent_options"].get(key))
+                .is_some_and(|options| options[super::discovery::EFFORTS_PENDING] == true);
+            if options {
                 "Discovering efforts…".into()
             } else {
                 "Harness default".into()
@@ -424,13 +500,7 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             mj_core::config::GUARDIAN_REVIEW_NEWEST_FLASH.to_owned()
         }
         ["profiles", _, "codex_profile"] => "None — config.toml only".to_owned(),
-        // Review needs a named reviewer profile; there is no fallback to a
-        // first enabled profile (`ReviewConfig::reviewer_profile`).
-        ["review", "profile"] => "Auto — choose by provider and quota".to_owned(),
-        ["review", "model" | "effort"] => match draft["review"]["profile"].as_str() {
-            Some(profile) => format!("{profile}'s default"),
-            None => "Not set".to_owned(),
-        },
+        ["profiles", _, "claude_permission_mode"] => "Auto".to_owned(),
         _ => "Not set".to_owned(),
     }
 }
@@ -504,27 +574,18 @@ pub fn section_summary(
             }
         }
         "review" => {
-            if section["trigger"].as_str() == Some("push") {
-                return Some("Before push".to_owned());
-            }
-            if section["trigger"].as_str().unwrap_or("off") == "off" {
-                "Off".to_owned()
+            // Review is on exactly when reviewers are configured. A draft
+            // that still has to choose them automatically has no list yet.
+            let reviewers = section["reviewers"].as_array().map_or(0, Vec::len);
+            if reviewers > 0 {
+                format!(
+                    "Before push · {reviewers} reviewer{}",
+                    if reviewers == 1 { "" } else { "s" }
+                )
+            } else if section.get("reviewers").is_none() && section["trigger"] == "push" {
+                "Before push · automatic reviewers".to_owned()
             } else {
-                match section["profile"].as_str() {
-                    Some(profile) => profile.to_owned(),
-                    None => "Auto · picks by quota".to_owned(),
-                }
-            }
-        }
-        "continuation" => {
-            if section["enabled"] == Value::Bool(false) {
                 "Off".to_owned()
-            } else if !jev_enabled(draft) {
-                // `Config::automatic_continuation_enabled`: the classifier
-                // that judges each reply is Jev, so without it nothing runs.
-                "Off · Jev is off (Privacy)".to_owned()
-            } else {
-                "On · 3 continuations plus quota recovery".to_owned()
             }
         }
         "github" => {
@@ -594,15 +655,6 @@ pub fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
             value.to_string()
         };
     };
-    if path == ["review", "trigger"] {
-        return match value {
-            "off" => "Off",
-            "turn" => "End of turn",
-            "push" => "Before push",
-            _ => value,
-        }
-        .to_owned();
-    }
     // Only the theme field: `auto` is also an image pull policy.
     if super::draft::storage_path(path) == ["theme"]
         && let Ok(choice) = serde_json::from_value::<ThemeChoice>(Value::String(value.into()))
@@ -632,6 +684,18 @@ pub fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
     // A machine id is shown as the user named it.
     if path.last().is_some_and(|key| key == "machine") {
         return value.to_owned();
+    }
+    if path
+        .last()
+        .is_some_and(|key| key == "claude_permission_mode")
+    {
+        return match value {
+            "auto" => "Auto",
+            "accept-edits" => "Accept edits",
+            "manual" => "Manual",
+            _ => value,
+        }
+        .to_owned();
     }
     match value {
         "native" => "Native",
@@ -672,7 +736,7 @@ pub fn option_label(path: &[String], value: &Value, draft: &Value) -> String {
         }
         .to_owned()
     } else if value.is_null()
-        && matches!(path, [section, _, field] if section == "subagents" && field == "model")
+        && matches!(path, [section, .., field] if section == "subagents" && field == "model")
     {
         "None".to_owned()
     } else if value.is_null() {
@@ -709,11 +773,20 @@ pub fn build_cache_gigabytes_label(size: &str) -> String {
 
 pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
-    if path.len() == 3 && path[0] == "subagents" && matches!(key, "model" | "effort") {
-        let mut choices = vec![Value::Null];
-        if let Some(values) = draft["_subagent_options"][&path[1]]
-            [if key == "model" { "models" } else { "efforts" }]
-        .as_array()
+    let subagent = subagent_options_key(path);
+    let reviewer = path.len() == 4 && path[0] == "review" && path[1] == "reviewers";
+    if (subagent.is_some() || reviewer) && matches!(key, "model" | "effort") {
+        let mut choices = if path[0] == "review" && key == "model" {
+            Vec::new()
+        } else {
+            vec![Value::Null]
+        };
+        let options = if let Some(subagent) = subagent {
+            &draft["_subagent_options"][&subagent]
+        } else {
+            &draft["_reviewer_options"][&path[2]]
+        };
+        if let Some(values) = options[if key == "model" { "models" } else { "efforts" }].as_array()
         {
             choices.extend(
                 values
@@ -726,7 +799,6 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         return choices;
     }
     let values: &[&str] = match key {
-        "trigger" if path == ["review", "trigger"] => &["off", "turn", "push"],
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
@@ -736,6 +808,7 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
         "permissions" => &["guardian", "yolo"],
+        "claude_permission_mode" => &["auto", "accept-edits", "manual"],
         "pull_policy" => &["auto", "always", "newer", "missing", "never"],
         "address_source" => &["public-dns", "public-ip", "private-dns", "private-ip"],
         "kind" if path.iter().any(|key| key == "workspace_storage") => {
@@ -744,7 +817,7 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "kind" if path.first().is_some_and(|key| key == "profiles") => {
             &["codex", "claude", "kimi", "grok", "muse", "opencode", "dsh"]
         }
-        "kind" if path.first().is_some_and(|key| key == "machines") => &["local", "ssh", "aws-ec2"],
+        "kind" if path.first().is_some_and(|key| key == "machines") => &["local", "ssh"],
         "kind" => &["bare", "podman", "docker", "apple-container"],
         _ => &[],
     };
@@ -799,8 +872,8 @@ fn jev_enabled(draft: &Value) -> bool {
 }
 
 /// The description drawn above the page `path`: its [`help`], except where
-/// another setting in the draft changes what the page does. Continuation
-/// cannot run while Jev is off, whatever its own box says.
+/// another setting in the draft changes what the page does. The GitHub
+/// watcher cannot run while Jev is off, whatever its own box says.
 pub fn page_help(path: &[String], draft: &Value) -> &'static str {
     page_specific_help(path, draft).unwrap_or_else(|| help(path))
 }
@@ -811,14 +884,11 @@ pub fn page_specific_help(path: &[String], draft: &Value) -> Option<&'static str
     Some(match path {
         [section]
             if section == "subagents"
-                && (["straightforward", "subtle"]
+                && (["straightforward", "subtle", "oracle"]
                     .iter()
                     .any(|task| draft["_subagent_options"][task].is_null())) =>
         {
             "Discovering available subagent models. Unset models remain None until you choose one."
-        }
-        [section] if section == "continuation" && !jev_enabled(draft) => {
-            "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
         }
         [section] | [section, _]
             if section == "github"
@@ -868,6 +938,11 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["github", "watch", "use_gpu"] => {
+            return Some(
+                "Automatically use a GPU only when it runs faster than the CPU. Turn off for CPU-only GitHub relevance scoring. Device failures select CPU and report a notice.",
+            );
+        }
         ["github"] | ["github", "watch"] => {
             return Some(
                 "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
@@ -903,7 +978,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings."
         }
         "targets" => {
-            "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run."
+            "Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH hosts under Machines."
         }
         "machine" => "Which machine this runtime runs on.",
         "phone" => {
@@ -947,15 +1022,12 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "repositories" => {
             "Set either a local repository directory or a GitHub source for each repository."
         }
-        "review" => "Used by turn review. Auto picks another provider with quota.",
-        "continuation" => {
-            "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
-        }
+        "review" => "Reviewers for code review before push. With no reviewers, review is off.",
         "quota" => {
-            "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine."
+            "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled."
         }
         "runtime" if path.first().is_some_and(|key| key == "quota") => {
-            "Auto: an enabled local Podman runtime, else Docker, else this machine. Podman or Docker: always that engine. Host: never a container."
+            "Auto: this machine when the agent is installed here, else an enabled local Podman runtime, else Docker. Podman or Docker: always that engine. Host: never a container."
         }
         "daemon" => {
             "Where the background daemon runs. Saving a change moves it there; running sessions keep going."
@@ -970,7 +1042,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Directories the daemon container sees, beside your home, Mjolnir's data and settings, and /tmp. Add local projects kept elsewhere."
         }
         "jev" => {
-            "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."
+            "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart."
         }
         "sessionwiki" => {
             "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."
@@ -978,11 +1050,17 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "archive_after_days" => {
             "After this many days, indexed suspended sessions lose their checkpoint and attachments. Blank keeps all."
         }
-        "subagents" => "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "subagents" => {
+            "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional."
+        }
+        "use_same_on_all_targets" => {
+            "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices."
+        }
         "straightforward" => "Work with a clear method. Choose a model and its effort.",
         "subtle" => {
             "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."
         }
+        "oracle" => "For read-only tricky questions that the primary agent isn't sure about.",
         "build_cache" => {
             "Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and Bazel."
         }
@@ -1005,8 +1083,17 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "guardian_review_model" => {
             "Codex with a custom provider: newest-flash, session (the session's model), or a model name. Blank: newest-flash."
         }
+        "load_balancing_may_consume_credits" => {
+            "When this subscription profile has used up its quota for a model, let load balancing still pick it and spend its paid credits. Off: it is skipped until the quota resets. Does not affect a session you pin to this profile."
+        }
+        "models" => {
+            "Optional. Offer only these models from this profile, one exact model name per entry. Leave empty to offer everything the profile advertises. The profile's current model is always offered."
+        }
         "codex_profile" => {
             "Codex only: the name of a profile file in the account directory, such as ds for ds.config.toml, layered over config.toml like codex -p ds."
+        }
+        "claude_permission_mode" => {
+            "How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions."
         }
         _ => return None,
     })
@@ -1050,5 +1137,48 @@ pub fn path_kind(path: &[String]) -> Option<PathKind> {
         | ["targets", _, "workspace_storage", "root"] => Some(Target),
         ["bundles", _, "repositories", _, "destination"] => Some(RelativeDestination),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    /// Reviewer entries are SubagentChoice tables, which reject unknown
+    /// keys, so expanding a draft must leave them exactly as stored.
+    #[test]
+    fn expanding_a_draft_leaves_reviewer_entries_unchanged() {
+        let reviewer = json!({"model": "gpt-6-terra", "effort": "xhigh"});
+        let mut draft = json!({"review": {"reviewers": [reviewer]}});
+        expand(&mut draft, &mut Vec::new());
+        assert_eq!(draft["review"]["reviewers"], json!([reviewer]));
+    }
+
+    #[test]
+    fn legacy_review_defaults_do_not_insert_reviewers() {
+        let path = ["review".to_owned()];
+        assert_eq!(defaults(&path, &json!({})), json!({}));
+    }
+
+    #[test]
+    fn review_summary_is_off_without_reviewers_and_counts_them_otherwise() {
+        let theme = |_: &Value, _: &Value| String::new();
+        let summary =
+            |review: Value| section_summary("review", &json!({ "review": review }), &theme);
+        let reviewer = json!({"model": "gpt-6-terra", "effort": "xhigh"});
+        assert_eq!(summary(json!({"reviewers": []})).as_deref(), Some("Off"));
+        assert_eq!(summary(json!({})).as_deref(), Some("Off"));
+        assert_eq!(
+            summary(json!({"reviewers": [reviewer]})).as_deref(),
+            Some("Before push · 1 reviewer")
+        );
+        assert_eq!(
+            summary(json!({"reviewers": [reviewer, reviewer]})).as_deref(),
+            Some("Before push · 2 reviewers")
+        );
+        assert_eq!(
+            summary(json!({"trigger": "push"})).as_deref(),
+            Some("Before push · automatic reviewers")
+        );
     }
 }

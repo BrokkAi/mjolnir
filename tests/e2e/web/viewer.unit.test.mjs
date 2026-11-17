@@ -49,9 +49,7 @@ test('conversation deltas carry the last presentation key and accept older respo
   const renders = [];
   const responses = [
     { entries: [{ id: 1 }], latest_seq: 5, presentation_key: 'key one', reset: false },
-    {},
     { entries: [{ id: 2 }], latest_seq: 6, reset: false },
-    {},
   ];
   const context = vm.createContext({
     currentSession: 'session/1',
@@ -63,6 +61,7 @@ test('conversation deltas carry the last presentation key and accept older respo
     cursor: 0,
     presentationKey: null,
     acknowledged: 0,
+    scheduleConversationRead: () => {},
     URLSearchParams,
     encodeURIComponent,
     JSON,
@@ -71,6 +70,7 @@ test('conversation deltas carry the last presentation key and accept older respo
       return responses.shift();
     },
     renderEntries: (entries, replace) => renders.push({ entries, replace }),
+    scrollToQuestionTarget: () => {},
     isTransitioningSession: () => false,
     isLoadingConversationSession: () => false,
     renderConversationTransition: () => assert.fail('conversation unexpectedly transitioned'),
@@ -89,11 +89,31 @@ test('conversation deltas carry the last presentation key and accept older respo
 
   await vm.runInContext('loadConversation(true)', context);
   assert.equal(
-    requests[2].url,
+    requests[1].url,
     '/api/conversations/session%2F1?after_seq=5&presentation_key=key+one',
   );
   assert.equal(context.presentationKey, null, 'missing keys remain compatible with an older server');
   assert.deepEqual(renders[1], { entries: [{ id: 2 }], replace: false });
+});
+
+test('question target scrolls a loaded entry once and ignores targets outside the feed', () => {
+  const scrolled = [];
+  const row = id => ({ dataset: { entryId: id }, scrollIntoView(options) { scrolled.push([id, options.block]); } });
+  const rows = [row('agent:older'), row('agent:question'), row('agent:latest')];
+  const context = vm.createContext({ feed: { querySelectorAll: () => rows } });
+  vm.runInContext(
+    sourceBetween('const appliedQuestionTargets = new Map();', '\nasync function openNativeHistory('),
+    context,
+  );
+
+  vm.runInContext("scrollToQuestionTarget({ id: 'session/1', question_message: 'agent:question' })", context);
+  assert.deepEqual(scrolled, [['agent:question', 'start']]);
+  vm.runInContext("scrollToQuestionTarget({ id: 'session/1', question_message: 'agent:question' })", context);
+  assert.equal(scrolled.length, 1, 'a target is applied once');
+  vm.runInContext("scrollToQuestionTarget({ id: 'session/1', question_message: 'agent:absent' })", context);
+  assert.equal(scrolled.length, 1, 'a target outside the feed leaves the position alone');
+  vm.runInContext("scrollToQuestionTarget({ id: 'session/2' })", context);
+  assert.equal(scrolled.length, 1);
 });
 
 test('runtime rows resolve interned values, merge metadata and reject gaps without partial updates', () => {
@@ -296,7 +316,7 @@ test('session titles stay blue while truly idle and clear blue when activity res
     textContent: '',
     classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) },
   };
-  const context = vm.createContext({ node, session: { title: 'Test session', is_idle: true } });
+  const context = vm.createContext({ node, session: { title: 'Test session', attention: 'idle' } });
   vm.runInContext(sourceBetween('function renderSessionTitle(', '\nfunction renderConversationHeader('), context);
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.equal(node.textContent, 'Test session');
@@ -305,12 +325,13 @@ test('session titles stay blue while truly idle and clear blue when activity res
   context.session.latest_event_ordinal = 20;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(classes.has('idle-title'));
-  context.session.is_idle = false;
+  context.session.attention = 'working';
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'));
-  delete context.session.is_idle;
+  delete context.session.attention;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
+
 });
 
 test('project preflight prevents duplicate checks and ignores a cancelled wizard response', async () => {
@@ -418,6 +439,35 @@ test('rolled-back launch errors remain visible only in their workspace and can b
   assert.equal(notices.children.length, 0);
 });
 
+// Hard-won: 27c51a34c: session deletion hid incomplete target cleanup from the browser.
+test('cleanup warnings remain visible after their session is removed and can be dismissed', () => {
+  const notices = makeNode();
+  const context = vm.createContext({
+    snapshot: { sessions: [], notices: [
+      { id: 7, session_id: 'removed', text: 'Environment cleanup failed; resources may remain.' },
+    ] },
+    route: { name: 'dashboard' },
+    viewerState: { cursor: { incarnation: 'first-daemon' } },
+    selectedWorkspaceId: () => 'primary',
+    document: { querySelector: () => notices },
+    el: (tag, className, textContent) => Object.assign(makeNode(tag), { className, textContent }),
+  });
+  vm.runInContext(sourceBetween('const dismissedLaunchFailures =', '\nfunction renderWorkspaces()'), context);
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children[0].children[0].textContent, context.snapshot.notices[0].text);
+  context.route.name = 'conversation';
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 1, 'warning survives the route after session removal');
+  notices.children[0].children[1].onclick();
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 0, 'snapshot refresh does not undo dismissal');
+  context.viewerState.cursor.incarnation = 'second-daemon';
+  context.snapshot.notices[0] = { id: 7, session_id: 'another', text: 'A new cleanup failed.' };
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 1, 'an ID reused by a new daemon is not dismissed');
+  assert.equal(notices.children[0].children[0].textContent, 'A new cleanup failed.');
+});
+
 function descendants(root, tag) {
   const wanted = tag.toUpperCase();
   const found = [];
@@ -488,51 +538,6 @@ function review() {
   };
 }
 
-test('identical reviews in different sessions rebuild actions for the current session', async () => {
-  const harness = turnReviewHarness();
-  const firstSession = { id: 'session-a', turn_review: review() };
-  const secondSession = { id: 'session-b', turn_review: review() };
-
-  harness.setActive(firstSession);
-  harness.renderTurnReview(firstSession);
-  const firstCard = harness.reviewHost.children[0];
-
-  harness.setActive(secondSession);
-  harness.renderTurnReview(secondSession);
-  const secondCard = harness.reviewHost.children[0];
-  assert.notStrictEqual(secondCard, firstCard, 'the second session reused the first session card');
-
-  const cancel = descendants(secondCard, 'button').find(button => button.textContent === 'Cancel');
-  await cancel.dispatch('click');
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.sent.at(-1))), {
-    action: 'resolve-review',
-    session_id: 'session-b',
-    resolution: 'cancel',
-  });
-});
-
-test('a failed review resolution restores every action allowed by the snapshot', async () => {
-  const harness = turnReviewHarness();
-  const session = { id: 'session-a', turn_review: review() };
-  harness.setActive(session);
-  harness.renderTurnReview(session);
-
-  const oldCard = harness.reviewHost.children[0];
-  const oldButtons = descendants(oldCard, 'button');
-  const forward = oldButtons.find(button => button.textContent === 'Forward findings');
-  const request = forward.dispatch('click');
-  assert.ok(oldButtons.every(button => button.disabled), 'the card accepted a second resolution');
-  await request;
-
-  const restoredCard = harness.reviewHost.children[0];
-  assert.notStrictEqual(restoredCard, oldCard, 'the failed action left the disabled card mounted');
-  assert.ok(
-    descendants(restoredCard, 'button').every(button => !button.disabled),
-    'an allowed resolution stayed disabled after failure',
-  );
-});
-
-
 test('phone review status exactly mirrors the shared status sentences', () => {
   const statusSource = sourceBetween(
     'function sessionReviewStatusConfig(snapshot, session) {',
@@ -541,38 +546,13 @@ test('phone review status exactly mirrors the shared status sentences', () => {
   const context = vm.createContext({});
   vm.runInContext(`${statusSource}\nglobalThis.reviewStatusLineForTest = reviewStatusLine;\nglobalThis.sessionReviewStatusConfigForTest = sessionReviewStatusConfig;`, context);
   const status = context.reviewStatusLineForTest;
-
-  const snapshot = { review_config: { trigger: 'turn', profile: 'reviewer', count: 2 } };
-  const session = { review_trigger: 'turn', review_count: 1 };
-  assert.equal(
-    status(context.sessionReviewStatusConfigForTest(snapshot, session), false),
-    'Reviewing every completed turn with [review] profile "reviewer"; 1 reviewer',
-  );
-
-  assert.equal(
-    status({ trigger: 'turn', profile: 'reviewer', count: 2 }, false),
-    'Reviewing every completed turn with [review] profile "reviewer"; 2 reviewers',
-  );
-  assert.equal(
-    status({ trigger: 'turn', count: 2 }, false),
-    'Reviewing every completed turn with Auto; 2 reviewers',
-  );
-  assert.equal(
-    status({ trigger: 'off', profile: 'reviewer', count: 2 }, false),
-    'Automatic review is off; /review reviews one turn with "reviewer"; 2 reviewers',
-  );
-  assert.equal(
-    status({ trigger: 'off', profile: null, count: 2 }, false),
-    'Automatic review is off; /review uses Auto; 2 reviewers',
-  );
-  assert.equal(
-    status({ trigger: 'push', profile: 'reviewer', count: 2 }, false),
-    'Review trigger is before push; 2 reviewers',
-  );
-  assert.equal(
-    status({ trigger: 'off', profile: 'reviewer', count: 2 }, true),
-    'Automatic review is off; /review reviews one turn with "reviewer"; 2 reviewers. A review is open now.',
-  );
+  const snapshot = { review_config: { trigger: 'push', reviewers: [{ model: 'terra' }, { model: 'sol' }] } };
+  const session = { review_trigger: 'push', review_count: 1 };
+  assert.equal(status(context.sessionReviewStatusConfigForTest(snapshot, session), false), 'Review trigger is before push; 1 reviewer');
+  assert.equal(status({ trigger: 'push', reviewers: [{ model: 'terra' }, { model: 'sol' }] }, false), 'Review trigger is before push; 2 reviewers');
+  assert.equal(status({ trigger: 'off', reviewers: [] }, false), 'Automatic review is off; /review reviews commits; no reviewers');
+  assert.equal(status({ trigger: 'off', reviewers: [{ model: 'terra' }] }, true), 'Automatic review is off; /review reviews commits; 1 reviewer. A review is open now.');
+  assert.equal(status({ trigger: 'push', reviewers: [{ model: 'terra' }] }, false), 'Review trigger is before push; 1 reviewer');
 });
 
 test('review action failures return false without leaking errors across sessions', async () => {
@@ -669,6 +649,7 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
   const context = vm.createContext({
     URL,
     caches,
+    importScripts() {},
     self,
     fetch(request) {
       operations.push(['fetch', request.url]);
@@ -691,6 +672,7 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
         '/',
         '/viewer.css',
         '/viewer.js',
+        '/push-sync.js',
         '/manifest.webmanifest',
         '/icon.svg',
       ],
@@ -973,6 +955,13 @@ test('an unanswered turn offers the prompt that was running', () => {
     null,
   );
   assert.equal(vm.runInContext('unansweredPromptFor', context)(warning, null), null);
+  // Hard-won: 9c2b74a01: a failed turn Mjolnir started offered an earlier, unrelated request.
+  const turnPromptText = vm.runInContext('turnPromptText', context);
+  const earlier = turnPromptText({ role: 'user', lines: ['rename the module'] }, null);
+  assert.equal(earlier, 'rename the module');
+  assert.equal(turnPromptText({ role: 'agent', lines: ['done'] }, earlier), earlier);
+  const continued = turnPromptText({ role: 'user', generated: true, lines: ['Continue'] }, earlier);
+  assert.equal(vm.runInContext('unansweredPromptFor', context)(warning, continued), null);
 });
 
 // Live path suggestions must never fight the person typing: a superseded
@@ -1348,6 +1337,22 @@ function delegationContext(kind = 'codex', configured = true) {
   return context;
 }
 
+test('Create gives a YOLO target its own configured Mjolnir choices', () => {
+  const context = delegationContext('codex', true);
+  context.snapshot.targets = [{ id: 'yolo', permission_mode: 'yolo', subagents_configured: false }];
+  const available = () => vm.runInContext(
+    `mjolnirAvailable({ profileId: 'profile', targetId: 'yolo', subagents: { mode: 'mjolnir' } })`,
+    context,
+  );
+  assert.equal(available(), false);
+  context.snapshot.targets[0].subagents_configured = true;
+  assert.equal(available(), true);
+  // A container target has no permission mode and keeps the shared choices.
+  context.snapshot.targets[0] = { id: 'yolo', subagents_configured: true };
+  context.snapshot.subagents_configured = false;
+  assert.equal(available(), true);
+});
+
 test('Create remembers delegation per profile and restores Mjolnir after an unavailable profile', () => {
   const context = delegationContext('codex', true);
   context.snapshot.profiles.push({ id: 'claude-profile', harness_kind: 'claude' }, { id: 'grok-profile', harness_kind: 'grok' });
@@ -1401,7 +1406,7 @@ test('Create sends the selected delegation policy across the browser action wire
 });
 
 test('delegation reflects unavailable configuration and rechecks it before submission', async () => {
-  for (const [kind, configured] of [['codex', false], ['grok', true], ['claude', true]]) {
+  for (const [kind, configured] of [['codex', false], ['grok', true], ['claude', true], ['opencode', true]]) {
     const context = delegationContext(kind, configured);
     const body = makeNode();
     const draft = { profileId: 'profile', subagents: { mode: 'native' } };
@@ -1469,4 +1474,145 @@ test('Move keeps legacy delegation unchanged without resending obsolete selector
     select.onchange();
     assert.deepEqual(JSON.parse(JSON.stringify(context.moveSubagentChange(draft))), { mode: select.value });
   }
+});
+
+
+test('review settings action renders a button that sends its action id', () => {
+  const calls = [];
+  const context = vm.createContext({
+    settingsEntryActions: makeNode(),
+    el: (tag, className, text) => Object.assign(makeNode(tag), { className, textContent: text || '' }),
+    button: label => Object.assign(makeNode('button'), { textContent: label }),
+    editSettings: (page, edit) => calls.push({ page, edit }),
+  });
+  vm.runInContext(sourceBetween('function renderSettingsEntryActions(', '\nfunction renderSettingsSavebar('), context);
+  vm.runInContext(`renderSettingsEntryActions({path: ['review'], actions: [{id: 'review.autoconfigure', label: 'Autoconfigure'}]})`, context);
+  const control = context.settingsEntryActions.children[0];
+  assert.equal(control.textContent, 'Autoconfigure');
+  control.onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{page: ['review'], edit: {kind: 'action', id: 'review.autoconfigure'}}]);
+  const controls = [];
+  context.pendingActions = new Set();
+  context.container = {
+    querySelector: () => controls[0],
+    append: control => controls.push(control),
+  };
+  context.button = label => ({ textContent: label, dataset: {}, remove: () => controls.pop() });
+  context.runSessionAction = (dataset, error, extra) => calls.push({ dataset, extra });
+  context.session = { id: 's', capabilities: {}, notification_dismissal: { read_through: 10 } };
+  vm.runInContext(sourceBetween('function renderNotificationDismissal(', '\nfunction updateSessionMenu('), context);
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls.length, 0, 'no dismissal control without capability');
+  context.session.capabilities.dismiss_notification = true;
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls[0].textContent, 'Dismiss notification');
+  context.session.notification_dismissal = { read_through: 11 };
+  controls[0].onclick({ stopPropagation() {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), {
+    dataset: { dismissNotification: 'true', action: 'dismiss-notification', id: 's', notificationDismissal: '{"read_through":10}' },
+  });
+  context.pendingActions.add('dismiss-notification:s');
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls[0].disabled, true);
+  context.session.capabilities.dismiss_notification = false;
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls.length, 0, 'withdrawing capability removes dismissal control');
+});
+
+
+// Hard-won: 92684ad3b: browser read receipts need the same served frontier as workspace mark-read.
+test('conversation receipts require a visible focused caught-up conversation and coalesce monotonic cursors', async () => {
+  const frames = [];
+  const sent = [];
+  let finish;
+  let focused = true;
+  const context = vm.createContext({
+    currentSession: 's', route: { name: 'conversation', sessionId: 's' },
+    cursor: 42, acknowledged: 0,
+    session: { capabilities: { open: true }, attention: 'working', unread_frontier: 42 },
+    document: { visibilityState: 'hidden', hasFocus: () => focused, querySelector: () => ({ textContent: '' }) },
+    window: { innerHeight: 800 },
+    feedScroll: { getBoundingClientRect: () => ({ top: 100, bottom: 700 }) },
+    feed: { lastElementChild: { getBoundingClientRect: () => ({ top: 500, bottom: 650 }) } },
+    sessionById: () => context.session,
+    isTransitioningSession: () => false,
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; },
+    request: (url, options) => { sent.push([url, JSON.parse(options.body).through]); return new Promise(resolve => { finish = resolve; }); },
+    showLogin: () => assert.fail('unexpected login'),
+  });
+  vm.runInContext(sourceBetween('const conversationReads = new Map();', '\nasync function loadConversation('), context);
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 0, 'hidden pages do not read');
+  context.document.visibilityState = 'visible';
+  focused = false;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  // Hard-won: 8edb31e9f: a visible but unfocused window cleared Important alerts.
+  assert.equal(sent.length, 0, 'a visible window without focus does not read');
+  focused = true;
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 900, bottom: 1000 });
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 0, 'scrolling away from latest does not read');
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 500, bottom: 650 });
+  vm.runInContext('scheduleConversationRead(); scheduleConversationRead(); scheduleConversationRead()', context);
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.deepEqual(sent, [['/api/conversations/s/read', 42]]);
+  context.cursor = 43;
+  context.session.unread_frontier = 43;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 1, 'only one receipt is in flight');
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  frames.shift()();
+  assert.equal(sent[1][1], 43);
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  context.cursor = 41;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 2, 'older loaded cursors never move the frontier back');
+  context.cursor = 50;
+  context.session.unread_frontier = 44;
+  const loaded = vm.runInContext('persistVisibleConversationRead()', context);
+  // Hard-won: 6a0981b02: receipts bounded by the row's lagging frontier left seen output unread.
+  assert.equal(sent[2][1], 50, 'acknowledges everything loaded and seen, even before the row republishes');
+  finish();
+  await loaded;
+  context.cursor = 51;
+  context.route.name = 'sessions';
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 3, 'closed conversations do not read');
+});
+
+
+test('notification snapshot retains handled entries below the notification band until a new visit', () => {
+  const context = vm.createContext({ sessionMessageMs: row => row.time, dismissedNotifications: new Map() });
+  vm.runInContext(sourceBetween('function hasNotification(', '/// Whether a session is a sub-agent'), context);
+  vm.runInContext(sourceBetween('class NotificationSnapshot {', '\nfunction notificationRows()'), context);
+  const update = (rows, allRows = rows) => JSON.parse(vm.runInContext(`JSON.stringify(notificationSnapshot.update(${JSON.stringify(rows)}, ${JSON.stringify(allRows)}))`, context));
+  const a = { id: 'a', time: 1, attention: 'needs_input' }, b = { id: 'b', time: 2, attention: 'important' }, c = { id: 'c', time: 3, attention: 'failed' };
+  assert.deepEqual(update([a, b]).map(entry => entry.row.id), ['b', 'a']);
+  const handled = { ...b, attention: 'working', capabilities: { open: false } };
+  let retained = update([a], [a, handled]);
+  assert.deepEqual(retained.map(entry => entry.row.id), ['a', 'b']);
+  assert.equal(retained[1].row.capabilities.open, false);
+  assert.deepEqual(update([a, c], [a, handled, c]).map(entry => entry.row.id), ['c', 'a', 'b']);
+  assert.deepEqual(update([a, b, c]).map(entry => entry.row.id), ['c', 'b', 'a']);
+  retained = update([a, c]);
+  assert.equal(retained[2].row.lifecycle, 'destroyed');
+  assert.deepEqual(retained[2].row.capabilities, {});
+  vm.runInContext('notificationSnapshot.reset()', context);
+  assert.deepEqual(update([a, c]).map(entry => entry.row.id), ['c', 'a']);
+});
+
+// Hard-won: 437e04dc6: an empty expiry event skipped durable reconciliation.
+test('service worker delegates empty expiry to shared reconcile and reports failures', async () => {
+  const listeners = new Map();
+  const registration = {};
+  const seen = [];
+  const context = vm.createContext({ importScripts() {}, self: { registration, addEventListener: (name, callback) => listeners.set(name, callback) }, MjPush: { reconcile: async (...args) => { seen.push(args); throw new Error('offline'); } }, console: { warn() {} } });
+  vm.runInContext(serviceWorkerSource, context);
+  let pending;
+  listeners.get('pushsubscriptionchange')({ oldSubscription: { endpoint: 'old' }, newSubscription: null, waitUntil: promise => { pending = promise; } });
+  await assert.rejects(pending, /offline/);
+  assert.deepEqual(seen, [[registration, 'old']]);
 });

@@ -1,0 +1,57 @@
+[
+  {
+    "id": 1,
+    "session_id": "",
+    "text": "Local GitHub relevance scoring is unavailable (download). Every GitHub item is scored by GLiDE while the model retries automatically."
+  },
+  {
+    "id": 2,
+    "session_id": "",
+    "text": "GitHub relevance local model recovered."
+  },
+  {
+    "id": 3,
+    "session_id": "",
+    "text": "GitHub relevance switched from CUDA to CPU: GPU scoring took 20 ms versus 10 ms on CPU."
+  },
+  {
+    "id": 4,
+    "session_id": "",
+    "text": "GitHub relevance switched from CoreML to CPU because load failed."
+  },
+  {
+    "id": 5,
+    "session_id": "",
+    "text": "GitHub relevance switched from DirectML to CPU because inference failed."
+  },
+  {
+    "id": 6,
+    "session_id": "",
+    "text": "Local GitHub relevance scoring is unavailable (inference). Every GitHub item is scored by GLiDE while the model retries automatically."
+  },
+  {
+    "id": 7,
+    "session_id": "",
+    "text": "GitHub relevance local model recovered."
+  },
+  {
+    "id": 8,
+    "session_id": "",
+    "text": "GitHub relevance uses CPU because CUDA libraries are missing: libcudnn.so.9. Install CUDA 12 and cuDNN 9, then restart the daemon to enable CUDA."
+  },
+  {
+    "id": 9,
+    "session_id": "",
+    "text": "GitHub relevance continues on CPU. Restart the daemon to enable GPU scoring with the updated preference."
+  },
+  {
+    "id": 10,
+    "session_id": "",
+    "text": "Local GitHub relevance scoring is unavailable on this platform. Every GitHub item is scored by GLiDE."
+  },
+  {
+    "id": 11,
+    "session_id": "",
+    "text": "Local GitHub relevance scoring needs the Microsoft Visual C++ Redistributable (x64): missing MSVCP140.dll. Every GitHub item is scored by GLiDE while model preparation retries automatically."
+  }
+]

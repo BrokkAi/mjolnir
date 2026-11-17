@@ -8,6 +8,7 @@
 //! A host is a machine, not a runtime: local Podman and local Docker are the
 //! same computer, so they share one identity here and one inspection of it.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
@@ -89,8 +90,10 @@ impl CacheHost {
             | targets::TargetTemplate::SshAppleContainer { ssh, .. } => {
                 Some(Self::Ssh(ssh.clone()))
             }
-            targets::TargetTemplate::LocalBare
-            | targets::TargetTemplate::AwsEc2(_)
+            // The host's caches are directories a container mounts; a sandbox
+            // is a VM and cannot, so it has no cache host.
+            targets::TargetTemplate::SshNitro { .. }
+            | targets::TargetTemplate::LocalBare
             | targets::TargetTemplate::SshBare { .. } => None,
         }
     }
@@ -120,9 +123,8 @@ impl CacheHost {
             mj_core::config::TargetTemplate::SshBare { ssh, .. }
             | mj_core::config::TargetTemplate::SshPodman { ssh, .. }
             | mj_core::config::TargetTemplate::SshDocker { ssh, .. }
-            | mj_core::config::TargetTemplate::SshAppleContainer { ssh, .. } => {
-                Self::for_ssh_input(ssh)
-            }
+            | mj_core::config::TargetTemplate::SshAppleContainer { ssh, .. }
+            | mj_core::config::TargetTemplate::SshNitro { ssh, .. } => Self::for_ssh_input(ssh),
         }
     }
 
@@ -208,7 +210,7 @@ impl CacheHost {
     pub(super) fn command(&self, remote: Vec<String>, purpose: impl Into<String>) -> CommandSpec {
         let command = match self {
             Self::Local => CommandSpec::new(remote[0].clone(), remote[1..].iter().cloned()),
-            Self::Ssh(ssh) => targets::ssh_command_owned(ssh, remote),
+            Self::Ssh(ssh) => targets::ssh_command_owned(SshTrafficClass::Control, ssh, remote),
         };
         command.purpose(purpose)
     }

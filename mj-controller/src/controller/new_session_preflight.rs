@@ -66,8 +66,12 @@ impl Controller {
                 self.managed_worktree_options(target_id, &directory, executor)?;
             // The rule registration applies. Neither wizard offers a
             // per-session review choice, so `[review]` decides.
-            let review_turns_off = plain_directory
-                && mj_core::review::settings::plain_directory_turns_review_off(&self.config, None);
+            let review_turns_off = mj_core::review::settings::automatic_review_off(
+                &self.config.review,
+                None,
+                plain_directory,
+            )
+            .is_some();
             return Ok(NewSessionPreflight {
                 managed_worktree,
                 project_directory: Some(directory),
@@ -153,6 +157,29 @@ mod tests {
     }
 
     impl CommandExecutor for RemoteExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.args.iter().any(|arg| arg == "ls-remote") {
                 self.requests.set(self.requests.get() + 1);
@@ -305,19 +332,16 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: PathBuf::from("/home/dev/.codex"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    PathBuf::from("/home/dev/.codex"),
+                )
             },
         );
-        config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-        config.review.profile = Some("codex".into());
+        config.review.reviewers = vec![mj_core::config::SubagentChoice {
+            model: "gpt-6-astra".into(),
+            effort: None,
+        }];
         let controller = config_only_controller(config);
         let result = controller
             .preflight_new_session("", "local-bare", Some(directory.path()), &ProcessExecutor)

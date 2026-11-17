@@ -6,8 +6,24 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    /// Current login failures from the daemon's publication; memory only.
+    fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
+        Ok(Default::default())
+    }
+
     fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
         Box::pin(async { anyhow::bail!("sub-agent configuration unavailable") })
+    }
+
+    /// Whether this session's recorded target runs with
+    /// `permissions = "yolo"`, which selects its own sub-agent choices.
+    fn session_is_yolo_target(&self, _session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    /// The dashboard's load-balancing preference order, from `[quota] prefer`.
+    fn quota_preferences(&self) -> BoxFuture<'_, AnyResult<Vec<String>>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 
     /// Cheap token for this session's durable wait inputs. Backends without
@@ -84,9 +100,24 @@ pub trait SubagentBackend: Send + Sync {
             profile, model, refresh,
         ))
     }
+
+    /// What `profile`'s harness advertises before the profile's `models`
+    /// allow-list, for `mj doctor`. Backends without the daemon's catalogue
+    /// answer with the ordinary choices.
+    fn unrestricted_profile_config(
+        &self,
+        profile: String,
+    ) -> BoxFuture<'_, AnyResult<mj_core::worker_launch::ProfileConfig>> {
+        self.profile_config(profile, None, false)
+    }
     /// Start discovering what `config` selects, such as a Settings draft's
     /// sub-agent models. Results arrive through the capability publication.
     fn warm_profile_capabilities(&self, _config: &mj_core::config::Config) {}
+    fn profile_capabilities_snapshot(
+        &self,
+    ) -> Option<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot> {
+        None
+    }
     /// Every enabled profile a parent running on `parent_profile` may use for
     /// a sub-agent, with its discovered choices and remaining quota. It waits
     /// for pending discovery; a profile whose discovery fails is reported as
@@ -96,6 +127,29 @@ pub trait SubagentBackend: Send + Sync {
         _parent_profile: String,
     ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
         Box::pin(async { anyhow::bail!("sub-agent profiles are unavailable") })
+    }
+    /// Enabled profiles available to review children, with current quota and health.
+    fn reviewer_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        Box::pin(async { anyhow::bail!("reviewer profiles are unavailable") })
+    }
+    /// Waits for a profile not in `tried` to report that it offers `model`,
+    /// then returns the ready candidates that were not tried. It fails when
+    /// no further profile does.
+    fn reviewer_candidates_for_model(
+        &self,
+        _model: String,
+        _tried: Vec<String>,
+    ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        self.reviewer_candidates()
+    }
+    fn reviewer_autoconfigure_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        self.reviewer_candidates()
+    }
+    fn reviewer_ready_candidates(
+        &self,
+        _model: String,
+    ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        self.reviewer_candidates()
     }
     /// Every enabled profile usable for a user-created session, with its
     /// discovered choices and remaining quota. This is independent of the
@@ -122,11 +176,21 @@ pub trait SubagentBackend: Send + Sync {
     /// newest task; see [`crate::controller::subagent_has_handed_back`].
     fn subagent_handed_back(&self, child_session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
         Box::pin(async move {
+            let liveness = self.subagent_work_liveness(child_session_id.clone()).await;
             tokio::task::spawn_blocking(move || {
-                crate::controller::subagent_has_handed_back(&child_session_id)
+                crate::controller::subagent_has_handed_back(&child_session_id, &liveness)
             })
             .await?
         })
+    }
+    /// Whether the processes a child's last turn left are still alive, as its
+    /// worker published it. The store does not carry it, so a backend without
+    /// live sessions publishes none.
+    fn subagent_work_liveness(
+        &self,
+        _child_session_id: String,
+    ) -> BoxFuture<'_, mj_core::subagent::Liveness> {
+        Box::pin(async { mj_core::subagent::Liveness::Known(None) })
     }
     fn read_context_file(
         &self,
@@ -138,7 +202,16 @@ pub trait SubagentBackend: Send + Sync {
                 .read_file(session_id, path, mj_checkpoint::archive::FetchMode::Content)
                 .await?;
             match fetched.kind {
-                mj_checkpoint::archive::FetchedKind::File => Ok(fetched.bytes),
+                mj_checkpoint::archive::FetchedKind::File => {
+                    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+                        let mut bytes = Vec::new();
+                        std::io::Read::read_to_end(&mut fetched.reader(), &mut bytes)?;
+                        Ok(bytes)
+                    })
+                    .await
+                    .map_err(|error| ExportError::Failed(error.into()))?
+                    .map_err(ExportError::Failed)
+                }
                 _ => Err(ExportError::Refused(format!(
                     "{} is a directory, not a file",
                     fetched.path
@@ -152,6 +225,17 @@ pub trait SubagentBackend: Send + Sync {
         &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async { tokio::task::spawn_blocking(crate::database::list_workspaces).await? })
+    }
+    /// One listed workspace, read from the store. `None` means the list
+    /// would not contain it. Action validation asks this instead of the
+    /// published copy of the list, which can lag behind the store (#1334).
+    fn workspace(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::database::workspace_record(&id)).await?
+        })
     }
     /// The workspace with this name, creating it when the store holds none.
     ///
@@ -211,6 +295,18 @@ pub trait SubagentBackend: Send + Sync {
         _created_at_ms: i64,
     ) -> BoxFuture<'_, AnyResult<SessionMessageResponse>> {
         Box::pin(async { anyhow::bail!("session messaging is unavailable") })
+    }
+
+    /// Record a prompt a person is about to send as `command_id` in their
+    /// prompt history. Agent messages, which also use
+    /// [`Self::prompt_with_id`], are not recorded.
+    fn record_user_prompt(
+        &self,
+        _session_id: String,
+        _command_id: String,
+        _text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
     }
 
     /// Submit under a producer-owned identity, preserving the receipt on retries.
@@ -289,6 +385,21 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 crate::database::load_session_usage(&session_id, after_seq, limit)
+            })
+            .await?
+        })
+    }
+
+    /// One finished review's per-role output, or the latest when `review_id`
+    /// is `None`. The rows outlive the reviewer child sessions.
+    fn finished_review(
+        &self,
+        session_id: String,
+        review_id: Option<String>,
+    ) -> BoxFuture<'_, AnyResult<Option<crate::database::FinishedReview>>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::database::finished_review(&session_id, review_id.as_deref())
             })
             .await?
         })

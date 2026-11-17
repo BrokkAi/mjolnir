@@ -1,11 +1,7 @@
-//! Resolves a recorded model value through the model list its profile's
-//! harness advertised. A turn records the value it selected, and Claude's
-//! values are aliases (`opus`, `fable`) whose meaning the harness decides; the
-//! advertised list names the model each one runs ("Opus 5.5"). The newest
-//! list is used for every period, so an alias the harness has since moved is
-//! priced as its current model.
+//! Price recorded model selections through their profile's advertised catalog.
 use super::pricing;
 use crate::acp::SessionConfigChoice;
+use crate::model_catalog;
 use std::collections::BTreeMap;
 
 /// The newest discovered model list of each profile.
@@ -21,104 +17,11 @@ impl ModelCatalogs {
         }
         profile
             .and_then(|profile| self.0.get(profile))
-            .and_then(|choices| matching_choice(choices, &model))
-            .and_then(choice_model_id)
+            .map(|choices| model_catalog::model_id(choices, &model))
+            .map(|id| pricing::normalize_model(&id))
             .filter(|id| pricing::is_priced(id))
             .unwrap_or(model)
     }
-}
-
-/// The choice `wanted` names: a listed value or display name, else, for a
-/// family alias the list does not offer (Claude's `fable`), the family's
-/// newest listed version, since an alias runs the newest model of its family.
-fn matching_choice<'a>(
-    choices: &'a [SessionConfigChoice],
-    wanted: &str,
-) -> Option<&'a SessionConfigChoice> {
-    let wanted = wanted.trim();
-    choices
-        .iter()
-        .find(|choice| {
-            choice.value.eq_ignore_ascii_case(wanted) || choice.name.eq_ignore_ascii_case(wanted)
-        })
-        .or_else(|| {
-            choices
-                .iter()
-                .filter_map(|choice| Some((family_version(choice)?, choice)))
-                .filter(|((family, _), _)| family.eq_ignore_ascii_case(wanted))
-                .max_by(|((_, a), _), ((_, b), _)| a.cmp(b))
-                .map(|(_, choice)| choice)
-        })
-}
-
-fn context_hint(value: &str) -> Option<&str> {
-    value
-        .strip_suffix(']')?
-        .rsplit_once('[')
-        .map(|(_, hint)| hint)
-}
-
-/// The family and version of a "<Family> <version>" display name such as
-/// "Opus 5.5" or "Claude Opus 5.5 (1M context)".
-fn family_version(choice: &SessionConfigChoice) -> Option<(&str, Vec<u32>)> {
-    let name = choice.name.trim();
-    let name = name.strip_prefix("Claude ").unwrap_or(name);
-    let name = match name.rsplit_once(" (") {
-        Some((base, suffix)) if suffix.ends_with(" context)") => base,
-        _ => name,
-    };
-    let (family, version) = name.split_once(' ')?;
-    if family.is_empty() || !family.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return None;
-    }
-    let version = version
-        .split('.')
-        .map(|part| {
-            part.bytes()
-                .all(|b| b.is_ascii_digit())
-                .then(|| part.parse().ok())
-                .flatten()
-        })
-        .collect::<Option<Vec<u32>>>()?;
-    Some((family, version))
-}
-
-/// A full model id for a choice: its value when that is already one, else one
-/// built from its display name ("Opus 5.5" is `claude-opus-5-5`).
-fn choice_model_id(choice: &SessionConfigChoice) -> Option<String> {
-    let value = match context_hint(&choice.value) {
-        Some(hint) => &choice.value[..choice.value.len() - hint.len() - 2],
-        None => &choice.value,
-    };
-    if pricing::is_priced(value) {
-        return Some(value.to_owned());
-    }
-    match family_version(choice) {
-        Some((family, version))
-            if matches!(
-                family.to_ascii_lowercase().as_str(),
-                "opus" | "sonnet" | "haiku" | "fable" | "mythos"
-            ) =>
-        {
-            let version = version.iter().map(u32::to_string).collect::<Vec<_>>();
-            Some(format!(
-                "claude-{}-{}",
-                family.to_ascii_lowercase(),
-                version.join("-")
-            ))
-        }
-        _ => Some(value.to_owned()),
-    }
-}
-
-/// Resolve a selected value or family alias through its advertised catalog.
-/// Unknown IDs retain their identity; an unknown price does not mean free.
-pub fn model_id(choices: &[SessionConfigChoice], wanted: &str) -> String {
-    pricing::normalize_model(
-        &matching_choice(choices, wanted)
-            .and_then(choice_model_id)
-            .unwrap_or_else(|| wanted.to_owned()),
-    )
 }
 
 #[cfg(test)]

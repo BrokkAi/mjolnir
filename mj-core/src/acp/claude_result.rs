@@ -1,8 +1,8 @@
 //! Claude Code SDK `result` messages, which mark the end of one model cycle.
 //!
 //! Foreground prompts end only at the adapter's `session/prompt` response.
-//! Raw results remain subscribed for autonomous turn completion until
-//! claude-agent-acp#1453 is fixed.
+//! Announced autonomous turns end at their AIR task's terminal update. Raw
+//! results remain the boundary for cycles without an announced task.
 
 use serde::{Deserialize, Serialize};
 

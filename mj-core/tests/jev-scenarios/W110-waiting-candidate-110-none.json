@@ -1,0 +1,432 @@
+{
+  "id": "W110",
+  "title": "Waiting candidate 110 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "238f0567ef7ce08a27c17a1f40e64cb1",
+    "session_title": "jvm-gate-8745-r2",
+    "reply_position": 12191,
+    "captured_at": "2026-11-02T00:49:54.177Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:4931",
+          "role": "assistant",
+          "text": "The base build is still active and has reached `brokk-bifrost-analysis`; the CLI executable has not been emitted yet. Candidate work remains on hold."
+        },
+        {
+          "id": "agent:4996",
+          "role": "assistant",
+          "text": "Compilation has reached the runtime and MCP crates. The build is ongoing with no error; once it exits, I’ll save the base hash and concise build report, noting the candidate hold."
+        },
+        {
+          "id": "agent:5070",
+          "role": "assistant",
+          "text": "The exact-base build succeeded and Cargo’s artifact was copied before exit. Base archive SHA-256 is `482f72…`; copied binary SHA-256 is `80dd6f…`. I’m writing the BUILD ONLY handoff now; the candidate remains unarchived and unbuilt under the hold."
+        },
+        {
+          "id": "agent:5143",
+          "role": "assistant",
+          "text": "The exact-base build succeeded and its archive and binary hashes are recorded in [BUILD.md](/tmp/lanes/jvm-gates/8946-r1/BUILD.md). The candidate build is on hold per the coordinator because its head will change; no candidate archive was started. Awaiting a replacement SHA."
+        },
+        {
+          "id": "agent:5236",
+          "role": "assistant",
+          "text": "I’ll read the #8915 request first, then archive and build the exact base and candidate sequentially, keeping their normal Cargo/mbx targets and recording completion evidence under `8915-r1`."
+        },
+        {
+          "id": "agent:5294",
+          "role": "assistant",
+          "text": "The exact base and candidate objects are present, the fresh base archive is extracted, and the candidate guidance files are saved. I’m starting the base build now; the candidate build will start only after this process exits and its binary is copied and hashed."
+        },
+        {
+          "id": "agent:5357",
+          "role": "assistant",
+          "text": "The base build is progressing through the core language, semantic, and store crates with no reported error. The copier is waiting for Cargo’s compiler-artifact event."
+        },
+        {
+          "id": "agent:5406",
+          "role": "assistant",
+          "text": "The base build has reached the tools, semantic-packs, and RQL crates. I’m still waiting on the same Cargo process; the candidate remains queued for a sequential build after base completion."
+        },
+        {
+          "id": "agent:5463",
+          "role": "assistant",
+          "text": "Base build completed with exit 0. Cargo reported and immediately copied the executable; base archive and binary hashes are recorded. I’m now creating the fresh candidate archive, then I’ll build that exact identity."
+        },
+        {
+          "id": "agent:5521",
+          "role": "assistant",
+          "text": "The base binary is retained and hashed. The candidate build is now running sequentially from its own fresh archive and with its full SHA as `BIFROST_BUILD_IDENTITY_OVERRIDE`; I’m waiting for its artifact and process exit."
+        },
+        {
+          "id": "agent:5583",
+          "role": "assistant",
+          "text": "Candidate compilation has progressed through the analysis crates into `brokk-bifrost-flow`. No build error is present; I’m continuing to poll the same process."
+        },
+        {
+          "id": "agent:5633",
+          "role": "assistant",
+          "text": "The candidate build has reached policy and is compiling the remaining runtime-facing crates. It’s still the single expected build process, with no failure output."
+        },
+        {
+          "id": "agent:5676",
+          "role": "assistant",
+          "text": "Both builds have now completed successfully in sequence. The candidate process exited 0 after Cargo emitted the measure artifact; I’m recording its hash and checking the two binary hashes differ before handing off."
+        },
+        {
+          "id": "agent:5754",
+          "role": "assistant",
+          "text": "Both #8915 BUILD ONLY builds succeeded in sequence with different binary hashes. The retained artifacts and exact commands are recorded in [BUILD.md](/tmp/lanes/jvm-gates/8915-r1/BUILD.md) and [inputs.txt](/tmp/lanes/jvm-gates/8915-r1/inputs.txt). No tests or captures were run; this is not gate acceptance."
+        },
+        {
+          "id": "agent:5869",
+          "role": "assistant",
+          "text": "I’ll read the full phase brief, then run only the three ordered lifecycle captures and required audits/comparisons using the retained binaries and fixed inputs."
+        },
+        {
+          "id": "agent:6141",
+          "role": "assistant",
+          "text": "Base A completed with process exit 0. The measured one-minute load was below 100 at launch and during the capture; I’m recording the post-capture load and checking it before starting the candidate capture."
+        },
+        {
+          "id": "agent:6194",
+          "role": "assistant",
+          "text": "Post-capture load rose to 107, so I’m waiting for the one-minute load to drop below the launch threshold before starting the candidate. The completed base A capture remains intact."
+        },
+        {
+          "id": "agent:6257",
+          "role": "assistant",
+          "text": "The host’s one-minute load is still above 100 (currently about 118), so I have not launched the candidate capture. I’ll continue waiting for a compliant window and preserve the existing run."
+        },
+        {
+          "id": "agent:6321",
+          "role": "assistant",
+          "text": "Load has remained well above the 100 threshold, reaching roughly 170 during the wait. No candidate capture has started; I’m continuing to sample at short intervals."
+        },
+        {
+          "id": "agent:6541",
+          "role": "assistant",
+          "text": "Candidate capture completed with exit 0 at compliant launch load (<100). I’m recording its post-load and checking the threshold before the final base B run."
+        },
+        {
+          "id": "agent:6757",
+          "role": "assistant",
+          "text": "All three captures finished with exit 0, and each was launched below the 100 one-minute-load threshold. Base B’s post-capture load rose above 100, so I’m recording it and now auditing request alignment, SQL flush completeness, selected-mount insert counts, and profile-write logs before any comparison."
+        },
+        {
+          "id": "agent:7124",
+          "role": "assistant",
+          "text": "The precomparison audit confirms 151 records on all three streams, complete SQL flushes, and 133 `selected_resolution_mounts` INSERT executions at record 0 in each capture. Base A/B strict comparison is exact. Candidate answers match base; the comparator reports read-key call-count movement and a SQL-family band drop. I’m saving the detailed movement mappings and running the closing integrity checks now."
+        },
+        {
+          "id": "agent:7250",
+          "role": "assistant",
+          "text": "Phase 2 captures and comparisons are complete. The raw evidence and observed movements are documented in [CAPTURE.md](/tmp/lanes/jvm-gates/8915-r1/CAPTURE.md) and [inputs.txt](/tmp/lanes/jvm-gates/8915-r1/inputs.txt). No gate PASS or causal attribution is claimed; parent classification remains pending."
+        },
+        {
+          "id": "agent:7361",
+          "role": "assistant",
+          "text": "I’ll read the Phase 3 protocol and the prior replay handoff, then extract the replay script from the exact candidate object and run only the four streams plus nine answers in the two JDK environments."
+        },
+        {
+          "id": "agent:7450",
+          "role": "assistant",
+          "text": "The replay is still running. All four nine-answer environment captures completed with 50 records each; the process is now moving through the replay130 streams. I’m keeping the same process and waiting for its exit."
+        },
+        {
+          "id": "agent:7618",
+          "role": "assistant",
+          "text": "Phase 3 replay is complete. [REPLAY.md](/tmp/lanes/jvm-gates/8915-r1/REPLAY.md) and updated [inputs.txt](/tmp/lanes/jvm-gates/8915-r1/inputs.txt) contain the commands, hashes, exits, comparisons, and integrity checks. No gate PASS or substantive classification is claimed."
+        },
+        {
+          "id": "agent:7732",
+          "role": "assistant",
+          "text": "I’ll read the #8946 capture ledger and current replay protocol first, then run the replay with the retained binaries and record the raw comparisons plus before/after integrity checks."
+        },
+        {
+          "id": "agent:7820",
+          "role": "assistant",
+          "text": "The retained candidate’s replay script is the correct version from the `b0c7da7150` extract; its hash matches the script used in #8915. I’m recording fresh input integrity checks now, then I’ll run the exact replay sequence into new #8946-only output and cache directories."
+        },
+        {
+          "id": "agent:7913",
+          "role": "assistant",
+          "text": "All replay streams and answer captures completed; the process exited 0. I’m now checking the produced record counts and binary receipt, running leaf-level comparisons, and closing the frozen-input and corpus integrity checks."
+        },
+        {
+          "id": "agent:7998",
+          "role": "assistant",
+          "text": "#8946-r1 Phase3 is complete. Replay and comparison both exited 0; all replay130 streams and nine-answer checks completed with zero leaf differences. Integrity checks passed before and after. Evidence is in [REPLAY.md](/tmp/lanes/jvm-gates/8946-r1/REPLAY.md) and `inputs.txt`. No overall gate PASS is asserted."
+        },
+        {
+          "id": "agent:8108",
+          "role": "assistant",
+          "text": "I’ll read the #8915 Phase4 request and the retained candidate’s testing guidance, then run the four serial invocations with fresh caches and compare the full outputs and work counters."
+        },
+        {
+          "id": "agent:8183",
+          "role": "assistant",
+          "text": "The private corpus copy is verified at 191 files with the expected digest. The first focused nextest command is still running; I’m preserving its session and will wait through all four invocations in sequence."
+        },
+        {
+          "id": "agent:8829",
+          "role": "assistant",
+          "text": "All four #8915 Phase4 invocations completed. Both source-golden tests passed; both work50 tests failed at the unblessed golden assertion (exit 100). The private corpus digest remained unchanged before and after every run.\n\nThe requested decoded golden comparison and full per-index `ReceiverAnalysisWork` audit are still incomplete, so this is not a complete Phase4 evidence report. Raw logs and exits are under `/tmp/lanes/jvm-gates/8915-r1/manual-logs/`; no `MANUAL.md` was completed."
+        },
+        {
+          "id": "agent:8975",
+          "role": "assistant",
+          "text": "I’ll finish the retained-log audit without rerunning anything: decode both golden assertion sides, compare the full source/work actuals, and enumerate all 50 scope entries plus each `ReceiverAnalysisWork` field by record index and site."
+        },
+        {
+          "id": "agent:9104",
+          "role": "assistant",
+          "text": "Completed the #8915 Phase4 audit and updated [MANUAL.md](/tmp/lanes/jvm-gates/8915-r1/MANUAL.md) and `inputs.txt`. Both source goldens passed; both work50 runs failed only at the unblessed golden equality assertion. The decoded strings, hashes, diffs, all 50 scope entries, and all emitted work counters are retained under `manual/` and `manual-logs/`. No overall gate PASS is asserted."
+        },
+        {
+          "id": "agent:9237",
+          "role": "assistant",
+          "text": "I’ll read the #8973 request, verify the peer clone and exact commits, then archive/build/copy/hash base and candidate sequentially with normal Cargo/mbx targets."
+        },
+        {
+          "id": "agent:9322",
+          "role": "assistant",
+          "text": "The base archive and extraction are verified. Its measure-profile CLI build is still running in the original exec session; I’m waiting on that session and will start the candidate only after the base’s actual exit."
+        },
+        {
+          "id": "agent:9402",
+          "role": "assistant",
+          "text": "The base build exited 0 and its binary was copied from Cargo’s reported artifact (`e86a5cc7…`). The candidate build is running in its original session; I’ll wait for its recorded Cargo exit before finalizing hashes and the ledger."
+        },
+        {
+          "id": "agent:9500",
+          "role": "assistant",
+          "text": "Both #8973 builds completed with exit 0 and distinct binary hashes. Build evidence and retained artifacts are in [BUILD.md](/tmp/lanes/jvm-gates/8973-r1/BUILD.md) and `inputs.txt`. No gate PASS is implied."
+        },
+        {
+          "id": "agent:9587",
+          "role": "assistant",
+          "text": "I’ll read the #8973 Phase2 protocol and verify the retained binary hashes, then perform the three sequential captures and complete the required precomparison audit before running strict and SQL comparisons."
+        },
+        {
+          "id": "agent:9664",
+          "role": "assistant",
+          "text": "The first base attempt stopped before starting the Bifrost process: the extracted profile script imports `followup-latency.py`, which I hadn’t copied yet. I’m preserving that failed attempt and extracting the missing dependency from the same candidate commit; the actual capture will use a fresh output and cache directory."
+        },
+        {
+          "id": "agent:9790",
+          "role": "assistant",
+          "text": "All three aligned captures have 151 seam/request records, 151 SQL request records, no temporary SQL files, and the selected-mount INSERT appears only at record 0 with 133 executions on each side. I’m running comparators only after this audit; then I’ll finish the closing integrity checks and ledgers."
+        },
+        {
+          "id": "agent:9899",
+          "role": "assistant",
+          "text": "#8973 Phase2 capture evidence is complete in [CAPTURE.md](/tmp/lanes/jvm-gates/8973-r1/CAPTURE.md) and `inputs.txt`. Strict comparisons exited 0 with no answer or read-key movement; the SQL band exited 2 with six session-reader family differences. No classification or gate PASS is asserted."
+        },
+        {
+          "id": "agent:10005",
+          "role": "assistant",
+          "text": "I’ll run a late audit over the retained SQL records, comparing whole-session totals to summed per-request totals for every exact `(role, SQL)` family, and hash the three frozen-answer difference payloads. I’ll record it as post-comparison evidence."
+        },
+        {
+          "id": "agent:10075",
+          "role": "assistant",
+          "text": "The late completeness audit passed: no SQL execution or row shortfalls across 2,708 families per capture, and all three frozen-answer difference payloads are identical. Details are in [CAPTURE.md](/tmp/lanes/jvm-gates/8973-r1/CAPTURE.md) and `logs/late-completeness-audit.json`. Missing during-capture load samples are recorded as a limitation; no recapture or PASS is claimed."
+        },
+        {
+          "id": "agent:10199",
+          "role": "assistant",
+          "text": "I’ll read the Phase3 protocol and verify the retained binaries, then run only the replay130 streams and nine-answer checks with the candidate’s own replay script. I’ll record load samples, exact exits, leaf comparisons, and closing input integrity."
+        },
+        {
+          "id": "agent:10308",
+          "role": "assistant",
+          "text": "The load is now below the capture threshold (one-minute load 93.43); frozen manifests and corpus digests passed preflight. I’m starting the fresh replay and will sample load at intervals while the original session runs."
+        },
+        {
+          "id": "agent:10426",
+          "role": "assistant",
+          "text": "#8973 Phase3 is complete. Replay and comparison exited 0; all requested streams completed, with no base/candidate answer differences. The inherited frozen differences are documented in [REPLAY.md](/tmp/lanes/jvm-gates/8973-r1/REPLAY.md). No overall gate PASS is asserted."
+        },
+        {
+          "id": "agent:10524",
+          "role": "assistant",
+          "text": "I’ll read the #7728 request, verify the retained #8973 base binary against its recorded hash, then archive and build only the exact final candidate from the parent repository."
+        },
+        {
+          "id": "agent:10604",
+          "role": "assistant",
+          "text": "The candidate build is still active in its original session, with Cargo output being retained. I’m waiting for the actual exit and will then finalize the artifact hash and build receipts."
+        },
+        {
+          "id": "agent:10668",
+          "role": "assistant",
+          "text": "#7728-r7 candidate build exited 0. The reused base and candidate binaries have different hashes. Evidence and retained artifacts are in [BUILD.md](/tmp/lanes/jvm-gates/7728-r7/BUILD.md) and `inputs.txt`. No gate PASS is implied."
+        },
+        {
+          "id": "agent:10761",
+          "role": "assistant",
+          "text": "I’ll read the #7728 Phase2 protocol, recheck both retained binary hashes, and prepare the exact candidate scripts. I’ll run the three captures sequentially and complete the full SQL flush and staging audit before any comparator."
+        },
+        {
+          "id": "agent:10857",
+          "role": "assistant",
+          "text": "Base A, candidate, and base B captures all exited successfully. I’m auditing their request alignment, selected-mount staging, SQL family flush totals, profile-write errors, and frozen-input integrity before running any comparisons."
+        },
+        {
+          "id": "agent:10975",
+          "role": "assistant",
+          "text": "#7728 Phase2 captures and comparisons are complete. All captures exited 0; precomparison alignment, staging, and SQL flush audits passed. Candidate comparisons show 115 JVM operation-read key differences and two SQL query-family increases, with no answer leaf changes. Details are in [CAPTURE.md](/tmp/lanes/jvm-gates/7728-r7/CAPTURE.md). No gate PASS is asserted."
+        },
+        {
+          "id": "agent:11092",
+          "role": "assistant",
+          "text": "I’ll audit only the retained #7728 captures. First I’ll locate the missing summary files, then pair operation-read keys by original request index and compare their structured payload fields before and after removing only the three named external-reason fields."
+        },
+        {
+          "id": "agent:11252",
+          "role": "assistant",
+          "text": "The retained #7728 addendum is complete. All 115 operation-read differences are limited to the three named fields, absent in base and empty in candidate; projected residuals are zero. Each added SQL family totals 54 executions and 177 rows across 54 requests, with sites recorded. The three frozen-difference payloads match byte-for-byte. See the addendum in [CAPTURE.md](/tmp/lanes/jvm-gates/7728-r7/CAPTURE.md); no PASS is asserted."
+        },
+        {
+          "id": "agent:11396",
+          "role": "assistant",
+          "text": "I’ll read the 8834 request and follow its build-only procedure for the exact base and candidate, keeping all artifacts under its output root."
+        },
+        {
+          "id": "agent:11442",
+          "role": "assistant",
+          "text": "The candidate’s testing guidance and gate README are available in the exact candidate object. I’m saving those with fresh source archives first, then I’ll build base followed by candidate using the normal shared target and copy each Cargo artifact as it completes."
+        },
+        {
+          "id": "agent:11510",
+          "role": "assistant",
+          "text": "The base build is still running; I’m keeping the same build session and waiting for its recorded exit before starting the candidate."
+        },
+        {
+          "id": "agent:11554",
+          "role": "assistant",
+          "text": "I found a working-directory mistake: the build command used relative paths while the shell was still in the prior lane. I’m checking that running session’s actual location and letting it reach its recorded exit; I won’t treat it as 8834 evidence. I’ll then run the exact build from the correct lane root."
+        },
+        {
+          "id": "agent:11666",
+          "role": "assistant",
+          "text": "The first archive/setup was also written relative to the prior lane, so no 8834 build has started yet. I’ve identified the mistake and will now use absolute paths throughout. The accidental run produced an artifact under 8745-r2; I’m preserving that state and will report it for the parent to assess, rather than changing another lane further."
+        },
+        {
+          "id": "agent:11773",
+          "role": "assistant",
+          "text": "The correctly rooted base build is underway now. The failed in-root launch stopped at shell redirection before Cargo started; that and the earlier wrong-lane run are recorded separately from build receipts."
+        },
+        {
+          "id": "agent:11837",
+          "role": "assistant",
+          "text": "Base measure build completed successfully and its artifact hash is saved. The candidate build is now running from its own fresh extraction with its own full-SHA identity override."
+        },
+        {
+          "id": "agent:11883",
+          "role": "assistant",
+          "text": "The candidate build is still active with compiler output accumulating in its lane log; I’m waiting on this original session to finish before hashing or writing the receipt."
+        },
+        {
+          "id": "agent:11945",
+          "role": "assistant",
+          "text": "Both correct 8834 builds have now exited 0, and the immediate copied binaries have distinct hashes. The parent has authorized Phase2 after the build receipts; I’ve read its exact-candidate script requirement and will proceed with captures, without running tests or later surfaces."
+        },
+        {
+          "id": "agent:12081",
+          "role": "assistant",
+          "text": "Preflight manifests and corpus digests pass, but the one-minute load is currently above the required threshold (about 146). I’m holding captures until a fresh load sample is below 100; the frozen inputs and capture setup are ready."
+        },
+        {
+          "id": "agent:12191",
+          "role": "assistant",
+          "text": "Base A finished with exit 0 and the required files were emitted. Its load rose above 100 during the capture, so I’m recording that limitation and waiting for the next below-100 start sample before candidate capture."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "Base A finished with exit 0 and the required files were emitted. Its load rose above 100 during the capture, so I’m recording that limitation and waiting for the next below-100 start sample before candidate capture.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 11387,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "Base A finished with exit 0 and the required files were emitted. Its load rose above 100 during the capture, so I’m recording that limitation and waiting for the next below-100 start sample before candidate capture."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-02T00:54:24.375Z",
+        "kind": "agent",
+        "text": "The valid retry for base A, candidate, and base B all completed with 150 sampled lookups each, 151 seam request records, 151 SQL request records, and no profile-write errors or leftover SQL temporary "
+      },
+      {
+        "at": "2026-11-02T01:01:41.186Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-11-02T01:01:42.531Z",
+        "kind": "user",
+        "text": "Hold all further builds/captures/replay/manual/restore/cleanup. Your handback lists the EXACT SAME SHA58f91c7db26917078a1e79dde2519df7db14bda7f04e7426b55a0c06014447e4 for the accidental dd19/8745 buil"
+      },
+      {
+        "at": "2026-11-02T01:02:05.115Z",
+        "kind": "agent",
+        "text": "I’ll write only the incident chronology in the 8834 lane, distinguishing recorded paths and times from source provenance that remains unresolved."
+      },
+      {
+        "at": "2026-11-02T01:02:15.624Z",
+        "kind": "agent",
+        "text": "Wrote [INCIDENT-CHRONOLOGY.md](/tmp/lanes/jvm-gates/8834-r1/INCIDENT-CHRONOLOGY.md). It documents the launch paths, overwritten artifacts and logs, and unresolved source provenance."
+      }
+    ]
+  }
+}

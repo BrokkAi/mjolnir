@@ -1,13 +1,5 @@
 use super::*;
 
-pub(super) fn prompt_command(prompt: String) -> RelayCommand {
-    RelayCommand::Prompt {
-        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
-            agent_client_protocol::v1::schema::TextContent::new(prompt),
-        )],
-    }
-}
-
 /// Runs one reviewer action for a running review.
 ///
 /// A foreground operation can hold the session's worker for a few seconds
@@ -61,51 +53,80 @@ pub(super) const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from
 /// The longest pause between attempts while a running review waits.
 const LIFECYCLE_RETRY_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The step of review preparation in progress.
+///
+/// Each step logs when it starts and ends with its duration, so a slow
+/// preparation names the step it spent its time in, and a cancellation says
+/// which step it interrupted (#1503).
+#[derive(Default)]
+pub(super) struct PreparationStages {
+    current: std::sync::Mutex<Option<(&'static str, std::time::Instant)>>,
+}
+
+impl PreparationStages {
+    /// Starts `stage`; the returned guard logs its end when dropped, which
+    /// includes a cancellation dropping the step.
+    fn enter<'a>(&self, session_id: &'a str, stage: &'static str) -> PreparationStage<'a> {
+        let started = std::time::Instant::now();
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stage, started));
+        tracing::info!(session_id, stage, "review preparation stage started");
+        PreparationStage {
+            session_id,
+            stage,
+            started,
+        }
+    }
+
+    /// The refusal for a preparation cancelled now, naming the step it
+    /// stopped.
+    pub(super) fn cancelled(&self) -> String {
+        match *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            Some((stage, started)) => format!(
+                "review preparation cancelled while {stage} (after {} s)",
+                started.elapsed().as_secs()
+            ),
+            None => "review preparation cancelled".to_owned(),
+        }
+    }
+}
+
+struct PreparationStage<'a> {
+    session_id: &'a str,
+    stage: &'static str,
+    started: std::time::Instant,
+}
+
+impl Drop for PreparationStage<'_> {
+    fn drop(&mut self) {
+        tracing::info!(
+            session_id = self.session_id,
+            stage = self.stage,
+            elapsed_ms = self.started.elapsed().as_millis(),
+            "review preparation stage ended"
+        );
+    }
+}
+
 /// Everything a review needs that only the database and the worker can answer.
+///
+/// The caller cancels preparation by dropping this future.
 pub(super) async fn prepare(
     control: &SessionManagerControl,
     environment: &Arc<dyn ReviewEnvironment>,
     session_id: &str,
     config: ReviewConfig,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<Prepared, StartRefusal> {
-    prepare_scoped(
-        control,
-        environment,
-        session_id,
-        config,
-        cancelled,
-        mj_core::relay::CaptureScope::TurnDelta,
-        None,
-    )
-    .await
-}
-
-pub(super) async fn prepare_scoped(
-    control: &SessionManagerControl,
-    environment: &Arc<dyn ReviewEnvironment>,
-    session_id: &str,
-    config: ReviewConfig,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
-    scope: mj_core::relay::CaptureScope,
+    stages: &PreparationStages,
     repositories: Option<Vec<std::path::PathBuf>>,
 ) -> Result<Prepared, StartRefusal> {
-    let push = scope == mj_core::relay::CaptureScope::PushableCommits;
-    // Turn reviews cover children through their parent's turn. Explicit
-    // commit reviews use the child's own durable review group instead.
-    let child = if !push {
-        let environment = environment.clone();
-        let session = session_id.to_owned();
-        tokio::task::spawn_blocking(move || environment.is_subagent(&session))
-            .await
-            .map_err(|error| StartRefusal(format!("checking review ownership: {error}")))?
-    } else {
-        false
-    };
-    if child {
-        return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));
-    }
     let review_refusal = {
+        let _stage = stages.enter(session_id, "checking the session's project source");
         let environment = environment.clone();
         let session = session_id.to_owned();
         tokio::task::spawn_blocking(move || environment.review_refusal(&session))
@@ -113,25 +134,31 @@ pub(super) async fn prepare_scoped(
             .map_err(|error| StartRefusal(format!("preparing review: {error}")))?
     };
     review_refusal.map_err(StartRefusal)?;
-    let handle = control
-        .session(session_id.to_owned())
-        .await
-        .map_err(|error| StartRefusal(format!("{error:#}")))?;
+    let handle = {
+        let _stage = stages.enter(session_id, "looking up the session");
+        control.session(session_id.to_owned()).await
+    }
+    .map_err(|error| {
+        StartRefusal(format!(
+            "{error:#}; resume the session before requesting review"
+        ))
+    })?;
     // Capture actions and primary prompt submissions are serialized by the
     // same session actor. Anything accepted before the admission hold is
     // reflected here; anything after it was refused by the actor.
     let view = handle.view();
     if !view.connected {
-        return Err(StartRefusal("this session is not connected".to_owned()));
+        return Err(StartRefusal(
+            "this session is not connected; resume it before requesting review".to_owned(),
+        ));
     }
     let Some(snapshot) = view.snapshot else {
         return Err(StartRefusal(
             "this session has no transcript yet".to_owned(),
         ));
     };
-    if push
-        && snapshot.operational.relay_protocol_version.unwrap_or(0)
-            < mj_core::relay::RELAY_PUSH_REVIEW_PROTOCOL
+    if snapshot.operational.relay_protocol_version.unwrap_or(0)
+        < mj_core::relay::RELAY_PUSH_REVIEW_PROTOCOL
     {
         return Err(StartRefusal(
             "the session's worker predates push review; restart the session".into(),
@@ -145,22 +172,8 @@ pub(super) async fn prepare_scoped(
             "the session's worker predates worktree review; restart the session".into(),
         ));
     }
-    if !push
-        && !matches!(
-            snapshot.materialized.execution,
-            MaterializedExecutionState::Idle
-        )
-    {
-        return Err(StartRefusal(
-            "a review runs between turns; this one is still working".to_owned(),
-        ));
-    }
-    if !push && !snapshot.materialized.queued_prompts.is_empty() {
-        return Err(StartRefusal(
-            "prompts are queued; the review waits for them".to_owned(),
-        ));
-    }
     let state = {
+        let _stage = stages.enter(session_id, "loading the review state");
         let session = session_id.to_owned();
         let environment = environment.clone();
         tokio::task::spawn_blocking(move || environment.load_state(&session))
@@ -171,30 +184,24 @@ pub(super) async fn prepare_scoped(
     // The capture and the reviewer choice share one bound on waiting for
     // background work.
     let deadline = tokio::time::Instant::now() + BACKGROUND_WORK_WAIT;
-    // From here until the review closes, no recovery copy or worker upgrade
-    // starts on this session: the same finished turn starts both, and either
-    // one would turn the reviewer's work away mid-review. A copy already
-    // running is waited for, not preempted.
-    let background = environment.hold_background_work(session_id, deadline).await;
-    // Capture what the turn changed before choosing a reviewer. Choosing one
-    // can take minutes (an Auto choice asks each candidate profile), and a
-    // turn that changed nothing needs no reviewer at all (I2-10). The capture
-    // is a reviewer action, so it waits for the recovery copy the same way
-    // the choice does. A capture that fails for any other reason is left to
-    // the review, which captures again and reports the failure the way it
-    // always has.
+    // Keep recovery copies and worker upgrades from interrupting reviewers.
+    // A copy already running is waited for, not preempted.
+    let background = {
+        let _stage = stages.enter(session_id, "waiting for background work on the session");
+        hold_background_work(environment, session_id, deadline).await?
+    };
+    // Capture committed work before choosing reviewers. Matching trees need
+    // no reviewer, and capture refusals go straight back to the caller.
     let scoped_repositories = repositories;
     let captured = {
+        let _stage = stages.enter(session_id, "capturing the change set through the worker");
         let handle = &handle;
-        let baselines = &state.baselines;
-        after_background_work(session_id, deadline, &cancelled, move || {
+        after_background_work(session_id, deadline, move || {
             let repositories = scoped_repositories.clone();
             async move {
                 handle
                     .reviewer(ReviewerAction::CaptureDelta {
                         repositories: repositories.clone(),
-                        scope,
-                        baselines: baselines.clone(),
                     })
                     .await
                     .map_err(|error| format!("{error:#}"))
@@ -203,138 +210,105 @@ pub(super) async fn prepare_scoped(
         .await
     };
     let captured = match captured {
-        Err(error) if push => return Err(StartRefusal(error)),
+        Err(error) => return Err(StartRefusal(error)),
         Ok(ReviewerOutcome::Delta { repositories })
-            if push
-                && (repositories.is_empty()
-                    || repositories
-                        .iter()
-                        .all(|delta| delta.base_commit == delta.head_commit)) =>
+            if (repositories.is_empty()
+                || repositories
+                    .iter()
+                    .all(|delta| delta.base_commit == delta.head_commit)) =>
         {
             return Err(StartRefusal(
                 "nothing to review because base == HEAD".into(),
             ));
         }
-        Ok(ReviewerOutcome::Delta { repositories }) => Some(repositories),
-        _ => None,
+        Ok(ReviewerOutcome::Delta { repositories }) => repositories,
+        other => return Err(StartRefusal(unexpected(other))),
     };
-    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-        return Err(StartRefusal("review preparation cancelled".into()));
-    }
-    if captured.as_deref().is_some_and(|deltas| {
-        if push {
-            mj_review::delta::trees_unchanged(deltas)
-        } else {
-            !mj_review::delta::has_changes(deltas)
-        }
-    }) {
+    if mj_review::delta::trees_unchanged(&captured) {
         return Ok(Prepared {
-            scope,
+            seed: seed_from_session(&snapshot.materialized),
             state,
             // No reviewer process starts for a turn with nothing to review.
-            reviewer: ReviewerIdentity::default(),
-            count: config.count,
-            materialized: Box::new(snapshot.materialized),
-            resume_forward: None,
+            reviewers: vec![ReviewerIdentity::default()],
+            brief_writer: None,
+            brief_skipped: None,
             captured,
             background,
         });
     }
-    let reviewer = after_background_work(session_id, deadline, &cancelled, || {
-        environment.resolve(handle.clone(), config.clone(), cancelled.clone())
-    })
-    .await
-    .map_err(StartRefusal)?;
-    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-        return Err(StartRefusal("review preparation cancelled".into()));
-    }
-    let profile = reviewer.profile.clone();
-    let session = session_id.to_owned();
-    let environment = environment.clone();
-    tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+    let reviewer = {
+        let _stage = stages.enter(session_id, "choosing reviewers");
+        after_background_work(session_id, deadline, || {
+            environment.resolve(handle.clone(), config.clone())
+        })
         .await
-        .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
-        .map_err(StartRefusal)?;
+    }
+    .map_err(StartRefusal)?;
+    let _stage = stages.enter(session_id, "checking reviewer profiles");
+    for selected in &reviewer {
+        let profile = selected.profile.clone();
+        let session = session_id.to_owned();
+        let environment = environment.clone();
+        tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+            .await
+            .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
+            .map_err(StartRefusal)?;
+    }
+    // The writer is an aid: any trouble choosing it leaves the review to run
+    // without a brief and tells the requester, instead of refusing the review.
+    let (brief_writer, brief_skipped) = match config.brief_writer.as_ref().and_then(|w| w.choice())
+    {
+        None => (None, None),
+        Some(choice) => {
+            let _stage = stages.enter(session_id, "choosing the brief writer");
+            let chosen = match environment.resolve_choice(choice).await {
+                Ok(writer) => {
+                    let profile = writer.profile.clone();
+                    let session = session_id.to_owned();
+                    let environment = environment.clone();
+                    tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+                        .await
+                        .map_err(|e| format!("checking the brief writer: {e}"))
+                        .and_then(|checked| checked)
+                        .map(|()| writer)
+                }
+                Err(error) => Err(error),
+            };
+            match chosen {
+                Ok(writer) => (Some(writer), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+    };
     Ok(Prepared {
-        scope,
+        seed: seed_from_session(&snapshot.materialized),
         state,
-        reviewer: reviewer.clone(),
-        count: config.count,
-        materialized: Box::new(snapshot.materialized),
-        resume_forward: None,
+        reviewers: reviewer.clone(),
+        brief_writer,
+        brief_skipped,
         captured,
         background,
     })
 }
 
-/// Loads the durable handoff before touching the live actor. A missing
-/// pending record means the accepted result had already been reconciled; the
-/// interrupted review can then stay cancelled without fabricating a notice.
-pub(super) async fn prepare_recovery(
-    control: &SessionManagerControl,
-    environment: &Arc<dyn ReviewEnvironment>,
-    session_id: &str,
-) -> Result<Option<Prepared>, String> {
-    let session = session_id.to_owned();
-    let load = environment.clone();
-    let state = tokio::task::spawn_blocking(move || load.load_state(&session))
-        .await
-        .map_err(|error| format!("loading the pending review handoff stopped: {error}"))??;
-    if let Some(child) = &state.child_session_id {
-        environment.close_child(child).await?;
-    }
-    let handle = control
-        .session(session_id.to_owned())
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    let Some(pending) = state.pending_forward.clone() else {
-        return Ok(None);
-    };
-    let view = handle.view();
-    if !view.connected {
-        return Err("the primary session is not connected".to_owned());
-    }
-    let Some(snapshot) = view.snapshot else {
-        return Err("the primary session has no transcript yet".to_owned());
-    };
-    if !matches!(
-        snapshot.materialized.execution,
-        MaterializedExecutionState::Idle
-    ) {
-        return Err("the primary session is still working".to_owned());
-    }
-    if !snapshot.materialized.queued_prompts.is_empty() {
-        return Err("prompts are queued; the pending handoff waits for them".to_owned());
-    }
-    Ok(Some(Prepared {
-        scope: Default::default(),
-        state,
-        // No reviewer process is started for a handoff-only recovery.
-        reviewer: ReviewerIdentity::default(),
-        count: mj_core::config::default_review_count(),
-        materialized: Box::new(snapshot.materialized),
-        resume_forward: Some(pending),
-        captured: None,
-        // A handoff only prompts the primary; no reviewer work needs the
-        // worker held.
-        background: None,
-    }))
-}
-
-/// A question's first line, quoted and kept short enough for a notice.
-pub(super) fn quoted_question(message: &str) -> String {
-    const LIMIT: usize = 160;
-    let line = message.lines().next().unwrap_or_default().trim();
-    if line.chars().count() > LIMIT {
-        format!("\"{}…\"", line.chars().take(LIMIT).collect::<String>())
-    } else {
-        format!("\"{line}\"")
-    }
-}
-
 /// How long a review waits for other work holding its session, such as the
 /// automatic recovery copy the same finished turn starts, before it gives up.
 pub(super) const BACKGROUND_WORK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Hold the session's background work off its worker until the returned hold
+/// is dropped, waiting until `deadline` for work already running. Everything
+/// in the review host that sends reviewer work to the worker takes this first:
+/// the worker refuses that work while a recovery copy holds its checkpoint
+/// barrier, and only the gate behind this hold knows whether one is running.
+pub(super) async fn hold_background_work(
+    environment: &Arc<dyn ReviewEnvironment>,
+    session_id: &str,
+    deadline: tokio::time::Instant,
+) -> Result<Option<BackgroundHold>, StartRefusal> {
+    tokio::time::timeout_at(deadline, environment.hold_background_work(session_id, deadline))
+        .await
+        .map_err(|_| StartRefusal(format!("waiting for background work on session {session_id} exceeded the review preparation deadline")))
+}
 
 /// Pause between attempts when the session's lease was taken by something the
 /// recovery gate does not coordinate, so a retry does not spin.
@@ -349,11 +323,10 @@ pub(super) use crate::review_selection::preempted_by_lifecycle;
 /// from starting, but a foreground lifecycle operation (a suspend, a move, a
 /// copy still running when the hold's wait ran out) can still refuse or
 /// cancel the capture or the reviewer choice. The step tries again until
-/// `deadline` instead of giving up.
+/// `deadline` instead of giving up. Cancelling the review drops this future.
 async fn after_background_work<T, Step, Attempt>(
     session_id: &str,
     deadline: tokio::time::Instant,
-    cancelled: &std::sync::atomic::AtomicBool,
     mut step: Step,
 ) -> Result<T, String>
 where
@@ -368,26 +341,19 @@ where
         attempt += 1;
         match step().await {
             Err(reason)
-                if preempted_by_lifecycle(&reason)
-                    && tokio::time::Instant::now() < deadline
-                    && !cancelled.load(std::sync::atomic::Ordering::Acquire) =>
+                if preempted_by_lifecycle(&reason) && tokio::time::Instant::now() < deadline =>
             {
                 tracing::info!(
                     %session_id,
                     attempt,
                     %reason,
-                    "turn review waits for another operation on the session"
+                    "code review waits for another operation on the session"
                 );
             }
             outcome => return outcome,
         }
     }
 }
-
-/// Why a sub-agent session is not reviewed on its own. An automatic review
-/// skips it without a notice; a manual request gets this sentence.
-pub(super) const SUBAGENT_REFUSAL: &str =
-    "a sub-agent's changes are reviewed with its parent's turn";
 
 /// The transcript line a review that could not start leaves behind. The
 /// refusal alone ("session is reserved for a lifecycle operation") did not say
@@ -401,10 +367,10 @@ pub fn start_refusal_notice(reason: &str) -> String {
     } else {
         reason
     };
-    format!("Turn review did not start: {reason}. The next review covers these changes.")
+    format!("Review did not start: {reason}. Commit tracked changes and request review again.")
 }
 
-/// The transcript line a resolution leaves behind, on every surface.
+/// The transcript line a resolution leaves behind, when it adds information.
 #[must_use]
 pub fn resolution_notice(
     phase: &TurnReviewPhase,
@@ -414,39 +380,41 @@ pub fn resolution_notice(
         return None;
     };
     Some(match resolution {
-        Resolution::Forwarded => "Review findings sent to the agent".to_owned(),
-        Resolution::Dismissed => match last_verdict {
-            Some(ReviewVerdict::Clean) => "Review complete: no material findings".to_owned(),
-            Some(ReviewVerdict::Failed { .. }) => {
-                "Review failed; the change stays unreviewed".to_owned()
-            }
-            _ => "Review dismissed".to_owned(),
+        Resolution::Completed => match last_verdict {
+            Some(ReviewVerdict::Clean) => "Review complete: no material findings".into(),
+            Some(ReviewVerdict::Failed { reason }) => format!("Review failed: {reason}"),
+            _ => return None,
         },
         Resolution::Cancelled => match last_verdict {
-            Some(ReviewVerdict::Failed { .. }) => {
-                "Review failed; the change stays unreviewed".to_owned()
+            Some(ReviewVerdict::Clean) => "Review cancelled: stopped waiting for approval recording. The worker may already have recorded approval; if it did, the push is allowed. Otherwise, request review again.".into(),
+            Some(ReviewVerdict::Failed { reason }) => {
+                format!(
+                    "Review failed: {}. The change stays unreviewed",
+                    short_failure_reason(reason)
+                )
             }
             _ => "Review cancelled".to_owned(),
         },
-        Resolution::NothingToReview => "Nothing to review: the turn changed no files".to_owned(),
-        Resolution::CoverageStarted => {
-            "Review coverage starts here; the next completed turn is reviewed".to_owned()
-        }
     })
 }
 
-/// Builds the review's seed from the session's own projection.
-///
-/// This is the daemon-side twin of what the chat used to read out of its view
-/// state: the latest user prompt is the task, and all chronological user
-/// messages are the intent context. Nothing the primary agent wrote is
-/// included, so reviewers judge the change against what the user asked rather
-/// than against the author's own account of it.
-pub(super) fn seed_from_session(
-    session: &MaterializedSession,
-    state: &TurnReviewState,
-    _trigger: &str,
-) -> TurnReviewSeed {
+fn short_failure_reason(reason: &str) -> String {
+    let first_line = reason.lines().next().unwrap_or("unknown error");
+    let mut chars = first_line.chars();
+    let short: String = chars.by_ref().take(160).collect();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+/// The review's task and user messages from the session transcript: the
+/// latest user prompt is the task, and every user message since the last
+/// context boundary is intent. Nothing the primary agent wrote is included.
+/// The declined findings for the captured repositories are added when the
+/// review starts.
+pub(super) fn seed_from_session(session: &MaterializedSession) -> TurnReviewSeed {
     let mut task = String::new();
     let mut user_messages = Vec::new();
 
@@ -470,26 +438,19 @@ pub(super) fn seed_from_session(
         if text.is_empty() {
             continue;
         }
-        if mj_core::continuation::is_generated_prompt_text(text)
-            || mj_core::continuation::is_generated_prompt(
-                item.stable_id
-                    .strip_prefix("user:")
-                    .unwrap_or(&item.stable_id),
-            )
-        {
+        if !mj_core::continuation::is_user_authored_message(Some(&item.stable_id), text) {
             continue;
         }
         task = text.to_owned();
         // Reviewers need the complete chronological user history to
         // tell a current steering prompt from an earlier requirement.
         // `task` separately identifies the latest outer prompt.
-        user_messages.push(UserMessage::prompt(text));
+        user_messages.push(mj_core::review::lanes::UserMessage::prompt(text));
     }
     TurnReviewSeed {
         task,
         user_messages,
-        baselines: state.baselines.clone(),
-        through_ordinal: session.applied_event_ordinal,
-        prior_review: state.prior_review.clone(),
+        declined: Vec::new(),
+        brief: None,
     }
 }

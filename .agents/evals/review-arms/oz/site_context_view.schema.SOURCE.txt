@@ -1,0 +1,4 @@
+bifrost-dev commit: 66a345f3d934767be49560a28630030b203d9371
+source: crates/bifrost-tools/src/site_context.rs (SiteContextView)
+command: dump_schema.sh (cargo test -p brokk-bifrost-tools --test h1_schema_dump -- --nocapture)
+note: first generation was run by hand with the same test body; dump_schema.sh reproduces it.

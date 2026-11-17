@@ -1,0 +1,152 @@
+{
+  "id": "W127",
+  "title": "Waiting candidate 127 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "e51c7d65124664c8c948eddbf8ffcd1a",
+    "session_title": "Finish prepared shared-flow implementation",
+    "reply_position": 1852,
+    "captured_at": "2026-10-13T00:54:12.492Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I’ll review the prepared flow patch and repository guidance, then finish the flow implementation and focused validation within the assigned files."
+        },
+        {
+          "id": "agent:154",
+          "role": "assistant",
+          "text": "The prepared patch is applied. I’m checking projection failures and alias handling before validation. Exact storage will bypass the caller’s preservation edge only when both call and normal-return mappings are proven complete; weak writes remain incomplete."
+        },
+        {
+          "id": "agent:483",
+          "role": "assistant",
+          "text": "Review found two issues in the prepared patch: one failed projection marked every mapping at that call incomplete, and origin/path limits became generic unknown statuses. I’m localizing failures to the affected storage and retaining budget details. Cargo validation is currently waiting on another build’s shared target lock."
+        },
+        {
+          "id": "agent:658",
+          "role": "assistant",
+          "text": "The routing helper now uses the existing reverse rule index. Weak-write and cross-formal alias failures affect only their storage partitions, and proven by-value copies remain storage barriers. I also extended the origin-search regression to verify that a refused search retains its budget dimension and allowance."
+        },
+        {
+          "id": "agent:737",
+          "role": "assistant",
+          "text": "The source changes are ready for validation, including typed incompleteness when a storage-bearing formal has no actual mapping. The shared build lock has cleared, and Cargo is compiling analysis dependencies. I’ll use the focused flow library tests to check for regressions; the parent owns the combined C/C++ policy gate."
+        },
+        {
+          "id": "agent:1095",
+          "role": "assistant",
+          "text": "Formatting and pack-authoring drift checks pass. Cargo is still checking the analysis dependency. The flow code continues to require the producer’s strong-update certificate for formal writes, so a weak store cannot silently produce a complete overwrite-kill result."
+        },
+        {
+          "id": "agent:1151",
+          "role": "assistant",
+          "text": "The flow library compiles successfully. The focused planner/client tests are queued on the shared target lock, including the budget regression. Afterward I’ll run Clippy for the changed crate."
+        },
+        {
+          "id": "agent:1286",
+          "role": "assistant",
+          "text": "The focused tests are still waiting for the other Cargo build to release the target lock. Review is complete: normal-return routing preserves no-write branches, keeps object and field partitions separate, and shares the same rule across forward flow, backward flow, and witness replay."
+        },
+        {
+          "id": "agent:1363",
+          "role": "assistant",
+          "text": "The focused test run remains queued on the target lock. I also checked the shared origin-search callers: mixed copy/reference alternatives now remain incomplete for every consumer, including gap refinement, so they cannot certify an exact backing store."
+        },
+        {
+          "id": "agent:1413",
+          "role": "assistant",
+          "text": "The focused run has acquired the target lock and is compiling its test binary. No compile or test failures have been reported so far. Detailed implementation notes are in the report directory for the parent’s combined validation."
+        },
+        {
+          "id": "agent:1652",
+          "role": "assistant",
+          "text": "The test build is still compiling analysis, and Clippy is queued behind it. The flow changes are complete. Validation will cover compilation, selected planner/client tests, lint, formatting, and pack drift; the parent’s policy gate will determine C/C++ acceptance."
+        },
+        {
+          "id": "agent:1715",
+          "role": "assistant",
+          "text": "The final evidence review tightened one case: a by-value copy counts as a complete storage barrier only when its target, mapping, and preceding origin evidence are proven complete. Unknown conversions and uncertain copy paths retain typed incompleteness. The test build is still compiling analysis."
+        },
+        {
+          "id": "agent:1773",
+          "role": "assistant",
+          "text": "The test build is still active in the large analysis crate, with no reported failures. Flow review and formatting are complete; I’m waiting for the selected tests and Clippy before handing back the report."
+        },
+        {
+          "id": "agent:1817",
+          "role": "assistant",
+          "text": "Analysis has compiled successfully. Cargo is now building the flow test binary from the final source. Clippy remains queued, and no failures have been reported."
+        },
+        {
+          "id": "agent:1852",
+          "role": "assistant",
+          "text": "All 14 selected planner/client tests pass, including the origin-budget regression and existing copy/move and backward-flow checks. Clippy is the remaining local check; it is waiting for the shared target lock."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "All 14 selected planner/client tests pass, including the origin-budget regression and existing copy/move and backward-flow checks. Clippy is the remaining local check; it is waiting for the shared target lock.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "All 14 selected planner/client tests pass, including the origin-budget regression and existing copy/move and backward-flow checks. Clippy is the remaining local check; it is waiting for the shared target lock."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-13T00:54:15.517Z",
+        "kind": "system",
+        "text": "Interrupted"
+      }
+    ]
+  }
+}

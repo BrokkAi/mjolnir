@@ -54,6 +54,7 @@ pub struct DeferredRelayAttach {
     state: RelayOperationalState,
     after_ordinal: u64,
     after_digest: String,
+    known_state_digest: Option<String>,
 }
 
 impl DurableRelay {
@@ -87,6 +88,11 @@ impl DurableRelay {
         let RelayResponseBody::Ok {
             payload:
                 RelayResponsePayload::Attached {
+                    through_ordinal,
+                    through_digest,
+                    ..
+                }
+                | RelayResponsePayload::AttachedWithKnownState {
                     through_ordinal,
                     through_digest,
                     ..
@@ -127,6 +133,7 @@ impl DurableRelay {
         let RelayRequest::Attach {
             after_ordinal,
             after_digest,
+            known_state_digest,
         } = &envelope.request
         else {
             return None;
@@ -142,6 +149,7 @@ impl DurableRelay {
             state,
             after_ordinal: *after_ordinal,
             after_digest: after_digest.clone(),
+            known_state_digest: known_state_digest.clone(),
         })
     }
 }
@@ -159,11 +167,15 @@ impl std::fmt::Display for UnreadableRelaySpan {
 impl std::error::Error for UnreadableRelaySpan {}
 
 impl RelayReplayPlan {
+    /// `known_state_digest` is the digest of the state the controller holds;
+    /// an unchanged state is not sent again. A worker speaks only the current
+    /// protocol, so every controller it serves understands the omission.
     pub(super) fn attach(
         &self,
         after_ordinal: u64,
         after_digest: &str,
         state: RelayOperationalState,
+        known_state_digest: Option<&str>,
     ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
         if let Err(error) = self.validate_cursor(after_ordinal, after_digest) {
             return Ok(Err(relay_protocol_error(
@@ -201,12 +213,21 @@ impl RelayReplayPlan {
                     return Err(error);
                 }
             };
+        let state_digest = mj_core::relay::relay_state_digest(&state)?;
+        if known_state_digest == Some(state_digest.as_str()) {
+            return Ok(Ok(RelayResponsePayload::AttachedWithKnownState {
+                events: page.events,
+                through_ordinal: page.through_ordinal,
+                through_digest: page.through_digest,
+            }));
+        }
         ensure_serialized_budget(&state, RELAY_STATE_BYTE_BUDGET, "relay operational state")?;
         Ok(Ok(RelayResponsePayload::Attached {
             state,
             events: page.events,
             through_ordinal: page.through_ordinal,
             through_digest: page.through_digest,
+            state_digest: Some(state_digest),
         }))
     }
 
@@ -477,11 +498,22 @@ impl DeferredRelayAttach {
 
     /// Blocking: reads journal segments and decompresses sealed ones. Callers
     /// on an async runtime must run this off the event loop.
+    /// The worker's harness preparation lives outside the relay; it joins the
+    /// state here, before [`Self::finish`] digests that state.
+    pub fn set_harness_preparation(
+        &mut self,
+        preparation: Option<mj_core::relay::HarnessPreparation>,
+    ) {
+        self.state.harness_preparation = preparation;
+    }
+
     pub fn finish(self) -> RelayResponseEnvelope {
-        let body = match self
-            .plan
-            .attach(self.after_ordinal, &self.after_digest, self.state)
-        {
+        let body = match self.plan.attach(
+            self.after_ordinal,
+            &self.after_digest,
+            self.state,
+            self.known_state_digest.as_deref(),
+        ) {
             Ok(Ok(payload)) => RelayResponseBody::Ok { payload },
             Ok(Err(error)) => RelayResponseBody::Error { error },
             Err(error) => RelayResponseBody::Error {

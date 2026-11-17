@@ -1,4 +1,4 @@
-import questions from "../../../mj-core/src/continuation/questions_v1.json" with { type: "json" };
+import questions from "./continuation-questions-v1.json" with { type: "json" };
 export { questions as continuationQuestions };
 export interface ContinuationEvidence { assistant_history_omitted: boolean; messages: { id: string; role: "user" | "assistant"; text: string }[] }
 const encoder = new TextEncoder();
@@ -32,7 +32,7 @@ export function continuationAnswers(value: unknown): Record<string, unknown> | u
   return result;
 }
 
-import questionsV2 from "../../../mj-core/src/continuation/questions.json" with { type: "json" };
+import questionsV2 from "./continuation-questions.json" with { type: "json" };
 export { questionsV2 as continuationQuestionsV2 };
 export interface ContinuationEvidenceV2 extends ContinuationEvidence { quota_message?: string }
 export function continuationRequestV2(value: unknown): value is ContinuationEvidenceV2 {

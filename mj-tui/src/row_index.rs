@@ -106,10 +106,12 @@ impl DashboardState {
         self.managed_child_ids(parent)
             .into_iter()
             .filter(|id| {
-                self.state
-                    .subagents
-                    .get(id)
-                    .is_some_and(|relation| relation.kind == kind)
+                self.state.subagents.get(id).is_some_and(|relation| {
+                    // The oracle is listed with the sub-agents.
+                    relation.kind == kind
+                        || (kind == mj_core::subagent::SubagentKind::Worker
+                            && relation.kind == mj_core::subagent::SubagentKind::Oracle)
+                })
             })
             .collect()
     }

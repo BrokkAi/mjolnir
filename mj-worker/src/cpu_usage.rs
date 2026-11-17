@@ -1,6 +1,8 @@
 //! Worker-owned CPU measurement and history; survives controller replacement.
 use anyhow::{Result, bail};
-use mj_core::cpu_usage::SessionCpuUsage;
+#[cfg(unix)]
+use mj_core::cpu_usage::CpuAccountingMode;
+use mj_core::cpu_usage::{CpuSampleScope, SessionCpuUsage};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -41,6 +43,7 @@ pub struct CpuSampler {
     weight: f64,
     covered: Duration,
     latest: Option<SessionCpuUsage>,
+    scope: CpuSampleScope,
 }
 
 impl CpuSampler {
@@ -69,6 +72,7 @@ impl CpuSampler {
             .saturating_add(dt)
             .min(Duration::from_secs(3600));
         self.latest = Some(SessionCpuUsage {
+            scope: self.scope,
             recent_permille: (share * 1000.0).round() as u16,
             hourly_permille: (self.weighted_share / self.weight * 1000.0).round() as u16,
             hourly_covered_secs: self.covered.as_secs() as u32,
@@ -89,18 +93,32 @@ pub(crate) type CpuRead = Result<Option<SessionCpuUsage>, String>;
 
 /// One sampler per serving worker. The serving loop supervises this task.
 #[cfg(unix)]
-pub(crate) async fn sample_cpu(sender: tokio::sync::watch::Sender<CpuRead>) {
-    let mut sampler = CpuSampler::default();
+pub(crate) async fn sample_cpu(
+    sender: tokio::sync::watch::Sender<CpuRead>,
+    accounting: CpuAccountingMode,
+) {
+    let scope = match accounting {
+        CpuAccountingMode::ProcessTree => CpuSampleScope::ProcessTree,
+        CpuAccountingMode::Container => CpuSampleScope::Container,
+    };
+    let mut sampler = CpuSampler {
+        scope,
+        ..CpuSampler::default()
+    };
+    let counter = tokio::task::spawn_blocking(move || CpuCounter::discover(accounting)).await;
+    let counter = match counter {
+        Ok(Ok(counter)) => Ok(counter),
+        Ok(Err(error)) => Err(format!("{error:#}")),
+        Err(error) => Err(format!("CPU counter discovery task failed: {error}")),
+    };
     let mut ticks = tokio::time::interval(Duration::from_secs(10));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticks.tick().await;
-        let result = tokio::task::spawn_blocking(|| -> Result<(Instant, Duration, u32)> {
-            Ok((
-                Instant::now(),
-                process_tree_cpu_time(std::process::id())?,
-                online_cpus()?,
-            ))
+        let counter = counter.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<(Instant, Duration, u32)> {
+            let counter = counter.map_err(anyhow::Error::msg)?;
+            Ok((Instant::now(), counter.read()?, online_cpus()?))
         })
         .await;
         let value = match result {
@@ -112,6 +130,39 @@ pub(crate) async fn sample_cpu(sender: tokio::sync::watch::Sender<CpuRead>) {
             Err(error) => Err(format!("CPU measurement task failed: {error}")),
         };
         let _ = sender.send_replace(value);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+enum CpuCounter {
+    ProcessTree(u32),
+    #[cfg(target_os = "linux")]
+    Container(linux::CgroupCpu),
+}
+
+#[cfg(unix)]
+impl CpuCounter {
+    fn discover(accounting: CpuAccountingMode) -> Result<Self> {
+        match accounting {
+            CpuAccountingMode::ProcessTree => Ok(Self::ProcessTree(std::process::id())),
+            CpuAccountingMode::Container => {
+                #[cfg(target_os = "linux")]
+                {
+                    Ok(Self::Container(linux::CgroupCpu::discover()?))
+                }
+                #[cfg(not(target_os = "linux"))]
+                bail!("container CPU sampling is not supported on this platform")
+            }
+        }
+    }
+
+    fn read(&self) -> Result<Duration> {
+        match self {
+            Self::ProcessTree(root) => process_tree_cpu_time(*root),
+            #[cfg(target_os = "linux")]
+            Self::Container(counter) => counter.read(),
+        }
     }
 }
 
@@ -132,6 +183,7 @@ mod tests {
         let usage = sampler.latest().unwrap();
         assert_eq!(usage.hourly_permille, 500);
         assert_eq!(usage.hourly_covered_secs, 50);
+        assert_eq!(usage.scope, CpuSampleScope::ProcessTree);
     }
     #[test]
     fn cpu_sampler_treats_a_falling_counter_as_idle() {

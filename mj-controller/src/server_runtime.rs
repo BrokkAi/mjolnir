@@ -13,7 +13,7 @@ mod api_activity;
 pub(crate) mod profile_catalog;
 mod publication;
 
-use mj_core::config::{Config, HarnessProfile, PhoneConfig, is_bare_project_target};
+use mj_core::config::{Config, PhoneConfig, is_bare_project_target};
 use mj_core::refusal::Refusal;
 use mj_core::remote_git::display_url;
 use mj_core::state::{MaterializedSession, ProjectSourceIdentity, SessionRecord, State};
@@ -38,8 +38,8 @@ use mj_core::workspace::WorkspaceRecord;
 use crate::controller::config_only_controller;
 use crate::daemon::{CreateSessionRequest, LifecycleControl, ResumeSessionRequest, RuntimeState};
 use crate::pollers::{
-    QUOTA_STALE_AFTER, QuotaRefreshBatch, apply_worker_record_update, projected_queued_prompts,
-    queued_prompt_projection, quota_refresh_profiles,
+    QUOTA_STALE_AFTER, apply_worker_record_update, projected_queued_prompts,
+    queued_prompt_projection,
 };
 
 #[derive(Debug, Clone)]
@@ -74,14 +74,14 @@ mod run;
 pub(crate) use run::*;
 mod support;
 use support::*;
-mod preflight;
+pub(crate) mod preflight;
 use preflight::*;
 mod actions;
-pub(crate) use actions::republish_quota_profiles;
 use actions::*;
 mod project_sources;
 use project_sources::*;
 mod snapshot;
+pub(crate) use snapshot::phone_prompt_blocks;
 use snapshot::*;
 
 #[cfg(test)]

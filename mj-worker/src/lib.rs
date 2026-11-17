@@ -6,6 +6,7 @@ pub const DEFAULT_WORKER_LOG_FILTER: &str = "warn,mj_jev=info";
 
 pub mod user_shell;
 pub mod worker_runtime;
+pub mod worker_stop;
 
 pub mod relay;
 
@@ -19,6 +20,10 @@ pub mod move_workspace;
 pub mod mailbox_hook;
 mod mcp_stdio;
 pub mod memory_mcp;
+pub mod observe;
+// Firecracker, vsock, TAP devices and PID 1 duties exist only on Linux.
+#[cfg(target_os = "linux")]
+pub mod microvm;
 pub mod review;
 pub mod subagent_mcp;
 
@@ -28,3 +33,4 @@ mod checkpoint_tests;
 mod test_support;
 
 pub mod cpu_usage;
+pub mod work_facts;

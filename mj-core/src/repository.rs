@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::remote_git::{Shorthand, parse_github_remote};
 use crate::targets::{CommandExecutor, CommandSpec};
 
 /// A session's accepted project shape. Catalog merges change its project ID,
@@ -111,62 +112,51 @@ pub enum RepositoryIdentity {
     RemoteDirectory { host: String, root: PathBuf },
 }
 
-fn github_path(source: &str) -> Option<&str> {
-    source
-        .strip_prefix("https://github.com/")
-        .or_else(|| source.strip_prefix("http://github.com/"))
-        .or_else(|| source.strip_prefix("git@github.com:"))
-        .or_else(|| source.strip_prefix("github.com:"))
-        .or_else(|| source.strip_prefix("ssh://github.com/"))
-        .or_else(|| (!source.contains("://") && !source.contains(['@', ':'])).then_some(source))
-}
-
 impl RepositoryIdentity {
     /// Normalize only equivalences guaranteed by the remote provider. Other
     /// servers can have case-sensitive paths or different transport namespaces.
     pub fn from_remote(source: &str) -> Option<Self> {
+        Self::from_remote_with(source, Shorthand::Allowed)
+    }
+
+    pub fn from_remote_with(source: &str, shorthand: Shorthand) -> Option<Self> {
+        Self::identity_and_label(source, shorthand).map(|(identity, _)| identity)
+    }
+
+    /// The identity and display label of a Git remote. `shorthand` says whether
+    /// a bare `owner/repository` means GitHub or is a relative path, which a
+    /// network remote cannot be. Only GitHub's main endpoint is a `Github`
+    /// identity; the same repository over `ssh.github.com` or an explicit SSH
+    /// port stays `Network`, because stored identities distinguish them.
+    pub(crate) fn identity_and_label(source: &str, shorthand: Shorthand) -> Option<(Self, String)> {
         let source = crate::remote_git::display_url(source.trim());
-        let source = source.as_str();
-        let github = github_path(source);
-        if let Some(path) = github {
-            let path = path.trim_end_matches('/').trim_end_matches(".git");
-            if let Some((owner, repository)) = path.split_once('/')
-                && !owner.is_empty()
-                && !repository.is_empty()
-                && !repository.contains('/')
-                && !path.chars().any(char::is_whitespace)
-                && owner
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
-                && !matches!(repository, "." | "..")
-            {
-                return Some(Self::Github(
-                    owner.to_ascii_lowercase(),
-                    repository.to_ascii_lowercase(),
-                ));
-            }
+        if let Some(remote) = parse_github_remote(&source, shorthand)
+            && remote.is_default_endpoint()
+        {
+            let label = format!("{}/{}", remote.owner, remote.repository);
+            return Some((
+                Self::Github(
+                    remote.owner.to_ascii_lowercase(),
+                    remote.repository.to_ascii_lowercase(),
+                ),
+                label,
+            ));
         }
-        crate::remote_git::validate_network_url(source).ok()?;
-        Some(Self::Network(
-            crate::remote_git::display_url(source)
-                .trim_end_matches('/')
-                .trim_end_matches(".git")
-                .to_owned(),
-        ))
+        crate::remote_git::validate_network_url(&source).ok()?;
+        let url = crate::remote_git::display_url(&source)
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_owned();
+        Some((Self::Network(url.clone()), url))
     }
 
     pub fn remote_label(source: &str) -> Option<String> {
+        Self::remote_label_with(source, Shorthand::Allowed)
+    }
+
+    pub fn remote_label_with(source: &str, shorthand: Shorthand) -> Option<String> {
         let clean = crate::remote_git::display_url(source.trim());
-        match Self::from_remote(&clean)? {
-            Self::Github(_, _) => Some(
-                github_path(&clean)?
-                    .trim_end_matches('/')
-                    .trim_end_matches(".git")
-                    .to_owned(),
-            ),
-            Self::Network(url) => Some(url),
-            _ => None,
-        }
+        Self::identity_and_label(&clean, shorthand).map(|(_, label)| label)
     }
 
     pub fn key(&self) -> String {
@@ -495,6 +485,29 @@ mod tests {
         // error: a repository that cannot be read is not a plain folder.
         struct RefusedGit;
         impl CommandExecutor for RefusedGit {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
                 Ok(CommandOutput {
                     status: 128,
@@ -570,6 +583,29 @@ mod tests {
         // A plain local session must not require the Git executable itself.
         struct MissingGit;
         impl CommandExecutor for MissingGit {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
                 Err(std::io::Error::new(ErrorKind::NotFound, "git is not installed").into())
             }
@@ -592,6 +628,29 @@ mod tests {
         // sessions, so a plain folder is refused there.
         struct PlainRemoteFolder;
         impl CommandExecutor for PlainRemoteFolder {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
                 Ok(CommandOutput {
                     status: 128,
@@ -619,6 +678,29 @@ mod tests {
 
         struct RefusedGit;
         impl CommandExecutor for RefusedGit {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 assert_eq!(command.env.get("LC_ALL").map(String::as_str), Some("C"));
                 Ok(CommandOutput {
@@ -653,6 +735,29 @@ mod tests {
             diagnostic: &'static str,
         }
         impl CommandExecutor for FailedGit {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
                 assert_eq!(command.env.get("LC_ALL").map(String::as_str), Some("C"));
                 Ok(crate::targets::CommandOutput {
@@ -718,6 +823,29 @@ mod tests {
     }
 
     impl CommandExecutor for GitRootsExecutor {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
             let stdout = if command.args.iter().any(|argument| argument == "rev-parse") {
                 self.roots.to_owned()

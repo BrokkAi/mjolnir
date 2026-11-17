@@ -39,6 +39,29 @@ impl ProbeExecutor {
 }
 
 impl CommandExecutor for ProbeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         assert_eq!(
             command.purpose, "probe mount source filesystem",
@@ -92,15 +115,10 @@ fn ssh_docker_registration_config() -> Config {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: PathBuf::from("/home/dev/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Codex,
+                PathBuf::from("/home/dev/.codex"),
+            )
         },
     );
     config.bundles.insert(
@@ -145,6 +163,29 @@ fn ssh_docker_registration_config() -> Config {
 struct DockerDesktopExecutor;
 
 impl CommandExecutor for DockerDesktopExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = match command.program.as_str() {
             "docker" => "Docker Desktop 4.40.0 (187762)\n",
@@ -309,6 +350,48 @@ fn podman_session_runs_as_root_without_image_user_probing_or_keep_id() {
     );
 }
 
+#[test]
+fn credential_free_container_creation_omits_runtime_token_environment() {
+    let environment = BTreeMap::<String, String>::from([
+        ("GH_TOKEN".into(), "runtime-secret".into()),
+        ("GITHUB_TOKEN".into(), "runtime-secret".into()),
+        ("GH_ENTERPRISE_TOKEN".into(), "runtime-secret".into()),
+        ("NON_SECRET_SETTING".into(), "keep".into()),
+    ]);
+    let template: mj_core::config::TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind":"local-podman", "image":"test-image", "environment":environment,
+    }))
+    .unwrap();
+    let mut session = crate::controller::test_support::checkpoint_test_session(
+        "0123456789abcdef0123456789abcdef",
+    );
+    session.no_github_credentials = true;
+    let target =
+        backend_target(&template, None, ContainerOverrides::for_session(&session)).unwrap();
+    let plan = targets::provision_plan_named(
+        &target,
+        &session.id,
+        &probe_bundle(),
+        &[],
+        None,
+        &targets::resource_name(&session.id).unwrap(),
+        Some("checkout-secret"),
+    )
+    .unwrap();
+    let run_args = &plan.commands[0].args;
+    assert!(run_args.iter().all(|arg| !arg.contains("runtime-secret")));
+    assert!(run_args.iter().any(|arg| arg == "NON_SECRET_SETTING=keep"));
+    for command in &plan.commands {
+        let input = command.sensitive_stdin();
+        if command.purpose.starts_with("clone ") {
+            assert_eq!(input, Some(b"checkout-secret\n".as_slice()));
+        } else {
+            assert!(input.is_none());
+        }
+    }
+    assert!(!format!("{plan:?}").contains("checkout-secret"));
+}
+
 const SSH_DOCKER_FAILURE_CHILD: &str = "MJ_TEST_SSH_DOCKER_FAILURE_CHILD";
 
 #[test]
@@ -343,11 +426,14 @@ fn stale_worker_fails_before_any_container_is_created() {
             "docker",
             "stale worker",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 create_managed_worktree: None,
                 at: None,
@@ -412,11 +498,14 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             "docker",
             "failed image",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -501,11 +590,14 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
             "docker",
             "borrow the parent container",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -526,18 +618,21 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     // recorded: the parent's container with no owner, which no child can
     // verify.
     let record = controller.state.sessions.get_mut(&child_id).unwrap();
-    record.target = Some(mj_core::state::TargetLocator::SshDocker {
+    record.target = Some(Box::new(mj_core::state::TargetLocator::SshDocker {
         host: "builder".into(),
         container_id: targets::resource_name("0123456789abcdef0123456789abcdef").unwrap(),
         borrowed_from: None,
-    });
+    }));
     crate::database::save_lifecycle_session(record).unwrap();
 
     let executor = RecordingExecutor::succeeding();
-    let error = futures::executor::block_on(controller.provision_subagent_session_controlled(
+    let error = futures::executor::block_on(controller.run_create(
         &child_id,
         &executor,
-        || false,
+        CreateKind::Subagent,
+        false,
+        || Ok(()),
+        &|| false,
     ))
     .unwrap_err();
     assert!(
@@ -593,8 +688,8 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
     );
     assert_eq!(
         stop.commands().len(),
-        1,
-        "failed stop must not reinstall or relaunch anything"
+        2,
+        "failed stop (after the control-worker check) must not reinstall or relaunch anything"
     );
     let mut recovered = Controller::load().unwrap();
     let child = &recovered.state.sessions[&child_id];
@@ -646,6 +741,29 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
 
 struct CancelledLaunch;
 impl CommandExecutor for CancelledLaunch {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         bail!("operation cancelled")
     }
@@ -676,11 +794,33 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
     let record = controller.state.sessions.get_mut(&child_id).unwrap();
     record.state = SessionState::Provisioning;
     crate::database::save_lifecycle_session(record).unwrap();
-    // Daemon shutdown is what cancels a launch nobody else stops (#1321).
-    let error = futures::executor::block_on(controller.provision_subagent_session_controlled(
+    // A launch the daemon's shutdown stopped is not a failure: the record and
+    // the worker stay as they are for the next daemon (create intent).
+    let error = futures::executor::block_on(controller.run_create(
         &child_id,
         &CancelledLaunch,
-        || true,
+        CreateKind::Subagent,
+        false,
+        || Ok(()),
+        &|| true,
+    ))
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("the Mjolnir daemon stopped during this launch"),
+        "{error:#}"
+    );
+    assert_eq!(
+        Controller::load().unwrap().state.sessions[&child_id].state,
+        SessionState::Provisioning
+    );
+    // A launch cancelled by anything else fails, and its cleanup still runs.
+    let error = futures::executor::block_on(controller.run_create(
+        &child_id,
+        &CancelledLaunch,
+        CreateKind::Subagent,
+        false,
+        || Ok(()),
+        &|| false,
     ))
     .unwrap_err();
     assert!(
@@ -695,14 +835,9 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
         "cleanup used a fresh executor despite launch cancellation: {record:?}"
     );
     assert!(record.archived);
-    // The parent reads this cause; "operation cancelled" alone looked like a
-    // fault on the target.
     let cause = record.last_error.as_deref().unwrap();
     assert!(
-        cause.starts_with(
-            "sub-agent startup failed: the Mjolnir daemon stopped during this launch; \
-             spawn the sub-agent again: operation cancelled"
-        ),
+        cause.starts_with("sub-agent startup failed: operation cancelled"),
         "{cause}"
     );
     controller
@@ -719,18 +854,18 @@ fn startup_cleanup_fixture() -> (Controller, String) {
     config.save().unwrap();
     let mut parent = crate::controller::test_support::checkpoint_test_session(PROVISIONED_SESSION);
     parent.project_directory = Some(mj_core::config::data_dir());
-    parent.target = Some(TargetLocator::LocalBare {
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join(PROVISIONED_SESSION),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let child_id = "fedcba9876543210fedcba9876543210";
     let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
     child.state = SessionState::StartupCleanup;
     child.last_error = Some("fixture launch failed".into());
     child.project_directory = Some(mj_core::config::data_dir());
-    child.target = Some(TargetLocator::LocalBare {
+    child.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join(child_id),
-    });
+    }));
     crate::database::save_subagent_session(
         &child,
         &mj_core::subagent::SubagentRecord {
@@ -802,11 +937,14 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             "docker",
             "missing Node",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -865,6 +1003,9 @@ fn failed_node_preflight_retains_error_before_provisioning() {
 fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = SessionRecord {
+        oracle_choice: None,
+        oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
             r#"{"kind":"ssh-bare","host":"builder","user":"original","permissions":"yolo","workspace_prefix":"workspaces"}"#
@@ -879,8 +1020,6 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: session_id.into(),
         title: "new session".into(),
         harness_kind: mj_core::config::HarnessKind::Kimi,
@@ -891,15 +1030,16 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "remote".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
         state: SessionState::Disconnected,
-        target: Some(TargetLocator::SshBare {
+        target: Some(Box::new(TargetLocator::SshBare {
             host: "builder".into(),
             workspace: format!(".local/share/hel/workspaces/{session_id}").into(),
             worker_id: None,
-        }),
+        })),
         native_session_id: None,
         acp_session_title: None,
         session_title_override: None,
@@ -908,6 +1048,8 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+            failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     };
@@ -947,6 +1089,29 @@ struct DurableStateAtCleanup {
 }
 
 impl CommandExecutor for DurableStateAtCleanup {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         let stored = crate::database::load_state()?
             .sessions
@@ -1014,11 +1179,14 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             "remote",
             "cancelled launch",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -1084,6 +1252,29 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
 
     struct RefuseStop(Mutex<usize>);
     impl CommandExecutor for RefuseStop {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             *self.0.lock().unwrap() += 1;
             bail!("target stop failed");
@@ -1091,13 +1282,13 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
     }
     let checkout = PathBuf::from("/srv/project/.mj/clones").join(&session_id);
     let record = controller.state.sessions.get_mut(&session_id).unwrap();
-    record.target = Some(TargetLocator::SshBare {
+    record.target = Some(Box::new(TargetLocator::SshBare {
         host: "builder".into(),
         workspace: format!(".local/share/hel/workspaces/{session_id}").into(),
         worker_id: None,
-    });
+    }));
     record.project_directory = Some(checkout.clone());
-    record.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    record.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: "/srv/project".into(),
         source_repository: "/srv/project".into(),
@@ -1105,7 +1296,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
         branch: "main".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     controller.persist_session_state(&session_id).unwrap();
     let refused = RefuseStop(Mutex::new(0));
     controller
@@ -1382,7 +1573,7 @@ fn inherited_git_settings_target_only_isolated_workers() {
             commands[0]
                 .args
                 .iter()
-                .any(|argument| argument.contains("- Agent O'"))
+                .any(|argument| argument.contains("Agent") && argument.contains("日本語"))
         );
         if matches!(
             locator,
@@ -1495,6 +1686,29 @@ impl RecordingExecutor {
 }
 
 impl CommandExecutor for RecordingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let mut argv = vec![command.program.clone()];
         argv.extend(command.args.clone());
@@ -1710,6 +1924,29 @@ fn only_a_worker_that_never_started_is_retried() {
 
 struct RawRegistrationExecutor;
 impl CommandExecutor for RawRegistrationExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = match command.purpose.as_str() {
             "resolve project repository and checkout" => "/srv/project\n/srv/project/.git\n",
@@ -1724,21 +1961,128 @@ impl CommandExecutor for RawRegistrationExecutor {
     }
 }
 
+/// A child that has to queue for a container start slot shows the wait as its
+/// own stage, from the first moment it waits until it is admitted; a child
+/// that finds a free slot reports nothing.
+#[tokio::test]
+async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
+    #[derive(Default)]
+    struct StageRecorder {
+        events: Mutex<Vec<(bool, targets::ProvisionStage)>>,
+    }
+
+    impl CommandExecutor for StageRecorder {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            unreachable!("waiting for a start slot runs no commands: {command:?}");
+        }
+
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            self.events.lock().unwrap().push((true, stage));
+        }
+
+        fn stage_finished(&self, stage: targets::ProvisionStage) {
+            self.events.lock().unwrap().push((false, stage));
+        }
+    }
+
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let free = StageRecorder::default();
+    let permit = admit_container_start(&gate, &free)
+        .await
+        .expect("a free slot");
+    assert!(free.events.lock().unwrap().is_empty());
+
+    let queued = std::sync::Arc::new(StageRecorder::default());
+    let waiter = {
+        let (gate, queued) = (gate.clone(), queued.clone());
+        tokio::spawn(async move { admit_container_start(&gate, &*queued).await.is_some() })
+    };
+    while queued.events.lock().unwrap().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        *queued.events.lock().unwrap(),
+        vec![(true, targets::ProvisionStage::WaitingForStartSlot)],
+        "the stage is open while the child waits"
+    );
+    drop(permit);
+    assert!(waiter.await.unwrap(), "admitted once the slot is free");
+    assert_eq!(
+        *queued.events.lock().unwrap(),
+        vec![
+            (true, targets::ProvisionStage::WaitingForStartSlot),
+            (false, targets::ProvisionStage::WaitingForStartSlot)
+        ],
+        "the stage closes on admission"
+    );
+}
+
 #[test]
-fn provisioning_reports_the_pull_stage_only_while_waiting() {
+fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns() {
     #[derive(Default)]
     struct StageRecorder {
         stages: Mutex<Vec<targets::ProvisionStage>>,
+        finished: Mutex<Vec<targets::ProvisionStage>>,
         notices: Mutex<Vec<String>>,
     }
 
     impl CommandExecutor for StageRecorder {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             unreachable!("waiting for an image runs no commands: {command:?}");
         }
 
         fn stage_started(&self, stage: targets::ProvisionStage) {
             self.stages.lock().unwrap().push(stage);
+        }
+
+        fn stage_finished(&self, stage: targets::ProvisionStage) {
+            self.finished.lock().unwrap().push(stage);
         }
 
         fn notify_notice(&self, notice: &str) {
@@ -1756,15 +2100,28 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
         workspace_storage: Default::default(),
     });
 
+    // Hard-won: 9c928ddc2: the pull stage closed before the work that pulls
+    // the image ran, so a long first pull counted as a stalled Create.
     let quiet = StageRecorder::default();
-    crate::image_pull_gate::with_image_ready(&target, &quiet, || Ok(()))
-        .expect("nothing is downloading, so the work runs straight away");
-    assert!(
-        quiet.stages.lock().unwrap().is_empty(),
-        "a launch with nothing to wait for reported {:?}",
-        quiet.stages.lock().unwrap()
+    crate::image_pull_gate::with_image_ready(&target, &quiet, || {
+        assert_eq!(
+            *quiet.stages.lock().unwrap(),
+            vec![targets::ProvisionStage::PullingImage],
+            "the stage is open while the work that pulls runs"
+        );
+        assert!(quiet.finished.lock().unwrap().is_empty());
+        Ok(())
+    })
+    .expect("nothing is downloading, so the work runs straight away");
+    assert_eq!(
+        *quiet.finished.lock().unwrap(),
+        vec![targets::ProvisionStage::PullingImage]
     );
-    assert!(quiet.notices.lock().unwrap().is_empty());
+    assert!(
+        quiet.notices.lock().unwrap().is_empty(),
+        "a launch with nothing to wait for said {:?}",
+        quiet.notices.lock().unwrap()
+    );
 
     let lock = crate::image_pull_gate::image_pull_mutex(&targets::ImageHost::LocalPodman, image);
     let started = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -1781,11 +2138,21 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
     started.wait();
 
     let waiting = StageRecorder::default();
-    crate::image_pull_gate::with_image_ready(&target, &waiting, || Ok(()))
-        .expect("the launch proceeds once the download finishes");
+    crate::image_pull_gate::with_image_ready(&target, &waiting, || {
+        assert_eq!(
+            *waiting.finished.lock().unwrap(),
+            vec![targets::ProvisionStage::WaitingForImagePull],
+            "the queue stage closes before pull work starts"
+        );
+        Ok(())
+    })
+    .expect("the launch proceeds once the download finishes");
     assert_eq!(
         *waiting.stages.lock().unwrap(),
-        vec![targets::ProvisionStage::PullingImage]
+        vec![
+            targets::ProvisionStage::WaitingForImagePull,
+            targets::ProvisionStage::PullingImage
+        ]
     );
     let notices = waiting.notices.lock().unwrap();
     assert!(
@@ -1801,6 +2168,29 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
 struct CgroupExecutor(serde_json::Value);
 
 impl CommandExecutor for CgroupExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         assert_eq!(command.purpose, "check Podman cgroup controllers");
         Ok(CommandOutput {
@@ -1871,4 +2261,178 @@ fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
     let args = container_run_args(&target);
     assert!(args.contains(&"--cpus=4".to_owned()), "{args:?}");
     assert!(args.contains(&"--memory=8589934592".to_owned()), "{args:?}");
+}
+
+/// A held real Git checkout overlaps file staging. Harness preflight waits for
+/// the published checkout, and a preflight failure rolls back after both lanes.
+#[cfg(unix)]
+// Hard-won: 8a928a08b: harness preflight inspected an unfinished checkout.
+#[tokio::test]
+async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cleanup() {
+    const NAME: &str =
+        "managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cleanup";
+    const CHILD: &str = "MJ_TEST_CHECKOUT_PAYLOAD_OVERLAP";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "checkout-payload-overlap")
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::test_hooks::fake_worker_dispatcher(),
+            )
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let source = crate::controller::test_support::committed_repository();
+    let root = source.path().canonicalize().unwrap();
+    let home = mj_core::config::data_dir().join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(HarnessKind::Codex, home),
+    );
+    config.save().unwrap();
+    let mut record =
+        crate::controller::test_support::raw_session_on("localhost", root.to_str().unwrap());
+    record.state = SessionState::Provisioning;
+    record.target = None;
+    record.native_session_id = None;
+    record.create_managed_worktree = Some(true);
+    record.no_project_memory = true;
+    record.oracle = false;
+    crate::database::save_session(&record).unwrap();
+    let mut controller = Controller::load().unwrap();
+
+    struct OverlapExecutor {
+        checkout_started: std::sync::mpsc::Sender<()>,
+        await_checkout: Mutex<std::sync::mpsc::Receiver<()>>,
+        preparation_started: std::sync::mpsc::Sender<()>,
+        await_preparation: Mutex<std::sync::mpsc::Receiver<()>>,
+        checkout_finished: std::sync::atomic::AtomicBool,
+        checkout: PathBuf,
+    }
+    impl CommandExecutor for OverlapExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let bound = std::time::Duration::from_secs(20);
+            match command.purpose.as_str() {
+                "select managed clone starting branch" => {
+                    self.checkout_started.send(())?;
+                    self.await_preparation
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(bound)
+                        .context("worker file staging did not overlap checkout")?;
+                    let result = targets::ProcessExecutor.execute(command);
+                    self.checkout_finished
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    result
+                }
+                "install local worker ownership marker" => {
+                    self.await_checkout
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(bound)
+                        .context("checkout did not overlap worker file staging")?;
+                    self.preparation_started.send(())?;
+                    targets::ProcessExecutor.execute(command)
+                }
+                "prepare exact managed harness before worker startup" => {
+                    assert!(
+                        self.checkout.is_dir(),
+                        "harness preflight needs the published checkout"
+                    );
+                    assert!(
+                        self.checkout_finished
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    );
+                    bail!("injected harness preflight failure")
+                }
+                "start detached Mjolnir worker" => panic!("a failed setup must not start a worker"),
+                _ => targets::ProcessExecutor.execute(command),
+            }
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            targets::ProcessExecutor.execute_with_stdin(command, input)
+        }
+    }
+    let (checkout_started, await_checkout) = std::sync::mpsc::channel();
+    let (preparation_started, await_preparation) = std::sync::mpsc::channel();
+    let executor = OverlapExecutor {
+        checkout_started,
+        await_checkout: Mutex::new(await_checkout),
+        preparation_started,
+        await_preparation: Mutex::new(await_preparation),
+        checkout_finished: std::sync::atomic::AtomicBool::new(false),
+        checkout: root.join(".mj/clones").join(&record.id),
+    };
+    let error = controller
+        .run_create(
+            &record.id,
+            &executor,
+            CreateKind::TopLevel {
+                remember_launch_choices: false,
+            },
+            false,
+            || panic!("failed setup cannot commit"),
+            &|| false,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("injected harness preflight failure"),
+        "{error:#}"
+    );
+    assert!(
+        executor
+            .checkout_finished
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert_eq!(
+        Controller::load().unwrap().state.sessions[&record.id].state,
+        SessionState::Error
+    );
+    let checkout = root.join(".mj/clones").join(&record.id);
+    assert!(
+        !checkout.exists(),
+        "rollback must remove the completed checkout"
+    );
+    assert!(!checkout.with_extension("provisioning").exists());
+    assert!(
+        root.join("nested/file.txt").is_file(),
+        "source remains intact"
+    );
 }

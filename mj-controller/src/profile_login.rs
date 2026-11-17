@@ -13,11 +13,27 @@ use mj_core::credentials::{self, LoginStatus};
 use crate::targets::CommandExecutor;
 
 /// The status of every profile in `config`, keyed by profile id.
-pub fn statuses(config: &Config, executor: &impl CommandExecutor) -> BTreeMap<String, LoginStatus> {
+pub fn statuses(
+    config: &Config,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> BTreeMap<String, LoginStatus> {
+    use rayon::prelude::*;
     config
         .profiles
-        .iter()
-        .map(|(id, profile)| (id.clone(), status(id, profile, executor)))
+        .par_iter()
+        .map(|(id, profile)| {
+            let executor = mj_core::targets::CancellableProcessExecutor::new(cancelled.clone())
+                .with_deadline(std::time::Duration::from_secs(10));
+            let result = status(id, profile, &executor);
+            let result = if executor.is_cancelled() {
+                LoginStatus::Unknown(format!(
+                    "profile {id} login probe cancelled or exceeded its 10 s deadline"
+                ))
+            } else {
+                result
+            };
+            (id.clone(), result)
+        })
         .collect()
 }
 
@@ -59,24 +75,37 @@ pub fn status(
             }
         },
         AuthScheme::NativeLogin => {
-            let authenticated =
-                crate::setup::harness_is_authenticated_with_executor(profile, executor);
-            #[cfg(target_os = "macos")]
-            if profile.kind == HarnessKind::Claude && !profile.authentication_marker().is_file() {
-                return if authenticated {
-                    LoginStatus::SignedIn
-                } else {
-                    LoginStatus::Unknown(
-                        "Claude Code keeps this login in the macOS Keychain".to_owned(),
-                    )
+            // On a Mac the Keychain item is the only Claude login; a
+            // `.credentials.json` there (a profile home's, or Claude Code's
+            // plaintext fallback) is not one. A Mac without the item is
+            // signed out, and `mj login` fixes it.
+            if matches!(
+                profile
+                    .kind
+                    .login_store(mj_core::config::HarnessHost::current(), &profile.home),
+                mj_core::config::HarnessLoginStore::MacKeychain
+            ) {
+                return match crate::setup::read_claude_keychain_login(executor) {
+                    Ok(crate::setup::KeychainLogin::Present(_)) => LoginStatus::SignedIn,
+                    Ok(crate::setup::KeychainLogin::Missing) => LoginStatus::SignedOut,
+                    Ok(crate::setup::KeychainLogin::Unreadable { status }) => {
+                        LoginStatus::Unknown(format!(
+                            "the macOS Keychain could not be read (security exited with status {status})"
+                        ))
+                    }
+                    Err(error) => LoginStatus::Unknown(format!(
+                        "could not read the Claude login from the macOS Keychain: {error:#}"
+                    )),
                 };
             }
+            let authenticated =
+                crate::setup::harness_is_authenticated_with_executor(profile, executor);
             if !authenticated {
                 return LoginStatus::SignedOut;
             }
             // Authenticated, but a recorded access-token expiry is worth
-            // calling out. Harnesses with no expiry record (or a macOS
-            // Keychain login with no file) simply stay "signed in".
+            // calling out. Harnesses with no expiry record simply stay
+            // "signed in".
             match credentials::read_credential_file(profile.kind, &profile.authentication_marker())
             {
                 Ok((snapshot, _)) if !snapshot.present => LoginStatus::SignedIn,
@@ -123,7 +152,11 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
         }
     }

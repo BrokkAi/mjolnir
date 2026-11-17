@@ -14,33 +14,14 @@ use std::collections::BTreeMap;
 
 /// Normalize provider qualifiers and context hints without losing versions.
 pub fn normalize_model(model: &str) -> String {
-    let lowercase = model.to_ascii_lowercase();
-    let model = lowercase.as_str();
-    // Known provider-qualified ids and dated snapshots share a base rate.
-    let model = model
-        .strip_prefix("global.")
-        .or_else(|| model.strip_prefix("us."))
-        .or_else(|| model.strip_prefix("eu."))
-        .unwrap_or(model);
-    let model = model
-        .strip_prefix("openai.")
-        .or_else(|| model.strip_prefix("anthropic."))
-        .unwrap_or(model);
-    let model = model
-        .strip_prefix("openai/")
-        .or_else(|| model.strip_prefix("anthropic/"))
-        .or_else(|| model.strip_prefix("z-ai/"))
-        .or_else(|| model.strip_prefix("deepseek/"))
-        .or_else(|| model.strip_prefix("x-ai/"))
-        .or_else(|| model.strip_prefix("moonshotai/"))
-        .unwrap_or(model);
-    let model = model.strip_suffix(":0").unwrap_or(model);
-    // Claude's context hint (`[1m]`); context premiums are excluded.
-    let model = match model.strip_suffix(']').and_then(|m| m.rsplit_once('[')) {
-        Some((base, _)) => base,
-        None => model,
-    };
-    model.to_owned()
+    let normalized = crate::model_catalog::normalize_model(model);
+    match normalized
+        .strip_suffix(']')
+        .and_then(|m| m.rsplit_once('['))
+    {
+        Some((base, _)) => base.to_owned(),
+        None => normalized,
+    }
 }
 
 fn base_model(model: &str) -> String {
@@ -64,6 +45,8 @@ fn base_model(model: &str) -> String {
 pub fn rates(model: &str) -> Option<[u64; 4]> {
     let base = base_model(model);
     Some(match base.as_str() {
+        // Checked 2026-11-11: https://developers.openai.com/api/docs/models/gpt-6.1-terra
+        "gpt-6.1-terra" => [1000, 5000, 50, 1250],
         "gpt-6.1-sol" => [2000, 10000, 100, 2500],
         "gpt-6-sol" => [2000, 10000, 200, 2500],
         "gpt-6-astra" => [10000, 50000, 1000, 12500],
@@ -88,6 +71,7 @@ pub fn rates(model: &str) -> Option<[u64; 4]> {
         "glm-5.3-flashx" => [370, 1250, 75, 0],
         "glm-4.7-flash" | "glm-4.5-flash" => [0, 0, 0, 0],
         // Peak rates: a stable estimate without reconstructing holidays/request times.
+        // DeepSeek pricing checked 2026-11-05: https://api-docs.deepseek.com/quick_start/pricing/
         "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => {
             [300, 1200, 6, 300]
         }

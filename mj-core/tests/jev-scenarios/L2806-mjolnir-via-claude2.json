@@ -1,0 +1,131 @@
+{
+  "id": "L2806",
+  "title": "mjolnir via claude2",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "669efe4f488f1665b2b3d834a33e69a2",
+    "session_title": "mjolnir via claude2",
+    "reply_position": 3295,
+    "captured_at": "2026-11-06T03:27:36.434Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:3226",
+          "role": "user",
+          "text": "add an ask_oracle agent tool; it should use a 3rd \"subagent\" type configuredin the same place as the others, but with a separate description: it is for read-only tricky questions that the primary agent isn't sure about\n\ntool description:\nConsult a strong read-only advisor about a decision before you commit to it. Consult when a choice is hard to reverse or affects more than your change, and you cannot state what it must satisfy, why your choice satisfies each requirement (beyond \"tests pass\"), and what would fail if you were wrong. Also consult before giving up, escalating to a human, or a third attempt at something that failed twice. Check facts yourself first; never use it for routine work. Send the decision, options, and evidence.\n\n---\nmechanics:\n\none oracle session per primary session, created lazily when first invoked, so no need to expose session ids. Oracle session should retain context between calls.\n\nany questions?"
+        },
+        {
+          "id": "agent:3266",
+          "role": "assistant",
+          "text": "I'm checking how the existing reviewer sessions are kept read-only, then I'll ask my questions."
+        },
+        {
+          "id": "user:3283",
+          "role": "user",
+          "text": "oh, expose it in the new/move dialog as \"Oracle: [enabled|disabled]\" when the subagent type is defined (default is None)"
+        },
+        {
+          "id": "agent:3295",
+          "role": "assistant",
+          "text": "Yes, I have four questions. Below are the defaults I plan to use for everything else, so you can correct them at the same time.\n\n`★ Insight ─────────────────────────────────────`\n- The task types are hard-coded as two values: `SubagentConfig` has `straightforward` and `subtle` fields (`mj-core/src/config.rs:446`), and `SubagentTaskType` is a two-value enum (`mj-core/src/subagent.rs:86`). Adding the oracle means adding an optional `[subagents.oracle]` table. That table must stay optional, because the config uses `deny_unknown_fields` and an older daemon would reject a config that contains it.\n- Every mj-agents call currently waits at most 120 seconds for a reply (`REPLY_TIMEOUT`, `mj-worker/src/subagent_mcp.rs:166`). A strong model at high effort will often take longer than that, so how the answer comes back is a real design choice.\n- Reviewer sessions are not technically prevented from writing today; they are only instructed not to (`mj-controller/src/controller/reviewer.rs`). \"Read-only\" for the oracle needs a decision too.\n`─────────────────────────────────────────────────`\n\n**Defaults I plan to use (tell me if any are wrong):**\n- **Config:** an optional `[subagents.oracle]` table (model and effort) in the same settings page as the other types. It gets its own description: \"for read-only tricky questions that the primary agent isn't sure about\". It does not require `straightforward`. When it is not set (the default), there is no Oracle row in the New/Move dialog and no `ask_oracle` tool.\n- **Who gets it:** only top-level sessions with Oracle enabled. Children and reviewers never get `ask_oracle`. The oracle itself gets no delegation tools.\n- **What the oracle sees:** only the messages the primary sends it, plus read access to the primary's working tree (it shares the target, so it sees uncommitted changes). It does not see the primary's transcript.\n- **Lifecycle:** the oracle starts on the first call and is parked between calls, so it keeps its context. It closes with the primary and moves with it. It does not count against the child limit, so a full set of children cannot block it. If the primary calls again while a question is still open, the call is refused.\n- **Profile choice:** the same rule as children use (the enabled profile with the most quota that supports the model)."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "oh, expose it in the new/move dialog as \"Oracle: [enabled|disabled]\" when the subagent type is defined (default is None)",
+    "assistant_text_tail": "rc/subagent.rs:86`). Adding the oracle means adding an optional `[subagents.oracle]` table. That table must stay optional, because the config uses `deny_unknown_fields` and an older daemon would reject a config that contains it.\n- Every mj-agents call currently waits at most 120 seconds for a reply (`REPLY_TIMEOUT`, `mj-worker/src/subagent_mcp.rs:166`). A strong model at high effort will often take longer than that, so how the answer comes back is a real design choice.\n- Reviewer sessions are not technically prevented from writing today; they are only instructed not to (`mj-controller/src/controller/reviewer.rs`). \"Read-only\" for the oracle needs a decision too.\n`─────────────────────────────────────────────────`\n\n**Defaults I plan to use (tell me if any are wrong):**\n- **Config:** an optional `[subagents.oracle]` table (model and effort) in the same settings page as the other types. It gets its own description: \"for read-only tricky questions that the primary agent isn't sure about\". It does not require `straightforward`. When it is not set (the default), there is no Oracle row in the New/Move dialog and no `ask_oracle` tool.\n- **Who gets it:** only top-level sessions with Oracle enabled. Children and reviewers never get `ask_oracle`. The oracle itself gets no delegation tools.\n- **What the oracle sees:** only the messages the primary sends it, plus read access to the primary's working tree (it shares the target, so it sees uncommitted changes). It does not see the primary's transcript.\n- **Lifecycle:** the oracle starts on the first call and is parked between calls, so it keeps its context. It closes with the primary and moves with it. It does not count against the child limit, so a full set of children cannot block it. If the primary calls again while a question is still open, the call is refused.\n- **Profile choice:** the same rule as children use (the enabled profile with the most quota that supports the model).",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      3295
+    ],
+    "user_position": 3283,
+    "input_rationale": "The agent asks four design questions (delivery, delegation, toggle, read-only) before implementing ask_oracle and lists defaults for the user to correct. The user answered the form next.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:3295"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T03:29:48.326Z",
+        "kind": "user",
+        "text": "Please answer the following questions.  Delivery: Later, as a message (Recommended) Delegation: Independent (Recommended) Toggle: Enabled (Recommended) Read-only: Instructions only"
+      },
+      {
+        "at": "2026-11-06T03:29:48.354Z",
+        "kind": "user",
+        "text": "and like subagents, should remember the most recent choice by profile"
+      },
+      {
+        "at": "2026-11-06T03:30:34.794Z",
+        "kind": "agent",
+        "text": "`★ Insight ─────────────────────────────────────` - Sending the answer later as a message (as `request_review` does) means the oracle can probably reuse the child machinery that already exists: start "
+      },
+      {
+        "at": "2026-11-06T03:31:48.311Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task map-oracle-runtime finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/669efe4f488f1665b2b3d834a33e69a2/.mj/agents/"
+      },
+      {
+        "at": "2026-11-06T03:31:48.315Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-06T03:31:52.081Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task map-oracle-config-ui finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/669efe4f488f1665b2b3d834a33e69a2/.mj/agent"
+      }
+    ]
+  }
+}

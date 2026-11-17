@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
@@ -18,7 +19,8 @@ pub(super) fn workspace_paths(
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
         | targets::TargetLocator::SshDocker { .. }
-        | targets::TargetLocator::SshAppleContainer { .. } => {
+        | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. } => {
             targets::container_workspace_root(container_workspace)
         }
         targets::TargetLocator::AwsEc2 { workspace, .. }
@@ -121,7 +123,10 @@ pub(in crate::controller) fn preflight_harness(
             let ssh = SshTarget::from(ssh);
             if profile.environment.contains_key("PATH") {
                 args.insert(0, "sh".into());
-                (crate::targets::ssh_command(&ssh, args), ssh.destination)
+                (
+                    crate::targets::ssh_command(SshTrafficClass::Control, &ssh, args),
+                    ssh.destination,
+                )
             } else {
                 (
                     crate::targets::ssh_login_script(&ssh, &script),
@@ -157,46 +162,77 @@ fn node_or_downloader_preflight_script() -> String {
 
 pub(super) const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nOutside the project workspace directories and any external attachments described below, files (including installed packages, `$HOME`, and `/tmp`) are ephemeral and will be lost. Keep durable results in a project workspace directory, a read-write external attachment, or push them to a remote. External attachments follow their listed access modes and are not included in project workspace checkpoints.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
 
-pub(super) fn profile_configuration_paths(harness: HarnessKind) -> Vec<&'static str> {
+fn profile_configuration_entries(harness: HarnessKind) -> Vec<(&'static str, bool)> {
     // Only the files peculiar to a harness are listed per harness. The
     // instruction file and the synced skill directories are the same facts the
     // rest of Hel reads off `HarnessKind`, so they are appended from there
     // rather than repeated in every arm.
-    let harness_files: &[&str] = match harness {
-        mj_core::config::HarnessKind::Muse => {
-            &["auth.json", "settings.json", "trust.json", "rules"]
-        }
-        mj_core::config::HarnessKind::Codex => {
-            &["auth.json", "config.toml", "instructions.md", "rules"]
-        }
+    let harness_files: &[(&str, bool)] = match harness {
+        mj_core::config::HarnessKind::Muse => &[
+            ("auth.json", false),
+            ("settings.json", false),
+            ("trust.json", false),
+            ("rules", true),
+        ],
+        mj_core::config::HarnessKind::Codex => &[
+            ("auth.json", false),
+            ("config.toml", false),
+            ("instructions.md", false),
+            ("rules", true),
+        ],
         mj_core::config::HarnessKind::Claude => &[
-            ".claude.json",
-            ".credentials.json",
-            "settings.json",
-            "plugins",
+            (".claude.json", false),
+            (".credentials.json", false),
+            ("settings.json", false),
+            ("plugins", true),
         ],
         mj_core::config::HarnessKind::Kimi => &[
-            "credentials",
-            "config.toml",
-            "device_id",
-            "SYSTEM.md",
-            "mcp.json",
-            "agents",
-            "plugins",
+            ("credentials", false),
+            ("config.toml", false),
+            ("device_id", false),
+            ("SYSTEM.md", false),
+            ("mcp.json", false),
+            ("agents", true),
+            ("plugins", true),
         ],
-        mj_core::config::HarnessKind::Grok => &["auth.json", "config.toml", "agent_id", "plugins"],
+        mj_core::config::HarnessKind::Grok => &[
+            ("auth.json", false),
+            ("config.toml", false),
+            ("agent_id", false),
+            ("plugins", true),
+        ],
         // OpenCode's logins live in its database, not its configuration
         // directory; they are exported below.
-        mj_core::config::HarnessKind::OpenCode => &["opencode.json", "opencode.jsonc"],
+        mj_core::config::HarnessKind::OpenCode => {
+            &[("opencode.json", false), ("opencode.jsonc", false)]
+        }
         // dsh-acp keeps no configuration or login of its own; only the
         // instruction file and skills tree below are staged.
+        mj_core::config::HarnessKind::Antigravity => {
+            &[("antigravity-cli/antigravity-oauth-token", false)]
+        }
         mj_core::config::HarnessKind::Dsh => &[],
     };
     harness_files
         .iter()
         .copied()
-        .chain(std::iter::once(harness.agent_instructions_file()))
-        .chain(harness.synced_skill_dirs().iter().copied())
+        .chain(std::iter::once((harness.agent_instructions_file(), false)))
+        .chain(harness.synced_skill_dirs().iter().map(|path| (*path, true)))
+        .collect()
+}
+
+pub(super) fn profile_configuration_paths(harness: HarnessKind) -> Vec<&'static str> {
+    profile_configuration_entries(harness)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// Only harness-declared content trees may outlive a session in the host store.
+pub(super) fn shared_profile_paths(harness: HarnessKind) -> Vec<&'static str> {
+    profile_configuration_entries(harness)
+        .into_iter()
+        .filter_map(|(path, shared)| shared.then_some(path))
         .collect()
 }
 
@@ -228,6 +264,7 @@ pub(super) fn stage_profile(
         }
         Ok(())
     })?;
+    strip_staged_refresh_token(harness, destination)?;
     // `codex app-server` refuses `--profile`, so a Codex profile overlay
     // reaches the session already layered into the staged `config.toml`.
     if profile.codex_profile.is_some()
@@ -258,6 +295,36 @@ pub(super) fn stage_profile(
         if catalog.exists() {
             copy_profile_entry(&catalog, &destination.join(".data/muse/model-catalog"))?;
         }
+    }
+    Ok(())
+}
+
+/// Every staged copy of a login is made here (sessions, reviewers, sub-agents
+/// and capability probes), so this is where a harness copy loses the refresh
+/// token that only the daemon may spend (#1490).
+pub(super) fn strip_staged_refresh_token(
+    harness: mj_core::config::HarnessKind,
+    destination: &Path,
+) -> Result<()> {
+    if !harness.copies_omit_refresh_token() {
+        return Ok(());
+    }
+    let path = destination.join(harness.credential_file_name());
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read staged login {}", path.display()));
+        }
+    };
+    let copy = mj_core::credentials::credential_copy_for_harness(harness, &bytes);
+    if copy.as_ref() != bytes.as_slice() {
+        mj_core::credentials::write_credential_file(harness, &path, &copy).with_context(|| {
+            format!(
+                "remove the refresh token from staged login {}",
+                path.display()
+            )
+        })?;
     }
     Ok(())
 }

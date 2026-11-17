@@ -1111,174 +1111,6 @@ fn project_picker_github_result_does_not_overwrite_query_or_steal_edit_focus() {
     );
 }
 
-fn project_picker_folders_navigate_up_home_and_choose_current_repository() {
-    let mut dashboard = dashboard_at_project_picker();
-    activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
-    let (home, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: String::new(),
-            filter: String::new(),
-        }
-    );
-    let home_result = ProjectDiscovery {
-        entries: vec![ProjectEntry {
-            name: "src".into(),
-            source: "/home/user/src".into(),
-            description: "Folder".into(),
-            kind: ProjectEntryKind::Directory,
-        }],
-        directory: Some("/home/user".into()),
-        parent: Some("/home".into()),
-        truncated: false,
-    };
-    dashboard.apply_project_discovery(&home, Ok(home_result.clone()));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    let (child, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: "/home/user/src".into(),
-            filter: String::new(),
-        }
-    );
-    let repo_result = ProjectDiscovery {
-        entries: vec![ProjectEntry {
-            name: "Use src".into(),
-            source: "/home/user/src".into(),
-            description: "Use this repository".into(),
-            kind: ProjectEntryKind::Repository,
-        }],
-        directory: Some("/home/user/src".into()),
-        parent: Some("/home/user".into()),
-        truncated: false,
-    };
-    dashboard.apply_project_discovery(&child, Ok(repo_result.clone()));
-    activate_project_control(&mut dashboard, WizardControl::ProjectUp);
-    let (up, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: "/home/user".into(),
-            filter: String::new(),
-        }
-    );
-    dashboard.apply_project_discovery(&up, Ok(home_result.clone()));
-    activate_project_control(&mut dashboard, WizardControl::ProjectHome);
-    let (home, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: String::new(),
-            filter: String::new(),
-        }
-    );
-    dashboard.apply_project_discovery(&home, Ok(home_result));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let (child, _) = take_project_request(&mut dashboard);
-    dashboard.apply_project_discovery(&child, Ok(repo_result));
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
-    assert!(text.contains("/home/user/src"), "{text}");
-    assert!(text.contains("Use this repository"), "{text}");
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::CreateBundle {
-            sources: vec!["/home/user/src".into()]
-        }
-    );
-}
-
-#[test]
-fn project_picker_folder_filter_retry_and_open_repository_preserve_navigation() {
-    let mut dashboard = dashboard_at_project_picker();
-    activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
-    let (initial, _) = take_project_request(&mut dashboard);
-    dashboard.apply_project_discovery(
-        &initial,
-        Ok(ProjectDiscovery {
-            entries: vec![
-                discovered_repository("/work/app"),
-                discovered_repository("/work/shared"),
-            ],
-            directory: Some("/work".into()),
-            parent: Some("/".into()),
-            truncated: false,
-        }),
-    );
-    focus_project_control(&mut dashboard, WizardControl::ProjectQuery);
-    type_source(&mut dashboard, "app");
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let (filtered, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: "/work".into(),
-            filter: "app".into()
-        }
-    );
-    dashboard.apply_project_discovery(&filtered, Err("Cannot read this folder".into()));
-    activate_project_control(&mut dashboard, WizardControl::ProjectRetry);
-    let (retry, retried_request) = take_project_request(&mut dashboard);
-    assert_eq!(retried_request, request);
-    assert_eq!(
-        project_wizard(&dashboard).project_picker.folder_filter,
-        "app"
-    );
-    dashboard.apply_project_discovery(
-        &retry,
-        Ok(ProjectDiscovery {
-            entries: vec![discovered_repository("/work/app")],
-            directory: Some("/work".into()),
-            parent: Some("/".into()),
-            truncated: false,
-        }),
-    );
-    // A repository can be browsed for nested projects without selecting it.
-    assert_eq!(
-        activate_project_control(&mut dashboard, WizardControl::ProjectOpenFolder),
-        DashboardAction::None
-    );
-    let (opened, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: "/work/app".into(),
-            filter: String::new()
-        }
-    );
-    assert!(
-        project_wizard(&dashboard)
-            .project_picker
-            .folder_filter
-            .is_empty()
-    );
-    assert!(!project_wizard(&dashboard).bundle_creation_in_flight);
-    dashboard.apply_project_discovery(
-        &opened,
-        Ok(ProjectDiscovery {
-            entries: vec![
-                discovered_repository("/work/app"),
-                discovered_repository("/work/app/nested"),
-            ],
-            directory: Some("/work/app".into()),
-            parent: Some("/work".into()),
-            truncated: false,
-        }),
-    );
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::CreateBundle {
-            sources: vec!["/work/app/nested".into()]
-        }
-    );
-}
-
 fn project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary() {
     let mut dashboard = dashboard_at_project_picker();
     focus_project_control(&mut dashboard, WizardControl::ProjectMultiple);
@@ -1331,7 +1163,7 @@ fn project_picker_rejects_late_success_and_failure_after_switching_tabs() {
     let mut dashboard = dashboard_at_project_picker();
     activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
     let (github, _) = take_project_request(&mut dashboard);
-    activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
     let (folders, _) = take_project_request(&mut dashboard);
     dashboard.apply_project_discovery(
         &github,
@@ -1341,7 +1173,7 @@ fn project_picker_rejects_late_success_and_failure_after_switching_tabs() {
     );
     dashboard.apply_project_discovery(&github, Err("old GitHub error".into()));
     let picker = &project_wizard(&dashboard).project_picker;
-    assert_eq!(picker.tab, ProjectTab::Folders);
+    assert_eq!(picker.tab, ProjectTab::Github);
     assert!(picker.loading);
     assert!(picker.entries.is_empty());
     assert!(picker.error.is_none());
@@ -1473,8 +1305,7 @@ fn project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminal
         let text = lines.join("\n");
         for label in [
             "Choose a project",
-            "Folders",
-            "Paste URL",
+            "URL or Path",
             "Search",
             "owner/visible",
             "Use project",
@@ -1502,35 +1333,16 @@ fn project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminal
     }
 }
 
-fn project_picker_folder_choices_and_filter_remain_visible_on_small_terminals() {
-    for (width, height) in [(80, 24), (60, 20)] {
-        let mut dashboard = dashboard_at_project_picker();
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        click_project_text(&mut dashboard, &mut terminal, "Folders");
-        let (context, _) = take_project_request(&mut dashboard);
-        dashboard.apply_project_discovery(
-            &context,
-            Ok(ProjectDiscovery {
-                entries: vec![discovered_repository("/work/visible")],
-                directory: Some("/work".into()),
-                parent: Some("/".into()),
-                truncated: false,
-            }),
-        );
-        let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
-        for label in ["/work/visible", "Filter:", "Use project"] {
-            assert!(
-                text.contains(label),
-                "missing {label:?} at {width}x{height}:\n{text}"
-            );
+fn project_picker_url_or_path_submits_a_local_repository_path() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
+    type_source(&mut dashboard, "/work/visible");
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["/work/visible".into()],
         }
-        assert_eq!(
-            click_project_text(&mut dashboard, &mut terminal, "Use project"),
-            DashboardAction::CreateBundle {
-                sources: vec!["/work/visible".into()],
-            }
-        );
-    }
+    );
 }
 
 fn project_picker_results_remain_visible_with_multiple_selected_repositories() {
@@ -1583,7 +1395,7 @@ fn project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions() {
     for (width, height) in [(80, 24), (60, 20)] {
         let mut dashboard = dashboard_at_project_picker();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        click_project_text(&mut dashboard, &mut terminal, "Paste URL");
+        click_project_text(&mut dashboard, &mut terminal, "URL or Path");
         click_project_text(
             &mut dashboard,
             &mut terminal,
@@ -1756,6 +1568,8 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            oracle: None,
+            oracle_choice: None,
             remember_container_size: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
             review: None,
@@ -1767,6 +1581,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
             target_template_id: "machine".into(),
             additional_mounts: Vec::new(),
             resource_allocation: None,
+            carried: Default::default(),
         }
     );
 }
@@ -1782,13 +1597,16 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
+                claude_permission_mode: None,
+                aws: None,
                 codex_profile: None,
-                kind,
-                home: PathBuf::from("/profiles/harness"),
                 environment: Default::default(),
+                ..mj_core::config::HarnessProfile::new(kind, PathBuf::from("/profiles/harness"))
             },
         )]);
         config
@@ -1858,15 +1676,10 @@ fn a_missing_profile_is_left_out_of_the_profile_step_and_named() {
     config.profiles.insert(
         "kimi-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     );
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
@@ -1897,15 +1710,10 @@ fn new_session_profile_step_aligns_its_columns() {
     config.profiles.insert(
         "kimi-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     );
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
@@ -1962,6 +1770,8 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
     dashboard.quotas = BTreeMap::from([(
         "claude-1".to_string(),
         ProfileQuota {
+            paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: "claude-1".into(),
             harness: HarnessKind::Claude,
@@ -1991,6 +1801,7 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
             error: None,
             refreshed_at_epoch_seconds: 0,
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         },
     )]);
     dashboard.begin_new();
@@ -2025,15 +1836,10 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     config.profiles = BTreeMap::from([(
         "kimi".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     )]);
     config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
@@ -2082,6 +1888,8 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     assert_eq!(
         dashboard.take_prerequisite_check().unwrap(),
         DashboardAction::CreateSession {
+            oracle: None,
+            oracle_choice: None,
             remember_container_size: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
             review: None,
@@ -2093,6 +1901,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
             target_template_id: "localhost".into(),
             additional_mounts: Vec::new(),
             resource_allocation: None,
+            carried: Default::default(),
         }
     );
 }
@@ -2212,6 +2021,136 @@ fn a_source_that_cannot_hold_the_overlay_skips_copy_on_write() {
     assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Mounts));
     ready_key(&mut dashboard, key(KeyCode::Esc));
     assert!(dashboard.dialog_confirmation_open());
+}
+
+// Hard-won: 6c5ea1b36: default destinations were joined with `\` on Windows (`/mnt\cache`).
+#[test]
+fn recent_mount_entry_uses_add_validation_and_returns_to_review() {
+    let mut dashboard = dashboard_at_mount_editor("");
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render empty history");
+    assert!(
+        !buffer_lines(terminal.backend().buffer())
+            .join("\n")
+            .contains("Recent on this host:")
+    );
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.mounts.history = vec!["/opt/cache".into()];
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::MountHistory);
+    assert!(matches!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::ValidateMountSource { .. }
+    ));
+    assert_eq!(wizard_mounts(&dashboard).source, "/opt/cache");
+    assert_eq!(wizard_mounts(&dashboard).destination, "/mnt/cache");
+    dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Review));
+}
+
+#[test]
+fn recent_mount_list_filters_attached_sources_and_scrolls() {
+    let mut mounts = MountWizard::new(
+        (0..8)
+            .map(|n| PathBuf::from(format!("/opt/recent-{n}")))
+            .collect(),
+    );
+    mounts.mounts.push(AdditionalMount {
+        source: "/opt/recent-0".into(),
+        destination: "/mnt/recent-0".into(),
+        access: MountAccess::Ro,
+    });
+    assert_eq!(mounts.available_history().len(), 7);
+    assert_eq!(
+        mounts.available_history()[0],
+        &PathBuf::from("/opt/recent-1")
+    );
+    mounts.editing_mount = Some(0);
+    assert_eq!(mounts.available_history().len(), 8);
+
+    let mut dashboard = dashboard_at_mount_editor("");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.mounts.history = mounts.history;
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::MountHistory);
+    for _ in 0..7 {
+        ready_key(&mut dashboard, key(KeyCode::Down));
+    }
+    assert_eq!(wizard_mounts(&dashboard).history_selection, 7);
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render scrolled");
+    let lines = buffer_lines(terminal.backend().buffer());
+    capture_render(120, 30, &lines);
+    let rendered = lines.join("\n");
+    assert!(rendered.contains("/opt/recent-7"));
+    let mut small = Terminal::new(TestBackend::new(60, 22)).expect("small terminal");
+    small
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render small dialog");
+    let small_render = buffer_lines(small.backend().buffer()).join("\n");
+    assert!(small_render.contains("/opt/recent-7"), "{small_render}");
+}
+
+#[test]
+fn recent_mount_single_click_selects_and_double_click_validates() {
+    let mut dashboard = dashboard_at_mount_editor("");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.mounts.history = vec!["/opt/cache".into()];
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    assert_eq!(
+        click_project_text(&mut dashboard, &mut terminal, "/opt/cache"),
+        DashboardAction::None
+    );
+    assert!(wizard_mounts(&dashboard).source.is_empty());
+    assert!(matches!(
+        click_project_text(&mut dashboard, &mut terminal, "/opt/cache"),
+        DashboardAction::ValidateMountSource { .. }
+    ));
+}
+
+#[test]
+fn recent_mount_entry_works_in_move_wizard() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_resume_for("session-1");
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("resume wizard")
+    };
+    wizard.step = WizardStep::Mounts;
+    wizard.mounts.history = vec!["/opt/cache".into()];
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render");
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("resume wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::MountHistory);
+    assert!(matches!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::ValidateMountSource { .. }
+    ));
+    dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
+    assert!(matches!(&dashboard.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Review));
 }
 
 #[test]
@@ -2378,6 +2317,8 @@ fn move_preparation() -> mj_core::state::MovePreparation {
         source_unavailable: false,
         conversion: None,
         selection: mj_core::state::MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             session_id: "session-1".into(),
@@ -3014,15 +2955,10 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
     dashboard.config.profiles.insert(
         "kimi-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     );
     open_resume_wizard(&mut dashboard);
@@ -3098,7 +3034,20 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     assert!(matches!(dashboard.mode, Mode::Resume(_)));
 
     let preparation = move_preparation();
+    let inherited_size = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 8 << 30,
+    };
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("Move wizard missing")
+    };
+    wizard.resource_allocation = Some(inherited_size.clone());
+    assert!(preparation.selection.resource_allocation.is_none());
     assert!(dashboard.apply_move_preparation(request_id, preparation.clone()));
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("Move wizard missing")
+    };
+    assert_eq!(wizard.resource_allocation, Some(inherited_size));
 
     // A stale action for another session must not consume the confirmation.
     assert!(dashboard.take_move_preparation("other-session").is_none());
@@ -3153,7 +3102,8 @@ fn failed_move_preparation_stays_visible_and_retry_requests_preparation() {
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .expect("draw failed move review");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    let lines = buffer_lines(terminal.backend().buffer());
+    let rendered = lines.join("\n");
     assert!(rendered.contains("Move preparation failed: destination is unavailable"));
     assert!(rendered.contains("Retry"));
 
@@ -3321,6 +3271,7 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 48 * gib,
@@ -3450,7 +3401,7 @@ fn apple_container_ram_overcommit_blocks_submission() {
         wizard
             .sizing_error
             .as_deref()
-            .is_some_and(|error| { error.contains("does not overcommit RAM on a Mac") })
+            .is_some_and(|error| { error.contains("RAM is a hard limit on this host") })
     );
     assert!(!target_advance_enabled(&dashboard, wizard));
 }
@@ -3462,6 +3413,7 @@ fn new_container_size_checkbox_is_explicit_and_reaches_the_create_action() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 64 << 30,
@@ -3524,11 +3476,11 @@ fn new_container_size_checkbox_is_explicit_and_reaches_the_create_action() {
 #[test]
 fn unknown_live_container_capacity_warns_instead_of_blocking_non_apple_targets() {
     let mut session = running_session();
-    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         container_id: "unknown-size".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     session.resource_allocation = None;
     let mut state = State::default();
     state.sessions.insert(session.id.clone(), session);
@@ -3537,6 +3489,7 @@ fn unknown_live_container_capacity_warns_instead_of_blocking_non_apple_targets()
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 64 << 30,
@@ -3584,6 +3537,7 @@ fn terminal_headroom_comes_from_the_daemons_reservation_adjusted_capacity() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(20),
             memory_used_bytes: 16 << 30,
             memory_total_bytes: 64 << 30,
@@ -5246,84 +5200,13 @@ fn container_fields_are_underlined_before_focus_and_clickable_on_small_terminals
 }
 
 #[test]
-fn ec2_dropdown_selects_instances_preserves_refresh_and_rejects_removed_selection() {
-    let aws = TargetTemplate::AwsEc2 {
-        aws_profile: None,
-        region: "us-east-1".into(),
-        launch_template: "hel".into(),
-        launch_template_version: None,
-        ssh_user: "ubuntu".into(),
-        address_source: mj_core::config::AwsAddressSource::PublicIp,
-        identity_file: None,
-        ssh_args: Vec::new(),
-    };
-    let mut configuration = config();
-    configuration.targets = BTreeMap::from([("aws".into(), aws)]);
-    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(new_wizard(&dashboard).resource_allocation.is_none());
-    let loading = captured_drawn(&mut dashboard, 80, 24).join("\n");
-    assert!(loading.contains("Loading instance types"), "{loading}");
-    let options = [8, 16]
-        .into_iter()
-        .map(|vcpus| SessionResourceAllocation::AwsEc2 {
-            instance_type: format!("family.{vcpus}"),
-            vcpus,
-            memory_bytes: vcpus * (4 << 30),
-        })
-        .collect::<Vec<_>>();
-    dashboard.apply_aws_resource_options("aws", Ok(options.clone()));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    assert_eq!(
-        new_wizard(&dashboard).form.borrow().focused(),
-        Some(WizardControl::ResourceInstance)
-    );
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let popup = captured_drawn(&mut dashboard, 80, 24).join("\n");
-    assert!(popup.contains("Instance types"), "{popup}");
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(
-        new_wizard(&dashboard).resource_allocation,
-        Some(options[1].clone())
-    );
-    assert!(
-        !new_wizard(&dashboard)
-            .resource_editor
-            .instances
-            .is_open(WizardControl::ResourceInstance)
-    );
-    dashboard.apply_aws_resource_options("aws", Ok(options.clone()));
-    assert_eq!(
-        new_wizard(&dashboard).resource_allocation,
-        Some(options[1].clone())
-    );
-    dashboard.apply_aws_resource_options("aws", Ok(vec![options[0].clone()]));
-    dashboard.apply_aws_resource_options("aws", Ok(vec![options[0].clone()]));
-    assert!(new_wizard(&dashboard).resource_allocation.is_none());
-    assert!(
-        new_wizard(&dashboard)
-            .sizing_error
-            .as_ref()
-            .unwrap()
-            .contains("unavailable")
-    );
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(
-        new_wizard(&dashboard).resource_allocation,
-        Some(options[0].clone())
-    );
-}
-
-#[test]
 fn container_memory_errors_keep_the_draft_and_refuse_submission_above_host_limits() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 16 << 30,
@@ -5419,6 +5302,7 @@ fn late_host_limits_preserve_typed_values_and_block_an_oversized_draft() {
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     let sample = |cpus| {
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 64 << 30,
@@ -5880,6 +5764,10 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
 fn golden_project_picker() {
     for (label, run) in [
         (
+            "recent_mount_list_filters_attached_sources_and_scrolls",
+            recent_mount_list_filters_attached_sources_and_scrolls as fn(),
+        ),
+        (
             "project_picker_skips_empty_saved_projects_and_offers_github_from_recent",
             project_picker_skips_empty_saved_projects_and_offers_github_from_recent as fn(),
         ),
@@ -5900,10 +5788,6 @@ fn golden_project_picker() {
             project_picker_github_search_chooses_the_keyboard_selected_result,
         ),
         (
-            "project_picker_folders_navigate_up_home_and_choose_current_repository",
-            project_picker_folders_navigate_up_home_and_choose_current_repository,
-        ),
-        (
             "project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary",
             project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary,
         ),
@@ -5912,8 +5796,8 @@ fn golden_project_picker() {
             project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals,
         ),
         (
-            "project_picker_folder_choices_and_filter_remain_visible_on_small_terminals",
-            project_picker_folder_choices_and_filter_remain_visible_on_small_terminals,
+            "project_picker_url_or_path_submits_a_local_repository_path",
+            project_picker_url_or_path_submits_a_local_repository_path,
         ),
         (
             "project_picker_results_remain_visible_with_multiple_selected_repositories",
@@ -6107,6 +5991,39 @@ fn golden_single_choice_fast_paths() {
 }
 
 #[test]
+fn oracle_choice_stays_available_when_delegation_is_none() {
+    let mut config = config();
+    config.subagents.oracle = Some(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: None,
+    });
+    let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None);
+    let profile = config.profiles.keys().next().unwrap().clone();
+    draft.update_choices(&profile, &config, &Default::default(), false);
+    assert!(draft.oracle_available());
+    assert_eq!(
+        draft.apply(&Interaction::ComboBoxCommit(WizardControl::Oracle, 1)),
+        Some(true)
+    );
+    assert!(!draft.oracle);
+    assert_eq!(draft.policy, mj_core::subagent::SubagentPolicy::None);
+    let override_choice = config.subagents.oracle.take();
+    let mut override_draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None)
+        .with_oracle(true, override_choice);
+    override_draft.update_choices(&profile, &config, &Default::default(), false);
+    assert!(override_draft.oracle_available());
+    config.subagents.oracle = override_draft.oracle_choice.clone();
+    let mut state = State::default();
+    state.last_oracle_choices.insert(profile, false);
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    dashboard.begin_new_wizard();
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("new wizard");
+    };
+    assert!(!wizard.subagents.oracle);
+}
+
+#[test]
 fn golden_create_delegation_availability_and_submission() {
     use mj_core::config::SubagentChoice;
     use mj_core::subagent::SubagentPolicy;
@@ -6120,6 +6037,10 @@ fn golden_create_delegation_availability_and_submission() {
             };
             dashboard.config.subagents.straightforward = Some(choice.clone());
             dashboard.config.subagents.subtle = Some(choice);
+            dashboard.config.subagents.oracle = Some(SubagentChoice {
+                model: "advisor".into(),
+                effort: Some("high".into()),
+            });
         }
         dashboard.state.last_subagent_policies.insert(
             String::new(),
@@ -6316,25 +6237,51 @@ fn move_unconfigured_delegation_retains_none_until_changed() {
 }
 
 #[test]
+fn yolo_target_uses_its_own_configured_choices() {
+    let choice = |model: &str| mj_core::config::SubagentChoice {
+        model: model.into(),
+        effort: None,
+    };
+    let mut config = config();
+    config.subagents.straightforward = Some(choice("shared"));
+    config.subagents.yolo.straightforward = Some(choice("yolo"));
+    config.subagents.use_same_on_all_targets = false;
+    let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    draft.update_choices("claude-1", &config, &Default::default(), true);
+    assert!(draft.unavailable_reason().is_none());
+
+    config.subagents.yolo.straightforward = None;
+    draft.update_choices("claude-1", &config, &Default::default(), true);
+    let reason = draft.unavailable_reason().unwrap();
+    assert!(reason.contains("YOLO"), "{reason}");
+    // The shared set still serves ordinary targets.
+    draft.update_choices("claude-1", &config, &Default::default(), false);
+    assert!(draft.unavailable_reason().is_none());
+}
+
+#[test]
 fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     use mj_core::subagent::SubagentPolicy;
     let mut draft = subagents::SubagentDraft::new(SubagentPolicy::Native);
     let mut config = config();
-    draft.update_choices("claude-1", &config, &Default::default());
+    draft.update_choices("claude-1", &config, &Default::default(), false);
     assert!(!draft.select_policy(1));
     assert!(draft.unavailable_reason().unwrap().contains("Settings"));
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Kimi;
-    draft.update_choices("claude-1", &config, &Default::default());
+    draft.update_choices("claude-1", &config, &Default::default(), false);
     assert!(!draft.select_policy(1));
     assert!(
         draft
             .unavailable_reason()
             .unwrap()
-            .contains("Claude, Codex, or DSH")
+            .contains("Claude, Codex, DSH, or OpenCode")
     );
     // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;
-    draft.update_choices("claude-1", &config, &Default::default());
+    draft.update_choices("claude-1", &config, &Default::default(), false);
     assert_eq!(draft.policies(), ["Mjolnir", "None"]);
     assert_eq!(draft.enabled_policies(), [false, true]);
     assert_eq!(draft.selected(), SubagentPolicy::None);
@@ -6542,4 +6489,183 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
             subtle: None
         }
     );
+}
+
+/// "New session with these settings" on a sub-agent that works in its
+/// parent's managed worktree must start a top-level session that asks for a
+/// worktree of its own in the parent's source directory (never the parent's
+/// worktree path), takes delegation and review from the owning session (the
+/// child's own are fixed by the launch), and replaces a profile that can no
+/// longer be used instead of refusing.
+#[test]
+fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_worktree() {
+    let mut parent = legacy_managed_session(running_session());
+    parent.target_template_id = "localhost".into();
+    // Mjolnir delegation with no sub-agent model configured, and an oracle
+    // with no oracle model: the copy cannot keep either.
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    parent.oracle = true;
+    parent.review = Some(Box::new(mj_core::config::SessionReview::Off));
+    parent.no_github_credentials = true;
+    let worktree_root = parent.project_directory.clone().unwrap();
+    let mut child = running_session();
+    child.id = "child-session".into();
+    child.target_template_id = "localhost".into();
+    child.project_directory = parent.project_directory.clone();
+    child.managed_worktree = None;
+    child.subagents = Some(mj_core::subagent::SubagentPolicy::None);
+    child.oracle = false;
+    child.review = None;
+    child.no_github_credentials = true;
+    // Size overrides are a container's; a bare runtime has none to carry.
+    child.last_profile = "retired-profile".into();
+    let relation = mj_core::subagent::SubagentMetadata {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        child_session_id: child.id.clone(),
+        parent_session_id: parent.id.clone(),
+        task_name: "Inspect parser".into(),
+        profile_id: child.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: Default::default(),
+        request_key: "request-1".into(),
+        created_at: child.created_at.clone(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+    };
+    let mut dashboard = dashboard_with_session(parent.clone());
+    dashboard
+        .config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(child.id.clone(), relation);
+    dashboard.set_state(state);
+
+    let DashboardAction::CreateSession {
+        project_directory,
+        create_managed_worktree,
+        subagents,
+        review,
+        profile_id,
+        carried,
+        ..
+    } = dashboard.begin_new_session_like(&child.id)
+    else {
+        panic!("the copy creates a session without a dialog");
+    };
+    assert_eq!(project_directory, Some(PathBuf::from("/srv/project")));
+    assert_ne!(project_directory, Some(worktree_root));
+    assert_eq!(create_managed_worktree, Some(true));
+    assert_eq!(subagents, Some(mj_core::subagent::SubagentPolicy::Native));
+    assert_eq!(review, Some(mj_core::config::SessionReview::Off));
+    // The profile the wizard itself would open on.
+    assert_eq!(
+        Some(profile_id.clone()),
+        dashboard.nth_offered_profile(dashboard.default_new_profile_index())
+    );
+    assert!(carried.no_github_credentials);
+    let note = carried.note.expect("the replaced profile is reported");
+    assert!(
+        note.contains("retired-profile") && note.contains(&profile_id),
+        "{note}"
+    );
+    assert!(
+        note.contains("Sub-agents: Mjolnir is not available")
+            && note.contains("so this session uses Native."),
+        "{note}"
+    );
+    assert!(
+        note.contains("Oracle is not available") && note.contains("starts without it."),
+        "{note}"
+    );
+}
+
+/// "New session with these settings" carries the owner's requested allocation,
+/// including when the selected session borrows its owner's container.
+#[test]
+fn new_session_like_carries_the_container_owners_size() {
+    let mut source = running_session();
+    source.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 6 << 30,
+    });
+    let mut dashboard = dashboard_with_session(source.clone());
+
+    let DashboardAction::CreateSession {
+        resource_allocation,
+        ..
+    } = dashboard.begin_new_session_like(&source.id)
+    else {
+        panic!("the copy creates a session without a dialog");
+    };
+
+    assert_eq!(resource_allocation, source.resource_allocation);
+
+    // Hard-won: 6ddd61a06: a sub-agent's copy read the child's own size,
+    // which is not updated when its parent's container is resized.
+    let mut child = running_session();
+    child.id = "resized-child".into();
+    child.project_directory = source.project_directory.clone();
+    let relation = mj_core::subagent::SubagentMetadata {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        child_session_id: child.id.clone(),
+        parent_session_id: source.id.clone(),
+        task_name: "Inspect parser".into(),
+        profile_id: child.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: Default::default(),
+        request_key: "request-1".into(),
+        created_at: child.created_at.clone(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+    };
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(child.id.clone(), relation);
+    dashboard.set_state(state);
+    let DashboardAction::CreateSession {
+        resource_allocation,
+        ..
+    } = dashboard.begin_new_session_like(&child.id)
+    else {
+        panic!("the copy of a sub-agent creates a session without a dialog");
+    };
+    assert_eq!(resource_allocation, source.resource_allocation);
+}
+
+/// A copied launch skips the new-session key, so it must wait for the host's
+/// Git identity check the way a fast-start launch does, then run as copied.
+// Hard-won: aa2206c29: the copied launch bypassed the Git identity gate.
+#[test]
+fn new_session_like_waits_for_the_git_identity_check() {
+    let mut source = legacy_managed_session(running_session());
+    source.target_template_id = "localhost".into();
+    let mut dashboard = dashboard_with_session(source.clone());
+    dashboard
+        .config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    dashboard.require_git_identity_check();
+
+    assert_eq!(
+        dashboard.begin_new_session_like(&source.id),
+        DashboardAction::CheckGitIdentity
+    );
+    dashboard.apply_git_identity_check(Ok(mj_client::daemon::GitIdentity {
+        name: Some("Ada".into()),
+        email: Some("ada@example.test".into()),
+        per_directory: false,
+    }));
+    assert!(matches!(
+        dashboard.take_git_identity_followup(),
+        Some(DashboardAction::CreateSession { .. })
+    ));
 }

@@ -2,6 +2,8 @@ use super::*;
 
 #[derive(Clone)]
 pub struct SessionManagerControl {
+    pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
+    pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub(crate) session_cpu: watch::Receiver<SessionCpuTable>,
     pub(super) commands: mpsc::Sender<ManagerCommand>,
 }
@@ -14,35 +16,12 @@ pub struct ManagedSessionHandle {
     pub(super) view: watch::Receiver<ManagedSessionView>,
 }
 
-/// A one-command capability issued by the review host while its prompt hold
-/// is open. It is intentionally opaque to callers: the session actor checks
-/// it against the host's live hold registry before bypassing prompt refusal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewDeliveryAdmission {
-    pub(super) session_id: String,
-    pub(super) epoch: u64,
-    pub(super) command_id: String,
-}
-
-impl ReviewDeliveryAdmission {
-    pub(crate) fn new(session_id: String, epoch: u64, command_id: String) -> Self {
-        Self {
-            session_id,
-            epoch,
-            command_id,
-        }
-    }
-
-    pub(crate) fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub(crate) const fn epoch(&self) -> u64 {
-        self.epoch
-    }
-
-    pub(crate) fn command_id(&self) -> &str {
-        &self.command_id
+impl SessionManagerControl {
+    pub(crate) fn install_harness_failure_handler(&self, handler: HarnessFailureHandler) {
+        assert!(
+            self.harness_failure.set(handler).is_ok(),
+            "readiness failure handler installed once"
+        );
     }
 }
 
@@ -84,7 +63,7 @@ impl ManagedSessionLease {
         let connection = self.connection.take();
         if let Err(error) = self.releases.send(ReturnedConnection {
             lease_id,
-            connection,
+            connection: connection.map(Box::new),
         }) {
             tracing::warn!(
                 session_id = %self.session_id,
@@ -155,28 +134,12 @@ impl ManagedSessionHandle {
         self.enqueue_submit(command_id, command).await?.wait().await
     }
 
-    /// Submit the review's corrective prompt through the one admission that
-    /// corresponds to its live prompt hold. Generic submissions continue to
-    /// use [`Self::submit`] and remain subject to review refusal.
-    pub(crate) async fn submit_review_delivery(
-        &self,
-        admission: ReviewDeliveryAdmission,
-        command: RelayCommand,
-    ) -> Result<u64> {
-        let command_id = admission.command_id.clone();
-        self.enqueue_submit_with_admission(command_id, command, Some(admission))
-            .await?
-            .wait()
-            .await
-    }
-
     pub async fn enqueue_submit(
         &self,
         command_id: String,
         command: RelayCommand,
     ) -> Result<PendingRelaySubmit> {
-        self.enqueue_submit_with_admission(command_id, command, None)
-            .await
+        self.enqueue_submit_inner(command_id, command).await
     }
 
     /// Mailbox submissions share ordinary actor admission and command-ID
@@ -213,19 +176,18 @@ impl ManagedSessionHandle {
                         Ok(MailboxEventDelivery::Accepted(ordinal))
                     }
                     MailboxDeliveryState::Pending if !failure.unconfirmed && !failure.refused => {
-                        Ok(MailboxEventDelivery::Pending(failure.message))
+                        Ok(MailboxEventDelivery::Pending(failure.failure.message))
                     }
-                    MailboxDeliveryState::Pending => Err(anyhow::anyhow!(failure.message)),
+                    MailboxDeliveryState::Pending => Err(anyhow::anyhow!(failure.failure.message)),
                 }
             }
         }
     }
 
-    pub(super) async fn enqueue_submit_with_admission(
+    pub(super) async fn enqueue_submit_inner(
         &self,
         command_id: String,
         command: RelayCommand,
-        admission: Option<ReviewDeliveryAdmission>,
     ) -> Result<PendingRelaySubmit> {
         let (reply, response) = oneshot::channel();
         self.commands
@@ -233,7 +195,6 @@ impl ManagedSessionHandle {
                 queued_at: Instant::now(),
                 command_id,
                 command,
-                admission,
                 reply,
             })
             .await
@@ -303,16 +264,14 @@ impl ManagedSessionHandle {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(ActorCommand::Reviewer {
+                queued_at: std::time::Instant::now(),
                 role: None,
                 action,
                 reply,
             })
             .await
             .context("session manager stopped")?;
-        result
-            .await
-            .context("session manager stopped")?
-            .map_err(anyhow::Error::msg)
+        result.await.context("session manager stopped")?
     }
 
     pub async fn enqueue_sync(&self) -> Result<PendingRelaySync> {
@@ -346,16 +305,20 @@ impl ManagedSessionHandle {
             .map_err(anyhow::Error::msg)
     }
 
-    pub async fn lease_connection(&self) -> Result<ManagedSessionLease> {
-        self.lease_connection_for(None).await
+    pub async fn lease_connection(
+        &self,
+        admission: &impl crate::recovery_gate::HoldsSession,
+    ) -> Result<ManagedSessionLease> {
+        self.lease_connection_for(None, admission).await
     }
 
     /// Background replacement must never take a busy session's control channel.
     pub async fn lease_idle_connection(
         &self,
         harness: mj_core::config::HarnessKind,
+        admission: &impl crate::recovery_gate::HoldsSession,
     ) -> Result<Option<ManagedSessionLease>> {
-        match self.lease_connection_for(Some(harness)).await {
+        match self.lease_connection_for(Some(harness), admission).await {
             Ok(lease) => Ok(Some(lease)),
             Err(error) if error.is::<SessionNotIdle>() => Ok(None),
             Err(error) => Err(error),
@@ -365,22 +328,19 @@ impl ManagedSessionHandle {
     async fn lease_connection_for(
         &self,
         idle_harness: Option<mj_core::config::HarnessKind>,
+        admission: &impl crate::recovery_gate::HoldsSession,
     ) -> Result<ManagedSessionLease> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(ActorCommand::Lease {
+                admission: admission.admission().lease(&self.session_id).await?,
+                returns: self.releases.clone(),
                 idle_harness,
                 reply,
             })
             .await
             .context("session manager stopped")?;
-        let (lease_id, connection) = response.await.context("session manager stopped")??;
-        Ok(ManagedSessionLease {
-            session_id: self.session_id.clone(),
-            lease_id: Some(lease_id),
-            connection: Some(connection),
-            releases: self.releases.clone(),
-        })
+        response.await.context("session manager stopped")?
     }
 }
 
@@ -427,8 +387,7 @@ impl std::fmt::Display for SessionNotIdle {
 impl std::error::Error for SessionNotIdle {}
 
 pub struct PendingRelaySubmit {
-    pub(super) response:
-        oneshot::Receiver<std::result::Result<u64, mj_client::session::SubmitFailure>>,
+    pub(super) response: oneshot::Receiver<std::result::Result<u64, SubmitFailure>>,
 }
 
 impl PendingRelaySubmit {
@@ -439,7 +398,11 @@ impl PendingRelaySubmit {
                 anyhow::Error::new(error).context(mj_client::session::DeliveryUnconfirmed)
             })?
             .map_err(|failure| {
-                let error = anyhow::Error::msg(failure.message);
+                let SubmitFailure { failure, code } = failure;
+                let mut error = anyhow::Error::msg(failure.message);
+                if let Some(code) = code {
+                    error = error.context(SubmitRefusalCode(code));
+                }
                 if failure.unconfirmed {
                     error.context(mj_client::session::DeliveryUnconfirmed)
                 } else if failure.refused {
@@ -452,14 +415,21 @@ impl PendingRelaySubmit {
 }
 
 pub struct PendingRelaySync {
-    pub(super) response: oneshot::Receiver<std::result::Result<(), String>>,
+    pub(super) response: oneshot::Receiver<Result<()>>,
 }
 
 impl PendingRelaySync {
     pub async fn wait(self) -> Result<()> {
-        self.response
-            .await
-            .context("session manager stopped")?
-            .map_err(anyhow::Error::msg)
+        self.response.await.context("session manager stopped")?
     }
 }
+
+/// In-process refusal detail; the client failure's wire representation is unchanged.
+#[derive(Debug)]
+pub(crate) struct SubmitRefusalCode(pub mj_core::relay::RelayErrorCode);
+impl std::fmt::Display for SubmitRefusalCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "relay refusal ({:?})", self.0)
+    }
+}
+impl std::error::Error for SubmitRefusalCode {}

@@ -29,13 +29,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::archive::read_archive_verified;
 use crate::archive::{
     ArchiveInput, BundleManifest, CanonicalSessionSnapshot, CanonicalTranscriptBody,
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, NativeArtifact, PayloadRole,
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
     collect_plain_directory_snapshot, ensure_no_symlink_ancestors, has_origin_refs,
-    read_archive_verified, remote_workspace_base, validate_component, verify_archive_streaming,
-    write_archive_hashed, write_archive_hashed_borrowed,
+    remote_workspace_base, validate_component, verify_archive_streaming, write_archive_hashed,
+    write_archive_hashed_borrowed,
 };
 use mj_core::config::HarnessKind;
 /// Native state whose storage format is owned by the target runtime.
@@ -49,6 +51,17 @@ pub trait NativeCheckpointState: Sync {
         path: &Path,
         data: &[u8],
     ) -> Result<bool>;
+    /// Handle target-owned artifacts without replacing existing state.
+    /// None means this is an ordinary file; Some reports whether data changed.
+    fn restore_missing(
+        &self,
+        _session: &SessionManifest,
+        _home: &Path,
+        _path: &Path,
+        _data: &[u8],
+    ) -> Result<Option<bool>> {
+        Ok(None)
+    }
 }
 struct NoNativeCheckpointState;
 impl NativeCheckpointState for NoNativeCheckpointState {
@@ -66,8 +79,6 @@ impl NativeCheckpointState for NoNativeCheckpointState {
     }
 }
 
-const MAX_NATIVE_FILE: u64 = 1024 * 1024 * 1024;
-const MAX_NATIVE_TOTAL: u64 = 8 * 1024 * 1024 * 1024;
 /// Version of the controller-to-exporter checkpoint specification contract.
 pub const CHECKPOINT_EXPORT_PROTOCOL_VERSION: u32 = 2;
 /// Version of the two-phase capture/pack contract used by ordinary checkpoints.
@@ -305,6 +316,22 @@ struct StagedRepository {
     untracked_tar_path: PathBuf,
     /// The Git operation's two payloads, present exactly when
     /// `metadata.git_operation` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conflicted_worktree_tar_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation_state_tar_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    linked_worktrees: Vec<StagedLinkedWorktree>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StagedLinkedWorktree {
+    metadata: mj_core::archive::LinkedWorktreeMetadata,
+    staged_patch_path: PathBuf,
+    unstaged_patch_path: PathBuf,
+    untracked_tar_path: PathBuf,
+    /// Present exactly when `metadata.git_operation` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     conflicted_worktree_tar_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

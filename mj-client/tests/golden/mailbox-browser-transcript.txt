@@ -29,6 +29,7 @@
         "    Report truncated; see the report directory for details.",
         "    Fixed ‹parser›.",
         "    Tests passed: \"parser\".",
+        "  - PR #4623 was merged by dana.",
         "  - Child task Check parser finished: failed",
         "    支持 Unicode and <script>literal text</script>.",
         "    - A report bullet stays in this event."
@@ -72,6 +73,9 @@
           "Report truncated; see the report directory for details.",
           "Fixed ‹parser›.",
           "Tests passed: \"parser\"."
+        ],
+        [
+          "PR #4623 was merged by dana."
         ],
         [
           "Child task Check parser finished: failed",

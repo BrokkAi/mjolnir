@@ -17,28 +17,19 @@ impl RuntimeState {
         acknowledge_container_recreation: bool,
         control: Option<LifecycleControl>,
     ) -> Result<()> {
-        let joining_restart = self
-            .owner()
-            .lifecycle
-            .get(&session_id)
-            .is_some_and(|active| {
-                matches!(
-                    active.kind,
-                    LifecycleKind::Restart | LifecycleKind::UpgradeContainer
-                ) && active.is_running()
-            });
-        if !joining_restart {
-            self.wait_before_close(&session_id).await?;
-            self.wait_for_active_suspend(&session_id).await?;
-            let cleanup_running = self
-                .owner()
-                .lifecycle
-                .get(&session_id)
-                .is_some_and(|active| active.kind == LifecycleKind::Cleanup && active.is_running());
-            if cleanup_running {
-                self.wait_for_deferred_cleanup(&session_id).await?;
-            }
-        }
+        let started = self
+            .start_restart_session(session_id, acknowledge_container_recreation, control)
+            .await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
+    }
+
+    pub(super) async fn start_restart_session(
+        self: &Arc<Self>,
+        session_id: String,
+        acknowledge_container_recreation: bool,
+        control: Option<LifecycleControl>,
+    ) -> Result<StartedLifecycle> {
         let workspace_id = blocking({
             let session_id = session_id.clone();
             move || {
@@ -53,50 +44,36 @@ impl RuntimeState {
         .await?;
         let _workspace_admission = self.workspace_resume_gate(&workspace_id).read_owned().await;
 
-        let operation = self.start_or_join_lifecycle_controlled(
-            session_id.clone(),
-            LifecycleKind::Restart,
-            Some(workspace_id),
-            None,
-            control,
-            move |state, session_id, cancelled| async move {
-                state
-                    .restart_admitted(
-                        session_id,
-                        cancelled,
-                        None,
-                        acknowledge_container_recreation,
-                    )
-                    .await
-            },
-        )?;
-        let completed = operation.clone();
-        let outcome = Self::wait_lifecycle_result(operation).await;
-        self.remove_completed_lifecycle(&completed);
-        outcome?;
-        Ok(())
-    }
-
-    async fn wait_for_active_suspend(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        let pending = {
-            let owner = self.owner();
-            owner.lifecycle.get(session_id).and_then(|active| {
-                (active.kind == LifecycleKind::Suspend && active.is_running())
-                    .then(|| active.result.clone())
-            })
-        };
-        if let Some(pending) = pending {
-            let completed = pending.clone();
-            Self::wait_lifecycle_result(pending).await?;
-            self.remove_completed_lifecycle(&completed);
-        }
-        Ok(())
+        let key = serde_json::to_string(&acknowledge_container_recreation)?;
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let operation = self
+            .admit_prepared_lifecycle(
+                session_id.clone(),
+                LifecycleKind::Restart,
+                super::lifecycle::LifecycleStart::request(key, Some(workspace_id), control),
+                Some(acceptance),
+                move |state, session_id, cancelled, session_admission| async move {
+                    let _workspace_admission = _workspace_admission;
+                    state
+                        .restart_admitted_with_acceptance(
+                            &session_admission,
+                            session_id,
+                            cancelled,
+                            None,
+                            acknowledge_container_recreation,
+                            Some(accepted),
+                        )
+                        .await
+                },
+            )
+            .await?;
+        Ok(operation)
     }
 
     /// Recover an accepted Restart after a daemon replacement. Its durable
     /// phase distinguishes a completed restore from a request that had only
     /// begun stopping the old worker.
-    pub(super) fn recover_restarts(
+    pub(super) async fn recover_restarts(
         self: &Arc<Self>,
         intents: Vec<crate::database::SessionRestartIntent>,
     ) -> Result<BTreeSet<String>> {
@@ -139,35 +116,46 @@ impl RuntimeState {
                 continue;
             }
             let key = format!("recovery:{}", intent.operation_id);
-            let result = self.admit_lifecycle(
-                session_id.clone(),
-                if intent.container_upgrade.is_some() {
-                    LifecycleKind::UpgradeContainer
-                } else {
-                    LifecycleKind::Restart
-                },
-                super::lifecycle::LifecycleStart {
-                    resume_workspace_id: None,
-                    request_key: Some(key),
-                    control: None,
-                    phase: if intent.container_upgrade.is_some()
-                        && intent.phase == crate::database::SessionRestartPhase::RecreatingContainer
-                    {
-                        LifecyclePhase::RetiringContainer
+            let result = self
+                .admit_lifecycle(
+                    session_id.clone(),
+                    if intent.container_upgrade.is_some() {
+                        LifecycleKind::UpgradeContainer
                     } else {
-                        LifecyclePhase::Executing
+                        LifecycleKind::Restart
                     },
-                    move_operation_id: None,
-                    deferrable_admission: None,
-                },
-                move |state, session_id, cancelled| async move {
-                    // A recovered intent keeps the rules it was started with,
-                    // including an automatic one's refusal to interrupt work.
-                    state
-                        .restart_admitted(session_id, cancelled, Some(intent), false)
-                        .await
-                },
-            )?;
+                    super::lifecycle::LifecycleStart {
+                        origin: super::lifecycle::LifecycleOrigin::Automatic,
+                        resume_workspace_id: None,
+                        request_key: Some(key),
+                        control: None,
+                        phase: if intent.container_upgrade.is_some()
+                            && intent.phase
+                                == crate::database::SessionRestartPhase::RecreatingContainer
+                        {
+                            LifecyclePhase::RetiringContainer
+                        } else {
+                            LifecyclePhase::Executing
+                        },
+                        move_operation_id: None,
+                        deferrable_admission: None,
+                        holds_through_drain: false,
+                    },
+                    move |state, session_id, cancelled, session_admission| async move {
+                        // A recovered intent keeps the rules it was started with,
+                        // including an automatic one's refusal to interrupt work.
+                        state
+                            .restart_admitted(
+                                &session_admission,
+                                session_id,
+                                cancelled,
+                                Some(intent),
+                                false,
+                            )
+                            .await
+                    },
+                )
+                .await?;
             owned.insert(session_id.clone());
             let state = self.clone();
             tokio::spawn(async move {
@@ -195,10 +183,31 @@ impl RuntimeState {
 
     pub(super) async fn restart_admitted(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: String,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
+    ) -> Result<DaemonLifecycleResult> {
+        self.restart_admitted_with_acceptance(
+            session_admission,
+            session_id,
+            cancelled,
+            recovered,
+            acknowledge_container_recreation,
+            None,
+        )
+        .await
+    }
+
+    async fn restart_admitted_with_acceptance(
+        self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
+        session_id: String,
+        cancelled: Arc<AtomicBool>,
+        recovered: Option<crate::database::SessionRestartIntent>,
+        acknowledge_container_recreation: bool,
+        acceptance: Option<LifecycleAcceptanceSender>,
     ) -> Result<DaemonLifecycleResult> {
         if recovered
             .as_ref()
@@ -207,10 +216,12 @@ impl RuntimeState {
             self.request_close(&session_id);
         }
         let result = Box::pin(self.restart_admitted_inner(
+            session_admission,
             &session_id,
             cancelled,
             recovered,
             acknowledge_container_recreation,
+            acceptance,
         ))
         .await;
         self.clear_close_request(&session_id);
@@ -219,19 +230,13 @@ impl RuntimeState {
 
     async fn restart_admitted_inner(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
+        acceptance: Option<LifecycleAcceptanceSender>,
     ) -> Result<DaemonLifecycleResult> {
-        let _recovery_reservation = tokio::task::spawn_blocking({
-            let observer = self.recovery_observer.clone();
-            let session_id = session_id.to_owned();
-            let cancelled = cancelled.clone();
-            move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-        })
-        .await
-        .context("reserve recovery for daemon restart task")??;
         let move_operation = crate::database::load_move_operation(session_id)?;
         ensure!(
             !move_operation
@@ -264,6 +269,9 @@ impl RuntimeState {
             "Restart intent belongs to another session"
         );
         self.bind_restart_intent(session_id, &intent.operation_id)?;
+        if let Some(acceptance) = acceptance {
+            acceptance.send_replace(Some(Ok(())));
+        }
         // Admission and settings edits serialize in the database writer. Read
         // only after admission, so no accepted edit can be missed or race this plan.
         let mut controller = tokio::task::spawn_blocking(Controller::load)
@@ -302,6 +310,7 @@ impl RuntimeState {
             }
             let operation_id = intent.operation_id.clone();
             Box::pin(controller.upgrade_container_worker(
+                session_admission,
                 session_id,
                 plan,
                 intent.phase == crate::database::SessionRestartPhase::RecreatingContainer,
@@ -360,6 +369,7 @@ impl RuntimeState {
             ensure_target_unavailable_for_fallback(&controller, session_id, &executor)?;
             tracing::info!(%session_id, "Restart selected suspend-and-resume fallback");
             self.restart_fallback(
+                session_admission,
                 session_id,
                 &intent.operation_id,
                 &mut controller,
@@ -384,7 +394,7 @@ impl RuntimeState {
             if fallback_is_safe(target) {
                 ensure!(
                     record.target.as_ref().is_none_or(|target| matches!(
-                        target,
+                        &**target,
                         mj_core::state::TargetLocator::LocalBare { .. }
                             | mj_core::state::TargetLocator::SshBare { .. }
                             | mj_core::state::TargetLocator::AwsEc2 { .. }
@@ -407,6 +417,7 @@ impl RuntimeState {
                     "Restart selected suspend-and-resume because the target was unavailable before checkpointing"
                 );
                 self.restart_fallback(
+                    session_admission,
                     session_id,
                     &intent.operation_id,
                     &mut controller,
@@ -436,6 +447,7 @@ impl RuntimeState {
             .await?;
             tracing::info!(%session_id, "Restart selected in-place checkpoint and restore");
             let suspended = Box::pin(controller.suspend_session_for_restart(
+                session_admission,
                 session_id,
                 &executor,
                 &self.session_manager,
@@ -467,7 +479,7 @@ impl RuntimeState {
             let checkpoint_sha256 = intent
                 .handoff
                 .as_ref()
-                .or(record.checkpoint.as_ref())
+                .or(record.checkpoint.as_deref())
                 .context("Restart checkpoint completed without a checkpoint")?
                 .sha256
                 .clone();
@@ -787,6 +799,7 @@ impl RuntimeState {
 
     async fn restart_fallback(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         restart_intent: &str,
         controller: &mut Controller,
@@ -818,7 +831,15 @@ impl RuntimeState {
         self.begin_restart_container_teardown(session_id, restart_intent)?;
         let stopped = async {
             match self
-                .suspend_with_loaded_controller(session_id, controller, executor, true, false, None)
+                .suspend_with_loaded_controller(
+                    session_admission,
+                    session_id,
+                    controller,
+                    executor,
+                    true,
+                    false,
+                    None,
+                )
                 .await?
             {
                 DaemonLifecycleResult::Done => {}
@@ -874,12 +895,7 @@ impl RuntimeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RestartTargetAvailability {
-    Reachable,
-    Missing,
-    Unreachable,
-}
+pub(super) use crate::controller::environment::TargetAvailability as RestartTargetAvailability;
 
 pub(super) fn restart_checkpoint_matches(
     record: &SessionRecord,
@@ -889,7 +905,7 @@ pub(super) fn restart_checkpoint_matches(
         && intent
             .handoff
             .as_ref()
-            .or(record.checkpoint.as_ref())
+            .or(record.checkpoint.as_deref())
             .is_some_and(|checkpoint| {
                 intent.checkpoint_sha256.as_deref() == Some(checkpoint.sha256.as_str())
             })
@@ -923,113 +939,7 @@ pub(super) fn restart_target_availability(
     session_id: &str,
     executor: &impl CommandExecutor,
 ) -> Result<RestartTargetAvailability> {
-    let record = controller
-        .state
-        .sessions
-        .get(session_id)
-        .with_context(|| format!("unknown session {session_id}"))?;
-    let Some(locator) = record.target.as_ref() else {
-        return Ok(RestartTargetAvailability::Missing);
-    };
-    let locator = crate::controller::backend_locator(locator, record, &controller.config)?;
-
-    if let Some(plan) = crate::targets::target_recovery_plan(&locator, session_id)? {
-        let output = executor
-            .execute(&plan.exists)
-            .context("check retained target before Restart")?;
-        match output.status {
-            0 => match crate::targets::ensure_recovery_target_running(executor, Some(&plan))? {
-                crate::targets::TargetRecoveryOutcome::Missing => {
-                    Ok(RestartTargetAvailability::Missing)
-                }
-                crate::targets::TargetRecoveryOutcome::AlreadyRunning
-                | crate::targets::TargetRecoveryOutcome::Started
-                | crate::targets::TargetRecoveryOutcome::NotRequired => {
-                    Ok(RestartTargetAvailability::Reachable)
-                }
-            },
-            1 => Ok(RestartTargetAvailability::Missing),
-            125 => Ok(RestartTargetAvailability::Unreachable),
-            255 if locator_is_remote(&locator) => Ok(RestartTargetAvailability::Unreachable),
-            status => bail!(
-                "could not confirm retained target availability before Restart (status {status}): {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        }
-    } else if let mj_core::targets::TargetLocator::AppleContainer { container_id, .. }
-    | mj_core::targets::TargetLocator::SshAppleContainer { container_id, .. } = &locator
-    {
-        // Listing runs on the host that owns the runtime, which for a remote
-        // target is the other side of ssh.
-        let engine = locator.container_engine().expect("Apple container locator");
-        let arguments = vec![
-            engine.to_owned(),
-            "list".to_owned(),
-            "--all".to_owned(),
-            "--quiet".to_owned(),
-        ];
-        let list = match &locator {
-            mj_core::targets::TargetLocator::SshAppleContainer { ssh, .. } => {
-                crate::targets::ssh_command_owned(ssh, arguments)
-            }
-            _ => {
-                let mut arguments = arguments.into_iter();
-                CommandSpec::new(
-                    arguments.next().expect("engine"),
-                    arguments.collect::<Vec<_>>(),
-                )
-            }
-        }
-        .purpose("check retained Apple container before Restart");
-        let output = executor
-            .execute(&list)
-            .context("list retained Apple target before Restart")?;
-        if output.status == 255 && locator_is_remote(&locator) {
-            return Ok(RestartTargetAvailability::Unreachable);
-        }
-        ensure!(
-            output.status == 0,
-            "could not confirm Apple target availability before Restart (status {}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let listed = String::from_utf8(output.stdout)
-            .context("decode Apple container list before Restart")?;
-        if listed.lines().any(|id| id.trim() == container_id) {
-            Ok(RestartTargetAvailability::Reachable)
-        } else {
-            Ok(RestartTargetAvailability::Missing)
-        }
-    } else {
-        let probe = crate::targets::command_on_locator(
-            &locator,
-            session_id,
-            vec!["true".into()],
-            "probe retained target before Restart",
-        )?;
-        let output = executor
-            .execute(&probe)
-            .context("probe retained target before Restart")?;
-        match output.status {
-            0 => Ok(RestartTargetAvailability::Reachable),
-            255 if locator_is_remote(&locator) => Ok(RestartTargetAvailability::Unreachable),
-            status => bail!(
-                "could not confirm retained target availability before Restart (status {status}); refusing destructive fallback: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        }
-    }
-}
-
-fn locator_is_remote(locator: &mj_core::targets::TargetLocator) -> bool {
-    matches!(
-        locator,
-        mj_core::targets::TargetLocator::AwsEc2 { .. }
-            | mj_core::targets::TargetLocator::SshBare { .. }
-            | mj_core::targets::TargetLocator::SshPodman { .. }
-            | mj_core::targets::TargetLocator::SshDocker { .. }
-            | mj_core::targets::TargetLocator::SshAppleContainer { .. }
-    )
+    crate::controller::environment::target_availability(controller, session_id, executor)
 }
 
 fn ensure_target_unavailable_for_fallback(

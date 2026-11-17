@@ -402,8 +402,7 @@ pub(crate) enum Confirmation {
     RecoverFailed {
         session_id: String,
         error: Option<String>,
-        /// Whether a verified recovery copy exists to resume from. Without one
-        /// there is nothing to recover and only the transcript is on offer.
+        /// Whether an environment can be repaired or a verified archive restored.
         recoverable: bool,
     },
     /// A resume that moves a local checkout into an isolated workspace. The
@@ -460,6 +459,7 @@ impl ConfirmDialog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportProgress {
+    pub(crate) cancellable: bool,
     pub(crate) session_title: String,
     pub(crate) step: usize,
     total: Option<usize>,
@@ -470,6 +470,7 @@ pub(crate) struct ImportProgress {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportBundleConfirmation {
+    project_root: TextInput,
     managed_worktree: mj_core::state::ManagedWorktreeOptions,
     create_managed_worktree: bool,
     dirty_git_roots: Vec<String>,
@@ -757,10 +758,9 @@ impl DashboardState {
 
     pub(crate) fn begin_profile_rename(&mut self) {
         let Some(old_id) = self
-            .config
-            .enabled_profiles()
-            .nth(self.quota_index)
-            .map(|(id, _)| id.to_owned())
+            .quota_profile_rows()
+            .get(self.quota_index)
+            .map(|row| row.id.to_owned())
         else {
             self.notices.set("No profile is selected.");
             return;
@@ -1150,6 +1150,7 @@ impl DashboardState {
 
     pub fn show_import_progress(&mut self, session_title: String) {
         self.mode = Mode::Importing(ImportProgress {
+            cancellable: true,
             session_title,
             step: 1,
             total: None,
@@ -1157,6 +1158,25 @@ impl DashboardState {
             last_updated: Instant::now(),
             form: dialog_form(&[DialogControl::Cancel], DialogControl::Cancel),
         });
+    }
+
+    pub fn show_import_upload(&mut self) {
+        if let Some(progress) = import_progress_mut(&mut self.mode) {
+            progress.cancellable = true;
+            progress.message = "Uploading archive…".into();
+            progress.last_updated = Instant::now();
+            self.mode = Mode::Importing(progress.clone());
+        }
+    }
+
+    pub fn show_import_registration(&mut self) {
+        if let Some(progress) = import_progress_mut(&mut self.mode) {
+            progress.cancellable = false;
+            progress.message = "Registering on the daemon — cannot be cancelled.".into();
+            progress.last_updated = Instant::now();
+            // An upload-cancel confirmation cannot outlive that upload phase.
+            self.mode = Mode::Importing(progress.clone());
+        }
     }
 
     pub fn update_import_progress(&mut self, step: usize, total: Option<usize>, message: String) {
@@ -1175,9 +1195,14 @@ impl DashboardState {
         omitted_non_git_dirs: Vec<String>,
         scratch_git_roots: Vec<String>,
         managed_worktree: mj_core::state::ManagedWorktreeOptions,
+        recorded_root: std::path::PathBuf,
     ) {
         let mut form = dialog_form(
-            &[DialogControl::ImportCancel, DialogControl::ImportContinue],
+            &[
+                DialogControl::Field,
+                DialogControl::ImportCancel,
+                DialogControl::ImportContinue,
+            ],
             DialogControl::ImportContinue,
         );
         if managed_worktree.available {
@@ -1188,6 +1213,7 @@ impl DashboardState {
             );
         }
         self.mode = Mode::ConfirmImportBundle(ImportBundleConfirmation {
+            project_root: TextInput::from_value(recorded_root.to_string_lossy().into_owned()),
             managed_worktree,
             create_managed_worktree: managed_worktree.default_create,
             dirty_git_roots,
@@ -1227,6 +1253,10 @@ impl DashboardState {
         event: Event,
         mut progress: ImportProgress,
     ) -> DashboardAction {
+        if !progress.cancellable {
+            self.mode = Mode::Importing(progress);
+            return DashboardAction::None;
+        }
         let result = progress.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
@@ -1252,15 +1282,8 @@ impl DashboardState {
         self.mode = Mode::Rename(RenameEditor {
             session_id: session.id.clone(),
             session_name: crate::render::session_name(session).to_owned(),
-            title: TextInput::from_value(
-                session
-                    .session_title_override
-                    .as_ref()
-                    .or(session.acp_session_title.as_ref())
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .with_max_chars(64),
+            title: TextInput::from_value(session.given_name().unwrap_or_default().to_owned())
+                .with_max_chars(64),
             form: dialog_form(
                 &[
                     DialogControl::Field,
@@ -1548,6 +1571,7 @@ impl DashboardState {
             Some(Interaction::Cancel)
             | Some(Interaction::Activate(DialogControl::ImportCancel)) => {
                 return DashboardAction::ConfirmImportBundle {
+                    project_root: confirmation.project_root.value().into(),
                     create_managed_worktree: None,
                     accepted: false,
                 };
@@ -1564,8 +1588,13 @@ impl DashboardState {
                         confirmation.managed_worktree.available
                             && confirmation.create_managed_worktree,
                     ),
+                    project_root: confirmation.project_root.value().into(),
                     accepted: true,
                 };
+            }
+            Some(Interaction::Edit(DialogControl::Field, edit)) => {
+                TextField::apply(&mut confirmation.project_root, edit);
+                self.mode = Mode::ConfirmImportBundle(confirmation);
             }
             _ => self.mode = Mode::ConfirmImportBundle(confirmation),
         }
@@ -1816,7 +1845,7 @@ impl DashboardState {
                     self.mode =
                         Mode::Confirm(self.confirm_dialog(Confirmation::DiscardSinceCheckpoint {
                             session_id,
-                            checkpoint,
+                            checkpoint: *checkpoint,
                         }));
                 } else {
                     self.set_notice("No recovery copy is available. Retry suspension.");
@@ -1834,7 +1863,7 @@ impl DashboardState {
                     .state
                     .sessions
                     .get(&session_id)
-                    .and_then(|s| s.checkpoint.as_ref())
+                    .and_then(|s| s.checkpoint.as_deref())
                     != Some(&checkpoint)
                 {
                     self.cancel_modal();
@@ -2163,7 +2192,7 @@ impl DashboardState {
 
 impl DashboardState {
     pub fn show_normal_restart(&mut self, session_id: String) {
-        let interrupting = self.attention_level(&session_id) == crate::AttentionLevel::Working;
+        let interrupting = self.own_turn_is_running(&session_id);
         self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::RestartAgent {
             session_id,
             interrupting,

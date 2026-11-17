@@ -20,7 +20,7 @@ function releaseZip(dir, tag) {
   mkdirSync(bundle, { recursive: true });
   copyFileSync(process.execPath, join(bundle, 'mj.exe'));
   appendFileSync(join(bundle, 'mj.exe'), `release ${tag}`);
-  for (const file of ['mj-desktop.exe', 'mj-worker-x86_64-unknown-linux-musl', 'mj-worker-aarch64-unknown-linux-musl', 'README.md']) {
+  for (const file of ['mj-worker-x86_64-unknown-linux-musl', 'mj-worker-aarch64-unknown-linux-musl', 'README.md']) {
     writeFileSync(join(bundle, file), `${file} ${tag}`);
   }
   const zip = join(dir, `${name}.zip`);
@@ -105,7 +105,7 @@ test('the PowerShell installer installs, upgrades a running mj.exe, and refuses 
   const fresh = await install(server, installDir);
   assert.equal(fresh.status, 0, fresh.stdout + fresh.stderr);
   assert.deepEqual(readdirSync(installDir).sort(), [
-    'mj-desktop.exe', 'mj-worker-aarch64-unknown-linux-musl', 'mj-worker-x86_64-unknown-linux-musl', 'mj.exe',
+    'mj-worker-aarch64-unknown-linux-musl', 'mj-worker-x86_64-unknown-linux-musl', 'mj.exe',
   ]);
   assert.ok(endsWith(installed('mj.exe'), 'release v9.9.9'));
 
@@ -117,7 +117,6 @@ test('the PowerShell installer installs, upgrades a running mj.exe, and refuses 
   const upgrade = await install(server, installDir, 'v9.9.10');
   assert.equal(upgrade.status, 0, upgrade.stdout + upgrade.stderr);
   assert.ok(endsWith(installed('mj.exe'), 'release v9.9.10'));
-  assert.equal(installed('mj-desktop.exe').toString(), 'mj-desktop.exe v9.9.10');
   const leftovers = readdirSync(installDir).filter(name => name.startsWith('.mj-'));
   assert.deepEqual(leftovers.map(name => name.replace(/-[0-9a-f]{32}$/, '')), ['.mj-replaced-mj.exe']);
 

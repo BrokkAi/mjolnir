@@ -13,7 +13,6 @@ ROOT_VOLUME_GIB=60
 SSH_PUBLIC_KEY="${HOME}/.ssh/vastai.pub"
 SSH_IDENTITY_FILE="${HOME}/.ssh/vastai"
 SECURITY_GROUP_NAME="mj-runson-ssh"
-WRITE_MJ_CONFIG=false
 SOURCE_AMI=""
 
 usage() {
@@ -30,8 +29,7 @@ usage() {
         '  --instance-type TYPE       EC2 instance type (default: m8i-flex.large)' \
         '  --root-volume-gib GIB      Root volume size (default: 60)' \
         '  --ssh-public-key PATH      Public key installed for Mjolnir SSH' \
-        '  --ssh-identity-file PATH   Matching private key recorded in Mjolnir config' \
-        '  --write-mj-config          Append machines.aws-runson and targets.aws-runson if not configured' \
+        '  --ssh-identity-file PATH   Matching private key for SSH access' \
         '  -h, --help                 Show this help'
 }
 
@@ -44,7 +42,6 @@ while (($#)); do
         --root-volume-gib) ROOT_VOLUME_GIB="$2"; shift 2 ;;
         --ssh-public-key) SSH_PUBLIC_KEY="$2"; shift 2 ;;
         --ssh-identity-file) SSH_IDENTITY_FILE="$2"; shift 2 ;;
-        --write-mj-config) WRITE_MJ_CONFIG=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
@@ -187,22 +184,6 @@ else
             --version-description "$version_description" --launch-template-data "file://${launch_data_file}" --output json)"
         template_version="$(jq -r '.LaunchTemplateVersion.VersionNumber' <<<"$create_result")"
         aws_ec2 modify-launch-template --launch-template-id "$template_id" --default-version "$template_version" >/dev/null
-    fi
-fi
-
-if [[ "$WRITE_MJ_CONFIG" == true ]]; then
-    mj_config_dir="${MJ_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/mjolnir}"
-    mj_config="$mj_config_dir/config.toml"
-    if [[ ! -f "$mj_config" ]]; then
-        printf 'Mjolnir config does not exist: %s\n' "$mj_config" >&2
-        exit 1
-    fi
-    if grep -Fqx '[targets.aws-runson]' "$mj_config"; then
-        printf '%s\n' 'Mjolnir target targets.aws-runson already exists; leaving it unchanged.'
-    else
-        printf '\n[machines.aws-runson]\nkind = "aws-ec2"\nregion = "%s"\nlaunch_template = "%s"\nssh_user = "ubuntu"\naddress_source = "public-ip"\nidentity_file = "%s"\n\n[targets.aws-runson]\nkind = "bare"\nmachine = "aws-runson"\n' \
-            "$REGION" "$TEMPLATE_NAME" "$SSH_IDENTITY_FILE" >>"$mj_config"
-        printf 'Added Mjolnir machine machines.aws-runson and target targets.aws-runson to %s.\n' "$mj_config"
     fi
 fi
 

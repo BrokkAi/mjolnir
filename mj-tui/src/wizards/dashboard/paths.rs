@@ -204,7 +204,7 @@ impl DashboardState {
                 }
                 mounts.add_validated_mount();
                 form.forget_draft_part("attachment editor");
-                mounts.history_index = mounts.mounts.len().saturating_sub(1);
+                mounts.selected_mount = mounts.mounts.len().saturating_sub(1);
                 form.focus(WizardControl::ReviewAttachments);
                 *step = WizardStep::Review;
                 entered_move_review = moving;

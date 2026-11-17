@@ -3,6 +3,7 @@ use super::*;
 impl Controller {
     pub(super) async fn checkpoint_session_controlled_with_manager(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -10,7 +11,7 @@ impl Controller {
         let previous = self.state.sessions.get(session_id).cloned();
         let operation_id = new_command_id("checkpoint-operation")?;
         let result = self
-            .checkpoint_session_owned(session_id, executor, manager, &operation_id)
+            .checkpoint_session_owned(admission, session_id, executor, manager, &operation_id)
             .await;
         if let Err(error) = &result
             && let Some(record) = self.state.sessions.get_mut(session_id)
@@ -37,6 +38,7 @@ impl Controller {
 
     async fn checkpoint_session_owned(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -67,6 +69,7 @@ impl Controller {
 
         match self
             .checkpoint_session_latched_for_operation(
+                admission,
                 session_id,
                 executor,
                 manager,
@@ -92,7 +95,7 @@ impl Controller {
                     let record = self.state.sessions.get_mut(session_id).unwrap();
                     record.state = SessionState::Running;
                     record.native_session_id = Some(artifact.native_session_id.clone());
-                    record.checkpoint = Some(artifact.metadata.clone());
+                    record.checkpoint = Some(Box::new(artifact.metadata.clone()));
                     record.updated_at = now();
                     record.last_error = None;
                     record.last_checkpoint_error = None;
@@ -116,7 +119,7 @@ impl Controller {
                     persist_ms = persist_started.elapsed().as_millis() as u64,
                     "checkpoint metadata persisted"
                 );
-                prune_replaced_checkpoint(previous.checkpoint.as_ref(), &artifact.metadata);
+                prune_replaced_checkpoint(previous.checkpoint.as_deref(), &artifact.metadata);
                 release_projection_behind_checkpoint(session_id, &artifact.metadata);
                 if let Err(error) = latched.complete().await {
                     // Only journal retention is at stake. A barrier that is
@@ -157,16 +160,18 @@ impl Controller {
     /// allowing the relay to garbage-collect through its event frontier.
     pub async fn create_recovery_checkpoint_managed_controlled(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         manager: &SessionManagerControl,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<CheckpointArtifact> {
-        self.create_recovery_checkpoint_with_manager(session_id, Some(manager), executor)
+        self.create_recovery_checkpoint_with_manager(admission, session_id, Some(manager), executor)
             .await
     }
 
     pub(super) async fn create_recovery_checkpoint_with_manager(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         manager: Option<&SessionManagerControl>,
         executor: &(impl CommandExecutor + Sync),
@@ -183,6 +188,7 @@ impl Controller {
         let previous_checkpoint = observed.checkpoint.clone();
         let latched = self
             .checkpoint_session_latched_with_recovery_stage(
+                admission,
                 session_id,
                 executor,
                 manager,
@@ -218,7 +224,7 @@ impl Controller {
         let installed = crate::database::record_recovery_success_if_current(
             session_id,
             expected_target,
-            previous_checkpoint.as_ref(),
+            previous_checkpoint.as_deref(),
             &artifact.native_session_id,
             &artifact.metadata,
         );
@@ -255,7 +261,7 @@ impl Controller {
                 "recovery checkpoint was saved, but the relay could not be told to release the history it covers: {error:#}"
             );
         }
-        prune_replaced_checkpoint(previous_checkpoint.as_ref(), &artifact.metadata);
+        prune_replaced_checkpoint(previous_checkpoint.as_deref(), &artifact.metadata);
         release_projection_behind_checkpoint(session_id, &artifact.metadata);
         Ok(artifact)
     }

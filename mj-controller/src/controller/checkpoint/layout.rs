@@ -6,7 +6,7 @@ fn is_plain_project_directory(session: &mj_core::state::SessionRecord) -> bool {
     session
         .project
         .as_ref()
-        .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+        .is_some_and(|project| project.primary_is_plain_directory())
 }
 
 impl Controller {
@@ -115,14 +115,17 @@ impl Controller {
                 );
                 // A checkout without later history has no origin remote, so
                 // the archive records the one the session was created from.
+                // A sub-agent works in its parent's workspace, so the
+                // workspace owner's record says how that workspace began.
+                let owner = self.state.workspace_owner(session_id)?;
                 let cutoff_origin = |repository: &mj_core::config::ProjectRepository| {
-                    session
+                    owner
                         .checkout
                         .as_ref()
                         .filter(|checkout| {
                             checkout.no_later_history && checkout.repository_id == repository.id
                         })
-                        .and(session.project.as_ref())
+                        .and(owner.project.as_ref())
                         .and_then(|project| project.network_sources.get(&repository.id))
                         .map(|source| source.fetch_url.clone())
                 };

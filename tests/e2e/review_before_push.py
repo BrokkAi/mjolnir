@@ -26,6 +26,9 @@ def main():
     parser.add_argument("--model", default="gpt-6.1-sol")
     parser.add_argument("--child-model",
                         help="model for straightforward sub-agents; defaults to --model")
+    parser.add_argument("--brief-writer", action="store_true",
+                        help="test relation briefs, child cleanup and usage instead of pushing")
+    parser.add_argument("--effort", default="high", help="reviewer and writer effort")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("a named isolated instance is required")
@@ -56,6 +59,10 @@ def main():
                    capture_output=True, text=True)
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(seed)], check=True)
     (seed / "README.md").write_text("Review before push regression fixture.\n")
+    if args.brief_writer:
+        (seed / "greeting.py").write_text('def greeting(name):\n    return f"Hello, {name}"\n')
+        (seed / "app.py").write_text('from greeting import greeting\n\ndef welcome():\n    return greeting("world")\n')
+        git(seed, "add", "greeting.py", "app.py")
     git(seed, "add", "README.md")
     git(seed, "-c", "user.name=Mj test", "-c", "user.email=mj-test@example.invalid",
         "commit", "-qm", "Fixture on main")
@@ -88,31 +95,28 @@ pull_policy = "never"
 [targets.docker]
 kind = "docker"
 pull_policy = "never"
-[continuation]
-enabled = true
 [subagents]
 max_concurrent = 2
 [subagents.straightforward]
 model = {json.dumps(args.child_model or args.model)}
-effort = "high"
+effort = {json.dumps(args.effort)}
 [subagents.subtle]
 model = {json.dumps(args.model)}
-effort = "medium"
+effort = {json.dumps(args.effort if args.brief_writer else "medium")}
 [review]
-trigger = "push"
-profile = "live"
+{('brief_writer = { enabled = true, model = ' + json.dumps(args.model) + ', effort = ' + json.dumps(args.effort) + ' }') if args.brief_writer else ''}
+[[review.reviewers]]
+model = {json.dumps(args.model)}
+effort = {json.dumps(args.effort)}
 ''')
     isolated_config = (config / "config.toml").read_text()
     assert str(source_home) not in isolated_config, "isolated config contains the real harness home"
     assert str(profile) in isolated_config, "isolated config does not point at the copied profile"
 
-    env = os.environ.copy()
+    # Session-owned instance paths must never leak into a live regression.
+    env = {key: os.environ[key] for key in ("HOME", "PATH") if key in os.environ}
     env.update(MJ_CONFIG_DIR=str(config), MJ_DATA_DIR=str(data), MJ_INSTANCE=args.instance,
                MJ_WORKER_BINARY=str(args.worker.resolve()), MJOLNIR_NO_UPDATE_CHECK="1", HOME=str(home))
-    for key in ("MJ_SESSION_ID", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "OPENAI_API_KEY",
-                "CODEX_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-                "CLAUDE_CODE_OAUTH_TOKEN", "MJ_DAEMON_OWNER_PID", "MJ_DAEMON_EXIT_WHEN_IDLE"):
-        env.pop(key, None)
     env["CODEX_HOME" if args.harness == "codex" else "CLAUDE_CONFIG_DIR"] = str(profile)
     mj = [str(args.mj.resolve()), "--instance", args.instance]
 
@@ -231,17 +235,50 @@ profile = "live"
 
     def relations():
         with sqlite3.connect(f"file:{data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
-            return [json.loads(row[0]) for row in database.execute(
-                "SELECT record_json FROM subagent_sessions WHERE parent_session_id=? ORDER BY child_session_id",
-                (session,))]
+            query = ("SELECT record_json FROM subagent_sessions WHERE parent_session_id=?")
+            parameters = (session,)
+            if args.brief_writer:
+                query += (" UNION ALL SELECT record_json FROM e2e_review_children "
+                          "WHERE parent_session_id=? AND child_session_id NOT IN "
+                          "(SELECT child_session_id FROM subagent_sessions)")
+                parameters += (session,)
+            return [json.loads(row[0]) for row in database.execute(query, parameters)]
 
     start = time.monotonic()
     try:
         cli("workspaces", "create", "Review before push regression")
+        if args.brief_writer:
+            # Test-only observation in this isolated database. Capture the exact
+            # stored launch atomically with Destroy, including children too fast
+            # for polling. This neither delays nor prevents normal child cleanup.
+            with sqlite3.connect(data / "mj.sqlite3") as database:
+                database.executescript("""
+                    CREATE TABLE e2e_review_children (
+                        child_session_id TEXT PRIMARY KEY,
+                        parent_session_id TEXT NOT NULL,
+                        record_json TEXT NOT NULL
+                    );
+                    CREATE TRIGGER e2e_capture_review_child
+                    BEFORE DELETE ON subagent_sessions BEGIN
+                        INSERT OR REPLACE INTO e2e_review_children
+                        VALUES (OLD.child_session_id, OLD.parent_session_id, OLD.record_json);
+                    END;
+                """)
         prompt = '''This is an isolated live regression. Append exactly the line `reviewed change` to README.md and commit it on the current branch. Follow Mjolnir's instructions about review before pushing. If a review finds issues, fix them, commit the fixes, and call request_review again; continue until you receive a clean verdict. Then push the branch to origin. When the push has succeeded, reply DONE. Do not edit any other files.'''
+        if args.brief_writer:
+            prompt = prompt.replace("Append exactly the line `reviewed change` to README.md",
+                                    "Change greeting.py to return `f\"Welcome, {name}\"` instead of "
+                                    "`f\"Hello, {name}\"`. Also append exactly the line `reviewed change` to README.md")
+            prompt = prompt.replace("Then push the branch to origin. When the push has succeeded, reply DONE.",
+                                    "When the clean review arrives, reply DONE. Do not push.")
+            prompt = prompt.replace("Do not edit any other files.",
+                                    "Do not edit files other than greeting.py and README.md.")
+        prompt += (" If Git reports a read-only filesystem or sandbox denial, request "
+                   "permission to run that Git command outside the sandbox and continue. "
+                   "The commit and push to this local fixture origin are authorized.")
         created = json.loads(cli("new", "--workspace", "Review before push regression",
                                  "--target", "localhost", "--project-directory", str(project),
-                                 "--model", args.model, "--effort", "medium", "--subagents", "mjolnir",
+                                 "--model", args.model, "--effort", args.effort if args.brief_writer else "medium", "--subagents", "mjolnir",
                                  "--review", "push", "--no-project-memory", "--json", prompt))
         session = created["session_id"]
         print("session:", session, flush=True)
@@ -292,8 +329,9 @@ profile = "live"
                 hook_exists = (hook / "pre-push").is_file()
                 conditions.update(tool_called=tool_called, reviewed_ref=recorded.returncode == 0,
                                   remote_has_tree=tree in remote_trees, hook_exists=hook_exists,
-                                  idle=idle(session), checkout=str(checkout), tree=tree)
-                if (tool_called and recorded.returncode == 0 and tree in remote_trees and hook_exists and
+                                  idle=bool(idle(session)), checkout=str(checkout), tree=tree)
+                (root / "conditions.json").write_text(json.dumps(conditions, indent=2) + "\n")
+                if (tool_called and recorded.returncode == 0 and (args.brief_writer or tree in remote_trees) and hook_exists and
                         "Review clean for commits" in delivered_messages() and idle(session)):
                     return {"checkout": checkout, "tree": tree,
                             "clean": clean, "hook": hook / "pre-push"}
@@ -317,41 +355,123 @@ profile = "live"
         assert "# mj-review-gate" in state["hook"].read_text(), \
             f"pre-push hook lacks # mj-review-gate: {state['hook']}"
         branch = git(state["checkout"], "symbolic-ref", "--short", "HEAD").strip()
-        assert git(bare, "rev-parse", f"refs/heads/{branch}^{{tree}}").strip() == state["tree"], \
-            f"agent push did not publish the reviewed tree to origin's {branch}"
+        if not args.brief_writer:
+            assert git(bare, "rev-parse", f"refs/heads/{branch}^{{tree}}").strip() == state["tree"], \
+                f"agent push did not publish the reviewed tree to origin's {branch}"
+
+        brief_summary = None
+        if args.brief_writer:
+            # Observe host cleanup before finally can destroy anything itself.
+            def review_children_destroyed():
+                children = relations()
+                if len(children) < 2:
+                    return None
+                with sqlite3.connect(f"file:{data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                    for child in children:
+                        if database.execute("SELECT 1 FROM sessions WHERE session_id=?",
+                                            (child["child_session_id"],)).fetchone():
+                            return None
+                return children
+
+            children = eventually("writer and reviewer destroyed by review completion",
+                                  review_children_destroyed)
+            writers = [child for child in children
+                       if child.get("reviewer_launch", {}).get("role") == "brief_writer"]
+            assert writers, children
+            reviewers = [child for child in children
+                         if child.get("reviewer_launch", {}).get("role", "reviewer") == "reviewer"]
+            assert reviewers, children
+            checkout = state["checkout"]
+            assert git(checkout, "show", "HEAD:greeting.py") == (
+                'def greeting(name):\n    return f"Welcome, {name}"\n'), "committed greeting change was omitted"
+            greeting_diff = git(checkout, "diff", "origin/rbp-test...HEAD", "--", "greeting.py")
+            assert '-    return f"Hello, {name}"' in greeting_diff, greeting_diff
+            assert '+    return f"Welcome, {name}"' in greeting_diff, greeting_diff
+            assert 'return greeting("world")' in git(checkout, "show", "HEAD:app.py")
+            usage = json.loads(cli("usage", "--parent", session, "--json"))
+            (root / "usage-tree.json").write_text(json.dumps(usage, indent=2) + "\n")
+            checked_reviewers = set()
+            brief_summary = []
+            for writer in writers:
+                writer_id = writer["child_session_id"]
+                with sqlite3.connect(f"file:{data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                    handback = database.execute(
+                        "SELECT handback_command_id, handback_message FROM subagent_handbacks "
+                        "WHERE child_session_id=?", (writer_id,)).fetchone()
+                assert handback and handback[0] and handback[1].strip(), handback
+                brief = handback[1].strip()
+                anchors = re.findall(r"[\w./-]+\.\w+:\d+", brief)
+                assert anchors, f"writer handback lacks file:line items: {brief}"
+                commands = re.findall(r"Run this exact command: `([^`]+)`", writer["initial_prompt"])
+                assert commands, writer["initial_prompt"]
+                matched = []
+                for reviewer in reviewers:
+                    prompt = reviewer["initial_prompt"]
+                    # The captured tree range identifies the round even when a
+                    # finding causes another writer/reviewer pair to be launched.
+                    if re.findall(r"Run this exact command: `([^`]+)`", prompt) != commands:
+                        continue
+                    heading = "## Relations computed from the repository"
+                    assert heading in prompt, prompt
+                    section = prompt.split(heading, 1)[1]
+                    if brief not in section:
+                        continue
+                    assert re.search(r"[\w./-]+\.\w+:\d+", section), section
+                    reviewer_id = reviewer["child_session_id"]
+                    checked_reviewers.add(reviewer_id)
+                    matched.append(reviewer_id)
+                    (root / f"reviewer-{reviewer_id}-prompt.txt").write_text(prompt)
+                assert matched, f"no reviewer received writer {writer_id}'s brief for {commands}"
+                (root / f"writer-{writer_id}-handback.txt").write_text(brief)
+                writer_usage = next(row for row in usage["sessions"] if row["session_id"] == writer_id)
+                assert writer_usage["parent_session_id"] == session, writer_usage
+                assert not writer_usage["operational_session_present"], writer_usage
+                assert writer_usage["coverage"]["full_turn_reports"] >= 1, writer_usage
+                assert any(counter["tokens"] > 0 for counter in writer_usage["totals"].values()), writer_usage
+                brief_summary.append({"writer": writer_id, "reviewers": matched,
+                                      "anchors": anchors, "writer_usage": writer_usage})
+            assert checked_reviewers == {child["child_session_id"] for child in reviewers}, children
 
         checkout = state["checkout"]
-        (checkout / "gate-regression.txt").write_text("unreviewed gate probe\n")
-        git(checkout, "add", "gate-regression.txt")
-        git(checkout, "-c", "user.name=Mj test", "-c", "user.email=mj-test@example.invalid",
-            "commit", "-qm", "Unreviewed gate probe")
-        gate_started = time.monotonic()
-        gated = subprocess.run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=checkout,
-                               env={**env, "MJ_REVIEW_GATE": "1"}, text=True, capture_output=True)
-        gate_refusal_seconds = round(time.monotonic() - gate_started, 2)
-        gate_output = gated.stdout + gated.stderr
-        assert gated.returncode != 0, f"gated push unexpectedly succeeded:\n{gate_output}"
-        assert "has not been reviewed" in gate_output, \
-            f"gated push failed without expected refusal text:\n{gate_output}"
-        ungated_started = time.monotonic()
-        ungated = subprocess.run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=checkout,
-                                 env={key: value for key, value in env.items() if key != "MJ_REVIEW_GATE"},
-                                 text=True, capture_output=True)
-        ungated_push_seconds = round(time.monotonic() - ungated_started, 2)
-        assert ungated.returncode == 0, f"hook was not inert without MJ_REVIEW_GATE=1:\n{ungated.stdout}{ungated.stderr}"
-
+        gate_refusal_seconds = None
+        ungated_push_seconds = None
+        if not args.brief_writer:
+            (checkout / "gate-regression.txt").write_text("unreviewed gate probe\n")
+            git(checkout, "add", "gate-regression.txt")
+            git(checkout, "-c", "user.name=Mj test", "-c", "user.email=mj-test@example.invalid",
+                "commit", "-qm", "Unreviewed gate probe")
+            gate_started = time.monotonic()
+            gated = subprocess.run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=checkout,
+                                   env={**env, "MJ_REVIEW_GATE": "1"}, text=True, capture_output=True)
+            gate_refusal_seconds = round(time.monotonic() - gate_started, 2)
+            gate_output = gated.stdout + gated.stderr
+            assert gated.returncode != 0, f"gated push unexpectedly succeeded:\n{gate_output}"
+            assert "has not been reviewed" in gate_output, \
+                f"gated push failed without expected refusal text:\n{gate_output}"
+            ungated_started = time.monotonic()
+            ungated = subprocess.run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=checkout,
+                                     env={key: value for key, value in env.items() if key != "MJ_REVIEW_GATE"},
+                                     text=True, capture_output=True)
+            ungated_push_seconds = round(time.monotonic() - ungated_started, 2)
+            assert ungated.returncode == 0, f"hook was not inert without MJ_REVIEW_GATE=1:\n{ungated.stdout}{ungated.stderr}"
         rounds = len(seen_rounds)
         final_tree = git(checkout, "rev-parse", "HEAD^{tree}").strip()
         summary = {"session_id": session, "harness": args.harness, "review_rounds": rounds,
+                   "brief_writer": brief_summary,
                    "verdict_kinds": verdict_kinds,
-                   "tree": state["tree"], "remote_tree_after_agent_push": state["tree"],
+                   "tree": state["tree"],
+                   "remote_tree_after_agent_push": None if args.brief_writer else state["tree"],
                    "tree_after_ungated_push": final_tree,
                    "checkout": str(checkout), "elapsed_seconds": round(time.monotonic() - start, 2),
                    "gate_refusal_seconds": gate_refusal_seconds,
                    "ungated_push_seconds": ungated_push_seconds}
         (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         print(json.dumps(summary, indent=2), flush=True)
-        print("PASS: clean review recorded, agent pushed, gated push refused, ungated push succeeded", flush=True)
+        if args.brief_writer:
+            print("PASS: reviewer received anchored brief; writer handback retained; "
+                  "writer and reviewer destroyed; writer usage retained under requester", flush=True)
+        else:
+            print("PASS: clean review recorded, agent pushed, gated push refused, ungated push succeeded", flush=True)
     finally:
         try:
             if session:
@@ -360,6 +480,9 @@ profile = "live"
                 cli("suspend", "--session", session, "--acknowledge-unpublished-work", check=False)
                 child_ids = [relation["child_session_id"] for relation in relations()]
                 for child in child_ids:
+                    with sqlite3.connect(f"file:{data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                        if not database.execute("SELECT 1 FROM sessions WHERE session_id=?", (child,)).fetchone():
+                            continue
                     cli("wait", "--session", child, "--timeout", "90", "--json", check=False)
                     cli("destroy", "--session", child, check=False)
                 cli("destroy", "--session", session, check=False)

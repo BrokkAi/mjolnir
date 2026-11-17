@@ -493,6 +493,7 @@ mod tests {
                 command: None,
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -622,8 +623,18 @@ mod tests {
         // when the worker's away resolution arrives.
         page_for(&path, "pre-away", vec![requested()], false).unwrap();
         let mut connection = open(&path).unwrap();
-        assert!(super::super::operator_away::set_with(&mut connection, true).unwrap());
-        assert!(!super::super::operator_away::set_with(&mut connection, true).unwrap());
+        assert!(
+            super::super::operator_away::set_with(&mut connection, true, std::time::Duration::ZERO)
+                .unwrap()
+        );
+        assert!(
+            !super::super::operator_away::set_with(
+                &mut connection,
+                true,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         assert_eq!(
             load_state_from(&path).unwrap().operator_presence,
             OperatorPresence {
@@ -664,10 +675,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(current.pending_elicitations.is_empty());
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of(current.transcript.iter().map(AsRef::as_ref));
         let transcript = current
             .transcript
             .iter()
-            .map(|item| mj_transcript::transcript::transcript_item_text(item))
+            .map(|item| {
+                mj_transcript::transcript::transcript_item_text_with_outputs(item, &outputs)
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(transcript.contains("Not shown because you were away: Which architecture?"));
@@ -678,9 +693,23 @@ mod tests {
         connection
             .execute("DELETE FROM api_events WHERE session_id='late'", [])
             .unwrap();
-        assert!(super::super::operator_away::set_with(&mut connection, false).unwrap());
+        assert!(
+            super::super::operator_away::set_with(
+                &mut connection,
+                false,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         // Repeating the same write and rebuilding a projection emit nothing twice.
-        assert!(!super::super::operator_away::set_with(&mut connection, false).unwrap());
+        assert!(
+            !super::super::operator_away::set_with(
+                &mut connection,
+                false,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         assert_eq!(
             load_state_from(&path).unwrap().operator_presence,
             OperatorPresence {
@@ -739,8 +768,82 @@ mod tests {
         assert_eq!(back_count, 3);
     }
 
+    /// A child's question reaches its parent under the name the session list
+    /// shows for the child: a typed name first, then the harness's, then the
+    /// title it was created with, cut to one bounded line.
     #[test]
-    fn child_question_outbox_survives_cancellation_replay_and_reused_ids() {
+    fn a_child_question_names_the_child_as_the_session_list_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("question-names.sqlite");
+        let long_title = format!(
+            "Fix the parser\n\n{}",
+            "The prompt goes on for paragraphs. ".repeat(20)
+        );
+        let mut parent = super::super::tests::session("parent", "project-1");
+        parent.state = SessionState::Running;
+        save_session_to(&path, &parent).unwrap();
+        let cases = [
+            ("created-with", None, None),
+            ("harness", None, Some("Harness name")),
+            ("typed", Some("Typed name"), Some("Harness name")),
+        ];
+        let question = ElicitationRequest::from_acp_params("elicitation-1", serde_json::json!({
+            "mode":"form", "sessionId":"child", "message":"Which architecture?",
+            "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "title":"Architecture", "enum":["Thin callers", "Thick callers"]}}}
+        })).unwrap();
+        for (id, title_override, acp_title) in cases {
+            let mut child = super::super::tests::session(id, "project-1");
+            child.state = SessionState::Running;
+            child.title = long_title.clone();
+            child.session_title_override = title_override.map(str::to_owned);
+            child.acp_session_title = acp_title.map(str::to_owned);
+            save_session_to(&path, &child).unwrap();
+            open(&path).unwrap().execute(
+                "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,'parent',?1,'{}')",
+                [id],
+            ).unwrap();
+            page_for(
+                &path,
+                id,
+                vec![RelayObservation::ElicitationRequested {
+                    request: question.clone(),
+                }],
+                false,
+            )
+            .unwrap();
+        }
+        let connection = open(&path).unwrap();
+        let sender_title = |child: &str| {
+            let json: String = connection
+                .query_row(
+                    "SELECT event_json FROM mailbox_outbox WHERE event_key LIKE ?1",
+                    [format!("subagent-question-{child}-%")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session { id, title },
+                ..
+            } = serde_json::from_str::<mj_core::mailbox::MailboxEvent>(&json)
+                .unwrap()
+                .body
+            else {
+                panic!("session message expected")
+            };
+            assert_eq!(id, child);
+            title
+        };
+        let created_with = sender_title("created-with");
+        assert!(!created_with.contains('\n'), "{created_with:?}");
+        assert!(created_with.starts_with("Fix the parser The prompt goes on"));
+        assert!(created_with.ends_with('…'));
+        assert!(created_with.chars().count() <= mj_core::state::MESSAGE_NAME_CHARS);
+        assert_eq!(sender_title("harness"), "Harness name");
+        assert_eq!(sender_title("typed"), "Typed name");
+    }
+
+    #[test]
+    fn child_question_outbox_survives_cancellation_replay_and_reused_ids_and_skips_approvals() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("questions.sqlite");
         for id in ["session-1", "parent"] {
@@ -752,29 +855,33 @@ mod tests {
             "mode":"form", "sessionId":"session-1", "message":"Which architecture?",
             "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "title":"Architecture", "enum":["Thin callers", "Thick callers"]}}}
         })).unwrap();
+        let mut reused = question.clone();
+        reused.message = "Which database?".into();
         let mut permission = question.clone();
+        permission.id = "tool-permission-1".into();
         permission.message = "May I run this command?".into();
         permission.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        let mut secret = question.clone();
+        secret.message = "Paste the token".into();
+        secret.fields[0].secret = true;
+        let mut plan = question.clone();
+        plan.id = format!("{}1", mj_core::acp::PLAN_REVIEW_ID_PREFIX);
+        plan.message = "Approve this plan?".into();
         let observations = || {
-            vec![
-                RelayObservation::ElicitationRequested {
-                    request: question.clone(),
-                },
-                RelayObservation::ElicitationResolved {
-                    elicitation_id: question.id.clone(),
+            let mut observations = Vec::new();
+            // A restarted harness may reuse the same question id. A parent
+            // cannot grant approvals, so they stay with the person.
+            for request in [&question, &reused, &permission, &secret, &plan] {
+                observations.push(RelayObservation::ElicitationRequested {
+                    request: request.clone(),
+                });
+                observations.push(RelayObservation::ElicitationResolved {
+                    elicitation_id: request.id.clone(),
                     action: "cancel".into(),
                     reply: None,
-                },
-                // A restarted harness may reuse the same question id.
-                RelayObservation::ElicitationRequested {
-                    request: permission.clone(),
-                },
-                RelayObservation::ElicitationResolved {
-                    elicitation_id: permission.id.clone(),
-                    action: "cancel".into(),
-                    reply: None,
-                },
-            ]
+                });
+            }
+            observations
         };
         // A top-level form remains local.
         page(&path, observations(), false).unwrap();
@@ -799,7 +906,7 @@ mod tests {
                 .unwrap()
                 .events
                 .len(),
-            4,
+            10,
             "outbox failure rolls back its API events too"
         );
         connection
@@ -812,7 +919,7 @@ mod tests {
             .unwrap();
         assert!(
             current.pending_elicitations.is_empty(),
-            "both forms resolved in this same projection page"
+            "every form resolved in this same projection page"
         );
         apply_projection_event_to(
             &path,
@@ -865,10 +972,13 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("Which architecture?"))
         );
+        assert!(texts.iter().any(|text| text.contains("Which database?")));
         assert!(
-            texts
+            !texts
                 .iter()
-                .any(|text| text.contains("May I run this command?"))
+                .any(|text| text.contains("May I run this command?")
+                    || text.contains("Paste the token")
+                    || text.contains("Approve this plan?"))
         );
         assert_eq!(
             super::super::subagent_questions::reconcile_pending_subagent_questions_with(
@@ -889,7 +999,7 @@ mod tests {
         )
         .unwrap();
         let connection = open(&path).unwrap();
-        assert_eq!(connection.query_row("SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='input_required'", [], |r| r.get::<_,u64>(0)).unwrap(), 4);
+        assert_eq!(connection.query_row("SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='input_required'", [], |r| r.get::<_,u64>(0)).unwrap(), 10);
         assert_eq!(
             connection
                 .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| r
@@ -931,6 +1041,53 @@ mod tests {
                 .unwrap(),
             3
         );
+    }
+
+    // Hard-won: #1345: a stopped child's forwarded question invited a
+    // send_message answer the child could never receive.
+    #[test]
+    fn a_child_that_cannot_receive_work_gets_no_forwarded_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-question.sqlite");
+        let mut parent = super::super::tests::session("parent", "project-1");
+        parent.state = SessionState::Running;
+        save_session_to(&path, &parent).unwrap();
+        let mut child = super::super::tests::session("session-1", "project-1");
+        child.state = SessionState::Stopped;
+        save_session_to(&path, &child).unwrap();
+        open(&path).unwrap().execute(
+            "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES ('session-1','parent','session-1','{}')",
+            [],
+        ).unwrap();
+        let question = ElicitationRequest::from_acp_params("elicitation-1", serde_json::json!({
+            "mode":"form", "sessionId":"session-1", "message":"Which architecture?",
+            "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "enum":["Thin", "Thick"]}}}
+        })).unwrap();
+        page(
+            &path,
+            vec![RelayObservation::ElicitationRequested { request: question }],
+            false,
+        )
+        .unwrap();
+        let count = |connection: &Connection| {
+            connection
+                .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| {
+                    r.get::<_, u64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(open(&path).map(|c| count(&c)).unwrap(), 0);
+        // The question stays pending for the stopped child, but reconciliation
+        // must not forward it either.
+        let mut connection = open(&path).unwrap();
+        assert_eq!(
+            super::super::subagent_questions::reconcile_pending_subagent_questions_with(
+                &mut connection
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(count(&connection), 0);
     }
 
     #[test]
@@ -1096,6 +1253,7 @@ mod tests {
             unreachable!()
         };
         *outcome = RelayCommandOutcome::Prompt {
+            work_facts: None,
             diagnostic: None,
             stop_reason: "provider_error".into(),
             usage: None,
@@ -1380,6 +1538,7 @@ mod tests {
                     command_id: "prompt-1".into(),
                     command: Some(RelayCommandKind::Prompt),
                     outcome: RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "Cancelled".into(),
                         usage: None,
                         diagnostic: None,
@@ -1393,6 +1552,7 @@ mod tests {
                     command_id: "prompt-1".into(),
                     command: Some(RelayCommandKind::Prompt),
                     outcome: RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "QuotaLimit".into(),
                         usage: None,
                         diagnostic: None,
@@ -1546,7 +1706,7 @@ mod tests {
         super::super::schema::restore_github_v84_schema(&connection);
         super::super::schema::restore_pre101_subagent_preference(&connection);
         super::super::schema::restore_review_state_schema(&connection, 56);
-        connection.execute_batch("DROP TABLE checkpoint_operations; DELETE FROM schema_migrations WHERE version >= 57; UPDATE schema_compatibility SET minimum_compatible_version = 56; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 56;").unwrap();
+        connection.execute_batch("DROP TABLE checkpoint_operations; DELETE FROM schema_migrations WHERE version >= 57; UPDATE schema_compatibility SET minimum_compatible_version = 56; DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 56;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
         let page = load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100).unwrap();
@@ -1583,12 +1743,12 @@ mod tests {
             tx.commit().unwrap();
         }
         record.state = SessionState::Running;
-        record.checkpoint = Some(CheckpointMetadata {
+        record.checkpoint = Some(Box::new(CheckpointMetadata {
             archive_path: dir.path().join("verified.tar"),
             sha256: "a".repeat(64),
             created_at: "2026-09-27T12:00:00Z".into(),
             event_frontier: 0,
-        });
+        }));
         {
             let tx = connection.transaction().unwrap();
             assert!(save_requested_checkpoint_with(&tx, &record, "stale-owner").is_err());
@@ -1652,12 +1812,12 @@ mod tests {
             let path = dir.path().join("events.sqlite");
             let mut record = super::super::tests::session("session-1", "project-1");
             record.state = SessionState::Running;
-            record.checkpoint = Some(CheckpointMetadata {
+            record.checkpoint = Some(Box::new(CheckpointMetadata {
                 archive_path: dir.path().join("previous.tar"),
                 sha256: "a".repeat(64),
                 created_at: "2026-09-27T12:00:00Z".into(),
                 event_frontier: 0,
-            });
+            }));
             save_session_to(&path, &record).unwrap();
             let previous = record.checkpoint.clone();
             let previous_warning = record.last_checkpoint_error.clone();

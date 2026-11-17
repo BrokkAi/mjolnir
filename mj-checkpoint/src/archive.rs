@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -27,8 +27,6 @@ use mj_core::config::HarnessKind;
 const MANIFEST_PATH: &str = "manifest.json";
 const CANONICAL_SESSION_PATH: &str = "canonical/session.json";
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_PAYLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 /// Compressible payloads larger than this are split into parts of this size.
 /// DEFLATE is sequential inside one stream, so parts are what let both the
 /// writer and the reader use every core on a large payload.
@@ -43,6 +41,20 @@ const ZSTD_LEVEL: i64 = 1;
 pub struct RepositorySnapshot {
     pub metadata: RepositoryMetadata,
     pub committed_bundle: Vec<u8>,
+    pub staged_patch: Vec<u8>,
+    pub unstaged_patch: Vec<u8>,
+    pub untracked_tar: Vec<u8>,
+    /// Present exactly when `metadata.git_operation` is.
+    pub operation_payloads: Option<GitOperationPayloads>,
+    /// Linked worktrees inside the checkout, parents before children.
+    pub linked_worktrees: Vec<LinkedWorktreeSnapshot>,
+}
+
+/// What a linked worktree holds beyond the commits in the repository's bundle:
+/// the same dirty state the checkout itself captures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedWorktreeSnapshot {
+    pub metadata: mj_core::archive::LinkedWorktreeMetadata,
     pub staged_patch: Vec<u8>,
     pub unstaged_patch: Vec<u8>,
     pub untracked_tar: Vec<u8>,
@@ -266,6 +278,7 @@ impl CloseVerification {
 struct PendingPayload<'a> {
     descriptor: PayloadDescriptor,
     data: Cow<'a, [u8]>,
+    source: Option<&'a Path>,
 }
 
 /// Writes, fsyncs, atomically replaces, reopens, and verifies an archive.
@@ -344,7 +357,7 @@ fn write_archive_installed_view(
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create temporary archive in {}", parent.display()))?;
     restrict_archive_permissions(temporary.path())?;
-    write_zip(temporary.as_file_mut(), &manifest, &payloads)?;
+    write_zip(temporary.as_file_mut(), parent, &manifest, &payloads)?;
     temporary
         .as_file_mut()
         .sync_all()
@@ -380,6 +393,92 @@ pub fn read_archive_verified(path: &Path) -> Result<VerifiedArchive> {
     })
 }
 
+/// Retain control and repository state while native files remain in the ZIP.
+pub(crate) fn read_archive_for_restore(path: &Path) -> Result<VerifiedArchive> {
+    let contents = read_verified_zip(path, PayloadRetention::Restore)?;
+    Ok(VerifiedArchive {
+        manifest: contents.manifest,
+        payloads: contents.payloads,
+        archive_sha256: digest_reader(&mut File::open(path)?)?,
+    })
+}
+
+pub(crate) fn read_archive_repositories(path: &Path) -> Result<VerifiedArchive> {
+    let contents = read_verified_zip(path, PayloadRetention::Repositories)?;
+    Ok(VerifiedArchive {
+        manifest: contents.manifest,
+        payloads: contents.payloads,
+        archive_sha256: digest_reader(&mut File::open(path)?)?,
+    })
+}
+
+/// An open checkpoint directory shared by all streamed payload copies.
+/// Each copy checks the descriptor's whole size and digest as it writes.
+pub struct CheckpointPayloadReader {
+    archive: Archive,
+}
+
+impl CheckpointPayloadReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Self {
+            archive: open_archive(path)?,
+        })
+    }
+
+    pub fn copy_payload(
+        &mut self,
+        descriptor: &PayloadDescriptor,
+        writer: &mut dyn Write,
+    ) -> Result<()> {
+        copy_payload_from_archive(&mut self.archive, descriptor, writer)
+    }
+}
+
+fn copy_payload_from_archive(
+    archive: &mut Archive,
+    descriptor: &PayloadDescriptor,
+    writer: &mut dyn Write,
+) -> Result<()> {
+    struct Destination<'a> {
+        writer: &'a mut dyn Write,
+        digest: Sha256,
+        size: u64,
+    }
+    impl Write for Destination<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let count = self.writer.write(bytes)?;
+            self.digest.update(&bytes[..count]);
+            self.size += count as u64;
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.writer.flush()
+        }
+    }
+    let mut output = Destination {
+        writer,
+        digest: Sha256::new(),
+        size: 0,
+    };
+    if descriptor.parts.is_empty() {
+        std::io::copy(&mut archive.by_name(&descriptor.path)?, &mut output)?;
+    } else {
+        for part in &descriptor.parts {
+            std::io::copy(&mut archive.by_name(&part.path)?, &mut output)?;
+        }
+    }
+    ensure!(
+        output.size == descriptor.size,
+        "native payload size changed during restore"
+    );
+    ensure!(
+        lower_hex(output.digest.finalize()) == descriptor.sha256,
+        "SHA-256 mismatch for payload '{}'",
+        descriptor.path
+    );
+    Ok(())
+}
+
 /// Verify an archive without materializing repository or native payloads.
 /// Every ZIP entry is still fully read, hashed, and checked; the Git tar
 /// payloads (untracked files, and an unfinished operation's files) are parsed
@@ -389,12 +488,34 @@ pub fn read_archive_verified(path: &Path) -> Result<VerifiedArchive> {
 /// memory long enough to reassemble and parse the tar, because tar safety is
 /// a property of the whole payload rather than of one part.
 pub fn verify_archive_streaming(path: &Path) -> Result<VerifiedArchiveMetadata> {
-    let contents = read_verified_zip(path, PayloadRetention::CanonicalOnly)?;
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    verify_archive_streaming_cancellable(
+        path,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+}
+
+/// Cancellation is checked on every physical archive read, including parallel payload readers.
+pub fn verify_archive_streaming_cancellable(
+    path: &Path,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<VerifiedArchiveMetadata> {
+    let contents = read_verified_zip_cancellable(
+        path,
+        PayloadRetention::CanonicalOnly,
+        Some(cancelled.clone()),
+    )?;
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut reader = ArchiveFile {
+        len: file.metadata()?.len(),
+        file: std::sync::Arc::new(file),
+        position: 0,
+        start: 0,
+        cancelled: Some(cancelled),
+    };
     Ok(VerifiedArchiveMetadata {
         manifest: contents.manifest,
         canonical_session: contents.canonical_session,
-        archive_sha256: digest_reader(&mut file)?,
+        archive_sha256: digest_reader(&mut reader)?,
     })
 }
 
@@ -539,7 +660,7 @@ pub fn read_verified_checkpoint_payload(
     Ok(bytes)
 }
 
-fn read_checkpoint_manifest_from(archive: &mut zip::ZipArchive<File>) -> Result<ArchiveManifest> {
+fn read_checkpoint_manifest_from(archive: &mut Archive) -> Result<ArchiveManifest> {
     let manifest_bytes = {
         let mut entry = archive
             .by_name(MANIFEST_PATH)
@@ -559,7 +680,7 @@ fn read_checkpoint_manifest_from(archive: &mut zip::ZipArchive<File>) -> Result<
 }
 
 fn read_checkpoint_payload(
-    archive: &mut zip::ZipArchive<File>,
+    archive: &mut Archive,
     descriptor: &PayloadDescriptor,
 ) -> Result<Vec<u8>> {
     if descriptor.parts.is_empty() {
@@ -588,7 +709,7 @@ fn read_checkpoint_payload(
 }
 
 fn read_checkpoint_entry(
-    archive: &mut zip::ZipArchive<File>,
+    archive: &mut Archive,
     path: &str,
     expected_size: u64,
     expected_mode: u32,
@@ -664,12 +785,20 @@ fn prepare_archive_view_with_part_size(
         push_payload(
             &mut payloads,
             archive_path,
-            Cow::Borrowed(artifact.data.as_slice()),
+            Cow::Borrowed(match &artifact.data {
+                NativeArtifactData::Bytes(bytes) => bytes.as_slice(),
+                NativeArtifactData::File(_) => &[],
+            }),
             artifact.mode,
             PayloadRole::NativeArtifact {
                 relative_path: artifact.relative_path.clone(),
             },
         )?;
+        if let NativeArtifactData::File(source) = &artifact.data {
+            let payload = payloads.last_mut().expect("just inserted native payload");
+            payload.source = Some(source);
+            payload.descriptor.size = artifact.size()?;
+        }
     }
 
     let mut repository_ids = BTreeSet::new();
@@ -816,6 +945,105 @@ fn prepare_archive_view_with_part_size(
                 (Some(worktree_path), Some(state_path))
             }
         };
+        let mut linked_worktrees = Vec::with_capacity(repository.linked_worktrees.len());
+        let mut worktree_paths = BTreeSet::new();
+        for (index, worktree) in repository.linked_worktrees.iter().enumerate() {
+            validate_linked_worktree_metadata(&worktree.metadata)
+                .with_context(|| format!("repository '{}'", repository.metadata.id))?;
+            ensure!(
+                worktree_paths.insert(worktree.metadata.path.clone()),
+                "repository '{}' lists linked worktree '{}' twice",
+                repository.metadata.id,
+                worktree.metadata.path.display()
+            );
+            validate_untracked_tar(&worktree.untracked_tar)?;
+            let worktree_root = format!("{root}/worktrees/{index:08}");
+            let id = repository.metadata.id.clone();
+            let worktree_index = index as u32;
+            let staged_patch_path = format!("{worktree_root}/staged.patch");
+            let unstaged_patch_path = format!("{worktree_root}/unstaged.patch");
+            let untracked_tar_path = format!("{worktree_root}/untracked.tar");
+            for (path, data, role) in [
+                (
+                    &staged_patch_path,
+                    &worktree.staged_patch,
+                    PayloadRole::GitLinkedWorktreeStagedPatch {
+                        repository_id: id.clone(),
+                        worktree: worktree_index,
+                    },
+                ),
+                (
+                    &unstaged_patch_path,
+                    &worktree.unstaged_patch,
+                    PayloadRole::GitLinkedWorktreeUnstagedPatch {
+                        repository_id: id.clone(),
+                        worktree: worktree_index,
+                    },
+                ),
+                (
+                    &untracked_tar_path,
+                    &worktree.untracked_tar,
+                    PayloadRole::GitLinkedWorktreeUntrackedTar {
+                        repository_id: id.clone(),
+                        worktree: worktree_index,
+                    },
+                ),
+            ] {
+                push_payload(
+                    &mut payloads,
+                    path.clone(),
+                    Cow::Borrowed(data.as_slice()),
+                    0o600,
+                    role,
+                )?;
+            }
+            let (conflicted_worktree_tar_path, operation_state_tar_path) = match (
+                &worktree.metadata.git_operation,
+                &worktree.operation_payloads,
+            ) {
+                (None, None) => (None, None),
+                (Some(_), Some(operation)) => {
+                    validate_conflicted_worktree_tar(&operation.conflicted_worktree_tar)?;
+                    validate_operation_state_tar(&operation.state_tar)?;
+                    let worktree_path = format!("{worktree_root}/conflicted-worktree.tar");
+                    let state_path = format!("{worktree_root}/operation-state.tar");
+                    push_payload(
+                        &mut payloads,
+                        worktree_path.clone(),
+                        Cow::Borrowed(operation.conflicted_worktree_tar.as_slice()),
+                        0o600,
+                        PayloadRole::GitLinkedWorktreeConflictedWorktreeTar {
+                            repository_id: id.clone(),
+                            worktree: worktree_index,
+                        },
+                    )?;
+                    push_payload(
+                        &mut payloads,
+                        state_path.clone(),
+                        Cow::Borrowed(operation.state_tar.as_slice()),
+                        0o600,
+                        PayloadRole::GitLinkedWorktreeOperationStateTar {
+                            repository_id: id.clone(),
+                            worktree: worktree_index,
+                        },
+                    )?;
+                    (Some(worktree_path), Some(state_path))
+                }
+                _ => bail!(
+                    "repository '{}' linked worktree '{}' Git operation metadata and payloads disagree",
+                    repository.metadata.id,
+                    worktree.metadata.path.display()
+                ),
+            };
+            linked_worktrees.push(mj_core::archive::LinkedWorktreeManifest {
+                metadata: worktree.metadata.clone(),
+                staged_patch_path,
+                unstaged_patch_path,
+                untracked_tar_path,
+                conflicted_worktree_tar_path,
+                operation_state_tar_path,
+            });
+        }
         repositories.push(RepositoryManifest {
             metadata: repository.metadata.clone(),
             committed_bundle_path,
@@ -824,18 +1052,55 @@ fn prepare_archive_view_with_part_size(
             untracked_tar_path,
             conflicted_worktree_tar_path,
             operation_state_tar_path,
+            linked_worktrees,
         });
     }
 
-    payloads.par_iter_mut().for_each(|payload| {
-        payload.descriptor.sha256 = digest_bytes(&payload.data);
-        payload.descriptor.parts = plan_payload_parts(
-            &payload.descriptor.path,
-            &payload.data,
-            payload_compression(&payload.descriptor.role),
-            part_bytes,
-        );
-    });
+    payloads
+        .par_iter_mut()
+        .try_for_each(|payload| -> Result<()> {
+            if let Some(path) = payload.source {
+                let mut source = File::open(path)?;
+                let mut whole = Sha256::new();
+                let mut buffer = vec![0; part_bytes];
+                let mut index = 0;
+                let split = payload_compression(&payload.descriptor.role)
+                    != CompressionMethod::Stored
+                    && payload.descriptor.size > part_bytes as u64;
+                loop {
+                    let mut count = 0;
+                    while count < buffer.len() {
+                        let read = source.read(&mut buffer[count..])?;
+                        if read == 0 {
+                            break;
+                        }
+                        count += read;
+                    }
+                    if count == 0 {
+                        break;
+                    }
+                    whole.update(&buffer[..count]);
+                    if split {
+                        payload.descriptor.parts.push(PayloadPartDescriptor {
+                            path: payload_part_path(&payload.descriptor.path, index),
+                            sha256: digest_bytes(&buffer[..count]),
+                            size: count as u64,
+                        });
+                    }
+                    index += 1;
+                }
+                payload.descriptor.sha256 = lower_hex(whole.finalize());
+            } else {
+                payload.descriptor.sha256 = digest_bytes(&payload.data);
+                payload.descriptor.parts = plan_payload_parts(
+                    &payload.descriptor.path,
+                    &payload.data,
+                    payload_compression(&payload.descriptor.role),
+                    part_bytes,
+                );
+            }
+            Ok(())
+        })?;
 
     let mut paths = BTreeSet::new();
     for payload in &payloads {
@@ -850,7 +1115,9 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if carries_review_refs(&repositories) {
+        schema_version: if carries_linked_worktrees(&repositories) {
+            ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+        } else if carries_review_refs(&repositories) {
             ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
         } else if input
             .canonical_session
@@ -891,10 +1158,6 @@ fn push_payload<'a>(
     role: PayloadRole,
 ) -> Result<()> {
     validate_archive_relative_path(Path::new(&path))?;
-    ensure!(
-        data.len() as u64 <= MAX_PAYLOAD_BYTES,
-        "archive payload '{path}' is too large"
-    );
     let descriptor = PayloadDescriptor {
         path,
         sha256: String::new(),
@@ -903,7 +1166,11 @@ fn push_payload<'a>(
         role,
         parts: Vec::new(),
     };
-    payloads.push(PendingPayload { descriptor, data });
+    payloads.push(PendingPayload {
+        descriptor,
+        data,
+        source: None,
+    });
     Ok(())
 }
 
@@ -919,7 +1186,12 @@ fn payload_compression(role: &PayloadRole) -> CompressionMethod {
         | PayloadRole::GitUnstagedPatch { .. }
         | PayloadRole::GitUntrackedTar { .. }
         | PayloadRole::GitConflictedWorktreeTar { .. }
-        | PayloadRole::GitOperationStateTar { .. } => CompressionMethod::Zstd,
+        | PayloadRole::GitOperationStateTar { .. }
+        | PayloadRole::GitLinkedWorktreeStagedPatch { .. }
+        | PayloadRole::GitLinkedWorktreeUnstagedPatch { .. }
+        | PayloadRole::GitLinkedWorktreeUntrackedTar { .. }
+        | PayloadRole::GitLinkedWorktreeConflictedWorktreeTar { .. }
+        | PayloadRole::GitLinkedWorktreeOperationStateTar { .. } => CompressionMethod::Zstd,
     }
 }
 
@@ -927,18 +1199,24 @@ fn payload_compression(role: &PayloadRole) -> CompressionMethod {
 /// with the checker for each.
 fn tar_payload_validator(role: &PayloadRole) -> Option<fn(&mut dyn Read) -> Result<()>> {
     match role {
-        PayloadRole::GitUntrackedTar { .. } => Some(|reader| validate_untracked_tar_reader(reader)),
-        PayloadRole::GitConflictedWorktreeTar { .. } => {
+        PayloadRole::GitUntrackedTar { .. } | PayloadRole::GitLinkedWorktreeUntrackedTar { .. } => {
+            Some(|reader| validate_untracked_tar_reader(reader))
+        }
+        PayloadRole::GitConflictedWorktreeTar { .. }
+        | PayloadRole::GitLinkedWorktreeConflictedWorktreeTar { .. } => {
             Some(|reader| validate_conflicted_worktree_tar_reader(reader))
         }
-        PayloadRole::GitOperationStateTar { .. } => {
+        PayloadRole::GitOperationStateTar { .. }
+        | PayloadRole::GitLinkedWorktreeOperationStateTar { .. } => {
             Some(|reader| validate_operation_state_tar_reader(reader))
         }
         PayloadRole::CanonicalSession
         | PayloadRole::NativeArtifact { .. }
         | PayloadRole::GitBundle { .. }
         | PayloadRole::GitStagedPatch { .. }
-        | PayloadRole::GitUnstagedPatch { .. } => None,
+        | PayloadRole::GitUnstagedPatch { .. }
+        | PayloadRole::GitLinkedWorktreeStagedPatch { .. }
+        | PayloadRole::GitLinkedWorktreeUnstagedPatch { .. } => None,
     }
 }
 
@@ -968,17 +1246,9 @@ fn plan_payload_parts(
         .collect()
 }
 
-/// One ZIP entry to write: either a whole payload, one part of a sharded
-/// payload, or the manifest.
-struct PlannedEntry<'a> {
-    name: &'a str,
-    mode: u32,
-    method: CompressionMethod,
-    data: &'a [u8],
-}
-
 fn write_zip(
     output: &mut File,
+    spool_parent: &Path,
     manifest: &ArchiveManifest,
     payloads: &[PendingPayload<'_>],
 ) -> Result<()> {
@@ -988,102 +1258,217 @@ fn write_zip(
         manifest_bytes.len() as u64 <= MAX_MANIFEST_BYTES,
         "archive manifest is too large"
     );
-    let mut entries = vec![PlannedEntry {
-        name: MANIFEST_PATH,
-        mode: 0o600,
-        method: CompressionMethod::Deflated,
-        data: &manifest_bytes,
-    }];
+    let mut writer = zip::ZipWriter::new(output);
+    write_stream_entry(
+        &mut writer,
+        MANIFEST_PATH,
+        0o600,
+        CompressionMethod::Deflated,
+        manifest_bytes.len() as u64,
+        &mut Cursor::new(&manifest_bytes),
+        &digest_bytes(&manifest_bytes),
+    )?;
+    let spool_builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    let spool_builder = {
+        use std::os::unix::fs::PermissionsExt;
+        let mut builder = spool_builder;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+        builder
+    };
+    let spool = spool_builder
+        .tempdir_in(spool_parent)
+        .context("create ZIP compression spool")?;
+    let mut entries = Vec::new();
     for payload in payloads {
         let descriptor = &payload.descriptor;
-        let method = payload_compression(&descriptor.role);
         if descriptor.parts.is_empty() {
-            entries.push(PlannedEntry {
+            entries.push(StreamEntry {
+                payload,
                 name: &descriptor.path,
-                mode: descriptor.mode,
-                method,
-                data: &payload.data,
+                size: descriptor.size,
+                digest: &descriptor.sha256,
+                offset: 0,
             });
-            continue;
+        } else {
+            let mut offset = 0_u64;
+            for part in &descriptor.parts {
+                entries.push(StreamEntry {
+                    payload,
+                    name: &part.path,
+                    size: part.size,
+                    digest: &part.sha256,
+                    offset,
+                });
+                offset = offset
+                    .checked_add(part.size)
+                    .context("payload parts overflow")?;
+            }
+            ensure!(
+                offset == descriptor.size,
+                "payload parts do not cover its body"
+            );
         }
-        let mut offset = 0_usize;
-        for part in &descriptor.parts {
-            let end = usize::try_from(part.size)
-                .ok()
-                .and_then(|size| offset.checked_add(size))
-                .filter(|end| *end <= payload.data.len())
-                .ok_or_else(|| {
-                    anyhow!("payload '{}' parts do not fit its body", descriptor.path)
-                })?;
-            entries.push(PlannedEntry {
-                name: &part.path,
-                mode: descriptor.mode,
-                method,
-                data: &payload.data[offset..end],
-            });
-            offset = end;
-        }
-        ensure!(
-            offset == payload.data.len(),
-            "payload '{}' parts do not cover its body",
-            descriptor.path
-        );
+    }
+    // Reuse Rayon's compression parallelism. One spool per active worker bounds
+    // scratch disk to a worker-sized window instead of the entire archive.
+    for window in entries.chunks(rayon::current_num_threads()) {
+        let compressed = window
+            .par_iter()
+            .map(|entry| {
+                // Stored Git bundles are already compressed and unsharded;
+                // spooling them would duplicate a potentially large bundle.
+                if payload_compression(&entry.payload.descriptor.role) == CompressionMethod::Stored
+                {
+                    Ok(None)
+                } else {
+                    compress_stream_entry(entry, spool.path())
+                        .map(Some)
+                        .with_context(|| format!("compress ZIP entry '{}'", entry.name))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        append_stream_entries(&mut writer, window, compressed)?;
     }
 
-    // Compression is the export freeze window, so every entry deflates on its
-    // own core; the container is then assembled sequentially in plan order so
-    // the archive layout stays deterministic.
-    let compressed = entries
-        .par_iter()
-        .map(compress_entry)
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut writer = zip::ZipWriter::new(output);
-    for (entry, buffer) in entries.iter().zip(compressed) {
-        let mut source = zip::ZipArchive::new(Cursor::new(buffer))
-            .with_context(|| format!("reopen compressed ZIP entry '{}'", entry.name))?;
-        let compressed_entry = source
-            .by_index(0)
-            .with_context(|| format!("read compressed ZIP entry '{}'", entry.name))?;
-        writer
-            .raw_copy_file(compressed_entry)
-            .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
-    }
     writer.finish().context("finish Mjolnir archive ZIP")?;
     Ok(())
 }
 
-/// Compresses one entry into a single-entry ZIP so the assembly pass can copy
-/// the finished deflate stream verbatim with [`zip::ZipWriter::raw_copy_file`].
-fn compress_entry(entry: &PlannedEntry<'_>) -> Result<Vec<u8>> {
-    let mut buffer = Cursor::new(Vec::with_capacity(entry.data.len() / 2 + 512));
-    let mut writer = zip::ZipWriter::new(&mut buffer);
-    writer
-        .start_file(
-            entry.name,
-            SimpleFileOptions::default()
-                .compression_method(entry.method)
-                .compression_level(match entry.method {
-                    CompressionMethod::Deflated => Some(DEFLATE_LEVEL),
-                    CompressionMethod::Zstd => Some(ZSTD_LEVEL),
-                    _ => None,
-                })
-                .unix_permissions(entry.mode)
-                .large_file(entry.data.len() as u64 > zip::ZIP64_BYTES_THR),
-        )
-        .with_context(|| format!("start ZIP entry '{}'", entry.name))?;
-    writer
-        .write_all(entry.data)
-        .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
-    writer
-        .finish()
-        .with_context(|| format!("compress ZIP entry '{}'", entry.name))?;
-    Ok(buffer.into_inner())
+/// Assembly owns payload completion: workers may finish parts out of order,
+/// so only this ordered pass can check EOF after every part has completed.
+fn append_stream_entries(
+    writer: &mut zip::ZipWriter<&mut File>,
+    entries: &[StreamEntry<'_>],
+    compressed: Vec<Option<tempfile::NamedTempFile>>,
+) -> Result<()> {
+    for (entry, temporary) in entries.iter().zip(compressed) {
+        if let Some(temporary) = temporary {
+            let mut source = zip::ZipArchive::new(temporary.reopen()?)
+                .with_context(|| format!("reopen compressed ZIP entry '{}'", entry.name))?;
+            let compressed_entry = source
+                .by_index(0)
+                .with_context(|| format!("read compressed ZIP entry '{}'", entry.name))?;
+            writer
+                .raw_copy_file(compressed_entry)
+                .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
+        } else {
+            write_payload_entry(writer, entry)
+                .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
+        }
+        if entry.offset + entry.size == entry.payload.descriptor.size {
+            let mut source = entry
+                .payload
+                .reader_at(entry.payload.descriptor.size)
+                .with_context(|| {
+                    format!(
+                        "reopen completed payload '{}'",
+                        entry.payload.descriptor.path
+                    )
+                })?;
+            ensure!(
+                source.read(&mut [0u8; 1])? == 0,
+                "payload source grew during export"
+            );
+        }
+    }
+    Ok(())
+}
+
+struct StreamEntry<'a> {
+    payload: &'a PendingPayload<'a>,
+    name: &'a str,
+    size: u64,
+    digest: &'a str,
+    offset: u64,
+}
+
+/// A private single-entry ZIP lets assembly reuse the codec output and CRC
+/// through raw_copy_file without retaining compressed payloads in memory.
+fn compress_stream_entry(
+    entry: &StreamEntry<'_>,
+    directory: &Path,
+) -> Result<tempfile::NamedTempFile> {
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    let mut writer = zip::ZipWriter::new(temporary.as_file_mut());
+    write_payload_entry(&mut writer, entry)?;
+    writer.finish().context("finish compressed ZIP entry")?;
+    Ok(temporary)
+}
+
+impl PendingPayload<'_> {
+    fn reader_at(&self, offset: u64) -> Result<Box<dyn Read + '_>> {
+        Ok(match self.source {
+            Some(path) => {
+                let mut file = NativeArtifactData::open_file(path)?;
+                file.seek(SeekFrom::Start(offset))?;
+                Box::new(file)
+            }
+            None => {
+                let mut cursor = Cursor::new(self.data.as_ref());
+                cursor.set_position(offset);
+                Box::new(cursor)
+            }
+        })
+    }
+}
+
+fn write_payload_entry(
+    writer: &mut zip::ZipWriter<&mut File>,
+    entry: &StreamEntry<'_>,
+) -> Result<()> {
+    let mut source = entry.payload.reader_at(entry.offset)?;
+    write_stream_entry(
+        writer,
+        entry.name,
+        entry.payload.descriptor.mode,
+        payload_compression(&entry.payload.descriptor.role),
+        entry.size,
+        &mut source.by_ref().take(entry.size),
+        entry.digest,
+    )?;
+    Ok(())
+}
+
+fn write_stream_entry(
+    writer: &mut zip::ZipWriter<&mut File>,
+    name: &str,
+    mode: u32,
+    method: CompressionMethod,
+    size: u64,
+    reader: &mut dyn Read,
+    expected_digest: &str,
+) -> Result<()> {
+    writer.start_file(
+        name,
+        SimpleFileOptions::default()
+            .compression_method(method)
+            .compression_level(match method {
+                CompressionMethod::Deflated => Some(DEFLATE_LEVEL),
+                CompressionMethod::Zstd => Some(ZSTD_LEVEL),
+                _ => None,
+            })
+            .unix_permissions(mode)
+            // ZIP's documented 32-bit size threshold requires ZIP64 beyond this value.
+            .large_file(size > zip::ZIP64_BYTES_THR),
+    )?;
+    let mut checked = DigestingReader::new(reader);
+    ensure!(
+        std::io::copy(&mut checked, writer)? == size,
+        "payload source size changed"
+    );
+    ensure!(
+        checked.finish().1 == expected_digest,
+        "payload source changed during export"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PayloadRetention {
     All,
+    Restore,
+    Repositories,
     CanonicalOnly,
     CanonicalAndGitBundles,
 }
@@ -1113,16 +1498,105 @@ enum EntryExpectation<'a> {
     },
 }
 
-/// Each parallel reader owns one of these: ZIP entries can only be read one at
-/// a time through a single handle, and the deflate decoder already buffers.
-fn open_archive(path: &Path) -> Result<zip::ZipArchive<File>> {
+type Archive = zip::ZipArchive<ArchiveFile>;
+
+/// Opening parses the ZIP's whole central directory. A parallel reader needs
+/// its own read position, not its own parse: clone the opened [`Archive`],
+/// which shares the parsed directory and this file.
+fn open_archive(path: &Path) -> Result<Archive> {
+    open_archive_cancellable(path, None)
+}
+
+fn open_archive_cancellable(
+    path: &Path,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Archive> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    zip::ZipArchive::new(file).context("open Mjolnir archive ZIP")
+    let len = file
+        .metadata()
+        .with_context(|| format!("read the size of {}", path.display()))?
+        .len();
+    zip::ZipArchive::new(ArchiveFile {
+        file: std::sync::Arc::new(file),
+        len,
+        position: 0,
+        start: 0,
+        cancelled,
+    })
+    .context("open Mjolnir archive ZIP")
+}
+
+/// A file read at explicit offsets, so clones share one open file and each
+/// keeps its own position. A duplicated handle would share the position.
+#[derive(Clone)]
+struct ArchiveFile {
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    file: std::sync::Arc<File>,
+    len: u64,
+    position: u64,
+    start: u64,
+}
+
+impl Read for ArchiveFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self
+            .cancelled
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Err(std::io::Error::other("archive verification cancelled"));
+        }
+        let count = usize::try_from(self.len.saturating_sub(self.position))
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        let offset = self
+            .start
+            .checked_add(self.position)
+            .ok_or_else(|| std::io::Error::other("file read offset overflow"))?;
+        #[cfg(unix)]
+        let read = std::os::unix::fs::FileExt::read_at(&*self.file, &mut buf[..count], offset)?;
+        #[cfg(windows)]
+        let read =
+            std::os::windows::fs::FileExt::seek_read(&*self.file, &mut buf[..count], offset)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
+
+impl std::io::Seek for ArchiveFile {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        let (base, offset) = match to {
+            std::io::SeekFrom::Start(position) => {
+                self.position = position;
+                return Ok(position);
+            }
+            std::io::SeekFrom::End(offset) => (self.len, offset),
+            std::io::SeekFrom::Current(offset) => (self.position, offset),
+        };
+        self.position = base.checked_add_signed(offset).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before the start of the archive",
+            )
+        })?;
+        Ok(self.position)
+    }
 }
 
 /// Payload bodies the caller keeps.
 fn retains_payload(retention: PayloadRetention, role: &PayloadRole) -> bool {
     retention == PayloadRetention::All
+        || (retention == PayloadRetention::Repositories
+            && !matches!(role, PayloadRole::NativeArtifact { .. }))
+        || (retention == PayloadRetention::Restore
+            && match role {
+                PayloadRole::NativeArtifact { relative_path } => {
+                    relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR)
+                        || relative_path.starts_with(mj_core::subagent::ARCHIVE_REPORT_DIR)
+                        || relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT)
+                }
+                _ => true,
+            })
         || *role == PayloadRole::CanonicalSession
         || (retention == PayloadRetention::CanonicalAndGitBundles
             && matches!(role, PayloadRole::GitBundle { .. }))
@@ -1136,7 +1610,15 @@ fn retains_parts(retention: PayloadRetention, role: &PayloadRole) -> bool {
 }
 
 fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<VerifiedZipContents> {
-    let mut archive = open_archive(path)?;
+    read_verified_zip_cancellable(path, retention, None)
+}
+
+fn read_verified_zip_cancellable(
+    path: &Path,
+    retention: PayloadRetention,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<VerifiedZipContents> {
+    let mut archive = open_archive_cancellable(path, cancelled)?;
     let mut entries = Vec::with_capacity(archive.len());
     let mut actual_paths = BTreeSet::<String>::new();
     let mut manifest_count = 0_usize;
@@ -1154,18 +1636,9 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
             .enclosed_name()
             .ok_or_else(|| anyhow!("unsafe ZIP entry path '{}'", entry.name()))?;
         validate_archive_relative_path(&enclosed)?;
-        ensure!(
-            entry.size() <= MAX_PAYLOAD_BYTES,
-            "ZIP entry '{}' is too large",
-            entry.name()
-        );
         total_size = total_size
             .checked_add(entry.size())
             .ok_or_else(|| anyhow!("archive expanded size overflow"))?;
-        ensure!(
-            total_size <= MAX_ARCHIVE_BYTES,
-            "archive expanded size exceeds limit"
-        );
         let name = slash_path(&enclosed)?;
         ensure!(
             actual_paths.insert(name.clone()),
@@ -1198,7 +1671,6 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
             .context("read archive manifest")?;
         bytes
     };
-    drop(archive);
     let manifest = parse_archive_manifest(&manifest_bytes)?;
 
     let mut expectations = BTreeMap::<&str, EntryExpectation<'_>>::new();
@@ -1243,17 +1715,14 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
     );
 
     // DEFLATE cannot be inflated in parallel inside one stream, so read
-    // parallelism comes from entries: each worker owns its own archive handle
-    // and verifies whole entries end to end.
+    // parallelism comes from entries: each worker reads through its own clone
+    // of the archive, sharing the directory parsed above, and verifies whole
+    // entries end to end.
     let outcomes = payload_entries
         .par_iter()
         .map_init(
-            || open_archive(path).map_err(|error| format!("{error:#}")),
+            || archive.clone(),
             |archive, (meta, expectation)| {
-                let archive = match archive {
-                    Ok(archive) => archive,
-                    Err(error) => bail!("{error}"),
-                };
                 read_verified_entry(archive, meta, *expectation, retention)
             },
         )
@@ -1268,6 +1737,11 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
     let mut payloads = BTreeMap::new();
     let mut canonical_session = None;
     for descriptor in &manifest.payloads {
+        // Per-part hashes do not prove the whole-payload digest. Verify omitted
+        // sharded bodies in order before returning any trusted archive state.
+        if !descriptor.parts.is_empty() && !retains_parts(retention, &descriptor.role) {
+            copy_payload_from_archive(&mut archive, descriptor, &mut std::io::sink())?;
+        }
         let bytes = reassemble_payload(descriptor, &mut bodies, retention)?;
         if let Some(validate) = tar_payload_validator(&descriptor.role)
             && let Some(bytes) = bytes.as_deref()
@@ -1296,10 +1770,7 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
                 "archive contains duplicate canonical session payloads"
             );
         }
-        if retention == PayloadRetention::All
-            || (retention == PayloadRetention::CanonicalAndGitBundles
-                && matches!(descriptor.role, PayloadRole::GitBundle { .. }))
-        {
+        if retains_payload(retention, &descriptor.role) {
             payloads.insert(
                 descriptor.path.clone(),
                 bytes.expect("selected payloads are retained by the reader"),
@@ -1316,7 +1787,7 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
 /// Reads one ZIP entry, verifies it against the manifest, and returns its body
 /// when the caller needs it.
 fn read_verified_entry(
-    archive: &mut zip::ZipArchive<File>,
+    archive: &mut Archive,
     meta: &ZipEntryMeta,
     expectation: EntryExpectation<'_>,
     retention: PayloadRetention,
@@ -1473,7 +1944,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -1514,6 +1986,14 @@ fn carries_checkout_subdirectory(repositories: &[RepositoryManifest]) -> bool {
         .any(|repository| repository.metadata.checkout_subdirectory.is_some())
 }
 
+/// Whether an archive holds a linked worktree, which only a build that
+/// restores them may read.
+fn carries_linked_worktrees(repositories: &[RepositoryManifest]) -> bool {
+    repositories
+        .iter()
+        .any(|repository| !repository.linked_worktrees.is_empty())
+}
+
 fn carries_review_refs(repositories: &[RepositoryManifest]) -> bool {
     repositories.iter().any(|repository| {
         repository.metadata.review_refs_metadata_only
@@ -1528,7 +2008,9 @@ fn carries_review_refs(repositories: &[RepositoryManifest]) -> bool {
 
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     let expected_schema =
-        if carries_review_refs(&manifest.repositories) {
+        if carries_linked_worktrees(&manifest.repositories) {
+            ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+        } else if carries_review_refs(&manifest.repositories) {
             ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
         } else if carries_checkout_subdirectory(&manifest.repositories) {
             ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
@@ -1543,10 +2025,14 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         };
     ensure!(
         manifest.schema_version == expected_schema
-            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+            || (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES)
             || (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
-                && expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS)
-            || (expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES)
+            || (expected_schema != ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_CLONE_REFS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
@@ -1568,9 +2054,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     for repository in &manifest.repositories {
         if let Some(reference) = &repository.metadata.review_baseline_ref {
             ensure!(
-                reference == REVIEW_BASELINE_REF
-                    || (reference.starts_with("refs/mj/worktrees/")
-                        && reference.ends_with("/review-baseline")),
+                mj_core::archive::is_review_baseline_pin(reference),
                 "invalid source review baseline ref: {reference}"
             );
         }
@@ -1585,11 +2069,6 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         ensure!(
             paths.insert(descriptor.path.as_str()),
             "duplicate manifest payload '{}'",
-            descriptor.path
-        );
-        ensure!(
-            descriptor.size <= MAX_PAYLOAD_BYTES,
-            "payload '{}' exceeds size limit",
             descriptor.path
         );
         normalized_mode(descriptor.mode)?;
@@ -1710,7 +2189,74 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
                 metadata.id
             ),
         };
-        for (path, role) in expected.into_iter().chain(operation_payloads) {
+        let mut worktree_payloads = Vec::new();
+        let mut worktree_paths = BTreeSet::new();
+        for (index, worktree) in repository.linked_worktrees.iter().enumerate() {
+            validate_linked_worktree_metadata(&worktree.metadata)
+                .with_context(|| format!("repository '{}'", metadata.id))?;
+            ensure!(
+                worktree_paths.insert(worktree.metadata.path.as_path()),
+                "repository '{}' lists linked worktree '{}' twice",
+                metadata.id,
+                worktree.metadata.path.display()
+            );
+            let id = metadata.id.clone();
+            let worktree_index = index as u32;
+            worktree_payloads.push((
+                worktree.staged_patch_path.as_str(),
+                PayloadRole::GitLinkedWorktreeStagedPatch {
+                    repository_id: id.clone(),
+                    worktree: worktree_index,
+                },
+            ));
+            worktree_payloads.push((
+                worktree.unstaged_patch_path.as_str(),
+                PayloadRole::GitLinkedWorktreeUnstagedPatch {
+                    repository_id: id.clone(),
+                    worktree: worktree_index,
+                },
+            ));
+            worktree_payloads.push((
+                worktree.untracked_tar_path.as_str(),
+                PayloadRole::GitLinkedWorktreeUntrackedTar {
+                    repository_id: id.clone(),
+                    worktree: worktree_index,
+                },
+            ));
+            match (
+                &worktree.conflicted_worktree_tar_path,
+                &worktree.operation_state_tar_path,
+                &worktree.metadata.git_operation,
+            ) {
+                (None, None, None) => {}
+                (Some(worktree_path), Some(state_path), Some(_)) => {
+                    worktree_payloads.push((
+                        worktree_path.as_str(),
+                        PayloadRole::GitLinkedWorktreeConflictedWorktreeTar {
+                            repository_id: id.clone(),
+                            worktree: worktree_index,
+                        },
+                    ));
+                    worktree_payloads.push((
+                        state_path.as_str(),
+                        PayloadRole::GitLinkedWorktreeOperationStateTar {
+                            repository_id: id,
+                            worktree: worktree_index,
+                        },
+                    ));
+                }
+                _ => bail!(
+                    "repository '{}' linked worktree '{}' Git operation metadata and payloads disagree",
+                    metadata.id,
+                    worktree.metadata.path.display()
+                ),
+            }
+        }
+        for (path, role) in expected
+            .into_iter()
+            .chain(operation_payloads)
+            .chain(worktree_payloads)
+        {
             ensure!(
                 manifest
                     .payloads
@@ -1741,6 +2287,32 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
                 );
                 Some(repository_id)
             }
+            PayloadRole::GitLinkedWorktreeStagedPatch {
+                repository_id,
+                worktree,
+            }
+            | PayloadRole::GitLinkedWorktreeUnstagedPatch {
+                repository_id,
+                worktree,
+            }
+            | PayloadRole::GitLinkedWorktreeUntrackedTar {
+                repository_id,
+                worktree,
+            } => {
+                ensure_linked_worktree_exists(manifest, payload, repository_id, *worktree)?;
+                Some(repository_id)
+            }
+            PayloadRole::GitLinkedWorktreeConflictedWorktreeTar {
+                repository_id,
+                worktree,
+            }
+            | PayloadRole::GitLinkedWorktreeOperationStateTar {
+                repository_id,
+                worktree,
+            } => {
+                ensure_linked_worktree_exists(manifest, payload, repository_id, *worktree)?;
+                Some(repository_id)
+            }
             PayloadRole::CanonicalSession | PayloadRole::NativeArtifact { .. } => None,
         };
         if let Some(repository_id) = repository_id {
@@ -1751,6 +2323,42 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
                 repository_id
             );
         }
+    }
+    Ok(())
+}
+
+fn ensure_linked_worktree_exists(
+    manifest: &ArchiveManifest,
+    payload: &PayloadDescriptor,
+    repository_id: &str,
+    worktree: u32,
+) -> Result<()> {
+    ensure!(
+        manifest.repositories.iter().any(|repository| {
+            repository.metadata.id == repository_id
+                && (worktree as usize) < repository.linked_worktrees.len()
+        }),
+        "payload '{}' holds linked worktree {worktree} that repository '{repository_id}' does not record",
+        payload.path
+    );
+    Ok(())
+}
+
+/// A linked worktree's directory is below the checkout and names nothing
+/// outside it, and its commit and lock reason are ones Git can have written.
+fn validate_linked_worktree_metadata(
+    worktree: &mj_core::archive::LinkedWorktreeMetadata,
+) -> Result<()> {
+    validate_worktree_relative_path(&worktree.path)
+        .with_context(|| format!("linked worktree '{}'", worktree.path.display()))?;
+    ensure!(
+        mj_core::remote_git::is_object_id(&worktree.head_commit),
+        "linked worktree '{}' has an invalid head commit",
+        worktree.path.display()
+    );
+    if let Some(operation) = &worktree.git_operation {
+        validate_saved_git_operation(operation)
+            .with_context(|| format!("linked worktree '{}'", worktree.path.display()))?;
     }
     Ok(())
 }
@@ -2046,26 +2654,29 @@ pub fn read_session_file(root: &Path, relative: &Path) -> Result<Vec<u8>, Sessio
 
 mod fetch;
 pub use fetch::{
-    FetchMode, FetchedKind, FetchedPath, ListedEntry, ListedKind, MAX_FETCHED_DIRECTORY_BYTES,
-    SavedFetch, SessionListing, fetch_session_path,
+    FetchMode, FetchedKind, FetchedPath, ListedEntry, ListedKind, SavedFetch, SessionListing,
+    create_fetch_spool, fetch_session_path,
 };
 mod file_input;
 pub use file_input::{read_session_file_input, write_session_file};
 
 mod git;
 
+pub(crate) use git::linked_worktree_directories;
+#[cfg(test)]
+pub(crate) use git::restore_linked_worktrees as restore_linked_worktrees_for_test;
 pub use git::{
     EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode,
     GitOutput, GitSnapshotProgress, MergeConflicts, NON_INTERACTIVE_GIT_ENV,
-    NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, REVIEW_BASELINE_REF,
-    ReflogAnchor, ReflogEntry, ReviewPoint, SessionDiff, SessionExportError, SystemGit,
-    UntrackedFiles, capture_paths, capture_worktree_tree, collect_git_metadata_snapshot,
-    collect_git_snapshot, collect_git_snapshot_with_progress, collect_plain_directory_snapshot,
-    diff_between_trees, empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref,
-    numstat_between_trees, pin_review_tree, push_branch, read_head_reflog, read_review_point,
-    record_review_point, record_reviewed_tree, remote_workspace_base,
-    remove_departed_worktree_pins, restore_git_snapshot, review_baseline_ref, session_diff,
-    session_diff_details, tree_without_paths, validate_symlink_target,
+    NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, ReflogAnchor, ReflogEntry,
+    ReviewPoint, SessionDiff, SessionExportError, SystemGit, UntrackedFiles, capture_paths,
+    capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
+    collect_git_snapshot_with_progress, collect_plain_directory_snapshot, diff_between_trees,
+    empty_tree_id, has_origin_refs, managed_base_is_available, merge_trees, migrate_review_ref,
+    numstat_between_trees, pin_review_tree, push_branch, push_review_base_ref, read_head_reflog,
+    read_review_point, record_overridden_tree, record_review_point, record_reviewed_tree,
+    remote_workspace_base, restore_git_snapshot, session_diff, session_diff_details,
+    session_start_scope, tree_without_paths, validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

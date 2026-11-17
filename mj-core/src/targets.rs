@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -20,7 +20,9 @@ use crate::config::{HarnessKind, ImagePullPolicy};
 
 mod diagnostics;
 pub use diagnostics::{BlockingOperation, BlockingOperationSnapshot, active_blocking_operations};
+mod capacity_report;
 pub mod storage;
+pub use capacity_report::*;
 
 pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
@@ -46,7 +48,19 @@ pub enum ProvisionStage {
     /// Waiting for a background download of this target's image to finish,
     /// rather than starting a second download of the same image.
     PullingImage,
+    /// Queued behind another task pulling this image. This is waiting for a
+    /// turn, not work, so it never counts as a stall.
+    WaitingForImagePull,
     WaitingForContainerUpgrade,
+    /// Queued behind another task holding the worker binary store for this
+    /// target. This is waiting for a turn, not work.
+    WaitingForWorkerStore,
+    /// Queued behind another task opening the shared SSH connection to this
+    /// host. This is waiting for a turn, not work.
+    WaitingForSshConnection,
+    /// Queued behind other children starting in the same container. This is
+    /// waiting for a turn, not work, so it never counts as a stall.
+    WaitingForStartSlot,
     Provisioning,
     Booting,
     Cloning,
@@ -73,9 +87,13 @@ impl ProvisionStage {
     pub fn label(&self) -> String {
         match self {
             Self::PullingImage => "Pull image".into(),
+            Self::WaitingForImagePull => "Waiting for another image pull".into(),
             Self::WaitingForContainerUpgrade => {
                 "Container upgrade pending; waiting for accepted work".into()
             }
+            Self::WaitingForWorkerStore => "Waiting for shared target content".into(),
+            Self::WaitingForSshConnection => "Waiting for an SSH connection to open".into(),
+            Self::WaitingForStartSlot => "Waiting for a container start slot".into(),
             Self::Provisioning => "Provision".into(),
             Self::Booting => "Boot".into(),
             Self::Cloning => "Clone".into(),
@@ -97,6 +115,23 @@ impl ProvisionStage {
         }
     }
 
+    /// Whether time in this stage stays off a stall clock. Queue time is not
+    /// progress: the stage waits for a turn behind other work, and admission
+    /// ends it. Harness preparation reports its own progress and failure
+    /// (the native startup deadline is likewise suspended during it), and one
+    /// step, such as a download, can be slow without being stuck.
+    pub fn pauses_stall_clock(&self) -> bool {
+        matches!(
+            self,
+            Self::WaitingForImagePull
+                | Self::WaitingForContainerUpgrade
+                | Self::WaitingForWorkerStore
+                | Self::WaitingForSshConnection
+                | Self::WaitingForStartSlot
+                | Self::PreparingHarness { .. }
+        )
+    }
+
     /// The worker owns the start time for harness preparation. Other stages
     /// start when the controller observes them.
     pub fn started_at_epoch_seconds(&self) -> Option<u64> {
@@ -110,7 +145,7 @@ impl ProvisionStage {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct SensitiveCommandInput(Vec<u8>);
+struct SensitiveCommandInput(Arc<Vec<u8>>);
 
 impl std::fmt::Debug for SensitiveCommandInput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -140,6 +175,10 @@ pub struct CommandSpec {
     /// observers. Executor-local, never persisted in command plans.
     #[serde(skip)]
     pub sensitive_output: bool,
+    /// Log non-empty stderr at `WARN` even when the command exits 0.
+    /// Executor-local, never persisted in command plans.
+    #[serde(skip)]
+    pub warn_on_stderr: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<std::path::PathBuf>,
     pub purpose: String,
@@ -169,9 +208,8 @@ pub struct CommandSpec {
     #[serde(skip)]
     preserve_children_on_cancel: bool,
     /// The SSH destination this command opens a connection to, when it does.
-    /// Tagged commands pass through [`SshAdmission`] so the daemon never
-    /// exceeds the remote `sshd`'s `MaxStartups` budget, and a transport
-    /// rejection is retried rather than reported as a command failure.
+    /// Tagged commands retry a server refusal before authentication rather
+    /// than reporting it as a command failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_destination: Option<String>,
     /// The shared SSH connection this command runs on as one session, when it
@@ -181,20 +219,21 @@ pub struct CommandSpec {
     /// [`CommandSpec::open_ssh_session`]). The arguments stored here never
     /// contain them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_session: Option<SshTarget>,
+    pub ssh_session: Option<SshSessionRequest>,
     /// The session is a fail-fast probe: it is counted on a shard but never
     /// opens a master (see [`CommandSpec::ssh_probe_session`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ssh_session_probe: bool,
+    /// The remote command line starts by printing [`SSH_START_MARKER`], so the
+    /// reader of this command's stdout strips it and the command's start is
+    /// known from it. Set only by [`CommandSpec::open_ssh_session`], on the
+    /// command it returns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) ssh_start_marker: bool,
     /// Input that must reach the child without becoming part of its arguments,
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
     sensitive_stdin: Option<SensitiveCommandInput>,
-    /// The command works on the daemon's own data (its checkpoint archives,
-    /// its store), so it runs where the daemon runs rather than on the node.
-    /// Executor-local, never serialized.
-    #[serde(skip)]
-    in_daemon: bool,
 }
 
 impl CommandSpec {
@@ -211,6 +250,7 @@ impl CommandSpec {
             env_remove: Vec::new(),
             clear_env: false,
             sensitive_output: false,
+            warn_on_stderr: false,
             cwd: None,
             purpose: String::new(),
             stage: None,
@@ -221,8 +261,8 @@ impl CommandSpec {
             ssh_destination: None,
             ssh_session: None,
             ssh_session_probe: false,
+            ssh_start_marker: false,
             sensitive_stdin: None,
-            in_daemon: false,
         }
     }
 
@@ -254,6 +294,12 @@ impl CommandSpec {
         self
     }
 
+    /// Log non-empty stderr at `WARN` when this command succeeds.
+    pub fn warn_on_stderr(mut self) -> Self {
+        self.warn_on_stderr = true;
+        self
+    }
+
     /// Record that this command opens an `ssh` connection to `destination`,
     /// which is the host (or `user@host`) argument, never an option value.
     pub fn ssh_destination(mut self, destination: impl Into<String>) -> Self {
@@ -263,10 +309,14 @@ impl CommandSpec {
 
     /// Record that this command is an `ssh` or `scp` invocation that runs as
     /// one session on `ssh`'s shared connection. It also opens a connection
-    /// to that destination, for admission, when sharing is off.
-    pub fn ssh_session(mut self, ssh: &SshTarget) -> Self {
+    /// to that destination when sharing is off, so a server's refusal of it
+    /// is retried the same way.
+    pub fn ssh_session(mut self, ssh: &SshTarget, class: SshTrafficClass) -> Self {
         self.ssh_destination = Some(ssh.destination.clone());
-        self.ssh_session = Some(ssh.clone());
+        self.ssh_session = Some(SshSessionRequest {
+            target: ssh.clone(),
+            class,
+        });
         self
     }
 
@@ -277,7 +327,7 @@ impl CommandSpec {
     /// probe still uses one of the master's sessions while it runs, so the
     /// executor counts it in the session ledger like any other session.
     pub fn ssh_probe_session(mut self, ssh: &SshTarget) -> Self {
-        self = self.ssh_session(ssh);
+        self = self.ssh_session(ssh, SshTrafficClass::Control);
         self.ssh_session_probe = true;
         self
     }
@@ -285,15 +335,47 @@ impl CommandSpec {
     /// Lease the SSH session this command asks for and return the command as
     /// it must be spawned, with the lease that must outlive the child.
     ///
-    /// A command without a session request is returned unchanged. `executor`
-    /// runs the master check and, when needed, the opener.
-    pub fn open_ssh_session(&self, executor: &dyn CommandExecutor) -> Result<SessionCommand<'_>> {
-        let Some(ssh) = &self.ssh_session else {
+    /// An `ssh` command's remote line is prefixed to print [`SSH_START_MARKER`]
+    /// first. The reader of its stdout must strip it and report the start to
+    /// the lease's [`StartGate`] (see [`SessionCommand::gate`]); the executors
+    /// and `spawn_session_proxy` do. A command without a session
+    /// request is returned unchanged. `executor` runs the master check and,
+    /// when needed, the opener. `walk` is the command's walk across the
+    /// connection's shards: a command that retries after a refusal passes the
+    /// same walk to each attempt (see [`SshRefusalRetry::walk`]).
+    pub fn open_ssh_session(
+        &self,
+        executor: &dyn CommandExecutor,
+        walk: &mut SshWalk,
+    ) -> Result<SessionCommand<'_>> {
+        self.lease_ssh_session(executor, walk, true)
+    }
+
+    /// [`Self::open_ssh_session`] for a command whose `ssh` is run by another
+    /// program that reads its stdout as its own protocol, such as the shell
+    /// wrapper Move gives `rsync --rsh`: no marker is added, and nothing
+    /// reports the session's start, so it counts only as a reservation.
+    pub fn open_ssh_session_without_marker(
+        &self,
+        executor: &dyn CommandExecutor,
+        walk: &mut SshWalk,
+    ) -> Result<SessionCommand<'_>> {
+        self.lease_ssh_session(executor, walk, false)
+    }
+
+    fn lease_ssh_session(
+        &self,
+        executor: &dyn CommandExecutor,
+        walk: &mut SshWalk,
+        marker: bool,
+    ) -> Result<SessionCommand<'_>> {
+        let Some(request) = &self.ssh_session else {
             return Ok(SessionCommand {
                 command: std::borrow::Cow::Borrowed(self),
                 lease: None,
             });
         };
+        let ssh = &request.target;
         let _waiting = BlockingOperation::start(
             &format!(
                 "lease SSH connection to {} for {}",
@@ -302,18 +384,32 @@ impl CommandSpec {
             "ssh",
         );
         let lease = if self.ssh_session_probe {
-            SshSessions::lease_probe(ssh)
+            SshSessions::lease_probe(ssh, walk)
         } else {
-            SshSessions::lease(ssh, executor)?
+            SshSessions::lease(ssh, request.class, executor, walk)?
         };
         let mut command = self.clone();
         command.ssh_session = None;
         command.ssh_session_probe = false;
         command.args = session_command_args(&self.program, &self.args, ssh, &lease);
+        // The remote command line is the last argument of every `ssh` session
+        // the builders in `targets/ssh.rs` make; `scp` has none.
+        if marker
+            && self.program == "ssh"
+            && let Some(line) = command.args.last_mut()
+        {
+            *line = with_start_marker(line);
+            command.ssh_start_marker = true;
+        }
         Ok(SessionCommand {
             command: std::borrow::Cow::Owned(command),
             lease: Some(lease),
         })
+    }
+
+    /// Whether the command's stdout starts with [`SSH_START_MARKER`].
+    pub fn expects_ssh_start_marker(&self) -> bool {
+        self.ssh_start_marker
     }
 
     /// Mark this command as the one that creates the session's target.
@@ -331,15 +427,118 @@ impl CommandSpec {
     /// Feed private file content through the shared concurrent pipe handler.
     /// The bytes stay out of argv, environments, serialization, and Debug.
     pub fn with_sensitive_stdin(mut self, input: Vec<u8>) -> Self {
-        self.sensitive_stdin = Some(SensitiveCommandInput(input));
+        self.sensitive_stdin = Some(SensitiveCommandInput(Arc::new(input)));
         self
     }
 
-    /// Run where the daemon runs: the command reads or writes the daemon's own
-    /// data, which only the daemon can reach.
-    pub fn in_daemon(mut self) -> Self {
-        self.in_daemon = true;
-        self
+    /// The command-owned input, for executors and test fakes.
+    pub fn sensitive_stdin(&self) -> Option<&[u8]> {
+        self.sensitive_stdin
+            .as_ref()
+            .map(|input| input.0.as_slice())
+    }
+}
+
+/// A stand-in `ssh` for tests: a script on `PATH` that refuses the first
+/// attempts as a plan says and otherwise runs the remote command line in a
+/// shell, as the remote side would, so the start marker is printed by the
+/// real line.
+#[cfg(all(test, unix))]
+pub(crate) mod fake_ssh {
+    use super::*;
+    use std::fs;
+
+    static FAST_RETRIES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) struct FastRetries(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl FastRetries {
+        pub(crate) fn new() -> Self {
+            let guard = FAST_RETRIES_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+            Self(guard)
+        }
+    }
+
+    impl Drop for FastRetries {
+        fn drop(&mut self) {
+            set_ssh_retry_backoff_for_test(None);
+            set_ssh_persistent_refusal_for_test(None);
+        }
+    }
+
+    pub(crate) struct FakeSsh {
+        directory: tempfile::TempDir,
+    }
+
+    impl FakeSsh {
+        /// `plan` has one word per attempt: `refuse-session`, `refuse-auth`,
+        /// `refuse-session-late-stderr` (closes stdout first and prints the
+        /// refusal to stderr moments later), `warn-then-run` (prints an ssh
+        /// warning to stderr before the session starts, then runs), or
+        /// `run-then-255` (runs the command, then fails like a dropped
+        /// connection). Attempts past the plan just run.
+        pub(crate) fn new(plan: &[&str]) -> Self {
+            let directory = tempfile::tempdir().expect("fake ssh directory");
+            let script = r#"#!/bin/sh
+dir=$(dirname "$0")
+count=$(cat "$dir/attempts" 2>/dev/null || echo 0)
+echo $((count + 1)) > "$dir/attempts"
+for last; do :; done
+case "$(sed -n "$((count + 1))p" "$dir/plan")" in
+  refuse-session)
+    echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2
+    exit 255 ;;
+  refuse-session-late-stderr)
+    exec >&-
+    sleep 0.3
+    echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2
+    exit 255 ;;
+  refuse-auth)
+    echo 'kex_exchange_identification: Connection closed by 10.0.0.1 port 22' >&2
+    exit 255 ;;
+  warn-then-run)
+    echo "Warning: Permanently added 'fake-host' to the list of known hosts." >&2
+    sleep 0.3
+    exec sh -c "$last" ;;
+  run-then-255)
+    sh -c "$last"
+    echo 'Read from remote host fake-host: Connection reset by peer' >&2
+    exit 255 ;;
+  *) exec sh -c "$last" ;;
+esac
+"#;
+            let path = directory.path().join("ssh");
+            fs::write(&path, script).unwrap();
+            fs::write(directory.path().join("plan"), plan.join("\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            Self { directory }
+        }
+
+        /// An `ssh` session command for `remote` on the fake host.
+        pub(crate) fn command(&self, remote: &[&str]) -> CommandSpec {
+            let ssh = SshTarget {
+                destination: "fake-host".to_owned(),
+                ssh_args: Vec::new(),
+            };
+            let mut command = ssh_command(SshTrafficClass::Control, &ssh, remote)
+                .purpose("run through the fake ssh");
+            let path = std::env::var("PATH").unwrap_or_default();
+            command.env.insert(
+                "PATH".to_owned(),
+                format!("{}:{path}", self.directory.path().display()),
+            );
+            command
+        }
+
+        pub(crate) fn attempts(&self) -> u32 {
+            fs::read_to_string(self.directory.path().join("attempts"))
+                .map(|text| text.trim().parse().expect("attempt count"))
+                .unwrap_or(0)
+        }
     }
 }
 
@@ -386,114 +585,18 @@ impl SessionCommand<'_> {
         self.lease.as_ref()
     }
 
+    /// Where the session stands, when its command prints the start marker:
+    /// the reader of its stdout reports into it.
+    pub fn gate(&self) -> Option<&Arc<StartGate>> {
+        self.command
+            .ssh_start_marker
+            .then(|| self.lease.as_ref().map(SshSessionLease::gate))
+            .flatten()
+    }
+
     pub fn into_parts(self) -> (CommandSpec, Option<SshSessionLease>) {
         (self.command.into_owned(), self.lease)
     }
-}
-
-/// A [`CommandSpec`] as it travels to a node, carrying the executor-local
-/// fields that its own serialization leaves out. Only the node protocol uses
-/// this form; plans and stores keep the redacted one.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeRun {
-    pub spec: CommandSpec,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arg0: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sensitive_output: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub preserve_children_on_cancel: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensitive_stdin: Option<Vec<u8>>,
-    /// The caller streams stdin after the description; otherwise the child's
-    /// stdin is empty (or `sensitive_stdin`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub streamed_stdin: bool,
-}
-
-impl std::fmt::Debug for NodeRun {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NodeRun")
-            .field("spec", &self.spec)
-            .field("streamed_stdin", &self.streamed_stdin)
-            .finish_non_exhaustive()
-    }
-}
-
-impl CommandSpec {
-    /// The command with every field a node needs to run it exactly as this
-    /// process would.
-    pub fn to_node_run(&self, streamed_stdin: bool) -> NodeRun {
-        NodeRun {
-            spec: self.clone(),
-            #[cfg(unix)]
-            arg0: self.arg0.clone(),
-            #[cfg(not(unix))]
-            arg0: None,
-            sensitive_output: self.sensitive_output,
-            preserve_children_on_cancel: self.preserve_children_on_cancel,
-            sensitive_stdin: self.sensitive_stdin.as_ref().map(|input| input.0.clone()),
-            streamed_stdin,
-        }
-    }
-}
-
-impl NodeRun {
-    pub fn into_spec(self) -> CommandSpec {
-        let mut spec = self.spec;
-        #[cfg(unix)]
-        {
-            spec.arg0 = self.arg0;
-        }
-        spec.sensitive_output = self.sensitive_output;
-        spec.preserve_children_on_cancel = self.preserve_children_on_cancel;
-        spec.sensitive_stdin = self.sensitive_stdin.map(SensitiveCommandInput);
-        spec
-    }
-}
-
-/// Where this process's commands run. In the daemon that is its node, the
-/// process on the computer holding the user's files; everywhere else it is
-/// unset and commands run here. Installed once at daemon startup, so every
-/// executor in the daemon makes the same choice and none runs a command
-/// locally behind the node's back.
-pub trait CommandHost: Send + Sync {
-    /// Run `command` to completion with `input` as its stdin (or none),
-    /// abandoning it once `is_cancelled` turns true. Errors keep the text the
-    /// executing side gave them, so "operation cancelled" stays recognisable.
-    fn run(
-        &self,
-        command: &CommandSpec,
-        input: Option<&mut (dyn Read + Send)>,
-        is_cancelled: &(dyn Fn() -> bool + Sync),
-    ) -> Result<CommandOutput>;
-
-    /// Start `command` as a live stream: stdin, stdout and stderr flow while
-    /// it runs. Long-lived proxies run this way.
-    fn open_stream<'a>(
-        &'a self,
-        command: &CommandSpec,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<crate::node::NodeExec>> + Send + 'a>,
-    >;
-}
-
-static COMMAND_HOST: std::sync::OnceLock<Arc<dyn CommandHost>> = std::sync::OnceLock::new();
-
-/// Send every command this process runs to `host`. Only the daemon calls
-/// this, once, before it runs any command.
-pub fn install_command_host(host: Arc<dyn CommandHost>) -> Result<()> {
-    COMMAND_HOST
-        .set(host)
-        .map_err(|_| anyhow::anyhow!("a command host is already installed"))
-}
-
-/// The host that runs `command`, or `None` to run it in this process. Every
-/// caller that starts a process asks this, so none decides on its own.
-pub fn command_host(command: &CommandSpec) -> Option<&'static Arc<dyn CommandHost>> {
-    COMMAND_HOST.get().filter(|_| !command.in_daemon)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,7 +606,8 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeploymentCapacityKind {
     Host,
     AwsFleet,
@@ -529,6 +633,11 @@ pub struct DeploymentCapacityTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentCapacityUsage {
+    /// Whether `memory_total_bytes` is a pool set aside for sessions at boot
+    /// (a Nitro host's sandbox memory) rather than the host's RAM. A pool is
+    /// already net of the host's own needs, so admission applies no reserve
+    /// to it.
+    pub memory_pool: bool,
     pub cpu_percent: Option<u8>,
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
@@ -706,13 +815,17 @@ pub fn default_mount_destination(source: &Path, existing: &[AdditionalMount]) ->
         .file_name()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| std::ffi::OsStr::new("mount"));
-    let base = PathBuf::from("/mnt").join(basename);
+    // A container path: POSIX separators on a Windows controller too.
+    let mnt = Path::new("/mnt");
+    let base = crate::target_path::join(mnt, Path::new(basename));
     if !existing.iter().any(|mount| mount.destination == base) {
         return base;
     }
     for number in 2.. {
-        let candidate =
-            PathBuf::from("/mnt").join(format!("{}-{number}", basename.to_string_lossy()));
+        let candidate = crate::target_path::join(
+            mnt,
+            Path::new(&format!("{}-{number}", basename.to_string_lossy())),
+        );
         if !existing.iter().any(|mount| mount.destination == candidate) {
             return candidate;
         }
@@ -780,10 +893,6 @@ pub trait CommandExecutor {
     fn shutdown_interrupted(&self) -> bool {
         false
     }
-    /// Bound the work that follows `end_resumable_work`: it holds daemon
-    /// admission, so a hung command must not stall a handoff. `None` lifts the
-    /// bound when the work leaves admission.
-    fn bound_admitted_work(&self, _timeout: Option<Duration>) {}
     /// Reacquire named control admission before leaving resumable work.
     fn end_resumable_work(&self, _label: &'static str) -> Result<()> {
         Ok(())
@@ -795,6 +904,128 @@ pub trait CommandExecutor {
         _input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
         bail!("this command executor does not support streamed stdin")
+    }
+
+    /// Run `command` with this executor's cancellation but without its
+    /// deadline, for work a timeout named for another step must not cover.
+    /// An executor without a deadline runs it as `execute` does; one with a
+    /// deadline drops it and keeps its cancellation. Required, so every
+    /// executor states which it is.
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput>;
+
+    /// [`Self::execute_without_deadline`] for a command that reads `input`.
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput>;
+
+    /// [`Self::cancellation_requested`] as the no-deadline methods see it: a
+    /// deadline that has passed is not a cancellation.
+    fn cancellation_requested_without_deadline(&self) -> bool;
+
+    /// Exclude this scope's wall time from the operation deadline. Required:
+    /// wrappers forward to their owner; executors with per-command deadlines
+    /// or no deadline return an empty guard. Cancellation remains active.
+    fn pause_deadline(&self) -> DeadlinePause;
+}
+
+/// An executor whose commands run without the wrapped executor's deadline but
+/// still stop when its supervisor cancels. Staging work that precedes a
+/// timeout-bound command runs on this, so the timeout covers only the command
+/// it names. Its lifetime also pauses that deadline, including gate waits and
+/// other staging work that runs no command.
+pub struct WithoutDeadline<'a, E: ?Sized> {
+    executor: &'a E,
+    _pause: DeadlinePause,
+}
+
+impl<'a, E: CommandExecutor + ?Sized> WithoutDeadline<'a, E> {
+    pub fn new(executor: &'a E) -> Self {
+        Self {
+            executor,
+            _pause: executor.pause_deadline(),
+        }
+    }
+}
+
+impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
+    fn pause_deadline(&self) -> DeadlinePause {
+        self.executor.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_without_deadline(command)
+    }
+
+    fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_cleanup(command)
+    }
+
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<CommandOutput> {
+        self.executor.execute_cleanup_with_timeout(command, timeout)
+    }
+
+    // The wrapper's whole purpose is to ignore the wrapped deadline, so a
+    // passed deadline must not read as a cancellation here either.
+    fn cancellation_requested(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        self.executor.stage_started(stage);
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        self.executor.stage_finished(stage);
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.executor.notify_notice(notice);
+    }
+
+    fn begin_resumable_work(&self) -> Result<()> {
+        self.executor.begin_resumable_work()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.executor.shutdown_interrupted()
+    }
+
+    fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+        self.executor.end_resumable_work(label)
+    }
+
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_with_stdin_without_deadline(command, input)
     }
 }
 
@@ -821,65 +1052,93 @@ impl<E: CommandExecutor + ?Sized> Drop for ProvisionStageGuard<'_, E> {
 
 pub struct ProcessExecutor;
 
-/// Run one `ssh` invocation under process-wide admission control, retrying it
-/// when the server turned the connection away before authentication.
+/// Run one `ssh` invocation, retrying it
+/// when the server turned it away before the remote command started.
 ///
-/// A permit is held only while a child is actually running and is released
-/// between attempts, because a waiting retry occupies no connection slot. A
-/// transport rejection means the remote command never started, so re-running
-/// the whole invocation cannot repeat a side effect.
+/// A refusal means the remote command never started (no byte of its stdout,
+/// not even the start marker, ever arrived), so re-running the whole
+/// invocation cannot repeat a side effect, whether or not the command
+/// streams stdin: nothing of the caller's input is read before the start.
+/// [`SshRefusalRetry`] decides each wait and when to stop: a refusal that
+/// persists for its time bound fails the command with an error naming the
+/// causes, for every caller; the caller's cancellation or deadline ends the
+/// retries sooner.
 ///
 /// A command that asks for a shared-connection session leases it on each
-/// attempt, before taking its permit: opening a master takes a permit of its
-/// own, and waiting for that while holding one could exhaust the gate. A
-/// session turned away by the transport usually means its master died, so
-/// the lease is invalidated and the retry checks and reopens the master.
+/// attempt, and the lease tells the ledger what the refusal means
+/// ([`SshSessionLease::note_refusal`]). A session turned away by the transport
+/// usually means its master died, so the retry checks and reopens the master.
+/// A session refused for `MaxSessions` moves to the next shard of the
+/// command's walk at once: the walk is the state change that ends that loop,
+/// so it needs no wait and spends no time.
+///
+/// `run` receives the leased command and the gate its stdout reader must
+/// report into (`None` when the command prints no start marker).
 ///
 /// Commands that are not tagged with a destination run untouched.
-fn with_ssh_admission(
+fn with_ssh_refusal_retry(
     command: &CommandSpec,
     executor: &dyn CommandExecutor,
-    is_cancelled: &dyn Fn() -> bool,
-    mut run: impl FnMut(&CommandSpec) -> Result<CommandOutput>,
+    is_cancelled: Option<&dyn Fn() -> bool>,
+    mut run: impl FnMut(&CommandSpec, Option<&Arc<StartGate>>) -> Result<CommandOutput>,
 ) -> Result<CommandOutput> {
     let Some(destination) = command.ssh_destination.as_deref() else {
-        return run(command);
+        return run(command, None);
     };
-    for attempt in 1..=SSH_RETRY_ATTEMPTS {
-        let session = command.open_ssh_session(executor)?;
-        let output = {
-            let _permit = SshAdmission::acquire_unless(destination, is_cancelled)?;
-            run(session.command())?
-        };
-        let refusal = ssh_refusal(output.status, &String::from_utf8_lossy(&output.stderr));
-        // A refused session found its master alive; any other refusal may
-        // mean the master is gone.
-        if refusal == Some(SshRefusal::BeforeAuthentication)
-            && let Some(lease) = session.lease()
-        {
-            lease.invalidate();
-        }
+    let mut retry = SshRefusalRetry::for_command(command);
+    loop {
+        let session = command.open_ssh_session(executor, retry.walk())?;
+        let output = run(session.command(), session.gate())?;
+        let refusal = note_session_refusal(&session, &output);
         drop(session);
-        let Some(refusal) = refusal else {
+        let Some((refusal, walks_on)) = refusal else {
             return Ok(output);
         };
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if attempt == SSH_RETRY_ATTEMPTS {
-            refusal.log_exhausted(destination, &command.purpose, stderr.trim());
-            return Ok(output);
-        }
-        let delay = ssh_retry_delay(attempt);
-        refusal.log_retry(destination, &command.purpose, attempt, delay, stderr.trim());
-        if !sleep_unless_cancelled(delay, is_cancelled) {
+        let delay = retry
+            .next(refusal, walks_on, destination, &command.purpose, &stderr)
+            .with_context(|| format!("{} failed", command.purpose))?;
+        if !sleep_unless_cancelled(delay, is_cancelled.unwrap_or(&|| false)) {
             bail!("operation cancelled while {}", command.purpose);
         }
     }
-    unreachable!("the final attempt always returns");
+}
+
+/// Classify a finished command's refusal by the server and tell the session's
+/// lease what it means. Returns the refusal and whether retrying at once can
+/// land elsewhere (see [`SshSessionLease::note_refusal`]). A command that
+/// printed the start marker was not refused, whatever its exit status.
+fn note_session_refusal(
+    session: &SessionCommand<'_>,
+    output: &CommandOutput,
+) -> Option<(SshRefusal, bool)> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // `scp` exits with a status of its own (normally 1) while relaying the
+    // refusal of the `ssh` it runs, and carries no start marker, so only that
+    // stderr can tell. Copying again is safe, as with Move's rsync.
+    let is_scp = session.command().program == "scp";
+    let Some(lease) = session.lease() else {
+        let refusal = if is_scp {
+            ssh_refusal_in_stderr(&stderr)
+        } else {
+            ssh_refusal(output.status, &stderr)
+        };
+        return refusal.map(|refusal| (refusal, false));
+    };
+    let refusal = if is_scp {
+        if output.status == 0 {
+            return None;
+        }
+        ssh_refusal_in_stderr(&stderr)?
+    } else {
+        lease.gate().refusal(output.status, &stderr)?
+    };
+    Some((refusal, lease.note_refusal(refusal)))
 }
 
 /// Wait out `delay`, giving up early if the supervising operation is
 /// cancelled. Returns whether the wait completed.
-fn sleep_unless_cancelled(delay: Duration, is_cancelled: &dyn Fn() -> bool) -> bool {
+pub fn sleep_unless_cancelled(delay: Duration, is_cancelled: &dyn Fn() -> bool) -> bool {
     let deadline = Instant::now() + delay;
     loop {
         if is_cancelled() {
@@ -922,46 +1181,54 @@ fn finished_command(
 }
 
 impl ProcessExecutor {
-    /// One attempt, with no admission or retry of its own.
-    fn run_once(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        if let Some(input) = &command.sensitive_stdin {
-            let mut input = std::io::Cursor::new(input.0.as_slice());
-            // Owned bytes, so each attempt gets its own reader.
-            return stream_command_with_stdin(
-                cancellable_command(command),
-                command,
-                &mut input,
-                &|| false,
-            );
-        }
-        let started = Instant::now();
-        let output = configured_command(command)
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
-        let status = output.status.code().unwrap_or(-1);
-        Ok(finished_command(
-            command,
-            started,
-            status,
-            output.stdout,
-            output.stderr,
-        ))
+    /// One attempt, with no retry of its own.
+    fn run_once(
+        &self,
+        command: &CommandSpec,
+        gate: Option<&Arc<StartGate>>,
+    ) -> Result<CommandOutput> {
+        // One path for both executors: the child gets its own process group,
+        // output is drained for a bounded time after it exits, and leftover
+        // descendants are killed. With no cancellation it only ends when the
+        // child does.
+        CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))).run_once(command, gate)
     }
 }
 
-// Both process executors wait for their child, and for SSH admission before
-// it, through `off_async_worker`: a caller several calls below an `async fn`
+// Both process executors wait for their child, and for the SSH session lease
+// before it, through `off_async_worker`: a caller several calls below an `async fn`
 // must not hold one of the runtime's async worker threads for the length of a
 // target command.
 impl CommandExecutor for ProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            if let Some(host) = command_host(command) {
-                return host.run(command, None, &|| false);
-            }
-            with_ssh_admission(command, self, &|| false, |command| self.run_once(command))
+            with_ssh_refusal_retry(command, self, None, |command, gate| {
+                self.run_once(command, gate)
+            })
         })
     }
 
@@ -972,24 +1239,27 @@ impl CommandExecutor for ProcessExecutor {
     ) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            if let Some(host) = command_host(command) {
-                return host.run(command, Some(input), &|| false);
-            }
-            // A caller's stream cannot be replayed, so this path takes a
-            // session and a permit but never retries.
-            let session = command.open_ssh_session(self)?;
-            let _permit = command
-                .ssh_destination
-                .as_deref()
-                .map(SshAdmission::acquire);
-            let command = session.command();
-            let process = cancellable_command(command);
-            // Plain process execution is not cancellable, so the transfer only
-            // ends when the child does.
-            stream_command_with_stdin(process, command, input, &|| false)
+            // The stream is not read until the session has started, so a
+            // refused session is retried with the same stream. Plain process
+            // execution is not cancellable, so a transfer only ends when the
+            // child does.
+            with_ssh_refusal_retry(command, self, None, |command, gate| {
+                stream_command_with_stdin(
+                    cancellable_command(command),
+                    command,
+                    &mut *input,
+                    &|| false,
+                    gate,
+                    None,
+                )
+            })
         })
     }
 }
+
+/// Observe bytes as a supervised command drains them. The callback may run
+/// concurrently for stdout and stderr, and must finish without blocking.
+pub type CommandOutputObserver = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 /// Streams `input` into a freshly spawned child and collects its output.
 ///
@@ -999,11 +1269,18 @@ impl CommandExecutor for ProcessExecutor {
 /// `is_cancelled` reports whether the supervising operation wants the transfer
 /// abandoned; [`ProcessExecutor`] passes a check that is never true, which also
 /// makes the kill path below unreachable for it.
+///
+/// With a `gate`, the command prints a start marker that is stripped from the
+/// collected stdout, and `input` is not read, nor anything written to the
+/// child, until the marker arrives. A session the server refused therefore
+/// leaves `input` untouched for the caller to retry with.
 fn stream_command_with_stdin(
     mut process: Command,
     command: &CommandSpec,
     input: &mut (dyn Read + Send),
     is_cancelled: &(dyn Fn() -> bool + Sync),
+    gate: Option<&Arc<StartGate>>,
+    observer: Option<CommandOutputObserver>,
 ) -> Result<CommandOutput> {
     let started = Instant::now();
     if is_cancelled() {
@@ -1031,13 +1308,23 @@ fn stream_command_with_stdin(
         .context("streamed command stderr missing")?;
     // Reader threads keep the child's output pipes drained; a child that fills
     // one while nobody reads would block instead of exiting.
-    let stdout_reader = PipeCollector::spawn(stdout);
-    let stderr_reader = PipeCollector::spawn(stderr);
+    let mut stdout_reader =
+        PipeCollector::spawn_observed(stdout, gate.cloned(), None, observer.clone());
+    let mut stderr_reader = PipeCollector::spawn_observed(stderr, None, None, observer);
     let process_result = std::thread::scope(|scope| -> Result<_> {
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
         // the process group and thereby close the blocked pipe.
-        let input_writer = scope.spawn(move || -> Result<()> {
+        let input_writer = scope.spawn(move || -> Result<bool> {
+            if let Some(gate) = gate {
+                match gate.wait_blocking(is_cancelled) {
+                    StartWait::Started => {}
+                    // The session ended without starting. Nothing was read,
+                    // and the exit status says why.
+                    StartWait::Ended => return Ok(false),
+                    StartWait::Cancelled => bail!("operation cancelled"),
+                }
+            }
             // Owning `stdin` here is what closes the pipe's write end once the
             // transfer finishes. A child that reads to EOF, such as
             // `mj worker export-checkpoint --spec -`, never exits while any
@@ -1059,12 +1346,19 @@ fn stream_command_with_stdin(
                     .write_all(&buffer[..count])
                     .context("stream command input")?;
             }
-            stdin.flush().context("flush command input")
+            stdin.flush().context("flush command input")?;
+            Ok(true)
         });
         let mut status = None;
         let mut exited_at = None;
         let mut group_killed = false;
         let status = loop {
+            if status.is_none() && (stdout_reader.failed() || stderr_reader.failed()) {
+                terminate_cancellable_child(&mut child, false);
+                status = child
+                    .try_wait()
+                    .context("reap command after pipe failure")?;
+            }
             if is_cancelled() {
                 terminate_cancellable_child(&mut child, false);
                 if let Err(error) = input_writer.join() {
@@ -1126,7 +1420,12 @@ fn stream_command_with_stdin(
         // A child that exited first explains the failure through its own
         // status and stderr; the broken pipe that exit caused would only hide
         // it. A successful child must not hide an input error.
-        input_result?;
+        let delivered = input_result?;
+        ensure!(
+            delivered,
+            "{} exited successfully without reporting that its command started, so its input was never sent",
+            command.purpose
+        );
     }
     let status = status.code().unwrap_or(-1);
     Ok(finished_command(command, started, status, stdout, stderr))
@@ -1135,9 +1434,69 @@ fn stream_command_with_stdin(
 #[derive(Clone)]
 pub struct CancellableProcessExecutor {
     cancelled: Arc<AtomicBool>,
-    deadline: Option<(Instant, Duration)>,
-    /// A deadline armed later by `bound_admitted_work`, shared by clones.
-    armed: Arc<Mutex<Option<(Instant, Duration)>>>,
+    token: Option<tokio_util::sync::CancellationToken>,
+    #[cfg(unix)]
+    foreground_terminal: bool,
+    deadline: Option<Arc<std::sync::Mutex<ProcessDeadline>>>,
+}
+
+/// One shared clock owns both deadline checks and nested pause accounting.
+struct ProcessDeadline {
+    expires: Instant,
+    timeout: Duration,
+    paused: Option<(Instant, usize)>,
+}
+
+impl ProcessDeadline {
+    fn new(timeout: Duration) -> Arc<std::sync::Mutex<Self>> {
+        Arc::new(std::sync::Mutex::new(Self {
+            expires: Instant::now() + timeout,
+            timeout,
+            paused: None,
+        }))
+    }
+
+    fn expired(&self) -> bool {
+        self.paused.map_or_else(Instant::now, |(start, _)| start) >= self.expires
+    }
+}
+
+/// Excludes a scope from its owner's deadline, including work between commands.
+/// Nested or overlapping scopes count their union rather than adding time twice.
+#[must_use]
+pub struct DeadlinePause(Option<Arc<std::sync::Mutex<ProcessDeadline>>>);
+
+impl DeadlinePause {
+    /// Executors with no operation-wide deadline have nothing to pause.
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    fn new(deadline: Option<Arc<std::sync::Mutex<ProcessDeadline>>>) -> Self {
+        if let Some(deadline) = &deadline {
+            let mut deadline = deadline.lock().unwrap();
+            match &mut deadline.paused {
+                Some((_, depth)) => *depth += 1,
+                paused @ None => *paused = Some((Instant::now(), 1)),
+            }
+        }
+        Self(deadline)
+    }
+}
+
+impl Drop for DeadlinePause {
+    fn drop(&mut self) {
+        if let Some(deadline) = &self.0 {
+            let mut deadline = deadline.lock().unwrap();
+            let (start, depth) = deadline.paused.as_mut().expect("a held deadline pause");
+            *depth -= 1;
+            if *depth == 0 {
+                let elapsed = start.elapsed();
+                deadline.expires += elapsed;
+                deadline.paused = None;
+            }
+        }
+    }
 }
 
 /// Cancels synchronous executor work when its supervising async wait is dropped.
@@ -1150,6 +1509,42 @@ impl Drop for ProcessCancellationGuard {
 }
 
 impl CancellableProcessExecutor {
+    /// Feed input, close stdin at EOF, and observe both output streams while
+    /// retaining the executor's process-group, cancellation and SSH ownership.
+    pub fn execute_with_stdin_observed(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+        observer: Option<CommandOutputObserver>,
+    ) -> Result<CommandOutput> {
+        self.describe_cancellation(
+            command,
+            crate::runtime::off_async_worker(|| {
+                let _running = BlockingOperation::command(command);
+                // The stream is not read until the session has started, so a
+                // refused session is retried with the same stream. The child
+                // runs in its own process group so cancellation can kill the
+                // whole group, which is what releases a writer blocked on a
+                // full pipe.
+                with_ssh_refusal_retry(
+                    command,
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| {
+                        stream_command_with_stdin(
+                            cancellable_command(command),
+                            command,
+                            &mut *input,
+                            &|| self.is_cancelled(),
+                            gate,
+                            observer.clone(),
+                        )
+                    },
+                )
+            }),
+        )
+    }
+
     pub fn cancel_on_drop(&self) -> ProcessCancellationGuard {
         ProcessCancellationGuard(self.cancelled.clone())
     }
@@ -1157,55 +1552,76 @@ impl CancellableProcessExecutor {
     pub fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self {
             cancelled,
+            token: None,
+            #[cfg(unix)]
+            foreground_terminal: false,
             deadline: None,
-            armed: Arc::default(),
         }
     }
 
-    /// The earliest deadline that applies, whether set at creation or armed.
-    fn effective_deadline(&self) -> Option<(Instant, Duration)> {
-        let armed = *self
-            .armed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        [self.deadline, armed]
-            .into_iter()
-            .flatten()
-            .min_by_key(|(at, _)| *at)
+    /// Use the supervising login's cancellation for blocking preparation.
+    /// Interactive account shells need foreground terminal ownership even
+    /// though their output is captured and cancellation owns their group.
+    #[cfg(unix)]
+    pub fn with_foreground_terminal(mut self) -> Self {
+        self.foreground_terminal = true;
+        self
+    }
+
+    pub fn with_cancellation(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.token = Some(token);
+        self
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self.cancelled.load(Ordering::Acquire)
             || self
-                .effective_deadline()
-                .is_some_and(|(deadline, _)| Instant::now() >= deadline)
+                .deadline
+                .as_ref()
+                .is_some_and(|deadline| deadline.lock().unwrap().expired())
+    }
+
+    /// Whether the supervisor, not the deadline, has asked to stop.
+    pub fn is_cancelled_without_deadline(&self) -> bool {
+        self.token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self.cancelled.load(Ordering::Acquire)
     }
 
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
-            deadline: Some((Instant::now() + timeout, timeout)),
-            armed: Arc::default(),
+            token: None,
+            #[cfg(unix)]
+            foreground_terminal: false,
+            deadline: Some(ProcessDeadline::new(timeout)),
         }
     }
 
     /// Bounds an existing flag-based executor with a deadline, so a wedged
     /// child becomes a reported failure instead of running forever.
     pub fn with_deadline(mut self, timeout: Duration) -> Self {
-        self.deadline = Some((Instant::now() + timeout, timeout));
-        // A clone made for cleanup must not inherit a deadline already spent.
-        self.armed = Arc::default();
+        self.deadline = Some(ProcessDeadline::new(timeout));
         self
     }
 
     fn cancellation_message(&self, purpose: &str) -> String {
         if !self.cancelled.load(Ordering::Acquire)
-            && let Some((deadline, timeout)) = self.effective_deadline()
-            && Instant::now() >= deadline
+            && !self
+                .token
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            && let Some(deadline) = &self.deadline
+            && let deadline = deadline.lock().unwrap()
+            && deadline.expired()
         {
             return format!(
                 "timed out after {} s while {purpose}",
-                timeout.as_secs_f64()
+                deadline.timeout.as_secs_f64()
             );
         }
         format!("operation cancelled while {purpose}")
@@ -1314,43 +1730,147 @@ pollable_pipe!(std::process::ChildStderr);
 struct PipeCollector {
     bytes: Arc<std::sync::Mutex<Vec<u8>>>,
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    task: PipeTask,
+}
+
+enum PipeTask {
+    Running(std::thread::JoinHandle<std::io::Result<()>>),
+    Finished(std::io::Result<()>),
 }
 
 impl PipeCollector {
-    fn spawn(mut pipe: impl PollablePipe) -> Self {
+    fn spawn(pipe: impl PollablePipe) -> Self {
+        Self::spawn_scanning(pipe, None)
+    }
+
+    /// Collect a session's stdout. With a `gate` the start marker is removed
+    /// from the front, the first byte reports the session's start, and the end
+    /// of the pipe reports that it ended; the gate settles however the thread
+    /// stops.
+    fn spawn_scanning(pipe: impl PollablePipe, gate: Option<Arc<StartGate>>) -> Self {
+        Self::spawn_output(pipe, gate, None)
+    }
+
+    fn spawn_output(
+        pipe: impl PollablePipe,
+        gate: Option<Arc<StartGate>>,
+        output: Option<std::fs::File>,
+    ) -> Self {
+        Self::spawn_observed(pipe, gate, output, None)
+    }
+
+    fn spawn_observed(
+        mut pipe: impl PollablePipe,
+        gate: Option<Arc<StartGate>>,
+        mut output: Option<std::fs::File>,
+        observer: Option<CommandOutputObserver>,
+    ) -> Self {
         let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (collected, stopped) = (bytes.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
+            let mut scan = gate.as_ref().map(|_| StartScan::new());
             let mut chunk = [0_u8; 8192];
-            while !stopped.load(Ordering::Acquire) {
-                if !pipe.readable(Duration::from_millis(25)) {
-                    continue;
+            let mut passed = Vec::new();
+            let result = (|| {
+                while !stopped.load(Ordering::Acquire) {
+                    if !pipe.readable(Duration::from_millis(25)) {
+                        continue;
+                    }
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            let mut collected = collected
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            match (&mut scan, &gate) {
+                                (Some(scan), Some(gate)) => {
+                                    passed.clear();
+                                    if scan.push(&chunk[..count], &mut passed) {
+                                        gate.mark_started();
+                                    }
+                                    if let Some(observer) = &observer {
+                                        observer(&passed);
+                                    }
+                                    if let Some(file) = &mut output {
+                                        file.write_all(&passed)?;
+                                    } else {
+                                        collected.extend_from_slice(&passed);
+                                    }
+                                }
+                                _ => {
+                                    if let Some(observer) = &observer {
+                                        observer(&chunk[..count]);
+                                    }
+                                    if let Some(file) = &mut output {
+                                        file.write_all(&chunk[..count])?;
+                                    } else {
+                                        collected.extend_from_slice(&chunk[..count]);
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error),
+                    }
                 }
-                match pipe.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(count) => collected
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .extend_from_slice(&chunk[..count]),
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(error) => return Err(error),
+                Ok(())
+            })();
+            let result = result.and_then(|()| {
+                if let Some(scan) = &mut scan {
+                    passed.clear();
+                    scan.finish(&mut passed);
+                    if let Some(observer) = &observer {
+                        observer(&passed);
+                    }
+                    if let Some(file) = &mut output {
+                        file.write_all(&passed)?;
+                    } else {
+                        collected
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .extend_from_slice(&passed);
+                    }
                 }
+                Ok(())
+            });
+            if let Some(gate) = &gate {
+                gate.mark_ended();
             }
-            Ok(())
+            result
         });
         Self {
             bytes,
             stop,
-            thread: Some(thread),
+            task: PipeTask::Running(thread),
         }
     }
 
     fn is_finished(&self) -> bool {
-        self.thread
-            .as_ref()
-            .is_none_or(std::thread::JoinHandle::is_finished)
+        match &self.task {
+            PipeTask::Running(thread) => thread.is_finished(),
+            PipeTask::Finished(_) => true,
+        }
+    }
+
+    fn join(&mut self) {
+        if let PipeTask::Running(thread) =
+            std::mem::replace(&mut self.task, PipeTask::Finished(Ok(())))
+        {
+            self.task =
+                PipeTask::Finished(thread.join().unwrap_or_else(|_| {
+                    Err(std::io::Error::other("command pipe reader panicked"))
+                }));
+        }
+    }
+
+    /// A finished reader owns its one result. The supervisor observes failure
+    /// before waiting for a child that may otherwise keep working forever.
+    fn failed(&mut self) -> bool {
+        if matches!(&self.task, PipeTask::Running(thread) if thread.is_finished()) {
+            self.join();
+        }
+        matches!(&self.task, PipeTask::Finished(Err(_)))
     }
 
     /// Waits for end of stream until `deadline`, then stops the reader and
@@ -1360,12 +1880,15 @@ impl PipeCollector {
             std::thread::sleep(Duration::from_millis(5));
         }
         self.stop.store(true, Ordering::Release);
-        self.thread
-            .take()
-            .context("command reader already joined")?
-            .join()
-            .map_err(|_| anyhow::anyhow!("command {stream} reader panicked"))?
-            .with_context(|| format!("read command {stream}"))?;
+        if matches!(self.task, PipeTask::Running(_)) {
+            self.join();
+        }
+        let PipeTask::Finished(result) =
+            std::mem::replace(&mut self.task, PipeTask::Finished(Ok(())))
+        else {
+            unreachable!()
+        };
+        result.with_context(|| format!("read command {stream}"))?;
         let mut bytes = self
             .bytes
             .lock()
@@ -1407,21 +1930,76 @@ fn terminate_cancellable_child(child: &mut std::process::Child, preserve_childre
 }
 
 impl CancellableProcessExecutor {
-    /// One attempt, with no admission or retry of its own.
-    fn run_once(&self, command: &CommandSpec) -> Result<CommandOutput> {
+    /// One attempt, with no retry of its own. A `gate` makes the attempt read
+    /// the start marker from stdout and report the session's start.
+    fn run_once(
+        &self,
+        command: &CommandSpec,
+        gate: Option<&Arc<StartGate>>,
+    ) -> Result<CommandOutput> {
+        self.run_once_output(command, gate, None)
+    }
+
+    /// Stream stdout into a file, retaining the shared cancellation, process-group,
+    /// and SSH refusal/start-marker semantics. Returned stdout is empty.
+    pub fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        use std::io::{Seek, SeekFrom};
+        ensure!(
+            command.sensitive_stdin.is_none(),
+            "file-output commands cannot carry buffered stdin"
+        );
+        crate::runtime::off_async_worker(|| {
+            let _running = BlockingOperation::command(command);
+            self.describe_cancellation(
+                command,
+                with_ssh_refusal_retry(
+                    command,
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| {
+                        let mut file = output.try_clone().context("clone command output file")?;
+                        file.set_len(0).context("reset command output file")?;
+                        file.seek(SeekFrom::Start(0))
+                            .context("rewind command output file")?;
+                        self.run_once_output(command, gate, Some(file))
+                    },
+                ),
+            )
+        })
+    }
+
+    fn run_once_output(
+        &self,
+        command: &CommandSpec,
+        gate: Option<&Arc<StartGate>>,
+        output: Option<std::fs::File>,
+    ) -> Result<CommandOutput> {
+        let mut process = cancellable_command(command);
+        #[cfg(unix)]
+        let _foreground = if self.foreground_terminal {
+            crate::subprocess::ForegroundGroup::prepare(&mut process)?
+        } else {
+            None
+        };
         if let Some(input) = &command.sensitive_stdin {
             let mut input = std::io::Cursor::new(input.0.as_slice());
             // Owned bytes, so each attempt gets its own reader.
             return stream_command_with_stdin(
-                cancellable_command(command),
+                process,
                 command,
                 &mut input,
                 &|| self.is_cancelled(),
+                gate,
+                None,
             );
         }
         let started = Instant::now();
         self.check_cancelled(&command.purpose)?;
-        let mut child = cancellable_command(command)
+        let mut child = process
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1431,11 +2009,17 @@ impl CancellableProcessExecutor {
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
         let stdout = child.stdout.take().context("command stdout missing")?;
         let stderr = child.stderr.take().context("command stderr missing")?;
-        let stdout_reader = PipeCollector::spawn(stdout);
-        let stderr_reader = PipeCollector::spawn(stderr);
+        let mut stdout_reader = PipeCollector::spawn_output(stdout, gate.cloned(), output);
+        let mut stderr_reader = PipeCollector::spawn(stderr);
         let mut status = None;
         let mut exited_at = None;
         let status = loop {
+            if status.is_none() && (stdout_reader.failed() || stderr_reader.failed()) {
+                terminate_cancellable_child(&mut child, command.preserve_children_on_cancel);
+                status = child
+                    .try_wait()
+                    .context("reap command after pipe failure")?;
+            }
             if self.is_cancelled() {
                 terminate_cancellable_child(&mut child, command.preserve_children_on_cancel);
                 let deadline = Instant::now() + IO_DRAIN_TIMEOUT;
@@ -1473,12 +2057,12 @@ impl CancellableProcessExecutor {
 }
 
 impl CommandExecutor for CancellableProcessExecutor {
-    fn bound_admitted_work(&self, timeout: Option<Duration>) {
-        *self
-            .armed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            timeout.map(|timeout| (Instant::now() + timeout, timeout));
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::new(self.deadline.clone())
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.is_cancelled_without_deadline()
     }
 
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -1499,20 +2083,37 @@ impl CommandExecutor for CancellableProcessExecutor {
         self.is_cancelled()
     }
 
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        Self {
+            deadline: None,
+            ..self.clone()
+        }
+        .execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        Self {
+            deadline: None,
+            ..self.clone()
+        }
+        .execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            if let Some(host) = command_host(command) {
-                return self.describe_cancellation(
-                    command,
-                    host.run(command, None, &|| self.is_cancelled()),
-                );
-            }
             self.describe_cancellation(
                 command,
-                with_ssh_admission(command, self, &|| self.is_cancelled(), |command| {
-                    self.run_once(command)
-                }),
+                with_ssh_refusal_retry(
+                    command,
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| self.run_once(command, gate),
+                ),
             )
         })
     }
@@ -1522,32 +2123,7 @@ impl CommandExecutor for CancellableProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        self.describe_cancellation(
-            command,
-            crate::runtime::off_async_worker(|| {
-                let _running = BlockingOperation::command(command);
-                if let Some(host) = command_host(command) {
-                    return host.run(command, Some(input), &|| self.is_cancelled());
-                }
-                // A caller's stream cannot be replayed, so this path takes a
-                // session and a permit but never retries.
-                let session = command.open_ssh_session(self)?;
-                let _permit = command
-                    .ssh_destination
-                    .as_deref()
-                    .map(|destination| {
-                        SshAdmission::acquire_unless(destination, &|| self.is_cancelled())
-                    })
-                    .transpose()?;
-                let command = session.command();
-                // The child runs in its own process group so cancellation can kill
-                // the whole group, which is what releases a writer blocked on a
-                // full pipe.
-                stream_command_with_stdin(cancellable_command(command), command, input, &|| {
-                    self.is_cancelled()
-                })
-            }),
-        )
+        self.execute_with_stdin_observed(command, input, None)
     }
 }
 
@@ -1595,6 +2171,31 @@ impl BoundedProcessExecutor {
 }
 
 impl CommandExecutor for BoundedProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        // This executor's only bound is its deadline and it has no
+        // cancellation, so without the deadline it is a plain process.
+        ProcessExecutor.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        ProcessExecutor.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let executor = CancellableProcessExecutor::with_timeout(self.timeout);
         executor.execute(command).map_err(|error| {
@@ -1647,27 +2248,203 @@ pub fn validate_inherited_environment_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// One argv-only operation in an ordered shell batch.
+#[derive(Debug, Clone)]
+pub struct CommandStep {
+    argv: Vec<String>,
+    purpose: String,
+    accepted_statuses: Vec<i32>,
+    cleanup: bool,
+    best_effort: bool,
+}
+
+impl CommandStep {
+    pub fn new(
+        purpose: impl Into<String>,
+        argv: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            argv: argv.into_iter().map(Into::into).collect(),
+            purpose: purpose.into(),
+            accepted_statuses: vec![0],
+            cleanup: false,
+            best_effort: false,
+        }
+    }
+
+    pub fn accepted_statuses(mut self, statuses: impl IntoIterator<Item = i32>) -> Self {
+        self.accepted_statuses = statuses.into_iter().collect();
+        self
+    }
+
+    /// Run on shell exit, including when an earlier operation failed.
+    pub fn cleanup(mut self) -> Self {
+        self.cleanup = true;
+        self
+    }
+
+    /// Report a cleanup failure to the caller without failing the batch.
+    /// Callers must log [`step_script_warnings`] even when execution failed.
+    pub fn best_effort_cleanup(mut self) -> Self {
+        self.cleanup = true;
+        self.best_effort = true;
+        self
+    }
+}
+
+/// Build one `sh -c` argv. Local decisions and transport selection stay with
+/// the caller; only these already-decided operations run in the script.
+pub fn step_script(steps: impl IntoIterator<Item = CommandStep>) -> Vec<String> {
+    let steps: Vec<_> = steps.into_iter().collect();
+    let mut script = String::new();
+    for (index, step) in steps.iter().enumerate() {
+        let argv = step
+            .argv
+            .iter()
+            .map(|arg| posix_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let statuses = step
+            .accepted_statuses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("|");
+        let purpose = serde_json::to_string(&step.purpose).expect("serialize step purpose");
+        let marker = if step.best_effort {
+            "MJ_STEP_WARNING"
+        } else {
+            "MJ_STEP_FAILED"
+        };
+        let returned = if step.best_effort {
+            "0"
+        } else {
+            "\"$mj_status\""
+        };
+        script.push_str(&format!(
+            "mj_step_{index}() {{\n( {argv} )\nmj_status=$?\ncase $mj_status in {statuses}) return 0;; esac\nprintf '\\n{marker} {index} %s %s\\n' \"$mj_status\" {} >&2\nreturn {returned}\n}}\n",
+            posix_quote(&purpose),
+        ));
+    }
+    if steps.iter().any(|step| step.cleanup) {
+        script.push_str("mj_cleanup() {\nmj_original=$?\ntrap - EXIT HUP INT TERM\n");
+        for (index, step) in steps.iter().enumerate() {
+            if step.cleanup {
+                script.push_str(&format!("mj_step_{index}\nmj_result=$?\nif [ \"$mj_original\" -eq 0 ]; then mj_original=$mj_result; fi\n"));
+            }
+        }
+        script.push_str("exit \"$mj_original\"\n}\ntrap mj_cleanup EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\n");
+    }
+    for (index, step) in steps.iter().enumerate() {
+        if !step.cleanup {
+            script.push_str(&format!("mj_step_{index} || exit $?\n"));
+        }
+    }
+    script.push_str("exit 0\n");
+    vec!["sh".into(), "-c".into(), script, "mj-steps".into()]
+}
+
+/// Decode the first failed step, preserving its stderr and original purpose.
+/// The marker includes JSON-escaped purpose text so transports and serialized
+/// plans need no extra metadata, including for purposes containing newlines.
+pub fn step_script_error(output: &CommandOutput) -> Option<String> {
+    if output.status == 0 {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut failure = None;
+    let mut detail = Vec::new();
+    for line in stderr.lines() {
+        let parsed = parse_step_marker(line, "MJ_STEP_FAILED ");
+        if let Some(parsed) = parsed {
+            failure.get_or_insert(parsed);
+        } else if parse_step_marker(line, "MJ_STEP_WARNING ").is_none() {
+            detail.push(line);
+        }
+    }
+    failure.map(|(status, purpose)| {
+        format!(
+            "{purpose} failed with status {status}: {}",
+            detail.join("\n").trim()
+        )
+    })
+}
+
+/// Failures of cleanup steps marked best-effort. Always inspect these before
+/// checking the command result, so an earlier failure cannot hide cleanup errors.
+pub fn step_script_warnings(output: &CommandOutput) -> Vec<String> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr
+        .lines()
+        .filter(|line| !line.starts_with("MJ_STEP_"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    stderr
+        .lines()
+        .filter_map(|line| {
+            let (status, purpose) = parse_step_marker(line, "MJ_STEP_WARNING ")?;
+            Some(format!(
+                "{purpose} failed with status {status}: {}",
+                detail.trim()
+            ))
+        })
+        .collect()
+}
+
+fn parse_step_marker(line: &str, prefix: &str) -> Option<(i32, String)> {
+    let mut fields = line.strip_prefix(prefix)?.splitn(3, ' ');
+    let _index = fields.next()?.parse::<usize>().ok()?;
+    let status = fields.next()?.parse::<i32>().ok()?;
+    let purpose = serde_json::from_str::<String>(fields.next()?).ok()?;
+    Some((status, purpose))
+}
+
 impl CommandPlan {
     /// Supply one container environment value without placing it in the
-    /// Podman/SSH argument vector. The target launcher reads the value from
-    /// stdin, exports it, and asks the container engine to inherit it by name.
+    /// Podman/SSH argument vector. See [`Self::provide_target_environment_secrets`].
     pub fn provide_target_environment_secret(
         &mut self,
         target: &TargetTemplate,
         name: &str,
         value: &str,
     ) -> Result<()> {
-        validate_inherited_environment_name(name)?;
+        self.provide_target_environment_secrets(target, &[(name.to_owned(), value.to_owned())])
+    }
+
+    /// Supply container environment values without placing them in the
+    /// Podman/SSH argument vector. The target launcher reads one value per
+    /// line from stdin, exports each, and the container engine is asked to
+    /// inherit it by name (`--env NAME`).
+    pub fn provide_target_environment_secrets(
+        &mut self,
+        target: &TargetTemplate,
+        secrets: &[(String, String)],
+    ) -> Result<()> {
         ensure!(
-            !value.as_bytes().contains(&b'\n') && !value.as_bytes().contains(&b'\r'),
-            "secret environment value cannot contain a newline"
+            !secrets.is_empty(),
+            "no secret environment values to supply"
         );
+        let mut read_and_export = String::new();
+        let mut input = Vec::new();
+        for (index, (name, value)) in secrets.iter().enumerate() {
+            validate_inherited_environment_name(name)?;
+            ensure!(
+                secrets[..index].iter().all(|(earlier, _)| earlier != name),
+                "secret environment variable {name} is supplied twice"
+            );
+            ensure!(
+                !value.as_bytes().contains(&b'\n') && !value.as_bytes().contains(&b'\r'),
+                "secret environment value cannot contain a newline"
+            );
+            read_and_export.push_str(&format!("IFS= read -r {name} || exit 1; export {name}; "));
+            input.extend_from_slice(value.as_bytes());
+            input.push(b'\n');
+        }
         let command = self
             .commands
             .iter_mut()
             .find(|command| command.creates_target)
             .context("provisioning plan has no target creation command")?;
-        let read_and_export = format!("IFS= read -r {name} || exit 1; export {name};");
         match target {
             TargetTemplate::LocalPodman(_)
             | TargetTemplate::LocalDocker(_)
@@ -1676,7 +2453,7 @@ impl CommandPlan {
                 let args = std::mem::take(&mut command.args);
                 command.args = vec![
                     "-c".to_owned(),
-                    format!("{read_and_export} exec \"$@\""),
+                    format!("{read_and_export}exec \"$@\""),
                     "mj-secret-env".to_owned(),
                     program,
                 ];
@@ -1684,22 +2461,19 @@ impl CommandPlan {
             }
             TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
-            | TargetTemplate::SshAppleContainer { .. } => {
+            | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. } => {
                 let remote = command
                     .args
                     .last_mut()
                     .context("remote container command has no SSH command argument")?;
-                *remote = format!("{read_and_export} exec {remote}");
+                *remote = format!("{read_and_export}exec {remote}");
             }
-            TargetTemplate::LocalBare
-            | TargetTemplate::AwsEc2(_)
-            | TargetTemplate::SshBare { .. } => {
+            TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
                 bail!("target does not support inherited container environment")
             }
         }
-        let mut input = value.as_bytes().to_vec();
-        input.push(b'\n');
-        command.sensitive_stdin = Some(SensitiveCommandInput(input));
+        command.sensitive_stdin = Some(SensitiveCommandInput(Arc::new(input)));
         Ok(())
     }
 
@@ -1707,15 +2481,7 @@ impl CommandPlan {
         let mut outputs = Vec::with_capacity(self.commands.len());
         for command in &self.commands {
             let output = executor.execute(command)?;
-            if output.status != 0 {
-                bail!(
-                    "{} failed with status {}: {}",
-                    command.purpose,
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            outputs.push(output);
+            outputs.push(checked_command_output(command, output)?);
         }
         Ok(outputs)
     }
@@ -1800,6 +2566,21 @@ impl CommandPlan {
     }
 }
 
+/// Emit a `WARN` log if a command succeeded with non-empty stderr and opted in.
+pub fn log_command_warnings(command: &CommandSpec, output: &CommandOutput) {
+    if command.warn_on_stderr && !command.sensitive_output {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let warning = stderr.trim();
+        if !warning.is_empty() {
+            tracing::warn!(
+                purpose = %command.purpose,
+                stderr = %warning,
+                "command succeeded with warnings"
+            );
+        }
+    }
+}
+
 /// Fail the same way [`CommandPlan::execute`] does for a non-zero exit
 /// status; kept as a shared helper so [`CommandPlan::execute_concurrent`]
 /// reports identical error text.
@@ -1807,6 +2588,9 @@ pub fn checked_command_output(
     command: &CommandSpec,
     output: CommandOutput,
 ) -> Result<CommandOutput> {
+    if let Some(error) = step_script_error(&output) {
+        bail!("{error}");
+    }
     if output.status != 0 {
         bail!(
             "{} failed with status {}: {}",
@@ -1815,6 +2599,7 @@ pub fn checked_command_output(
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    log_command_warnings(command, &output);
     Ok(output)
 }
 
@@ -2037,6 +2822,109 @@ pub enum ImageHost {
     SshPodman(SshTarget),
     SshDocker(SshTarget),
     SshAppleContainer(SshTarget),
+    /// The `mj-worker microvm` engine on an EC2 host; see [`MICROVM_ENGINE`].
+    SshNitro(SshTarget),
+}
+
+/// The name of the Nitro Sandbox host engine, `mj-worker microvm`. It
+/// implements the subset of Podman's verbs, flags and output formats that
+/// Mjolnir drives over SSH, so most call sites treat it like `podman`.
+pub const MICROVM_ENGINE: &str = "microvm";
+
+/// Where the host engine's worker binary lives on an SSH host, relative to
+/// the login home. The daemon installs it there before the first engine call
+/// (see the controller's `ensure_microvm_engine`); this is the only place
+/// that names the path.
+pub const MICROVM_ENGINE_WORKER: &str = ".local/share/hel/microvm/hel";
+
+/// The argument vector that runs `engine` on its host, up to the verb.
+///
+/// Podman, Docker and Apple's `container` are one program. The microVM engine
+/// is the installed worker run as root. `sudo` needs an absolute path and
+/// ssh quotes every argument, so the login shell cannot expand `$HOME`; the
+/// inner `sh` does it before `sudo` starts. Everything after this prefix
+/// reaches the engine unchanged, including stdin, stdout and the exit status.
+pub fn engine_argv(engine: &str) -> Vec<String> {
+    engine_argv_with_env(engine, &[])
+}
+
+/// [`engine_argv`] for a command whose engine must inherit the environment
+/// variables `names` from the ssh command's environment. `sudo` resets the
+/// environment, so the microVM engine's prefix preserves exactly these; a
+/// value on the command line would be logged by `sudo` and visible in `ps`.
+/// Other engines inherit the whole environment and ignore `names`.
+pub fn engine_argv_with_env(engine: &str, names: &[String]) -> Vec<String> {
+    if engine == MICROVM_ENGINE {
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                r#"exec {} "$@""#,
+                engine_shell_words_with_env(engine, names)
+            ),
+            "mj-microvm".to_owned(),
+        ]
+    } else {
+        vec![engine.to_owned()]
+    }
+}
+
+/// `engine` as the words of a shell command line, for a script that runs it:
+/// `exec $(engine_shell_words) volume rm "$volume"`. The words contain `$HOME`
+/// for the microVM engine, so they belong inside a script that does not quote
+/// them away, never in an argument that ssh quotes.
+pub fn engine_shell_words(engine: &str) -> String {
+    engine_shell_words_with_env(engine, &[])
+}
+
+/// [`engine_shell_words`] preserving the environment variables `names`
+/// through `sudo`; see [`engine_argv_with_env`].
+pub fn engine_shell_words_with_env(engine: &str, names: &[String]) -> String {
+    if engine == MICROVM_ENGINE {
+        let preserve = if names.is_empty() {
+            String::new()
+        } else {
+            format!("--preserve-env={} ", names.join(","))
+        };
+        format!(r#"sudo -n {preserve}"$HOME/{MICROVM_ENGINE_WORKER}" {MICROVM_ENGINE}"#)
+    } else {
+        engine.to_owned()
+    }
+}
+
+/// `args` with a leading engine name expanded to the command that runs it.
+pub fn with_engine_argv(mut args: Vec<String>) -> Vec<String> {
+    if args.first().is_some_and(|first| first == MICROVM_ENGINE) {
+        let verbs = args.split_off(1);
+        let mut argv = engine_argv(MICROVM_ENGINE);
+        argv.extend(verbs);
+        argv
+    } else {
+        args
+    }
+}
+
+/// `engine` followed by `args`, as one command.
+pub fn engine_command(
+    engine: &str,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> CommandSpec {
+    let mut argv = engine_argv(engine);
+    argv.extend(args.into_iter().map(Into::into));
+    let program = argv.remove(0);
+    CommandSpec::new(program, argv)
+}
+
+/// `engine` followed by `args`, run on the SSH host.
+pub fn ssh_engine_command(
+    class: SshTrafficClass,
+    ssh: &SshTarget,
+    engine: &str,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> CommandSpec {
+    let mut argv = engine_argv(engine);
+    argv.extend(args.into_iter().map(Into::into));
+    ssh_command_owned(class, ssh, argv)
 }
 
 impl ImageHost {
@@ -2045,6 +2933,7 @@ impl ImageHost {
             Self::LocalPodman | Self::SshPodman(_) => "podman",
             Self::LocalDocker | Self::SshDocker(_) => "docker",
             Self::AppleContainer | Self::SshAppleContainer(_) => "container",
+            Self::SshNitro(_) => MICROVM_ENGINE,
         }
     }
 
@@ -2057,17 +2946,24 @@ impl ImageHost {
             Self::SshPodman(ssh) => format!("podman on {}", ssh.destination),
             Self::SshDocker(ssh) => format!("docker on {}", ssh.destination),
             Self::SshAppleContainer(ssh) => format!("apple container on {}", ssh.destination),
+            Self::SshNitro(ssh) => format!("nitro sandboxes on {}", ssh.destination),
         }
     }
 
-    /// Run `args` (an engine command line) on this host.
+    /// Run `args` (an engine command line, starting with the engine's name)
+    /// on this host.
     pub fn command(&self, args: Vec<String>, purpose: String) -> CommandSpec {
         match self {
             Self::LocalPodman | Self::LocalDocker | Self::AppleContainer => {
                 CommandSpec::new(args[0].clone(), args[1..].iter().cloned())
             }
-            Self::SshPodman(ssh) | Self::SshDocker(ssh) | Self::SshAppleContainer(ssh) => {
-                ssh_command_owned(ssh, args)
+            Self::SshPodman(ssh)
+            | Self::SshDocker(ssh)
+            | Self::SshAppleContainer(ssh)
+            | Self::SshNitro(ssh) => {
+                let mut argv = engine_argv(&args[0]);
+                argv.extend(args.into_iter().skip(1));
+                ssh_command_owned(SshTrafficClass::Control, ssh, argv)
             }
         }
         .purpose(purpose)
@@ -2102,9 +2998,9 @@ pub struct ImageRefresh {
     /// Run before and after the pull.
     pub image_id: CommandSpec,
     pub pull: CommandSpec,
-    /// Dangling images only. Both engines keep an image a container still uses.
-    /// `None` for Apple's `container` engine, which has no verified prune form.
-    pub prune: Option<CommandSpec>,
+    /// Dangling images and orphaned content only. Keep tagged images ready
+    /// for future sessions; `--all` would delete those preloaded images.
+    pub prune: CommandSpec,
 }
 
 /// The background refresh for one configured container target, or `None` when
@@ -2154,17 +3050,12 @@ pub fn image_refresh(
     }
     pull_args.push(image.to_owned());
     let pull = host.command(pull_args, format!("refresh container image {image}"));
-    let prune = (!apple).then(|| {
-        host.command(
-            vec![
-                engine.to_owned(),
-                "image".to_owned(),
-                "prune".to_owned(),
-                "-f".to_owned(),
-            ],
-            "remove dangling container images".to_owned(),
-        )
-    });
+    let mut prune_args = vec![engine.to_owned(), "image".to_owned(), "prune".to_owned()];
+    // Apple prunes without prompting and does not accept Docker/Podman's -f.
+    if !apple {
+        prune_args.push("-f".to_owned());
+    }
+    let prune = host.command(prune_args, "remove dangling container images".to_owned());
     Some(ImageRefresh {
         host,
         image: image.to_owned(),
@@ -2200,23 +3091,12 @@ pub struct SshTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AwsTemplate {
-    pub profile: String,
-    pub region: String,
-    pub launch_template: String,
-    pub launch_template_version: Option<String>,
-    pub instance_type: Option<String>,
-    pub ssh: SshTarget,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TargetTemplate {
     LocalBare,
     LocalPodman(ContainerTemplate),
     LocalDocker(ContainerTemplate),
     AppleContainer(ContainerTemplate),
-    AwsEc2(AwsTemplate),
     SshBare {
         ssh: SshTarget,
         #[serde(default = "default_ssh_prefix")]
@@ -2231,6 +3111,10 @@ pub enum TargetTemplate {
         container: ContainerTemplate,
     },
     SshAppleContainer {
+        ssh: SshTarget,
+        container: ContainerTemplate,
+    },
+    SshNitro {
         ssh: SshTarget,
         container: ContainerTemplate,
     },
@@ -2330,6 +3214,15 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         borrowed_from: Option<String>,
     },
+    SshNitro {
+        ssh: SshTarget,
+        container_id: String,
+        /// The session that owns the sandbox when this locator is a
+        /// sub-agent child borrowing its parent's sandbox; `None` when the
+        /// session owns the sandbox itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
+    },
 }
 
 impl TargetTemplate {
@@ -2338,6 +3231,7 @@ impl TargetTemplate {
             Self::LocalPodman(_) | Self::SshPodman { .. } => Some("podman"),
             Self::LocalDocker(_) | Self::SshDocker { .. } => Some("docker"),
             Self::AppleContainer(_) | Self::SshAppleContainer { .. } => Some("container"),
+            Self::SshNitro { .. } => Some(MICROVM_ENGINE),
             _ => None,
         }
     }
@@ -2358,12 +3252,24 @@ impl TargetTemplate {
             Self::SshAppleContainer { ssh, container } => {
                 Some((ImageHost::SshAppleContainer(ssh.clone()), container))
             }
-            Self::LocalBare | Self::AwsEc2(_) | Self::SshBare { .. } => None,
+            Self::SshNitro { ssh, container } => {
+                Some((ImageHost::SshNitro(ssh.clone()), container))
+            }
+            Self::LocalBare | Self::SshBare { .. } => None,
         }
     }
 }
 
 impl TargetLocator {
+    /// Container placement includes borrowed workers: each can survive its owner moving.
+    pub fn cpu_accounting(&self) -> crate::cpu_usage::CpuAccountingMode {
+        if self.container_engine().is_some() {
+            crate::cpu_usage::CpuAccountingMode::Container
+        } else {
+            crate::cpu_usage::CpuAccountingMode::ProcessTree
+        }
+    }
+
     /// The target kind spelling shared with [`crate::config::TargetTemplate`].
     pub const fn kind_name(&self) -> &'static str {
         match self {
@@ -2376,6 +3282,7 @@ impl TargetLocator {
             Self::SshPodman { .. } => "ssh-podman",
             Self::SshDocker { .. } => "ssh-docker",
             Self::SshAppleContainer { .. } => "ssh-apple-container",
+            Self::SshNitro { .. } => "ssh-nitro",
         }
     }
 
@@ -2384,6 +3291,7 @@ impl TargetLocator {
             Self::LocalPodman { .. } | Self::SshPodman { .. } => Some("podman"),
             Self::LocalDocker { .. } | Self::SshDocker { .. } => Some("docker"),
             Self::AppleContainer { .. } | Self::SshAppleContainer { .. } => Some("container"),
+            Self::SshNitro { .. } => Some(MICROVM_ENGINE),
             _ => None,
         }
     }
@@ -2522,10 +3430,10 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
         | TargetTemplate::AppleContainer(_)
         | TargetTemplate::SshPodman { .. }
         | TargetTemplate::SshDocker { .. }
-        | TargetTemplate::SshAppleContainer { .. } => {
+        | TargetTemplate::SshAppleContainer { .. }
+        | TargetTemplate::SshNitro { .. } => {
             bail!("container targets use the session's recorded container workspace")
         }
-        TargetTemplate::AwsEc2(_) => Ok(aws_workspace(session_id)),
         TargetTemplate::SshBare {
             workspace_prefix, ..
         } => {
@@ -2544,6 +3452,7 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
 
 /// Wrap an argv vector for execution at a provisioned session target.
 pub fn command_on_locator(
+    class: SshTrafficClass,
     locator: &TargetLocator,
     session_id: &str,
     args: Vec<String>,
@@ -2553,13 +3462,17 @@ pub fn command_on_locator(
     if args.is_empty() {
         bail!("target command must not be empty");
     }
-    Ok(locator_command(locator, args).purpose(purpose))
+    Ok(locator_command(class, locator, args).purpose(purpose))
 }
 
 /// Wrap a non-empty argv vector for execution at a target, without checking
 /// that the locator belongs to a particular session. Every per-target command
 /// is built here, so each target kind is spelled out once.
-pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpec {
+pub fn locator_command(
+    class: SshTrafficClass,
+    locator: &TargetLocator,
+    args: Vec<String>,
+) -> CommandSpec {
     match locator {
         TargetLocator::LocalBare { .. } => {
             let mut args = args.into_iter();
@@ -2574,7 +3487,7 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
             args,
         ),
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_owned(ssh, args)
+            ssh_command_owned(class, ssh, args)
         }
         TargetLocator::SshPodman {
             ssh, container_id, ..
@@ -2584,18 +3497,18 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
         }
         | TargetLocator::SshAppleContainer {
             ssh, container_id, ..
+        }
+        | TargetLocator::SshNitro {
+            ssh, container_id, ..
         } => {
-            let mut remote = vec![
-                locator
-                    .container_engine()
-                    .expect("remote container")
-                    .to_owned(),
-                "exec".to_owned(),
-                "-i".to_owned(),
-                container_id.to_owned(),
-            ];
-            remote.extend(args);
-            ssh_command_owned(ssh, remote)
+            let remote = drained_container_exec(
+                locator.container_engine().expect("remote container"),
+                container_id,
+                args,
+            );
+            let mut argv = vec![remote.program];
+            argv.extend(remote.args);
+            ssh_command_owned(class, ssh, argv)
         }
     }
 }
@@ -2608,7 +3521,8 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
         | TargetLocator::AppleContainer { .. }
         | TargetLocator::SshPodman { .. }
         | TargetLocator::SshDocker { .. }
-        | TargetLocator::SshAppleContainer { .. } => {
+        | TargetLocator::SshAppleContainer { .. }
+        | TargetLocator::SshNitro { .. } => {
             format!("/var/lib/hel/workers/{session_id}")
         }
         TargetLocator::AwsEc2 { .. } => format!(".local/share/hel/workers/{session_id}"),
@@ -2620,8 +3534,8 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
 }
 mod convert;
 pub use convert::{
-    RecordedTarget, StoredTarget, TargetConversionError, locator_needs_connection,
-    ssh_args_with_identity,
+    RecordedTarget, StoredTarget, TargetConversionError, locator_kind_name,
+    locator_needs_connection, ssh_args_with_identity,
 };
 
 mod ssh;
@@ -2634,14 +3548,194 @@ pub fn container_exec(
 ) -> CommandSpec {
     let mut command_args = vec!["exec".to_owned(), "-i".to_owned(), container_id.to_owned()];
     command_args.extend(args.into_iter().map(Into::into));
-    CommandSpec::new(engine, command_args)
+    engine_command(engine, command_args)
 }
+
+/// A container exec run on a remote host over SSH, through the output drain
+/// below. Only SSH targets need it: there the drain runs on the remote host
+/// and outlives a cancelled local ssh, whereas a local target's cancellation
+/// kills the whole process group, drain included, and a local controller
+/// (Windows) may have no POSIX shell to run it.
+pub fn drained_container_exec(
+    engine: &str,
+    container_id: &str,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> CommandSpec {
+    let exec = container_exec(engine, container_id, args);
+    let mut wrapped = vec![
+        "-c".to_owned(),
+        CONTAINER_EXEC_DRAIN.to_owned(),
+        "exec-drain".to_owned(),
+        exec.program,
+    ];
+    wrapped.extend(exec.args);
+    CommandSpec::new("sh", wrapped)
+}
+
+// Podman's attached client removes its exec record only on normal exit. A broken
+// SSH output pipe kills it with SIGPIPE and leaks that record. The host-side
+// POSIX drain preserved both streams and status and prevented leaks in all 40
+// cancellation trials on morannon (2026-11-07). Keep draining after EPIPE.
+// An infinite command retains its temporary status directory until it ends.
+const CONTAINER_EXEC_DRAIN: &str = r#"status_dir=$(mktemp -d) || exit 125
+trap 'rm -rf "$status_dir"' 0
+drain() {
+    trap '' PIPE
+    cat
+    cat >/dev/null
+}
+{
+    {
+        "$@"
+        printf '%s\n' "$?" >"$status_dir/status"
+    } 2>&1 1>&3 | drain >&2
+} 3>&1 | drain
+if [ -r "$status_dir/status" ]; then
+    read -r status <"$status_dir/status"
+    exit "$status"
+fi
+exit 125
+"#;
 
 #[cfg(all(test, unix))]
 mod executor_tests {
+    #[test]
+    #[cfg(unix)]
+    fn step_script_reports_partial_failure_and_runs_cleanup() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let cleaned = directory.path().join("cleanup 'with spaces");
+        let skipped = directory.path().join("must not run");
+        let argv = step_script([
+            CommandStep::new("absent Git key", ["sh", "-c", "exit 5"]).accepted_statuses([0, 5]),
+            CommandStep::new(
+                "failing middle step",
+                ["sh", "-c", "echo precise-error >&2; exit 7"],
+            ),
+            CommandStep::new("later operation", ["touch", skipped.to_str().unwrap()]),
+            CommandStep::new("remove staging", ["touch", cleaned.to_str().unwrap()]).cleanup(),
+            CommandStep::new(
+                "optional cleanup",
+                ["sh", "-c", "echo cleanup-error >&2; exit 9"],
+            )
+            .best_effort_cleanup(),
+        ]);
+        let command = CommandSpec::new(&argv[0], argv[1..].iter().cloned()).purpose("batch");
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(output.status, 7);
+        let warnings = step_script_warnings(&output);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("optional cleanup failed with status 9"));
+        assert!(warnings[0].contains("cleanup-error"));
+        let error = checked_command_output(&command, output)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("failing middle step failed with status 7: precise-error"),
+            "{error}"
+        );
+        assert!(cleaned.exists());
+        assert!(!skipped.exists());
+
+        // Cleanup failure remains visible even after successful publication.
+        let argv = step_script([CommandStep::new(
+            "optional discard",
+            ["sh", "-c", "echo discard-error >&2; exit 9"],
+        )
+        .best_effort_cleanup()]);
+        let command = CommandSpec::new(&argv[0], argv[1..].iter().cloned());
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(
+            step_script_warnings(&output),
+            ["optional discard failed with status 9: discard-error"]
+        );
+    }
+
     use std::fs;
 
     use super::*;
+
+    // Hard-won: leaked exec records: a broken SSH pipe killed the attached client.
+    #[test]
+    fn container_exec_drain_preserves_streams_stdin_and_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake = temp.path().join("podman");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nshift 3\ncat\nprintf 'stderr bytes\\n' >&2\nexit \"$1\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        for status in [0, 37, 23, 255] {
+            let plain = CommandSpec::new(
+                fake.to_str().unwrap(),
+                ["exec", "-i", "ctr", &status.to_string()],
+            );
+            let wrapped =
+                drained_container_exec(fake.to_str().unwrap(), "ctr", [status.to_string()]);
+            let input = vec![b'x'; 204800];
+            let expected = ProcessExecutor
+                .execute_with_stdin(&plain, &mut std::io::Cursor::new(&input))
+                .unwrap();
+            let actual = ProcessExecutor
+                .execute_with_stdin(&wrapped, &mut std::io::Cursor::new(&input))
+                .unwrap();
+            assert_eq!(actual.stdout, expected.stdout);
+            assert_eq!(actual.stderr, expected.stderr);
+            assert_eq!(actual.status, expected.status);
+            assert_eq!(actual.stdout.len(), input.len());
+            let mut argv = vec![wrapped.program.clone()];
+            argv.extend(wrapped.args.clone());
+            let marked = CommandSpec::new(
+                "sh",
+                [
+                    "-c".to_owned(),
+                    with_start_marker(&remote_command_line(&argv)),
+                ],
+            );
+            let marked = ProcessExecutor
+                .execute_with_stdin(&marked, &mut std::io::Cursor::new(&input))
+                .unwrap();
+            assert_eq!(
+                marked.stdout,
+                [SSH_START_MARKER.as_bytes(), actual.stdout.as_slice()].concat()
+            );
+            assert_eq!(marked.stderr, actual.stderr);
+            assert_eq!(marked.status, actual.status);
+        }
+    }
+
+    // Hard-won: leaked exec records: output cancellation must let the client exit normally.
+    // Hard-won: 1e324ede0: BSD head rejects zero-byte readers in this fixture.
+    #[test]
+    fn container_exec_drain_survives_closed_downstream_pipes() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake = temp.path().join("podman");
+        fs::write(&fake, "#!/bin/sh\nset -e\nshift 3\nhead -c 204800 /dev/zero\nhead -c 204800 /dev/zero >&2\nprintf done > \"$1\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        let marker = temp.path().join("normal-exit");
+        let wrapped =
+            drained_container_exec(fake.to_str().unwrap(), "ctr", [marker.to_str().unwrap()]);
+        let mut argv = vec![wrapped.program];
+        argv.extend(wrapped.args);
+        let line = format!(
+            "{{ {} 2>&1 1>&3 | true; }} 3>&1 | true",
+            remote_command_line(&argv)
+        );
+        let result = ProcessExecutor
+            .execute(&CommandSpec::new("sh", ["-c", &line]))
+            .unwrap();
+        assert_eq!(result.status, 0);
+        assert_eq!(fs::read_to_string(marker).unwrap(), "done");
+    }
+
+    /// The retry backoff override is process-wide, so tests that shorten it
+    /// take turns: one test restoring the real delay mid-run would stretch
+    /// another's retries past its deadline.
+    use fake_ssh::FastRetries;
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -2795,26 +3889,6 @@ mod executor_tests {
     }
 
     #[test]
-    fn admitted_work_bound_applies_only_after_it_is_armed_and_not_to_cleanup() {
-        let command = CommandSpec::new("sh", ["-c", "sleep 30"]).purpose("launch a worker");
-        let executor = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)));
-        assert!(!executor.is_cancelled(), "no deadline before arming");
-        executor.bound_admitted_work(Some(Duration::ZERO));
-        assert_eq!(
-            executor.execute(&command).unwrap_err().to_string(),
-            "timed out after 0 s while launch a worker"
-        );
-        // Cleanup runs on a clone with its own deadline, not the spent one.
-        let cleanup = CommandSpec::new("true", Vec::<String>::new());
-        executor.execute_cleanup(&cleanup).unwrap();
-        executor.bound_admitted_work(None);
-        assert!(
-            !executor.is_cancelled(),
-            "leaving admission lifts the bound"
-        );
-    }
-
-    #[test]
     fn cleanup_timeout_replaces_an_expired_deadline_and_keeps_shared_cancellation() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("completed");
@@ -2851,17 +3925,21 @@ mod executor_tests {
     /// A stand-in for `ssh` that is refused by the server on its first call and
     /// connects on the next, the way a host at its `MaxStartups` ceiling
     /// behaves once the daemon's burst drains.
-    fn flaky_ssh_script(directory: &Path) -> CommandSpec {
+    ///
+    /// The count is written to a scratch file and renamed into place, so a
+    /// deadline that kills the script mid-write never leaves an empty counter.
+    fn flaky_ssh_script(directory: &Path, refusals: u32) -> CommandSpec {
         let counter = directory.join("attempts");
         let script = format!(
             "count=$(cat {counter} 2>/dev/null || echo 0)\n\
-             echo $((count + 1)) > {counter}\n\
-             if [ \"$count\" -eq 0 ]; then\n\
+             echo $((count + 1)) > {counter}.tmp && mv {counter}.tmp {counter}\n\
+             if [ \"$count\" -lt {refusals} ]; then\n\
              echo 'kex_exchange_identification: Connection closed by 10.0.0.1 port 22' >&2\n\
              exit 255\n\
              fi\n\
              echo connected\n",
-            counter = counter.display()
+            counter = counter.display(),
+            refusals = refusals
         );
         CommandSpec::new("sh", ["-c".to_owned(), script])
             .ssh_destination("build@10.0.0.1")
@@ -2888,6 +3966,29 @@ mod executor_tests {
     }
 
     impl CommandExecutor for MasterKilledOnce {
+        fn pause_deadline(&self) -> DeadlinePause {
+            DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let reply = |status: i32, stderr: &str| CommandOutput {
                 status,
@@ -2896,7 +3997,7 @@ mod executor_tests {
             };
             if command.ssh_session.is_some() {
                 // A session. The first one arrives just after its master died.
-                return with_ssh_admission(command, self, &|| false, |spawned| {
+                return with_ssh_refusal_retry(command, self, None, |spawned, _gate| {
                     self.sessions.borrow_mut().push(spawned.args.clone());
                     if self.sessions.borrow().len() == 1 {
                         self.running.borrow_mut().clear();
@@ -2904,6 +4005,10 @@ mod executor_tests {
                     }
                     Ok(reply(0, ""))
                 });
+            }
+            // The first session on a master the ledger just opened.
+            if command.args.contains(&"ProxyCommand=false".to_owned()) {
+                return Ok(reply(0, ""));
             }
             let socket = command
                 .args
@@ -2933,7 +4038,7 @@ mod executor_tests {
         let _guard = ssh::SHARING_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let _fast_retries = FastRetries::new();
         let socket_dir = tempfile::tempdir_in("/tmp").expect("short socket directory");
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
             socket_dir.path().to_path_buf(),
@@ -2943,9 +4048,8 @@ mod executor_tests {
             ssh_args: Vec::new(),
         };
         let executor = MasterKilledOnce::default();
-        let output = executor.execute(&ssh_command(&ssh, ["true"]));
+        let output = executor.execute(&ssh_command(SshTrafficClass::Control, &ssh, ["true"]));
         set_ssh_connection_sharing_for_test(None);
-        set_ssh_retry_backoff_for_test(None);
 
         assert_eq!(output.expect("the retry succeeds").status, 0);
         let sessions = executor.sessions.borrow();
@@ -2963,9 +4067,9 @@ mod executor_tests {
     // Hard-won: e6ed54ed: sshd MaxStartups rejected concurrent session handshakes and users saw dead workers and failed closes.
     #[test]
     fn a_transport_rejected_ssh_command_is_retried_once_and_then_succeeds() {
-        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let _fast_retries = FastRetries::new();
         let directory = tempfile::tempdir().expect("temp dir");
-        let command = flaky_ssh_script(directory.path());
+        let command = flaky_ssh_script(directory.path(), 1);
 
         let output = ProcessExecutor
             .execute(&command)
@@ -2974,15 +4078,14 @@ mod executor_tests {
         assert_eq!(output.status, 0);
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "connected");
         assert_eq!(attempts(directory.path()), 2);
-        set_ssh_retry_backoff_for_test(None);
     }
 
     // Hard-won: e6ed54ed: sshd MaxStartups rejected remote operations during daemon startup and they were falsely reported as failed.
     #[test]
     fn the_cancellable_executor_also_retries_a_transport_rejection() {
-        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let _fast_retries = FastRetries::new();
         let directory = tempfile::tempdir().expect("temp dir");
-        let command = flaky_ssh_script(directory.path());
+        let command = flaky_ssh_script(directory.path(), 1);
 
         let output = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
             .execute(&command)
@@ -2990,6 +4093,338 @@ mod executor_tests {
 
         assert_eq!(output.status, 0);
         assert_eq!(attempts(directory.path()), 2);
-        set_ssh_retry_backoff_for_test(None);
+    }
+
+    /// A host at its `MaxStartups` ceiling can keep dropping connections for
+    /// longer than any fixed budget. The command never ran, so a caller that
+    /// can be cancelled keeps coming back until it gets in.
+    #[test]
+    fn a_cancellable_caller_retries_pre_authentication_refusals_until_it_gets_in() {
+        let _fast_retries = FastRetries::new();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let command = flaky_ssh_script(directory.path(), 7);
+
+        let output = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
+            .execute(&command)
+            .expect("the seventh attempt gets in");
+
+        assert_eq!(output.status, 0);
+        assert_eq!(attempts(directory.path()), 8);
+    }
+
+    /// A permanent block (a firewall or gateway that always closes the
+    /// connection) looks like `MaxStartups`. The retries end at the caller's
+    /// deadline when it has one, and after the persistent-refusal bound for
+    /// every caller, cancellable or not, with an error that names the host and
+    /// the possible causes.
+    // Hard-won: 5cb64e019: pre-authentication refusals were retried until cancellation, so a cancellable caller with no deadline (Move, session creation) retried a permanent block forever.
+    #[test]
+    fn pre_authentication_retries_end_at_the_deadline_or_the_time_bound() {
+        let _fast_retries = FastRetries::new();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let command = flaky_ssh_script(directory.path(), u32::MAX);
+        let error = CancellableProcessExecutor::with_timeout(Duration::from_secs(2))
+            .execute(&command)
+            .expect_err("a server that never lets the command in ends at the deadline");
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        assert!(attempts(directory.path()) > 3);
+
+        set_ssh_persistent_refusal_for_test(Some(Duration::from_millis(400)));
+        for cancellable in [true, false] {
+            let directory = tempfile::tempdir().expect("temp dir");
+            let command = flaky_ssh_script(directory.path(), u32::MAX);
+            let started = Instant::now();
+            let error = if cancellable {
+                CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))).execute(&command)
+            } else {
+                ProcessExecutor.execute(&command)
+            }
+            .expect_err("a server that never lets the command in fails after the bound");
+            let message = format!("{error:#}");
+            let elapsed = started.elapsed();
+            assert!(elapsed < Duration::from_secs(10), "{message}");
+            for needle in ["build@10.0.0.1", "MaxStartups", "firewall", "kex_exchange"] {
+                assert!(message.contains(needle), "{needle} missing: {message}");
+            }
+            // Each attempt spawns several processes, so how many fit in the
+            // bound depends on the machine. Check that the caller retried and
+            // that the bound, not an attempt count, ended the retries.
+            assert!(
+                attempts(directory.path()) >= 2,
+                "cancellable: {cancellable}, retried within the bound"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(400),
+                "cancellable: {cancellable}, stopped before the bound after {elapsed:?}"
+            );
+        }
+    }
+
+    /// A fail-fast probe (target validation, `mj doctor`) fails within its own
+    /// connect timeout when the server closes every connection before
+    /// authentication, instead of retrying for the persistent-refusal bound
+    /// of a minute like a command that has to get in.
+    // Hard-won: ca6580092: probes retried pre-authentication refusals for the full 60 s bound.
+    #[test]
+    fn a_probe_gives_a_refusal_no_more_time_than_its_connect_timeout() {
+        let _fast_retries = FastRetries::new();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut command = flaky_ssh_script(directory.path(), u32::MAX);
+        command.ssh_session_probe = true;
+        let started = Instant::now();
+        let error = ProcessExecutor
+            .execute(&command)
+            .expect_err("a server that always closes fails the probe");
+        let elapsed = started.elapsed();
+        let message = format!("{error:#}");
+        assert!(message.contains("build@10.0.0.1"), "{message}");
+        assert!(message.contains("firewall"), "{message}");
+        assert!(
+            elapsed >= Duration::from_secs(3) && elapsed < Duration::from_secs(15),
+            "{elapsed:?}"
+        );
+        assert!(attempts(directory.path()) > 3, "retried within the bound");
+    }
+
+    /// Pins both defects of an exit-255 rule without a start proof: a command
+    /// that ran and printed its marker, then lost its connection (exit 255
+    /// with "Connection reset" on stderr), was retried as a transport
+    /// rejection and so could run twice.
+    // Hard-won: 5cb64e019: exit 255 after the command started was retried as a refusal.
+    #[test]
+    fn a_session_that_printed_the_marker_is_never_retried_even_at_exit_255() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        for cancellable in [false, true] {
+            let fake = fake_ssh::FakeSsh::new(&["run-then-255"]);
+            let command = fake.command(&["echo", "ran"]);
+            let output = if cancellable {
+                CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))).execute(&command)
+            } else {
+                ProcessExecutor.execute(&command)
+            }
+            .expect("ssh runs");
+            assert_eq!(output.status, 255);
+            assert_eq!(output.stdout, b"ran\n", "the marker is stripped");
+            assert_eq!(fake.attempts(), 1, "cancellable: {cancellable}");
+        }
+        set_ssh_connection_sharing_for_test(None);
+    }
+
+    /// A streamed command the server refuses is retried like any other, and
+    /// the whole input (more than a pipe buffers) arrives once, on the attempt
+    /// that started: nothing is read from the caller's stream before that.
+    // Hard-won: 5cb64e019: streamed commands returned the refusal instead of retrying.
+    #[test]
+    fn a_refused_streamed_command_is_retried_and_receives_all_its_input_once() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let payload = vec![b'x'; 300 * 1024];
+        for cancellable in [false, true] {
+            let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
+            let command = fake.command(&["wc", "-c"]);
+            let mut input = std::io::Cursor::new(payload.clone());
+            let output = if cancellable {
+                CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
+                    .execute_with_stdin(&command, &mut input)
+            } else {
+                ProcessExecutor.execute_with_stdin(&command, &mut input)
+            }
+            .expect("the third attempt starts");
+            assert_eq!(
+                output.status,
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                payload.len().to_string()
+            );
+            assert_eq!(fake.attempts(), 3, "cancellable: {cancellable}");
+        }
+        set_ssh_connection_sharing_for_test(None);
+    }
+
+    #[test]
+    fn file_output_preserves_large_ssh_stdout_across_refusals_and_cancels() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
+        let command = fake.command(&[
+            "sh",
+            "-c",
+            "head -c 307200 /dev/zero; printf diagnostic >&2",
+        ]);
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"old output that must be truncated")
+            .unwrap();
+        let output = CancellableProcessExecutor::new(Default::default())
+            .execute_to_file(&command, &file)
+            .unwrap();
+        assert_eq!(output.status, 0);
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"diagnostic");
+        assert_eq!(file.metadata().unwrap().len(), 307200);
+        assert_eq!(fake.attempts(), 3);
+        use std::io::{Seek as _, SeekFrom};
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut received = Vec::new();
+        file.read_to_end(&mut received).unwrap();
+        assert_eq!(received, vec![0; 307200]);
+        set_ssh_connection_sharing_for_test(None);
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let executor =
+            CancellableProcessExecutor::new(Default::default()).with_cancellation(token.clone());
+        let file = tempfile::tempfile().unwrap();
+        let probe = file.try_clone().unwrap();
+        let pending = std::thread::spawn(move || {
+            executor.execute_to_file(
+                &CommandSpec::new("sh", ["-c", "head -c 307200 /dev/zero; sleep 600"]),
+                &file,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while probe.metadata().unwrap().len() < 307200 {
+            assert!(
+                Instant::now() < deadline,
+                "child did not produce its output"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        token.cancel();
+        assert!(
+            pending
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+    }
+
+    // Hard-won: #1544: a failed output spool was observed only after the child exited.
+    #[test]
+    fn file_output_failure_terminates_a_child_that_keeps_running() {
+        const CHILD: &str = "MJ_TEST_FETCH_WRITE_FAILURE";
+        if std::env::var_os(CHILD).is_some() {
+            // Restrict only this test subprocess's regular-file writes. Pipe
+            // writes are unaffected, so the producer can still fill stdout.
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                let limit = libc::rlimit {
+                    rlim_cur: 128 * 1024,
+                    rlim_max: 128 * 1024,
+                };
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+            }
+            let file = tempfile::tempfile().unwrap();
+            let error = CancellableProcessExecutor::new(Default::default())
+                .execute_to_file(
+                    &CommandSpec::new("sh", ["-c", "head -c 1048576 /dev/zero; sleep 600"]),
+                    &file,
+                )
+                .unwrap_err();
+            assert!(
+                error.chain().any(|cause| cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.raw_os_error() == Some(libc::EFBIG))),
+                "{error:#}"
+            );
+            return;
+        }
+        let mut command = CommandSpec::new(
+            std::env::current_exe().unwrap().to_string_lossy(),
+            [
+                "--exact",
+                "targets::executor_tests::file_output_failure_terminates_a_child_that_keeps_running",
+                "--nocapture",
+            ],
+        );
+        command.env.insert(CHILD.into(), "1".into());
+        let output = CancellableProcessExecutor::with_timeout(Duration::from_secs(10))
+            .execute(&command)
+            .unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// `scp` exits 1, not ssh's 255, while relaying the refusal of the `ssh` it
+    /// runs; the copy is still retried instead of failing.
+    // Hard-won: af9848339: scp's own exit status hid an SSH session refusal from the retry
+    #[test]
+    fn an_scp_that_relays_a_refused_session_is_retried() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let directory = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+dir=$(dirname "$0")
+count=$(cat "$dir/attempts" 2>/dev/null || echo 0)
+echo $((count + 1)) > "$dir/attempts"
+if [ "$count" -eq 0 ]; then
+  echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2
+  echo 'scp: Connection closed' >&2
+  exit 1
+fi
+exit 0
+"#;
+        let fake = directory.path().join("scp");
+        std::fs::write(&fake, script).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ssh = SshTarget {
+            destination: "fake-host".to_owned(),
+            ssh_args: Vec::new(),
+        };
+        let mut command = ssh::scp_download(&ssh, "remote-file", "local-file");
+        let path = std::env::var("PATH").unwrap_or_default();
+        command.env.insert(
+            "PATH".to_owned(),
+            format!("{}:{path}", directory.path().display()),
+        );
+
+        let output = ProcessExecutor.execute(&command).expect("scp runs");
+
+        assert_eq!(output.status, 0);
+        let attempts = std::fs::read_to_string(directory.path().join("attempts")).unwrap();
+        assert_eq!(attempts.trim(), "2");
+        set_ssh_connection_sharing_for_test(None);
+    }
+
+    /// A caller's sensitive stdin is part of the command, so each attempt
+    /// sends it afresh.
+    #[test]
+    fn sensitive_stdin_is_sent_again_on_each_retry() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let fake = fake_ssh::FakeSsh::new(&["refuse-session"]);
+        let command = fake
+            .command(&["cat"])
+            .with_sensitive_stdin(b"secret\n".to_vec());
+        let output = ProcessExecutor.execute(&command).expect("ssh runs");
+        assert_eq!(output.stdout, b"secret\n");
+        assert_eq!(fake.attempts(), 2);
+        set_ssh_connection_sharing_for_test(None);
     }
 }

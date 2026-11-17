@@ -497,6 +497,7 @@ for line in sys.stdin:
             let spec = LaunchSpec {
                 operator_away: Default::default(),
                 imported_logins: None,
+                login_identity: Default::default(),
                 bridge_spec_path: None,
                 subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                 managed_subagent: false,
@@ -521,14 +522,13 @@ for line in sys.stdin:
                 initial_model: None,
                 harness: HarnessKind::Codex,
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
+                claude_permission_mode: Default::default(),
+                observe_policy: None,
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
                 turn_context: Default::default(),
-                verdict: Some(crate::acp::VerdictSource::Direct {
-                    key: String::new(),
-                    endpoint: String::new(),
-                }),
+                verdict: Some(crate::acp::VerdictSource::Disabled),
                 stall_policy: None,
             };
             let (tx, rx) = mpsc::channel(8);
@@ -673,6 +673,7 @@ for line in sys.stdin:
                 let spec = LaunchSpec {
                     operator_away: Default::default(),
                     imported_logins: None,
+                    login_identity: Default::default(),
                     bridge_spec_path: None,
                     subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                     managed_subagent: false,
@@ -696,14 +697,13 @@ for line in sys.stdin:
                     initial_model: None,
                     harness,
                     execution_policy: ExecutionPolicy::ConfiguredApprovals,
+                    claude_permission_mode: Default::default(),
+                    observe_policy: None,
                     acp_activity: Default::default(),
                     step_clock: Default::default(),
                     tools_in_flight: Default::default(),
                     turn_context: Default::default(),
-                    verdict: Some(crate::acp::VerdictSource::Direct {
-                        key: String::new(),
-                        endpoint: String::new(),
-                    }),
+                    verdict: Some(crate::acp::VerdictSource::Disabled),
                     stall_policy: None,
                 };
                 let (tx, rx) = mpsc::channel(8);

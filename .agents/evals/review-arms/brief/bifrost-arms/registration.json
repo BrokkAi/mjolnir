@@ -1,0 +1,32 @@
+{
+  "recorded_at": "2026-11-17T03:50:59.563387+00:00",
+  "stage": "relation-only before remaining13+40 decision",
+  "job_order_seed": 20261119,
+  "job_order_method": "random.Random(seed).shuffle of frozen corpus order, A then BT pairs",
+  "ordinary_count": 40,
+  "known_count": 30,
+  "relation_count": 17,
+  "reviewers_per_arm": 3,
+  "reviewer_model": "gpt-6.1-terra",
+  "reviewer_effort": "high",
+  "writer": "gpt-6.1-sol/high",
+  "writer_profile": "codex4",
+  "leak_check": "existing paired helper;two gpt-6.1-sol/high codex4 checks,one rewrite/recheck if needed",
+  "catch_judges": "two gpt-6.1-sol/high codex4,then roundJ handcheck",
+  "judge_bugs_per_batch": 8,
+  "quota_floor_percent": 25,
+  "quota_gate_environment": "codex4=25",
+  "instance": "default",
+  "target": "podman",
+  "bundle": "bifrost-dev",
+  "repository_dir": "bifrost-dev",
+  "host_clone": "/mnt/optane/tmp/d2fa-bifrost/bifrost-dev",
+  "m1_freeze_sha256": "8859219e907208ce5e7a23e88fbc5188dca0e31a434b7be779efd103d4c32754",
+  "cutoff": "2026-11-01T00:00:00Z",
+  "no_study_arms_run_yet": true,
+  "input_sha256": {
+    "corpus/corpus.jsonl": "f6fda0200ac7fecbb7f03bc3a27fb193fd08620c82476118f33533972c8ea749",
+    "corpus/diffs.jsonl": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
+    "census-results/relations.jsonl": "a5e9a2d5d4f731cbc95cd30a5cdd2b385a79212b07e6a03258b217743a4a6efa"
+  }
+}

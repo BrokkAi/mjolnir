@@ -1,0 +1,151 @@
+{
+  "diagnostic": "stage-A decisive-fact containment",
+  "run": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "profile": "codex4",
+    "target": "podman",
+    "concurrency": 1,
+    "items": 44,
+    "expected_briefs_per_writer": 22,
+    "quota_floor_percent": 25,
+    "quota_before_run_week_percent": 65,
+    "amendment_commit": "5a00ed1025fafe34608a1ee620a535a5300992ee",
+    "session_id": "a5adcac30a88976dd06ff83b406b0412",
+    "session_profile": "codex4",
+    "completed_normally": true
+  },
+  "counts": {
+    "P": {
+      "Sol": {
+        "yes": 7,
+        "partial": 8,
+        "no": 3
+      },
+      "Terra": {
+        "yes": 1,
+        "partial": 13,
+        "no": 4
+      }
+    },
+    "S": {
+      "Sol": {
+        "yes": 2,
+        "partial": 1,
+        "no": 1
+      },
+      "Terra": {
+        "yes": 1,
+        "partial": 3,
+        "no": 0
+      }
+    },
+    "all": {
+      "Sol": {
+        "yes": 9,
+        "partial": 9,
+        "no": 4
+      },
+      "Terra": {
+        "yes": 2,
+        "partial": 16,
+        "no": 4
+      }
+    }
+  },
+  "paired_yes_by_group": {
+    "P": {
+      "both_yes": 1,
+      "only_Sol": 6,
+      "only_Terra": 0,
+      "neither_yes": 11
+    },
+    "S": {
+      "both_yes": 1,
+      "only_Sol": 1,
+      "only_Terra": 0,
+      "neither_yes": 2
+    }
+  },
+  "descriptive_pair_category_catch_means": {
+    "P_both_yes": {
+      "diffs": 1,
+      "mean_TT_catch_share": 1.0,
+      "mean_BT_catch_share": 1.0
+    },
+    "P_neither_yes": {
+      "diffs": 11,
+      "mean_TT_catch_share": 0.2727272727272727,
+      "mean_BT_catch_share": 0.45454545454545453
+    },
+    "P_only_Sol": {
+      "diffs": 6,
+      "mean_TT_catch_share": 0.2222222222222222,
+      "mean_BT_catch_share": 0.6666666666666666
+    },
+    "S_both_yes": {
+      "diffs": 1,
+      "mean_TT_catch_share": 0.6666666666666666,
+      "mean_BT_catch_share": 0.6666666666666666
+    },
+    "S_neither_yes": {
+      "diffs": 2,
+      "mean_TT_catch_share": 0.5,
+      "mean_BT_catch_share": 0.5
+    },
+    "S_only_Sol": {
+      "diffs": 1,
+      "mean_TT_catch_share": 0.0,
+      "mean_BT_catch_share": 0.0
+    }
+  },
+  "registered_writer_decision": "Sol/high",
+  "changes_registered_decision": false,
+  "limitation": "Single blinded Sol/high judge; association with reviewer catches is descriptive, not a causal decomposition.",
+  "usage": {
+    "session_id": "a5adcac30a88976dd06ff83b406b0412",
+    "record_path": "/mnt/optane/review-arms-20261113/briefs/writer-contains/sessions/batch-unit.json",
+    "profile": "codex4",
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "target": "podman",
+    "turns": 1,
+    "total_tokens": 815370,
+    "input_tokens": 80882,
+    "output_tokens": 5144,
+    "thought_tokens": 1414,
+    "cached_read_tokens": 729344,
+    "cached_write_tokens": 0,
+    "coverage": {
+      "recorded_turns": 1,
+      "full_turn_reports": 1,
+      "last_request_reports": 0,
+      "unspecified_reports": 0,
+      "missing_reports": 0,
+      "unfinished_turns": 0,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 1,
+      "missing_cost_turns": 0
+    },
+    "cost_ticks": 2861384000,
+    "estimated_api_price_usd": 0.2861384,
+    "provider_billed_cost_usd": null,
+    "wall_time_prompt_to_completion_seconds": 178.309,
+    "wall_time_definition": "session record prompted timestamp to completed_at_ms; excludes setup/queue before prompt and post-completion collection",
+    "effort_note": "run metadata and session config state high; usage attribution turn selection reports effort null",
+    "cost_note": "estimated API list price, not provider-billed spend; null means unknown, not zero",
+    "usage_raw_sha256": "ea7787fa48fd0e89d4643169358799ce3621d9223058537d6f05481f282396a8"
+  },
+  "validation": {
+    "key_ids": 44,
+    "input_ids": 44,
+    "output_rows": 44,
+    "unique_output_ids": 44,
+    "labels_valid": true,
+    "all_brief_hashes_match": true,
+    "item_brief_text_matches_published": true,
+    "matching_item_quotes_exact": true,
+    "required_output_fields_present": true,
+    "output_schema_valid": true
+  }
+}

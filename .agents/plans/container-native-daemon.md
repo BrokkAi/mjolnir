@@ -24,7 +24,7 @@ The status says the daemon is in a container. `docker inspect` shows no host net
 - [x] (2026-11-04) The launcher creates a container with a private network and PID namespace, one named data volume at `/var/lib/mjolnir`, one published loopback port, and only the explicit `[daemon] mounts`. It runs `sleep infinity` as the placeholder so the container can be reused.
 - [x] (2026-11-04) The launcher starts `mj daemon-run` inside the container with `HOME`, `MJ_DATA_DIR`, `MJ_CONFIG_DIR`, `MJ_DAEMON_LISTEN`, `MJ_DAEMON_TOKEN`, `MJ_DAEMON_CONTAINER`, and `MJ_DAEMON_CONTAINER_RUNTIME` set. Logs go to the data volume.
 - [x] (2026-11-04) The launcher publishes the host `daemon.json` with `pid: 0`; clients use `Identity` to learn the placement and container name.
-- [x] (2026-11-04) A container daemon does not install the host command node or host filesystem. Its commands, workers, harnesses, and files all run inside its own container.
+- [x] (2026-11-04) A container daemon runs its commands, workers, harnesses, and files inside its own container.
 - [x] (2026-11-04) Stop, restart, and handoff follow the container daemon's endpoint instead of the host store guard. Forced stop uses the container engine.
 - [x] (2026-11-04) The agent-dev image creates `/var/lib/mjolnir/home`, `/var/lib/mjolnir/data`, and `/var/lib/mjolnir/config` owned by its runtime user, so a fresh named volume is writable.
 - [x] (2026-11-04) Use the existing agent-dev image as the daemon image. It already carries the daemon, the worker and every harness, which is what an all-in-one container needs; a separate small daemon image would leave local sessions without their runtime.
@@ -44,7 +44,7 @@ The old container placement shared the host network and PID namespaces and bind-
 
 A local worker's `HOME` comes from the account database (`/home/hel` in the image), not from the daemon's `HOME=/var/lib/mjolnir/home`. Managed installations made by session workers therefore landed in the container's writable layer and were lost when the container was recreated. Using the image's harnesses for sessions removes that copy.
 
-Host mode still uses those assumptions deliberately. This plan changes only the container placement. The `HostFs` and `mj node` work from the superseded plan remains useful for host placement but is not part of the container path.
+Host mode still uses those assumptions deliberately. This plan changes only the container placement.
 
 ## Decision Log
 
@@ -52,7 +52,8 @@ Host mode still uses those assumptions deliberately. This plan changes only the 
 - Decision: Keep the named volume and reuse the same container across daemon processes. Rationale: the volume is the durable data plane, and a `sleep infinity` placeholder keeps the container alive while a new daemon starts inside it. Date/Author: 2026-11-04.
 - Decision: Host directories are opt-in through `[daemon] mounts`, never implicit. Rationale: users may want a project checkout, but the daemon must not require the host home, data directory, or runtime directory. Date/Author: 2026-11-04.
 - Decision: The host launcher writes `daemon.json` with `pid: 0`. Rationale: a container PID is not a host PID. Clients already ask the daemon for `Identity`; `pid` remains only in the frozen `Status` shape. Date/Author: 2026-11-04.
-- Decision: A container daemon runs commands locally inside its container instead of installing a node. Rationale: if everything is containerized, the container is where local work belongs. Date/Author: 2026-11-04.
+- Decision: A container daemon runs commands locally inside its container. Rationale: if everything is containerized, the container is where local work belongs. Date/Author: 2026-11-04.
+- Decision: Remove `mj node`, its protocol, the daemon's command host and `HostFs` (2026-11-11). Rationale: the container placement never used them, so a host daemon was the only user, and there they only moved the daemon's own work into a second process on the same computer. That split caused a run of regressions (node lifetime, inherited environment and limits, transport size limits) with no gain. Two behaviours that production had through the node are kept on the local path: every `ProcessExecutor` command runs through the cancellable executor (own process group, bounded output drain, leftover descendants killed), and streamed children (relay proxy, capacity and quota probes) get their own process group. A client of this build removes `node-endpoint.json`, `node-id` and `node.lock` before it launches a daemon and after an explicit stop, which makes a node from 2.66.0 through 2.70.x exit. Date/Author: 2026-11-11.
 - Decision: Use the agent-dev image as the daemon image rather than a small daemon-only image. Rationale: local sessions run their worker and harness in the same container, so that image must contain all three. Date/Author: 2026-11-04.
 
 - Decision: Local sessions of a container daemon use the `Ambient` harness policy and are seeded with the image's environment, the same as container targets. Rationale: the launcher only runs an image whose revision label matches the build, so the image's harnesses are the pinned versions; the `Managed` policy downloaded a second copy of Node and each harness on first use. The worker's ambient selection still installs a pinned copy when a bridge is missing or incompatible. The placement fact has one owner, `daemon::placement()`, which startup, `Identity` and the launch policy all ask. Date/Author: 2026-11-05.
@@ -71,7 +72,7 @@ The daemon is `mj daemon-run`, implemented in `mj-controller`. It owns the SQLit
 
 The launcher in `mj-cli/src/daemon/container.rs` resolves an image whose `org.brokk.mjolnir.revision` label matches this build, creates a named volume, creates one container with `sleep infinity`, and starts `mj daemon-run` in it with `docker|podman exec`. It writes the host metadata file after the daemon answers `Ping`.
 
-`mj-controller/src/daemon/process.rs` skips the node command host and host filesystem when `MJ_DAEMON_CONTAINER` is present. Commands therefore run in the container with the container's files.
+A daemon runs its commands where it runs, so a container daemon's commands run in the container with the container's files.
 
 `mj-cli/src/daemon.rs` treats a container daemon differently for liveness and exit waits: it follows the published endpoint and the container engine, not the host store guard or host PID.
 

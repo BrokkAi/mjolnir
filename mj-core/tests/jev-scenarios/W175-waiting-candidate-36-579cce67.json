@@ -1,0 +1,108 @@
+{
+  "id": "W175",
+  "title": "waiting candidate 36 579cce67",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "579cce671a9d9840047bb6b4f07d626c",
+    "session_title": "9550-m4-root-closure",
+    "reply_position": 775,
+    "captured_at": "2026-11-04T09:33:52.313Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:27",
+          "role": "assistant",
+          "text": "I’ll read the M4 design and closure code, then implement the root proof in the existing dependency walk. I’ll keep edits confined to the closure and run the requested checks."
+        },
+        {
+          "id": "agent:123",
+          "role": "assistant",
+          "text": "The projection already walks reachable procedures, but policy checks unresolved relations before calling that projection. I’m tracing how to carry the certificate out of the existing walk so the proof runs before event transfer without adding another traversal."
+        },
+        {
+          "id": "agent:522",
+          "role": "assistant",
+          "text": "The existing projection now records scoped admission and open call boundaries for its root closure, including detached candidates that were previously omitted from reachability. I’ve wired the certificate through the production result for policy’s root decision; the flow and policy compile is running."
+        },
+        {
+          "id": "agent:699",
+          "role": "assistant",
+          "text": "Flow and policy compile, fmt, and Clippy pass. The typestate and policy integration selections are building now. I’ll use their results to check which roots can be certified and where the proof must stay incomplete."
+        },
+        {
+          "id": "agent:775",
+          "role": "assistant",
+          "text": "Clippy passed. The test build is still running, and the policy selection is waiting on Cargo’s build lock. The proof currently fails closed on missing coverage, open edges, and budget or cancellation errors; I’ll check the root-specific outcomes once the tests execute."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "Clippy passed. The test build is still running, and the policy selection is waiting on Cargo’s build lock. The proof currently fails closed on missing coverage, open edges, and budget or cancellation errors; I’ll check the root-specific outcomes once the tests execute.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 0
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-04T09:38:26.911Z",
+        "kind": "agent",
+        "text": "The broad policy selection has one failure: `rust_resource_lifecycle_composition_matches_forced_icfg` still returns `PartialDiscovery` for the proven move. I’m checking whether its closure is refused "
+      },
+      {
+        "at": "2026-11-04T09:42:20.656Z",
+        "kind": "agent",
+        "text": "The targeted probe shows the Rust case reaches the expected local procedures, but its certificate remains incomplete. I’ve narrowed the diagnostic to the specific coverage or call obligation that bloc"
+      },
+      {
+        "at": "2026-11-04T09:46:29.042Z",
+        "kind": "agent",
+        "text": "Handed the parent the WIP commit, validation results, and the coverage decision needed to continue M4."
+      }
+    ]
+  }
+}

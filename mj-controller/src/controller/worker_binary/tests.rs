@@ -1,7 +1,48 @@
 use super::launch::*;
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 use crate::targets::tests::unwrapped_remote_line;
+
+#[test]
+fn observe_enforcement_requires_configured_approvals_even_on_isolated_targets() {
+    for current in [
+        ExecutionPolicy::ConfiguredApprovals,
+        ExecutionPolicy::Unconstrained,
+    ] {
+        assert_eq!(
+            effective_execution_policy(current, true),
+            ExecutionPolicy::ConfiguredApprovals
+        );
+        assert_eq!(effective_execution_policy(current, false), current);
+    }
+}
+
+#[test]
+fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
+    let mut session = crate::controller::test_support::checkpoint_test_session("primary");
+    let mut choices = mj_core::config::SubagentConfig::default();
+    let choice = mj_core::config::SubagentChoice {
+        model: "strong".into(),
+        effort: Some("high".into()),
+    };
+    session.oracle = true;
+    assert!(!oracle_launch_enabled(&session, false, &choices, false));
+    choices.oracle = Some(choice.clone());
+    assert!(oracle_launch_enabled(&session, false, &choices, false));
+    assert!(!oracle_launch_enabled(&session, true, &choices, false));
+    session.oracle = false;
+    assert!(!oracle_launch_enabled(&session, false, &choices, false));
+    session.oracle = true;
+    session.oracle_choice = Some(Box::new(choice));
+    choices.oracle = None;
+    assert!(oracle_launch_enabled(&session, false, &choices, false));
+
+    // A YOLO target reads its own oracle choice, which is absent here.
+    session.oracle_choice = None;
+    choices.use_same_on_all_targets = false;
+    assert!(!oracle_launch_enabled(&session, false, &choices, true));
+}
 
 fn stamped_worker(body: &[u8]) -> Vec<u8> {
     let mut bytes = body.to_vec();
@@ -93,6 +134,255 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
     assert!(error.contains("missing worker build stamp"), "{error}");
 }
 
+// Hard-won: 816ca1d77: the controller ran an old root binary that lacks the worker control subcommands
+#[cfg(unix)]
+#[test]
+fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_worker() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    const CHILD: &str = "MJ_OLD_ROOT_WORKER_CHILD";
+    const SESSION: &str = "17171717171717171717171717171717";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        // The current worker: answers the control subcommands, then carries
+        // this build's stamp after its `exit`.
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; liveness) echo dead ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_worker",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-816ca1d77-old-root")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    // A build from before `worker stop|liveness|holder`: clap's own rejection.
+    let old = "#!/bin/sh\necho \"error: unrecognized subcommand '$2'\" >&2\nexit 2\n";
+    let hel = root.join("hel");
+    std::fs::write(&hel, old).unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let inode = std::fs::metadata(&hel).unwrap().ino();
+    let unchanged = || {
+        assert_eq!(std::fs::read_to_string(&hel).unwrap(), old);
+        assert_eq!(std::fs::metadata(&hel).unwrap().ino(), inode);
+    };
+
+    let liveness = probe_worker_liveness(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
+    assert_eq!(liveness.status, 0);
+    assert_eq!(String::from_utf8_lossy(&liveness.stdout).trim(), "dead");
+    // The control worker is a hard link to this build's store entry, in the
+    // root itself, so the entry's link count went up and the root owns it.
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert_eq!(control.parent(), Some(root.as_path()));
+    let digest = mj_core::worker_launch::worker_executable_digest(Path::new(
+        &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
+    ))
+    .unwrap();
+    let entry = directory
+        .path()
+        .join("workers/worker-binaries")
+        .join(digest)
+        .join("hel");
+    let entry_meta = std::fs::metadata(&entry).unwrap();
+    assert_eq!(std::fs::metadata(&control).unwrap().ino(), entry_meta.ino());
+    assert_eq!(entry_meta.nlink(), 2, "the store entry and the root's link");
+    unchanged();
+
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(SESSION, "test stop")
+        .unwrap()
+        .unwrap();
+    stop_worker(&owner, &ProcessExecutor, &locator, &root_text).unwrap();
+    unchanged();
+
+    // The close plan stops the worker (embedding the same control binary) and
+    // then removes the root, and the control worker with it.
+    targets::close_plan(&locator, SESSION)
+        .unwrap()
+        .execute(&ProcessExecutor)
+        .unwrap();
+    assert!(!root.exists());
+}
+
+// A plan that embeds the control worker installs it when it runs, so a
+// cleanup with no earlier probe or stop (a failed provisioning) still works.
+#[cfg(unix)]
+#[test]
+fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_FRESH_BARE_CLOSE_CHILD";
+    const SESSION: &str = "18181818181818181818181818181818";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-816ca1d77-fresh-close")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("worker's space").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    let hel = root.join("hel");
+    std::fs::write(&hel, "#!/bin/sh\nexit 2\n").unwrap();
+    let hel_inode = std::fs::metadata(&hel).unwrap().ino();
+    let root_text = root.to_string_lossy().into_owned();
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert!(!control.exists(), "nothing is staged yet");
+    // Simulate another build's control file as a link to this worker store
+    // entry. Installing this build must release the old link.
+    let other = std::path::PathBuf::from(targets::control_worker_path_for_build(
+        &root_text,
+        "another-build",
+    ));
+    assert_ne!(other, control, "builds get separate files");
+    assert_eq!(other.parent(), control.parent());
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let plan = targets::close_plan(&locator, SESSION).unwrap();
+    assert!(plan.stages_control_worker());
+    // A caller's deadline bounds the check that precedes its command: with the
+    // deadline already past, nothing is staged and nothing is removed.
+    let expired = targets::CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
+    let error = plan.execute(&expired).unwrap_err();
+    assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    assert!(!control.exists(), "the check ignored the caller's deadline");
+    assert!(root.exists(), "the timed-out close removed nothing");
+    // Install this build's control worker once so its store entry exists, then
+    // add a stand-in for an older build's control file linked to that entry.
+    ensure_control_worker(&ProcessExecutor, &locator, SESSION).unwrap();
+    let digest = mj_core::worker_launch::worker_executable_digest(Path::new(
+        &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
+    ))
+    .unwrap();
+    let entry = store::store_root(&locator, SESSION)
+        .unwrap()
+        .join(digest)
+        .join("hel");
+    std::fs::hard_link(&entry, &other).unwrap();
+    assert_eq!(std::fs::metadata(&entry).unwrap().nlink(), 3);
+    std::fs::remove_file(&control).unwrap();
+    ensure_control_worker(&ProcessExecutor, &locator, SESSION).unwrap();
+    assert!(control.exists());
+    assert!(!other.exists(), "the superseded control file is removed");
+    assert_eq!(std::fs::metadata(&entry).unwrap().nlink(), 2);
+    assert_eq!(std::fs::metadata(&hel).unwrap().ino(), hel_inode);
+    plan.execute(&ProcessExecutor).unwrap();
+    assert!(!root.exists());
+}
+
+// A diagnosis reports and installs nothing: a root with no control worker for
+// this build gets a finding that says so, and no file appears.
+#[cfg(unix)]
+#[test]
+fn a_diagnosis_reports_a_missing_control_worker_and_installs_nothing() {
+    const SESSION: &str = "20202020202020202020202020202020";
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let before = std::fs::read_dir(directory.path().join("workers"))
+        .unwrap()
+        .count();
+    let error = diagnose_worker_read_only(&ProcessExecutor, &locator, &root_text).unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&format!(
+            "control worker for this build not installed in {root_text}"
+        )),
+        "{error:#}"
+    );
+    assert!(!std::path::Path::new(&targets::control_worker_path(&root_text)).exists());
+    assert_eq!(
+        std::fs::read_dir(directory.path().join("workers"))
+            .unwrap()
+            .count(),
+        before,
+        "the diagnosis created something beside the root"
+    );
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+}
+
+// The readiness probe is a decision, so like every command that embeds the
+// control worker it installs it first: a startup wait on a root with none
+// must not fail with exit 78.
+#[cfg(unix)]
+#[test]
+fn probing_a_worker_installs_the_control_worker_itself() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_PROBE_STAGES_CHILD";
+    const SESSION: &str = "19191919191919191919191919191919";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "probing_a_worker_installs_the_control_worker_itself",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-816ca1d77-probe-stages")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert!(!control.exists(), "nothing is staged yet");
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let probe = probe_worker(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
+    assert!(control.exists());
+    assert!(probe.pids.is_empty(), "{probe:?}");
+}
+
 #[test]
 fn stale_pins_are_re_resolved() {
     const CHILD: &str = "MJ_STALE_WORKER_PIN_CHILD";
@@ -110,6 +400,7 @@ fn stale_pins_are_re_resolved() {
             .env("MJ_INSTANCE", "issue-1138-pins")
             .env(CHILD, "1")
             .env("MJ_WORKER_DIR", workers)
+            .env_remove("MJ_WORKER_BINARY")
             .run();
         return;
     }
@@ -161,6 +452,7 @@ fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
         .env("MJ_INSTANCE", "handoff-warm-pins")
         .env(CHILD, "1")
         .env("MJ_WORKER_DIR", &workers)
+        .env_remove("MJ_WORKER_BINARY")
         .run();
         return;
     }
@@ -400,6 +692,29 @@ fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
         fail: std::cell::Cell<bool>,
     }
     impl CommandExecutor for FullDiskUpload {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if self.fail.get() && command.purpose == "stage replacement Mjolnir worker" {
                 std::fs::write(&command.args[1], vec![0; 32 * 1024]).unwrap();
@@ -555,19 +870,12 @@ fn node_preflight_accepts_a_managed_runtime_when_node_is_missing() {
         &format!("#!/bin/sh\ncase \"$1\" in -s) echo {system} ;; -m) echo {machine} ;; esac\n"),
     );
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: directory.path().into(),
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
             directory.path().to_string_lossy().into_owned(),
         )])
         .into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, directory.path().to_path_buf())
     };
     preflight_harness(
         &mj_core::config::TargetTemplate::LocalBare,
@@ -582,19 +890,12 @@ fn node_preflight_accepts_a_managed_runtime_when_node_is_missing() {
 fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
     let directory = tempfile::tempdir().unwrap();
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: directory.path().into(),
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
             directory.path().to_string_lossy().into_owned(),
         )])
         .into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, directory.path().to_path_buf())
     };
     let error = format!(
         "{:#}",
@@ -625,19 +926,12 @@ fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
     );
     mj_core::test_hooks::install_fake_command(directory.path(), "dsh-acp", &current);
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Dsh,
-        home: directory.path().into(),
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
             directory.path().to_string_lossy().into_owned(),
         )])
         .into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Dsh, directory.path().to_path_buf())
     };
 
     preflight_harness(
@@ -745,15 +1039,10 @@ fn blank_claude_auth_environment_values_do_not_count_as_logins() {
     use mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV;
 
     let mut profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Claude,
-        home: std::path::PathBuf::from("claude"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            HarnessKind::Claude,
+            std::path::PathBuf::from("claude"),
+        )
     };
     let mut environment = BTreeMap::from([
         (CLAUDE_OAUTH_TOKEN_ENV.to_owned(), " \n ".to_owned()),
@@ -784,84 +1073,56 @@ fn blank_claude_auth_environment_values_do_not_count_as_logins() {
     assert!(!claude_environment_login_present(&profile, &environment));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
-fn an_apple_container_takes_macs_claude_keychain_login_unless_a_setup_token_does() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+fn macs_claude_keychain_login_is_the_only_staged_login_and_has_no_refresh_token() {
+    use crate::claude_login::fake::FakeKeychain;
+    use mj_core::config::HarnessHost;
 
     const KEYCHAIN_LOGIN: &[u8] =
         br#"{"claudeAiOauth":{"accessToken":"keychain","refreshToken":"keychain-refresh","expiresAt":100}}"#;
-    const PREVIOUS_ACCOUNT_LOGIN: &[u8] =
+    const STAGED_LOGIN: &[u8] = br#"{"claudeAiOauth":{"accessToken":"keychain","expiresAt":100}}"#;
+    // What `stage_profile` copies from a profile home that an earlier release
+    // filled from a session.
+    const LEFTOVER_LOGIN: &[u8] =
         br#"{"claudeAiOauth":{"accessToken":"previous","refreshToken":"previous","expiresAt":200}}"#;
-
-    struct KeychainExecutor {
-        calls: AtomicUsize,
-    }
-
-    impl CommandExecutor for KeychainExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.program, "security");
-            assert_eq!(
-                command.args,
-                [
-                    "find-generic-password",
-                    "-s",
-                    "Claude Code-credentials",
-                    "-w"
-                ]
-            );
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Ok(CommandOutput {
-                status: 0,
-                stdout: KEYCHAIN_LOGIN.to_vec(),
-                stderr: Vec::new(),
-            })
-        }
-    }
 
     let directory = tempfile::tempdir().unwrap();
     let staged = directory.path().join("profile");
     std::fs::create_dir(&staged).unwrap();
-    let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Claude,
-        home: directory.path().join("claude"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
-    };
-    let backend = targets::TargetLocator::AppleContainer {
-        borrowed_from: None,
-        container_id: "hel-session".into(),
-    };
-    let executor = KeychainExecutor {
-        calls: AtomicUsize::new(0),
-    };
+    let staged_login = staged.join(".credentials.json");
+    let profile =
+        mj_core::config::HarnessProfile::new(HarnessKind::Claude, directory.path().join("claude"));
+    let keychain = FakeKeychain::holding(KEYCHAIN_LOGIN);
 
-    stage_claude_keychain_login(&profile, &staged, &backend, true, &executor).unwrap();
-    assert_eq!(executor.calls.load(Ordering::Relaxed), 0);
-    assert!(!staged.join(".credentials.json").exists());
+    // The Keychain holds the login on a Mac only: nothing else asks it.
+    stage_claude_keychain_login(&profile, HarnessHost::Other, &staged, false, &keychain).unwrap();
+    assert!(keychain.calls().is_empty());
 
-    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
-    assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        std::fs::read(staged.join(".credentials.json")).unwrap(),
-        KEYCHAIN_LOGIN
-    );
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, true, &keychain).unwrap();
+    assert!(keychain.calls().is_empty());
+    assert!(!staged_login.exists());
+
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
 
     // Freshness cannot distinguish a refreshed grant from another account.
     // The current Keychain login stays authoritative even when an earlier
     // staged copy has a later expiry.
-    std::fs::write(staged.join(".credentials.json"), PREVIOUS_ACCOUNT_LOGIN).unwrap();
-    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
-    assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
-    assert_eq!(
-        std::fs::read(staged.join(".credentials.json")).unwrap(),
-        KEYCHAIN_LOGIN
-    );
+    std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
+
+    // With no Keychain item, or a locked one, a leftover profile-home file is
+    // not a login and is never staged as one.
+    for keychain in [
+        FakeKeychain::default(),
+        FakeKeychain::holding(KEYCHAIN_LOGIN).locked(),
+    ] {
+        std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
+        stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain)
+            .unwrap();
+        assert!(!staged_login.exists());
+    }
 }
 
 #[test]
@@ -1101,8 +1362,12 @@ fn a_present_controller_still_looks_beside_itself() {
 #[test]
 #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
 fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("Application Support").join("hel worker");
+    let root = temp
+        .path()
+        .join("Application Support")
+        .join("0123456789abcdef0123456789abcdef");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join(mj_core::relay::WORKER_STARTUP_FILE),
@@ -1126,7 +1391,7 @@ fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
         worker_root: root.into(),
     };
 
-    let probe = probe_worker(&ProcessExecutor, &locator, root).unwrap();
+    let probe = probe_worker(&ProcessExecutor, &locator, SESSION, root).unwrap();
 
     assert_eq!(probe.step(), Some("harness-resolve"));
     assert_eq!(
@@ -1138,60 +1403,36 @@ fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
     assert_eq!(probe.to_string(), "the worker exited: panic");
 }
 
-/// A running worker is found by the process for its root, and a root with
-/// no records yet reads as a running worker that recorded nothing.
-#[test]
-#[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
-fn probing_a_running_worker_reports_its_process() {
-    struct Child(std::process::Child);
-    impl Drop for Child {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("hel worker");
-    std::fs::create_dir_all(&root).unwrap();
-    let root = root.to_str().unwrap();
-    // The trailing `:` keeps `sh` from replacing itself with `sleep`, so its
-    // command line keeps the worker's arguments.
-    let worker = Child(
-        std::process::Command::new("sh")
-            .args([
-                "-c",
-                "sleep 60; :",
-                &format!("hel worker run --root {root}"),
-            ])
-            .spawn()
-            .unwrap(),
-    );
-    std::fs::write(
-        std::path::Path::new(root).join(mj_core::relay::WORKER_PID_FILE),
-        worker.0.id().to_string(),
-    )
-    .unwrap();
-    let locator = targets::TargetLocator::LocalBare {
-        worker_root: root.into(),
-    };
-
-    let probe = probe_worker(&ProcessExecutor, &locator, root).unwrap();
-
-    assert_eq!(probe.pids, vec![worker.0.id()]);
-    assert_eq!(probe.step(), None);
-    assert_eq!(
-        probe.to_string(),
-        "the worker is running and recorded no startup step"
-    );
-}
-
 /// Output that is not the probe's document is an error, not a worker with
 /// nothing to report.
 #[test]
 fn a_probe_that_prints_something_else_is_an_error() {
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
     struct GarbageExecutor;
     impl CommandExecutor for GarbageExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 0,
@@ -1200,11 +1441,12 @@ fn a_probe_that_prints_something_else_is_an_error() {
             })
         }
     }
+    let root = format!("/nonexistent/{SESSION}");
     let locator = targets::TargetLocator::LocalBare {
-        worker_root: "/nonexistent".into(),
+        worker_root: root.clone(),
     };
 
-    let error = probe_worker(&GarbageExecutor, &locator, "/nonexistent").unwrap_err();
+    let error = probe_worker(&GarbageExecutor, &locator, SESSION, &root).unwrap_err();
 
     assert!(
         format!("{error:#}").contains("read the worker probe"),
@@ -1218,6 +1460,19 @@ fn a_probe_that_prints_something_else_is_an_error() {
 // Hard-won: a6ad3cc: concurrent checkpoint, upgrade, and recovery paths shared worker launch logs
 #[test]
 fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
+    const CHILD: &str = "MJ_TEST_PRIVATE_WORKER_LAUNCH_LOGS";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "starting_a_worker_uses_private_logs_without_touching_incumbent_files",
+        ))
+        .isolated_store(directory.path())
+        .env(CHILD, "1")
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let token_dir = tempfile::tempdir().unwrap();
     let token_path = token_dir.path().join("agent-pat");
     std::fs::write(&token_path, "github_pat_at_start").unwrap();
@@ -1230,6 +1485,29 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -1250,6 +1528,25 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
             workspace_storage: Default::default(),
         },
     ] {
+        let mut session = crate::controller::test_support::checkpoint_test_session(
+            "13131313131313131313131313131313",
+        );
+        session.target = Some(match &locator {
+            targets::TargetLocator::LocalBare { worker_root } => {
+                Box::new(mj_core::state::TargetLocator::LocalBare {
+                    worker_root: worker_root.into(),
+                })
+            }
+            targets::TargetLocator::LocalPodman { container_id, .. } => {
+                Box::new(mj_core::state::TargetLocator::LocalPodman {
+                    container_id: container_id.clone(),
+                    borrowed_from: None,
+                    workspace_storage: Default::default(),
+                })
+            }
+            _ => unreachable!(),
+        });
+        crate::database::save_session(&session).unwrap();
         let executor = RecordingExecutor {
             commands: RefCell::new(Vec::new()),
         };
@@ -1291,6 +1588,30 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
         assert!(!script.contains("worker-exit.json"));
         assert!(!script.contains("control.sock"));
         assert!(!script.contains("/worker.log"));
+        drop(commands);
+        session.no_github_credentials = true;
+        crate::database::save_session(&session).unwrap();
+        executor.commands.borrow_mut().clear();
+        start_worker(
+            &crate::worker_lifecycle::WorkerPermit::try_acquire(
+                &session.id,
+                "credential-free start",
+            )
+            .unwrap()
+            .unwrap(),
+            &executor,
+            &locator,
+            &targets::worker_root(&locator, &session.id).unwrap(),
+            &github,
+        )
+        .unwrap();
+        assert!(
+            executor
+                .commands
+                .borrow()
+                .iter()
+                .all(|command| command.purpose != "install configured session GitHub token")
+        );
     }
 }
 #[test]
@@ -1300,6 +1621,29 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -1335,33 +1679,28 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     .unwrap();
 
     let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].purpose, "stop Mjolnir worker daemon");
+    // The staged control worker is checked first, then the stop runs it.
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].purpose, "check the control worker");
+    assert_eq!(commands[1].purpose, "stop Mjolnir worker daemon");
     assert!(
-        commands[0]
+        commands[1]
             .args
             .last()
             .is_some_and(|remote| unwrapped_remote_line(remote).starts_with("'sh' '-c' ")),
         "raw SSH worker management must not source login profiles: {commands:?}"
     );
-    let script = commands[0]
+    let script = commands[1]
         .args
         .iter()
-        .find(|argument| argument.contains("worker run --root"))
+        .find(|argument| argument.contains("worker stop --root"))
         .unwrap_or_else(|| panic!("stop script missing from {commands:?}"));
     assert!(
-        script.contains("hel_match=\"hel worker run --root $hel_root\""),
-        "stop must match only this session's worker: {script}"
-    );
-    assert!(
-        script.contains("hel_match_home=\"hel worker run --root $HOME/$hel_root\""),
-        "stop must also match a login-home-absolute --root: {script}"
-    );
-    assert!(
-        !script.contains("grep -F"),
-        "leftover detection must not grep the match string: {script}"
+        script.contains("worker stop --root"),
+        "stop must go through the installed worker binary: {script}"
     );
 }
+
 #[test]
 fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
     struct RecordingExecutor {
@@ -1370,6 +1709,29 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(self.outputs.borrow_mut().remove(0))
@@ -1410,6 +1772,11 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
                 stdout: Vec::new(),
                 stderr: Vec::new(),
             },
+            CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
         ]),
     };
     let locator = targets::TargetLocator::LocalPodman {
@@ -1443,6 +1810,7 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
             "inspect Mjolnir session container",
             "start stopped Mjolnir session container",
             "inspect Mjolnir session container",
+            "check the control worker",
             "stop Mjolnir worker daemon",
         ]
     );
@@ -1498,17 +1866,58 @@ struct SshHostExecutor {
     host_files: RefCell<HashSet<String>>,
 }
 impl CommandExecutor for SshHostExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         let mut status = 0;
         let mut stdout = Vec::new();
         let remote = command.args.last().cloned().unwrap_or_default();
         if command.purpose == "publish shared Mjolnir worker" {
-            let words = remote.split_whitespace().collect::<Vec<_>>();
-            let directory = words[words.len() - 2].trim_matches('\'');
+            // Publication now shares one shell batch with verification and
+            // discard. Its directory is an argument inside the quoted script.
+            let unquoted = remote.replace(['\'', '\\', '"'], "");
+            let directory = unquoted
+                .split_whitespace()
+                .find(|word| {
+                    word.rsplit_once("worker-binaries/")
+                        .is_some_and(|(_, digest)| {
+                            digest.len() == 64
+                                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                })
+                .expect("published worker store directory");
             self.host_files
                 .borrow_mut()
                 .insert(format!("{directory}/hel"));
+        } else if command.purpose == "link shared Mjolnir worker into session" {
+            // Arguments end with: source temporary destination digest mode.
+            let words = remote.split_whitespace().collect::<Vec<_>>();
+            let source = words[words.len() - 5].trim_matches('\'');
+            if !self.host_files.borrow().contains(source) {
+                status = 75;
+            }
         } else if command.purpose == "verify shared Mjolnir worker" {
             let path = remote.split_whitespace().last().unwrap().trim_matches('\'');
             if self.host_files.borrow().contains(path) {
@@ -1523,6 +1932,23 @@ impl CommandExecutor for SshHostExecutor {
             stdout,
             stderr: Vec::new(),
         })
+    }
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        if command.purpose == "query host profile content" {
+            std::io::copy(input, &mut std::io::sink())?;
+            return self.execute(command);
+        }
+        // The transport boundary receives a complete archive, rather than a
+        // test-only fallback to file-by-file copy.
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(input));
+        for entry in archive.entries()? {
+            std::io::copy(&mut entry?, &mut std::io::sink())?;
+        }
+        self.execute(command)
     }
 }
 fn install_on_ssh_host(
@@ -1543,6 +1969,7 @@ fn install_on_ssh_host(
         &fixture.ownership,
         &fixture.profile_stage,
         None,
+        &[],
     )
     .unwrap();
     rendered(&executor.commands.take())
@@ -1676,6 +2103,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             &fixture.ownership,
             &fixture.profile_stage,
             None,
+            &[],
         )?;
         let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
             &session,
@@ -1756,6 +2184,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
         execute_checked(
             &ProcessExecutor,
             targets::locator_command(
+                SshTrafficClass::Control,
                 &locator,
                 vec![
                     "sh".into(),
@@ -1807,13 +2236,20 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
             target: targets::target_recovery_plan(&locator, &session)?,
             workspace: None,
             exit_record: None,
-            liveness_probe: worker_liveness_command(&locator, &root),
+            liveness_probe: targets::WorkerControlPlan::new(
+                "probe liveness",
+                vec![worker_liveness_command(&locator, &root)],
+                &locator,
+                &session,
+            )
+            .unwrap(),
             binary_refresh: worker_binary_refresh_plan(&locator, &session)?,
             launch_refresh: Some(worker_launch_refresh_plan(&locator, &session, &launch)?),
             restart: CommandPlan {
                 description: "restart isolated Docker worker".into(),
                 commands: vec![start_worker_command(&locator, &root)],
-            },
+            }
+            .into(),
         };
         crate::session_manager::recover_worker_controlled(plan, false, None, &ProcessExecutor)?;
         let installed = execute_checked(
@@ -1986,6 +2422,7 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
             &fixture.ownership,
             &fixture.profile_stage,
             None,
+            &[],
         )?;
         as_root(&format!("test ! -e {unused}"))?;
         execute_checked(
@@ -2026,7 +2463,10 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
         })?;
         // The daemon identifies its worker by `hel worker run --root`; the
         // link keeps that name on the process started through it.
-        let liveness = execute_checked(&ProcessExecutor, worker_liveness_command(&locator, &root))?;
+        let liveness = execute_checked(
+            &ProcessExecutor,
+            worker_liveness_command(&locator, &root).unstaged_command(),
+        )?;
         ensure!(
             String::from_utf8_lossy(&liveness.stdout).trim() == "alive",
             "the worker started through the link must be recognized as alive, got {:?}",
@@ -2048,6 +2488,29 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         commands: RefCell<Vec<CommandSpec>>,
     }
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -2217,6 +2680,19 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
              {MUSE_ACP_VERSION}; a stale check fails only when the image is published"
     );
     assert!(CONTAINERFILE.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
+    let antigravity: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../mj-core/assets/antigravity/runtime.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        antigravity["version"],
+        mj_core::harness_runtime::ANTIGRAVITY_VERSION
+    );
+    assert!(CONTAINERFILE.contains(
+        "COPY mj-core/assets/antigravity/runtime.json /opt/mjolnir/antigravity-runtime.json"
+    ));
+    assert!(CONTAINERFILE.contains("RUN python3 /opt/mjolnir/install-antigravity.py /opt/mjolnir/antigravity-runtime.json /usr/local/bin"));
+    assert!(CONTAINERFILE.contains("ENV AGY_CLI_DISABLE_AUTO_UPDATE=true"));
 
     for package in [
         format!("@moonshot-ai/kimi-code@{KIMI_VERSION}"),
@@ -2350,16 +2826,9 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     std::fs::create_dir_all(&home).unwrap();
     let own = home.join("AGENTS.md");
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Dsh,
-        home: home.clone(),
         environment: BTreeMap::from([("DEEPSEEK_API_KEY".to_owned(), "sk-dummy".to_owned())])
             .into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Dsh, home.clone())
     };
     let refusal = |error: anyhow::Error| {
         let refusal = mj_core::refusal::Refusal::of(&error).expect("a refusal for the client");
@@ -2595,14 +3064,20 @@ fn a_session_without_project_memory_launches_without_memory() {
         };
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: directory.path().join(format!("{}-home", kind.id())),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            ..mj_core::config::HarnessProfile::new(
+                kind,
+                directory.path().join(format!("{}-home", kind.id())),
+            )
         };
         let launch = |no_project_memory: bool| {
             let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
@@ -2677,23 +3152,29 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
         };
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: directory.path().join(format!("{}-home", kind.id())),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            ..mj_core::config::HarnessProfile::new(
+                kind,
+                directory.path().join(format!("{}-home", kind.id())),
+            )
         };
         let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
         session.harness_kind = kind;
         session.last_profile = kind.id().into();
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.clone());
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let (launch, memory, _) = worker_launch_config(
             &session,
@@ -2768,10 +3249,14 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         environment: BTreeMap::from([("ZAI_API_KEY".to_owned(), "coding-plan-key".to_owned())])
             .into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
+        claude_permission_mode: None,
+        aws: None,
     }
 }
 
@@ -2787,15 +3272,7 @@ fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directo
     std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
     std::fs::write(&saved, br#"{"schema_version":2,"rows":[]}"#).unwrap();
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Muse,
-        home: home.clone(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Muse, home.clone())
     };
     let staged = tempfile::tempdir().unwrap();
     let staged_home = staged.path().join("muse");
@@ -3078,10 +3555,14 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         environment: BTreeMap::from([("DEEPSEEK_API_KEY".to_owned(), "deepseek-key".to_owned())])
             .into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
+        claude_permission_mode: None,
+        aws: None,
     }
 }
 
@@ -3153,15 +3634,10 @@ fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
     .unwrap();
     // No `env_key` and an empty environment: the key is only in `config.toml`.
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Codex,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            home.path().to_path_buf(),
+        )
     };
     let asked = std::cell::RefCell::new(Vec::new());
 
@@ -3220,15 +3696,10 @@ fn stage_grok_profile_copies_authentication_and_agent_identity() {
     std::fs::write(home.path().join("sessions/session_search.sqlite"), "x").unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Grok,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Grok,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3254,15 +3725,10 @@ fn stage_claude_profile_preserves_rollout_identity() {
     std::fs::write(home.path().join(".claude.json"), identity).unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3301,15 +3767,10 @@ fn stage_claude_profile_follows_symlinked_entries() {
 
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3343,15 +3804,10 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
 
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3443,7 +3899,8 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             | HarnessKind::Grok
             | HarnessKind::Muse
             | HarnessKind::OpenCode
-            | HarnessKind::Dsh => &[],
+            | HarnessKind::Dsh
+            | HarnessKind::Antigravity => &[],
         };
         let home = tempfile::tempdir().unwrap();
         let skill = format!("{}/review/SKILL.md", kind.synced_skill_dirs()[0]);
@@ -3456,14 +3913,17 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
         let staged = tempfile::tempdir().unwrap();
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -3536,15 +3996,10 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
 
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3600,15 +4055,10 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
     std::fs::write(home.path().join("settings.json"), "{}").unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3662,10 +4112,6 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
     )
     .unwrap()
     .0;
-    for environment in [&mut launch.target_environment, &mut launch.environment] {
-        environment.insert("TYPESAFE_API_KEY".into(), "secret".into());
-    }
-
     let mut on = launch.clone();
     apply_jev_switch(&mut on, true);
     assert_eq!(on.target_environment, launch.target_environment);
@@ -3673,21 +4119,8 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
 
     apply_jev_switch(&mut launch, false);
     for environment in [&launch.target_environment, &launch.environment] {
-        assert!(!environment.contains_key("TYPESAFE_API_KEY"));
         assert_eq!(
             environment.get(mj_core::jev::DISABLED_ENVIRONMENT),
-            Some(&"1".to_owned())
-        );
-    }
-
-    // The continuation switch travels the same way, and only when off.
-    let mut continuing = launch.clone();
-    super::launch::apply_continuation_switch(&mut continuing, true);
-    assert_eq!(continuing.environment, launch.environment);
-    super::launch::apply_continuation_switch(&mut launch, false);
-    for environment in [&launch.target_environment, &launch.environment] {
-        assert_eq!(
-            environment.get(mj_core::jev::CONTINUATION_DISABLED_ENVIRONMENT),
             Some(&"1".to_owned())
         );
     }
@@ -3707,6 +4140,29 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(format!(
                 "{} {}",
@@ -3749,13 +4205,15 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     );
     assert!(shim.contains("# mjolnir-mbx-shim"), "{shim}");
     assert!(
-        shim.contains("exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""),
+        shim.contains(&targets::posix_quote(
+            "exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""
+        )),
         "both wrappers execute the synchronized cache copy: {shim}"
     );
     assert!(!commands.iter().any(|line| line.contains(" cp ")));
     assert!(
         commands.iter().any(|line| {
-            line.contains("exec -i hel-session sh -c") && line.contains("config/mbx")
+            line.contains("'exec' '-i' 'hel-session' 'sh' '-c'") && line.contains("config/mbx")
         }),
         "the machine mbx configuration is linked into the container: {commands:#?}"
     );
@@ -3769,6 +4227,29 @@ fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
     }
 
     impl CommandExecutor for VersionExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(format!(
                 "{} {}",
@@ -3822,10 +4303,14 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         ])
         .into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
+        claude_permission_mode: None,
+        aws: None,
     }
 }
 
@@ -3868,9 +4353,9 @@ fn launches_on_every_target(
     local.target_template_id = "localhost".into();
     local.project_directory = Some(project.path().to_path_buf());
     let local_root = format!("/home/me/.local/share/hel/workers/{parent_id}");
-    local.target = Some(mj_core::state::TargetLocator::LocalBare {
+    local.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: local_root.clone().into(),
-    });
+    }));
     let localhost = worker_launch_config(
         &local,
         profile,
@@ -3939,6 +4424,22 @@ fn launches_on_every_target(
 }
 
 #[test]
+fn cpu_accounting_follows_container_placement_in_launch_config() {
+    use mj_core::cpu_usage::CpuAccountingMode;
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    for (target, launch) in launches_on_every_target(&profile) {
+        let expected = match target {
+            "localhost" => CpuAccountingMode::ProcessTree,
+            "container" => CpuAccountingMode::Container,
+            "sub-agent" => CpuAccountingMode::Container,
+            _ => unreachable!(),
+        };
+        assert_eq!(launch.cpu_accounting, expected, "{target}");
+    }
+}
+
+#[test]
 fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() {
     let home = tempfile::tempdir().unwrap();
     let codex = codex_login_profile(home.path(), "chatgpt");
@@ -3974,15 +4475,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
     }
 
     let claude = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
     };
     for (target, launch) in launches_on_every_target(&claude) {
         if target == "localhost" {
@@ -4000,6 +4493,45 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
         );
         assert_eq!(launch.environment["IS_SANDBOX"], "1", "{target}");
     }
+
+    // Hard-won: review of a13f351: Docker sessions on the root default image got no sandbox marker, so Claude refused to start.
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let workspace = targets::new_container_workspace(parent_id).unwrap();
+    let mut session = crate::controller::test_support::checkpoint_test_session(parent_id);
+    session.project_directory = None;
+    session.container_workspace = Some(workspace.clone());
+    let docker = mj_core::config::TargetTemplate::LocalDocker {
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: mj_core::config::DEFAULT_SESSION_IMAGE.to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let launch = worker_launch_config(
+        &session,
+        &claude,
+        Some(&crate::controller::test_support::local_bundle(Path::new(
+            "/src/project",
+        ))),
+        &targets::TargetLocator::LocalDocker {
+            container_id: targets::resource_name(parent_id).unwrap(),
+            borrowed_from: None,
+        },
+        LaunchWorkspace {
+            session_id: parent_id,
+            container: Some(&workspace),
+            parent_worktree: None,
+        },
+        &mj_core::state::TargetRuntimeSettings::from(&docker),
+    )
+    .unwrap()
+    .0;
+    assert_eq!(launch.environment["IS_SANDBOX"], "1");
 }
 
 #[test]
@@ -4111,15 +4643,8 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
         ("AWS_EC2_METADATA_DISABLED".to_owned(), "false".to_owned()),
     ]);
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: aws_environment.clone().into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     for (target, launch) in launches_on_every_target(&profile) {
@@ -4264,9 +4789,9 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     session.last_profile = "glm".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some(project.path().to_path_buf());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/home/me/.local/share/hel/workers/session-glm".into(),
-    });
+    }));
 
     let (launch, _, target_home) = worker_launch_config(
         &session,
@@ -4314,8 +4839,7 @@ fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
 // Hard-won: a24070f: Muse launches failed when staged settings retained the shipped :auto-review profile.
 // Both policies stage `:ask-me`. Unconstrained Muse additionally runs
 // `allowAll` approvals with auto-review off (plus `--disable-sandbox`), so
-// no permission requests are emitted and the staged profile never matters;
-// a profile with `muse_auto_review = true` opts back into the reviewer.
+// no permission requests are emitted and the staged profile never matters.
 #[test]
 fn muse_staged_settings_replace_the_auto_review_profile_under_every_policy() {
     for (policy, profile) in [
@@ -4359,19 +4883,11 @@ fn raw_local_muse_launches_with_guardian_approvals() {
     session.last_profile = "muse".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some(project.path().to_path_buf());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/home/me/.local/share/hel/workers/session-muse".into(),
-    });
+    }));
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Muse,
-        home: PathBuf::from("/profiles/muse"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Muse, PathBuf::from("/profiles/muse"))
     };
 
     let (launch, _, _) = worker_launch_config(
@@ -4411,15 +4927,10 @@ fn stage_kimi_profile_preserves_device_identity() {
     .unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Kimi,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Kimi,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -4446,15 +4957,10 @@ fn staged_kimi_profile_binds_history_tools_to_the_target_runtime() {
     std::fs::write(home.path().join("mcp.json"), &original_body).unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Kimi,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Kimi,
+            home.path().to_path_buf(),
+        )
     };
     stage_profile(&profile, staged.path()).unwrap();
     let memory = ProjectMemoryLaunchConfig {
@@ -4543,15 +5049,10 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
     std::fs::write(home.path().join("SYSTEM.md"), system_override).unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Kimi,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Kimi,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -4585,6 +5086,29 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
 fn container_attachment_guidance_matches_engine_permissions_and_harness_instruction_files() {
     struct MountExecutor;
     impl CommandExecutor for MountExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(command.purpose, "inspect session container storage");
             assert!(command.args.iter().any(|arg| arg == "{{json .Mounts}}"));
@@ -4701,6 +5225,29 @@ struct DigestExecutor {
 }
 
 impl CommandExecutor for DigestExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         Ok(CommandOutput {
@@ -4735,10 +5282,14 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
+        no_github_credentials: false,
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        subagent_kind: None,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
@@ -4762,11 +5313,22 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
     };
 
+    // A host of its own, so no other test has claimed this store's collection.
+    let locator = targets::TargetLocator::SshBare {
+        worker_id: None,
+        ssh: SshTarget {
+            destination: "managed-harness-upgrade@host.test".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: format!("/srv/mj/{session}"),
+    };
     prepare_managed_harness_for_upgrade(
         &executor,
-        &ssh_bare_locator(session),
+        &locator,
         session,
         &WorkerInstall::Host(source),
         &launch,
@@ -4784,16 +5346,8 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
             "clear managed harness preparation staging",
             "create managed harness preparation staging",
             "remove stale private worker staging",
-            "collect unused Mjolnir worker binaries",
-            "verify shared Mjolnir worker",
-            "create private worker store upload",
-            "stage replacement Mjolnir worker",
-            "replace installed Mjolnir worker",
-            "make replaced Mjolnir worker executable",
-            "verify uploaded Mjolnir worker",
-            "publish shared Mjolnir worker",
-            "discard private worker store upload",
             "link shared Mjolnir worker into session",
+            "collect unused Mjolnir worker binaries",
             "stage managed harness launch configuration",
             "prepare exact managed harness",
             "remove managed harness preparation staging",
@@ -4825,6 +5379,29 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
     }
 
     impl CommandExecutor for CacheLinkExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             let mut args = command.args[3..].to_vec();
@@ -4872,6 +5449,9 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         borrowed_from: None,
     };
     let launch = WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
+        no_github_credentials: false,
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         goal_resume_request: None,
@@ -4879,6 +5459,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         session_id: session.id.clone(),
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        subagent_kind: None,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
@@ -4899,6 +5480,8 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
     };
     let executor = CacheLinkExecutor {
         commands: RefCell::new(Vec::new()),
@@ -4948,6 +5531,29 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     }
 
     impl CommandExecutor for ConfigRecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let config_path = command
                 .args
@@ -4968,6 +5574,29 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     }
 
     impl CommandExecutor for FailingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.borrow_mut().push(command.purpose.clone());
             Err(anyhow::anyhow!("managed harness installation failed"))
@@ -4979,10 +5608,14 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
+        no_github_credentials: false,
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        subagent_kind: None,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
@@ -5006,6 +5639,8 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
     };
     let locator = targets::TargetLocator::LocalBare {
         worker_root: "/worker/session-local".into(),
@@ -5145,7 +5780,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["dead\n"]),
+        liveness_probe: CommandSpec::new("printf", ["dead\n"]).into(),
         binary_refresh: worker_binary_refresh_plan(&locator, session_id).unwrap(),
         launch_refresh: Some(WorkerLaunchRefreshPlan {
             expected_sha256: lower_hex(Sha256::digest(b"new launch schema")),
@@ -5171,10 +5806,11 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
                 "touch",
                 [restarted.to_string_lossy().into_owned()],
             )],
-        },
+        }
+        .into(),
     };
     let mut record = crate::controller::test_support::checkpoint_test_session(session_id);
-    record.target = Some(plan.source_target.clone());
+    record.target = Some(Box::new(plan.source_target.clone()));
     crate::database::save_session(&record).unwrap();
     let error = crate::session_manager::recover_worker_controlled(
         plan.clone(),
@@ -5362,6 +5998,13 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
         ],
         // dsh-acp keeps only its sessions, written atomically through a
         // temporary file beside each record.
+        HarnessKind::Antigravity => &[
+            ("antigravity-cli/antigravity-oauth-token", true),
+            ("AGENTS.md", true),
+            ("skills/review/SKILL.md", true),
+            ("antigravity-cli/conversations/old.db", false),
+            ("settings.json", false),
+        ],
         HarnessKind::Dsh => &[
             ("AGENTS.md", true),
             ("skills/review/SKILL.md", true),
@@ -5417,14 +6060,17 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
         }
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5544,6 +6190,10 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
                 "expires": 1_790_000_000_000_i64 + generation * 1000,
             },
         }]),
+        HarnessKind::Antigravity => serde_json::json!({"token": {
+            "access_token": format!("access-{generation}"), "refresh_token": "stable-refresh",
+            "expiry": format!("2026-09-{:02}T09:00:00Z", 10 + generation),
+        }}),
         HarnessKind::Dsh => panic!("DSH keeps no login; its key comes from DEEPSEEK_API_KEY"),
     };
     serde_json::to_vec(&login).unwrap()
@@ -5574,14 +6224,17 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         let home = directory.path().join(format!("{}-home", kind.id()));
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: home.clone(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
         let canonical = profile.authentication_marker();
         let database = home.join(".data/opencode/opencode.db");
@@ -5600,9 +6253,9 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         session.last_profile = kind.id().into();
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.clone());
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let (launch, _, target_home) = worker_launch_config(
             &session,
@@ -5669,6 +6322,15 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             continue;
         }
         stage_profile(&profile, &launch.harness_home).unwrap();
+        // #1490: a staged Claude login never carries the refresh token the
+        // daemon alone may spend; the profile's own file keeps it.
+        if kind.copies_omit_refresh_token() {
+            let staged: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&endpoint).unwrap()).unwrap();
+            assert!(staged["claudeAiOauth"].get("refreshToken").is_none());
+            assert_eq!(staged["claudeAiOauth"]["accessToken"], "access-1");
+            assert_eq!(std::fs::read(&canonical).unwrap(), login_bytes(kind, 1));
+        }
 
         // The profile's login rotates while the session runs.
         std::fs::write(&canonical, login_bytes(kind, 2)).unwrap();
@@ -5724,14 +6386,17 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
         let home = directory.path().join(format!("{}-home", kind.id()));
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: home.clone(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
         let marker = profile.authentication_marker();
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
@@ -5745,9 +6410,9 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
         session.last_profile = kind.id().into();
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.clone());
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
         let (_, memory, target_home) = worker_launch_config(
             &session,
             &profile,
@@ -6019,6 +6684,29 @@ mod container_runtime {
             fail_prepare: bool,
         }
         impl CommandExecutor for PreparationExecutor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 self.commands.borrow_mut().push(command.clone());
                 if self.fail_prepare
@@ -6180,7 +6868,12 @@ fn installed_digest_matches_bytes_on_linux_and_darwin_with_quoted_paths() {
 #[test]
 fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
     use mj_core::subagent::SubagentPolicy;
-    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Dsh] {
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::Dsh,
+        HarnessKind::OpenCode,
+    ] {
         let home = tempfile::tempdir().unwrap();
         let source = home.path().join(harness.agent_instructions_file());
         std::fs::write(&source, "User instructions without final newline").unwrap();
@@ -6231,6 +6924,7 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
 /// 30 s for one debug build on a busy disk. An unchanged source is now
 /// recognised from its path, size, mtime, inode and ctime.
 // Hard-won: 8b62e1b: rehashing unchanged worker sources delayed daemon startup by tens of seconds
+// Hard-won: daemon heap profile: resolving an unchanged pinned copy still rescanned the executable.
 #[test]
 fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
     let directory = tempfile::tempdir().unwrap();
@@ -6240,6 +6934,8 @@ fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
 
     let first = copy_worker_source_to_cache(&source, &cache).unwrap();
     verify_worker_build_indexed(&cache, &source).unwrap();
+    assert_eq!(indexed_pinned_worker(&cache, &first), Some(first.clone()));
+    verify_worker_build_indexed(&cache, &first).unwrap();
 
     // Damage the pinned copy without changing its length. A pin that read
     // the source or re-hashed the copy would notice; the indexed one does not.
@@ -6248,6 +6944,8 @@ fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
         vec![0_u8; std::fs::metadata(&source).unwrap().len() as usize],
     )
     .unwrap();
+    assert!(indexed_pinned_worker(&cache, &first).is_none());
+    assert!(verify_worker_build_indexed(&cache, &first).is_err());
     assert_eq!(copy_worker_source_to_cache(&source, &cache).unwrap(), first);
     verify_worker_build_indexed(&cache, &source).unwrap();
 
@@ -6320,4 +7018,81 @@ fn installing_a_local_stage_links_the_login_and_never_writes_through_an_earlier_
         std::fs::read_to_string(&profile_login).unwrap(),
         "profile login"
     );
+}
+
+#[test]
+fn refreshing_profile_configuration_clears_every_aws_file_including_the_scope_record() {
+    let executor = SshHostExecutor::default();
+    install::clear_profile_configuration(
+        &executor,
+        &targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: "c".repeat(64),
+            workspace_storage: Default::default(),
+        },
+        "0123456789abcdef0123456789abcdef",
+        "/home/agent/.codex",
+        HarnessKind::Codex,
+    )
+    .unwrap();
+    let commands = executor.commands.borrow();
+    let script = commands
+        .last()
+        .unwrap()
+        .args
+        .iter()
+        .find(|argument| argument.contains("rm -rf"))
+        .expect("the removal script runs");
+    for name in mj_core::aws_credentials::FILES {
+        assert!(script.contains(name), "{name} is not cleared: {script}");
+    }
+}
+
+#[test]
+fn launching_where_the_role_cannot_apply_announces_why() {
+    let home = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut profile = mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile
+        .environment
+        .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+    profile.aws = Some(mj_core::config::AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    });
+    let mut config = mj_core::config::Config::default();
+    config.profiles.insert("bedrock".into(), profile);
+    config.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    let mut session = crate::controller::test_support::checkpoint_test_session(id);
+    session.last_profile = "bedrock".into();
+    session.target_template_id = "localhost".into();
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: format!("/home/me/.local/share/hel/workers/{id}").into(),
+    }));
+    let controller = Controller {
+        config,
+        state: mj_core::state::State {
+            sessions: [(id.to_owned(), session)].into_iter().collect(),
+            ..Default::default()
+        },
+    };
+
+    let notice = controller.aws_role_notice(id).unwrap().unwrap();
+
+    assert!(
+        notice.contains("[profiles.bedrock.aws] has no effect on this session"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("raw local sessions read the host's own AWS files"),
+        "{notice}"
+    );
+    // Nothing is minted or synced for a session the role cannot apply to.
+    assert!(controller.aws_credential_source(id).unwrap().is_none());
 }

@@ -1,23 +1,24 @@
 //! Backend target, locator, and capacity conversion for provisioned sessions.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use mj_core::config::{AwsAddressSource, Config, ProjectBundle, TargetTemplate, data_dir};
+use mj_core::config::{Config, ProjectBundle, TargetTemplate, data_dir};
 use mj_core::state::{
     PodmanWorkspaceLocator, ResourceAllocationKind, SessionRecord, SessionResourceAllocation,
-    TargetLocator, allocation_cpus,
+    TargetLocator,
 };
 
 use crate::targets::{
-    self, AwsTemplate, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate,
-    ImageRefresh, ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
+    self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageRefresh,
+    ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
 };
 
-use super::{Controller, execute_checked};
+use super::Controller;
 
 impl Controller {
     /// Inspect the actual execution checkout in a background worker.
@@ -40,11 +41,12 @@ impl Controller {
         if session
             .project
             .as_ref()
-            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+            .is_some_and(|project| project.primary_is_plain_directory())
         {
             return Ok((launch.cwd, "not a git checkout".to_owned()));
         }
         let output = executor.execute(&targets::command_on_locator(
+            SshTrafficClass::Control,
             &backend,
             session_id,
             vec![
@@ -111,7 +113,11 @@ impl Controller {
             let mut command = vec!["git".to_owned(), "-C".to_owned(), cwd_text.clone()];
             command.extend(args.iter().map(|arg| (*arg).to_owned()));
             let output = executor.execute(&targets::command_on_locator(
-                &backend, session_id, command, purpose,
+                SshTrafficClass::Control,
+                &backend,
+                session_id,
+                command,
+                purpose,
             )?)?;
             Ok((output.status == 0).then(|| String::from_utf8_lossy(&output.stdout).into_owned()))
         };
@@ -133,120 +139,6 @@ impl Controller {
             &numstat,
             &porcelain,
         ))
-    }
-
-    pub fn resolve_aws_resource_options(
-        &self,
-        target_id: &str,
-        executor: &impl CommandExecutor,
-    ) -> Result<Vec<SessionResourceAllocation>> {
-        let TargetTemplate::AwsEc2 {
-            aws_profile,
-            region,
-            launch_template,
-            launch_template_version,
-            ..
-        } = self
-            .config
-            .targets
-            .get(target_id)
-            .with_context(|| format!("unknown target template {target_id:?}"))?
-        else {
-            bail!("target {target_id:?} is not an AWS EC2 target");
-        };
-        let profile = aws_profile.as_deref().unwrap_or("default");
-        let launch_key = if launch_template.starts_with("lt-") {
-            "--launch-template-id"
-        } else {
-            "--launch-template-name"
-        };
-        let version = launch_template_version.as_deref().unwrap_or("$Default");
-        let describe_template = CommandSpec::new(
-            "aws",
-            [
-                "--profile",
-                profile,
-                "--region",
-                region,
-                "ec2",
-                "describe-launch-template-versions",
-                launch_key,
-                launch_template,
-                "--versions",
-                version,
-                "--output",
-                "json",
-            ],
-        )
-        .purpose("resolve EC2 launch template instance family");
-        let output = executor.execute(&describe_template)?;
-        if output.status != 0 {
-            bail!(
-                "{} failed with status {}: {}",
-                describe_template.purpose,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let response: serde_json::Value =
-            serde_json::from_slice(&output.stdout).context("parse EC2 launch template response")?;
-        let instance_type = response
-            .pointer("/LaunchTemplateVersions/0/LaunchTemplateData/InstanceType")
-            .and_then(serde_json::Value::as_str)
-            .context("launch template does not specify a concrete instance type")?;
-        let family = instance_type
-            .rsplit_once('.')
-            .map(|(family, _)| family)
-            .context("launch template instance type has no size suffix")?;
-        let filter = format!("Name=instance-type,Values={family}.*");
-        let describe_types = CommandSpec::new(
-            "aws",
-            [
-                "--profile",
-                profile,
-                "--region",
-                region,
-                "ec2",
-                "describe-instance-types",
-                "--filters",
-                &filter,
-                "--output",
-                "json",
-            ],
-        )
-        .purpose("discover EC2 instance sizes");
-        let output = executor.execute(&describe_types)?;
-        if output.status != 0 {
-            bail!(
-                "{} failed with status {}: {}",
-                describe_types.purpose,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let response: serde_json::Value =
-            serde_json::from_slice(&output.stdout).context("parse EC2 instance type response")?;
-        let mut options = response
-            .get("InstanceTypes")
-            .and_then(serde_json::Value::as_array)
-            .context("EC2 instance type response omitted InstanceTypes")?
-            .iter()
-            .filter_map(|entry| {
-                Some(SessionResourceAllocation::AwsEc2 {
-                    instance_type: entry.get("InstanceType")?.as_str()?.to_owned(),
-                    vcpus: entry.pointer("/VCpuInfo/DefaultVCpus")?.as_u64()?,
-                    memory_bytes: entry
-                        .pointer("/MemoryInfo/SizeInMiB")?
-                        .as_u64()?
-                        .checked_mul(1024 * 1024)?,
-                })
-            })
-            .collect::<Vec<_>>();
-        options.sort_by_key(allocation_cpus);
-        if !options.iter().any(|option| allocation_cpus(option) == 8) {
-            bail!("EC2 family {family:?} has no exact 8-vCPU baseline size");
-        }
-        Ok(options)
     }
 
     pub fn reconnect_command(&self, session_id: &str) -> Result<CommandSpec> {
@@ -289,7 +181,11 @@ impl Controller {
 
         let mut local_ids = Vec::new();
         // Per host: its target ids, and per SSH connection the paths to measure.
-        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>)>);
+        // The flag marks a connection on which every target is a Nitro
+        // sandbox, whose memory total is the engine's pool. A host shared
+        // with other runtimes keeps its physical memory as the total, because
+        // their sessions draw on all of it.
+        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>, bool)>);
         let mut ssh_hosts: BTreeMap<String, HostProbes> = BTreeMap::new();
         let mut targets = Vec::new();
         for (target_id, template) in &self.config.targets {
@@ -303,17 +199,35 @@ impl Controller {
                 TargetTemplate::SshBare { ssh, .. }
                 | TargetTemplate::SshPodman { ssh, .. }
                 | TargetTemplate::SshDocker { ssh, .. }
-                | TargetTemplate::SshAppleContainer { ssh, .. } => {
+                | TargetTemplate::SshAppleContainer { ssh, .. }
+                | TargetTemplate::SshNitro { ssh, .. } => {
                     let entry = ssh_hosts.entry(ssh.host.clone()).or_default();
                     entry.0.push(target_id.clone());
                     let connection = SshTarget::from(ssh);
-                    let paths = match entry.1.iter_mut().find(|(known, _)| *known == connection) {
-                        Some((_, paths)) => paths,
+                    let nitro = matches!(template, TargetTemplate::SshNitro { .. });
+                    let position = match entry
+                        .1
+                        .iter()
+                        .position(|(known, _, _)| *known == connection)
+                    {
+                        Some(position) => position,
                         None => {
-                            entry.1.push((connection, Vec::new()));
-                            &mut entry.1.last_mut().expect("just pushed").1
+                            entry.1.push((connection, Vec::new(), true));
+                            entry.1.len() - 1
                         }
                     };
+                    // A disabled target with no live session draws on no
+                    // memory. `mj ec2 create` registers a Nitro host with a
+                    // disabled bare sibling, which must not turn the pool
+                    // back into physical memory less the host reserve.
+                    let draws_memory = !self.config.disabled_targets.contains(target_id)
+                        || self.state.sessions.values().any(|session| {
+                            session.target_template_id == *target_id && session.state.is_active()
+                        });
+                    if draws_memory {
+                        entry.1[position].2 &= nitro;
+                    }
+                    let paths = &mut entry.1[position].1;
                     push_unique(paths, ssh_storage_paths(template));
                     // Each live session's own directories: a project or
                     // clone can sit on a filesystem of its own.
@@ -387,7 +301,13 @@ impl Controller {
                         local: false,
                         probes: connections
                             .iter()
-                            .map(|(ssh, paths)| targets::ssh_host_capacity_command(ssh, paths))
+                            .map(|(ssh, paths, nitro)| {
+                                if *nitro {
+                                    targets::ssh_nitro_host_capacity_command(ssh, paths)
+                                } else {
+                                    targets::ssh_host_capacity_command(ssh, paths)
+                                }
+                            })
                             .collect(),
                         local_storage_paths: Vec::new(),
                         probe_error: None,
@@ -475,6 +395,7 @@ pub(crate) fn ssh_storage_paths(template: &TargetTemplate) -> Vec<String> {
         }
         TargetTemplate::SshPodman { .. } => paths.push(ContainerStorage::Podman.path().to_owned()),
         TargetTemplate::SshDocker { .. } => paths.push(ContainerStorage::Docker.path().to_owned()),
+        TargetTemplate::SshNitro { .. } => paths.push(ContainerStorage::Microvm.path().to_owned()),
         _ => {}
     }
     paths.extend(build_cache_directory(template));
@@ -569,7 +490,17 @@ pub(crate) fn local_engine_readiness(
     let result = match kind {
         "local-podman" => targets::verify_local_podman(executor).map(|_| ()),
         "local-docker" => targets::verify_local_docker(executor).map(|_| ()),
-        "apple-container" => targets::ensure_apple_container_runtime(executor).map(|_| ()),
+        // Observe only: opening the launch options must not start a service
+        // the user may have stopped. Starting stays with daemon startup and
+        // the launch preflight.
+        "apple-container" => {
+            targets::apple_container_runtime_status(executor).and_then(|status| match status {
+                targets::AppleContainerStatus::Running => Ok(()),
+                targets::AppleContainerStatus::Stopped { status, detail } => {
+                    anyhow::bail!("container system status exited with status {status}: {detail}")
+                }
+            })
+        }
         _ => return None,
     };
     Some(match result {
@@ -586,15 +517,6 @@ pub(crate) fn is_missing_command(error: &anyhow::Error) -> bool {
             .downcast_ref::<std::io::Error>()
             .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
     })
-}
-
-/// The check a target gets before anything is launched on it, as the
-/// machine probe runs it for an EC2 launch template.
-pub(crate) fn verify_target_before_launch(
-    template: &TargetTemplate,
-    executor: &impl CommandExecutor,
-) -> Result<()> {
-    verify_target(template, executor, TargetCheck::BeforeLaunch)
 }
 
 /// Check that a target's host and runtime can run sessions.
@@ -684,58 +606,24 @@ pub(super) fn verify_target(
                     )
                 })
         }
+        TargetTemplate::SshNitro { ssh, .. } => {
+            let ssh = SshTarget::from(ssh);
+            // The engine is the worker binary itself, so it is installed
+            // before the first command that needs it.
+            super::worker_binary::ensure_microvm_engine(&ssh, executor)
+                .and_then(|()| targets::verify_ssh_nitro(&ssh, executor))
+                .map(|_| ())
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Nitro sandbox host preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
+                        ssh.destination
+                    )
+                })
+        }
         TargetTemplate::SshBare { ssh, .. } => {
             verify_ssh_connectivity(&SshTarget::from(ssh), executor)
         }
-        TargetTemplate::AwsEc2 {
-            aws_profile,
-            region,
-            launch_template,
-            launch_template_version,
-            ..
-        } => {
-            let mut identity_args = vec!["sts".into(), "get-caller-identity".into()];
-            if let Some(profile) = aws_profile {
-                identity_args.extend(["--profile".into(), profile.clone()]);
-            }
-            let identity = CommandSpec::new("aws", identity_args)
-                .purpose("verify AWS credentials")
-                .stage(ProvisionStage::Provisioning);
-            let output = executor.execute(&identity)?;
-            ensure!(
-                output.status == 0,
-                "AWS credential test failed with status {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-
-            let mut launch_args = vec![
-                "ec2".into(),
-                "describe-launch-template-versions".into(),
-                "--region".into(),
-                region.clone(),
-                if launch_template.starts_with("lt-") { "--launch-template-id" } else { "--launch-template-name" }.into(),
-                launch_template.clone(),
-                "--versions".into(),
-                launch_template_version
-                    .clone()
-                    .unwrap_or_else(|| "$Default".into()),
-            ];
-            if let Some(profile) = aws_profile {
-                launch_args.extend(["--profile".into(), profile.clone()]);
-            }
-            let launch = CommandSpec::new("aws", launch_args)
-                .purpose("verify AWS launch template")
-                .stage(ProvisionStage::Provisioning);
-            let output = executor.execute(&launch)?;
-            ensure!(
-                output.status == 0,
-                "AWS launch-template test failed with status {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            Ok(())
-        }
+        TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
         TargetTemplate::LocalBare => Ok(()),
     }
 }
@@ -768,15 +656,25 @@ pub(super) fn backend_session_bundle(
     let bundle = session
         .project_bundle(config)
         .context("session bundle is missing")?;
-    let mut spec = backend_bundle_with_sources(
+    backend_bundle_with_sources(
         bundle,
         session
             .project
             .as_ref()
             .map(|project| &project.network_sources),
         executor,
-    )?;
+    )
+}
+
+pub(super) fn apply_session_history_cutoff(
+    session: &SessionRecord,
+    config: &mj_core::config::Config,
+    spec: &mut ProjectBundleSpec,
+) -> Result<()> {
     if let Some(cutoff) = session_history_cutoff(session)? {
+        let bundle = session
+            .project_bundle(config)
+            .context("session bundle is missing")?;
         let checkout = session
             .checkout
             .as_ref()
@@ -792,10 +690,10 @@ pub(super) fn backend_session_bundle(
         spec.repositories
             .iter_mut()
             .find(|repository| repository.destination == destination)
-            .expect("bundle spec mirrors the bundle")
+            .context("cutoff repository is missing from the workspace bundle")?
             .history_cutoff = Some(cutoff);
     }
-    Ok(spec)
+    Ok(())
 }
 
 /// The history a session created with `no_later_history` starts with: its
@@ -851,28 +749,104 @@ fn backend_bundle_with_sources(
     })
 }
 
-/// Per-session container size overrides. They win over both the target
-/// template's values and any recorded resource allocation, and they are read
-/// only while a container is being created.
+/// Per-session credential policy applied while creating a container.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct ContainerOverrides<'a> {
-    pub cpus: Option<&'a str>,
-    pub memory: Option<&'a str>,
+pub(super) struct ContainerOverrides {
+    pub no_github_credentials: bool,
 }
 
-impl<'a> ContainerOverrides<'a> {
-    pub(super) fn for_session(session: &'a SessionRecord) -> Self {
+impl ContainerOverrides {
+    pub(super) fn for_session(session: &SessionRecord) -> Self {
         Self {
-            cpus: session.container_cpus.as_deref(),
-            memory: session.container_memory.as_deref(),
+            no_github_credentials: session.no_github_credentials,
         }
     }
+}
+
+/// OCI platform of a container target, before its container exists.
+pub(crate) fn session_image_platform(
+    template: &TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<String> {
+    let (host, container) = template
+        .image_host()
+        .context("image operation requires a container target")?;
+    let architecture = if let Some(platform) = &container.platform {
+        platform
+            .split('/')
+            .find_map(|part| targets::normalize_architecture(part).ok())
+            .context("unsupported container platform")?
+    } else if matches!(
+        host,
+        targets::ImageHost::AppleContainer | targets::ImageHost::SshAppleContainer(_)
+    ) {
+        "aarch64"
+    } else {
+        // The engine owns its native architecture, including Docker Desktop
+        // on a Windows daemon host where uname is not available.
+        let args = match host.engine() {
+            "podman" => vec![
+                "podman".into(),
+                "info".into(),
+                "--format".into(),
+                "{{.Host.Arch}}".into(),
+            ],
+            "docker" => vec![
+                "docker".into(),
+                "info".into(),
+                "--format".into(),
+                "{{.Architecture}}".into(),
+            ],
+            _ => vec!["uname".into(), "-sm".into()], // Nitro hosts run Linux.
+        };
+        let output =
+            super::execute_checked(executor, host.command(args, "detect image platform".into()))?;
+        let output = std::str::from_utf8(&output.stdout)?;
+        if matches!(host, targets::ImageHost::SshNitro(_)) {
+            targets::TargetPlatform::parse(output)?.architecture
+        } else {
+            targets::normalize_architecture(output.trim())?
+        }
+    };
+    Ok(format!(
+        "linux/{}",
+        match architecture {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            _ => unreachable!(),
+        }
+    ))
+}
+
+/// Resolve the project assignment before preflight, creation, or recreation.
+/// A target without project images does not require an additional host probe.
+pub(crate) fn session_target(
+    config: &Config,
+    bundle_id: &str,
+    target_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<TargetTemplate> {
+    let template = config
+        .targets
+        .get(target_id)
+        .context("session target configuration is missing")?;
+    if template.container().is_none()
+        || config
+            .images
+            .bundles
+            .get(bundle_id)
+            .is_none_or(BTreeMap::is_empty)
+    {
+        return Ok(template.clone());
+    }
+    let platform = session_image_platform(template, executor)?;
+    config.session_target(Some(bundle_id), target_id, &platform)
 }
 
 pub(super) fn backend_target(
     template: &TargetTemplate,
     allocation: Option<&SessionResourceAllocation>,
-    overrides: ContainerOverrides<'_>,
+    overrides: ContainerOverrides,
 ) -> Result<targets::TargetTemplate> {
     Ok(match template {
         TargetTemplate::LocalBare => targets::TargetTemplate::LocalBare,
@@ -893,32 +867,7 @@ pub(super) fn backend_target(
                 container: backend_container(container, allocation, overrides),
             }
         }
-        TargetTemplate::AwsEc2 {
-            aws_profile,
-            region,
-            launch_template,
-            launch_template_version,
-            ssh_user,
-            identity_file,
-            ssh_args,
-            ..
-        } => targets::TargetTemplate::AwsEc2(AwsTemplate {
-            profile: aws_profile.clone().unwrap_or_else(|| "default".into()),
-            region: region.clone(),
-            launch_template: launch_template.clone(),
-            launch_template_version: launch_template_version.clone(),
-            instance_type: match allocation {
-                Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) => {
-                    Some(instance_type.clone())
-                }
-                _ => None,
-            },
-            // The address is filled after describe-instances.
-            ssh: SshTarget {
-                destination: format!("{ssh_user}@pending.invalid"),
-                ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
-            },
-        }),
+        TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
         TargetTemplate::SshBare {
             ssh,
             workspace_prefix,
@@ -939,6 +888,10 @@ pub(super) fn backend_target(
             ssh: SshTarget::from(ssh),
             container: backend_container(container, allocation, overrides),
         },
+        TargetTemplate::SshNitro { ssh, container } => targets::TargetTemplate::SshNitro {
+            ssh: SshTarget::from(ssh),
+            container: backend_container_with(container, allocation, overrides, true),
+        },
     })
 }
 
@@ -955,29 +908,37 @@ pub(super) fn backend_target(
 /// entry takes the more eager of the two.
 pub fn image_refresh_plan(config: &Config) -> Vec<ImageRefresh> {
     let mut plan: Vec<ImageRefresh> = Vec::new();
-    for target in config.targets.values() {
+    for (target_id, target) in &config.targets {
         let Some((host, container)) = target.image_host() else {
             continue;
         };
-        let Some(refresh) = targets::image_refresh(
-            host,
-            &container.image,
-            container.platform.as_deref(),
-            container.pull_policy,
-        ) else {
-            continue;
-        };
-        // Commands are decided by the host, the image, and the platform alone,
-        // so those three identify the duplicates worth collapsing.
-        if let Some(existing) = plan.iter_mut().find(|entry| {
-            entry.host == refresh.host
-                && entry.image == refresh.image
-                && entry.platform == refresh.platform
-        }) {
-            existing.when = existing.when.max(refresh.when);
-            continue;
+        let mut images = vec![container.image.as_str()];
+        if let Some(platform) = container.platform.as_deref() {
+            for bundle_id in config.bundles.keys() {
+                if let Some(image) = config.session_image(Some(bundle_id), target_id, platform) {
+                    images.push(image);
+                }
+            }
         }
-        plan.push(refresh);
+        for image in images {
+            let Some(refresh) = targets::image_refresh(
+                host.clone(),
+                image,
+                container.platform.as_deref(),
+                container.pull_policy,
+            ) else {
+                continue;
+            };
+            if let Some(existing) = plan.iter_mut().find(|entry| {
+                entry.host == refresh.host
+                    && entry.image == refresh.image
+                    && entry.platform == refresh.platform
+            }) {
+                existing.when = existing.when.max(refresh.when);
+            } else {
+                plan.push(refresh);
+            }
+        }
     }
     plan
 }
@@ -1092,10 +1053,11 @@ pub(super) fn configure_github_token_environment(target: &mut targets::TargetTem
         | targets::TargetTemplate::AppleContainer(container)
         | targets::TargetTemplate::SshPodman { container, .. }
         | targets::TargetTemplate::SshDocker { container, .. }
-        | targets::TargetTemplate::SshAppleContainer { container, .. } => container,
-        targets::TargetTemplate::LocalBare
-        | targets::TargetTemplate::AwsEc2(_)
-        | targets::TargetTemplate::SshBare { .. } => return false,
+        | targets::TargetTemplate::SshAppleContainer { container, .. }
+        | targets::TargetTemplate::SshNitro { container, .. } => container,
+        targets::TargetTemplate::LocalBare | targets::TargetTemplate::SshBare { .. } => {
+            return false;
+        }
     };
     container
         .extra_run_args
@@ -1123,7 +1085,53 @@ pub(super) fn use_github_https_urls(bundle: &mut targets::ProjectBundleSpec) {
 fn backend_container(
     container: &mj_core::config::ContainerTemplate,
     allocation: Option<&SessionResourceAllocation>,
-    overrides: ContainerOverrides<'_>,
+    overrides: ContainerOverrides,
+) -> ContainerTemplate {
+    backend_container_with(container, allocation, overrides, false)
+}
+
+/// A container environment as the engine receives it: the `--env` arguments,
+/// and the values those arguments leave out.
+///
+/// An entry whose value comes from a reference (`from_env`, `from_secret`) or
+/// from the controller's own environment is a secret. When the engine runs
+/// under `sudo`, which logs every command line, a secret is named by a
+/// valueless `--env NAME` and its value travels in the ssh command's
+/// environment instead (see `CommandPlan::provide_target_environment_secrets`).
+/// One function builds both lists, so an argument and its value cannot
+/// disagree. Everything else stays `--env NAME=value`.
+pub(super) struct ContainerEnvironment {
+    pub args: Vec<String>,
+    pub secrets: Vec<(String, String)>,
+}
+
+pub(super) fn container_environment(
+    container: &mj_core::config::ContainerTemplate,
+    overrides: ContainerOverrides,
+    secrets_out_of_band: bool,
+) -> ContainerEnvironment {
+    let mut environment = container.environment.resolved().clone();
+    if overrides.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut environment);
+    }
+    let mut args = Vec::new();
+    let mut secrets = Vec::new();
+    for (key, value) in environment {
+        if secrets_out_of_band && container.environment.is_secret_sourced(&key) {
+            args.extend(["--env".to_owned(), key.clone()]);
+            secrets.push((key, value));
+        } else {
+            args.extend(["--env".to_owned(), format!("{key}={value}")]);
+        }
+    }
+    ContainerEnvironment { args, secrets }
+}
+
+fn backend_container_with(
+    container: &mj_core::config::ContainerTemplate,
+    allocation: Option<&SessionResourceAllocation>,
+    overrides: ContainerOverrides,
+    secrets_out_of_band: bool,
 ) -> ContainerTemplate {
     let mut extra_run_args = Vec::new();
     if let Some(platform) = &container.platform {
@@ -1135,18 +1143,13 @@ fn backend_container(
         }
         _ => (container.cpus.clone(), container.memory.clone()),
     };
-    // The session's own overrides are the last word on size.
-    let cpus = overrides.cpus.map(str::to_owned).or(cpus);
-    let memory = overrides.memory.map(str::to_owned).or(memory);
     if let Some(cpus) = cpus {
         extra_run_args.push(format!("--cpus={cpus}"));
     }
     if let Some(memory) = memory {
         extra_run_args.push(format!("--memory={memory}"));
     }
-    for (key, value) in &container.environment {
-        extra_run_args.extend(["--env".to_string(), format!("{key}={value}")]);
-    }
+    extra_run_args.extend(container_environment(container, overrides, secrets_out_of_band).args);
     ContainerTemplate {
         image: container.image.clone(),
         pull_policy: container.pull_policy,
@@ -1218,12 +1221,55 @@ fn wait_for_ssh_ready(
     }
 }
 
+/// Wait for a newly provisioned EC2 host using the same readiness policy as
+/// session-owned instances. Call from supervised blocking work.
+pub fn wait_for_ec2_ssh(executor: &impl CommandExecutor, ssh: &SshTarget) -> Result<()> {
+    wait_for_ssh_ready(
+        executor,
+        &crate::targets::ssh_command(SshTrafficClass::Control, ssh, ["true"])
+            .purpose("wait for EC2 SSH availability")
+            .stage(ProvisionStage::Booting),
+        AWS_SSH_READY_TIMEOUT,
+        Instant::now,
+        std::thread::sleep,
+    )
+}
+
+/// Wait until a rebooting EC2 host answers SSH from a boot other than
+/// `previous_boot_id`, so an answer from the old boot, just before it goes
+/// down, cannot pass for the new one. Call from supervised blocking work.
+pub fn wait_for_ec2_reboot(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    previous_boot_id: &str,
+) -> Result<()> {
+    wait_for_ssh_ready(
+        executor,
+        &crate::targets::ssh_command(
+            SshTrafficClass::Control,
+            ssh,
+            [
+                "sh",
+                "-c",
+                "test \"$(cat /proc/sys/kernel/random/boot_id)\" != \"$1\"",
+                "sh",
+                previous_boot_id,
+            ],
+        )
+        .purpose("wait for the EC2 host to come back from its reboot")
+        .stage(ProvisionStage::Booting),
+        AWS_SSH_READY_TIMEOUT,
+        Instant::now,
+        std::thread::sleep,
+    )
+}
+
 pub(super) fn locator_after_provision_named(
     canonical: &TargetTemplate,
     backend: &targets::TargetTemplate,
     session_id: &str,
-    first_output: Option<&CommandOutput>,
-    executor: &(impl CommandExecutor + Sync),
+    _first_output: Option<&CommandOutput>,
+    _executor: &(impl CommandExecutor + Sync),
     name: &str,
 ) -> Result<TargetLocator> {
     let generated = name.to_owned();
@@ -1280,109 +1326,12 @@ pub(super) fn locator_after_provision_named(
             host: ssh.host.clone(),
             container_id: generated,
         },
-        TargetTemplate::AwsEc2 { .. } => {
-            let output = first_output.context("AWS launch produced no output")?;
-            let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-                .context("parse aws ec2 run-instances response")?;
-            let instance_id = json
-                .pointer("/Instances/0/InstanceId")
-                .and_then(serde_json::Value::as_str)
-                .context("AWS response omitted instance ID")?
-                .to_string();
-            return ec2_locator_after_launch(canonical, instance_id, executor);
-        }
-    })
-}
-
-/// Resolve a created instance. Callers persist its ID before these long waits.
-pub(super) fn ec2_locator_after_launch(
-    canonical: &TargetTemplate,
-    instance_id: String,
-    executor: &(impl CommandExecutor + Sync),
-) -> Result<TargetLocator> {
-    let TargetTemplate::AwsEc2 {
-        aws_profile,
-        region,
-        ssh_user,
-        address_source,
-        identity_file,
-        ssh_args,
-        ..
-    } = canonical
-    else {
-        bail!("EC2 locator requires an EC2 target");
-    };
-    let profile = aws_profile.clone().unwrap_or_else(|| "default".into());
-    execute_checked(
-        executor,
-        CommandSpec::new(
-            "aws",
-            [
-                "--profile".into(),
-                profile.clone(),
-                "--region".into(),
-                region.clone(),
-                "ec2".into(),
-                "wait".into(),
-                "instance-running".into(),
-                "--instance-ids".into(),
-                instance_id.clone(),
-            ],
-        )
-        .purpose("wait for EC2 session instance to run")
-        .stage(ProvisionStage::Booting),
-    )?;
-    let field = match address_source {
-        AwsAddressSource::PublicDns => "PublicDnsName",
-        AwsAddressSource::PublicIp => "PublicIpAddress",
-        AwsAddressSource::PrivateDns => "PrivateDnsName",
-        AwsAddressSource::PrivateIp => "PrivateIpAddress",
-    };
-    let address = execute_checked(
-        executor,
-        CommandSpec::new(
-            "aws",
-            [
-                "--profile".into(),
-                profile.clone(),
-                "--region".into(),
-                region.clone(),
-                "ec2".into(),
-                "describe-instances".into(),
-                "--instance-ids".into(),
-                instance_id.clone(),
-                "--query".into(),
-                format!("Reservations[0].Instances[0].{field}"),
-                "--output".into(),
-                "text".into(),
-            ],
-        )
-        .purpose("resolve EC2 session address")
-        .stage(ProvisionStage::Booting),
-    )?;
-    let address = String::from_utf8(address.stdout)
-        .context("AWS address was not UTF-8")?
-        .trim()
-        .to_string();
-    if address.is_empty() || address == "None" {
-        bail!("AWS instance {instance_id} has no configured address");
-    }
-    let ssh = SshTarget {
-        destination: format!("{ssh_user}@{address}"),
-        ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
-    };
-    wait_for_ssh_ready(
-        executor,
-        &crate::targets::ssh_command(&ssh, ["true"])
-            .purpose("wait for EC2 SSH availability")
-            .stage(ProvisionStage::Booting),
-        AWS_SSH_READY_TIMEOUT,
-        Instant::now,
-        std::thread::sleep,
-    )?;
-    Ok(TargetLocator::AwsEc2 {
-        instance_id,
-        address: Some(address),
+        TargetTemplate::SshNitro { ssh, .. } => TargetLocator::SshNitro {
+            borrowed_from: None,
+            host: ssh.host.clone(),
+            container_id: generated,
+        },
+        TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
     })
 }
 
@@ -1395,16 +1344,37 @@ pub(crate) fn backend_locator(
     session: &SessionRecord,
     config: &Config,
 ) -> Result<targets::TargetLocator> {
-    let runtime = if session.target_runtime.is_some() || targets::locator_needs_connection(locator)
-    {
-        Some(session.target_runtime_settings(config)?)
+    recorded_backend_locator(
+        locator,
+        &session.id,
+        &session.target_template_id,
+        session.target_runtime.as_deref(),
+        config,
+    )
+}
+
+pub(super) fn recorded_backend_locator(
+    locator: &TargetLocator,
+    session_id: &str,
+    target_template_id: &str,
+    runtime: Option<&mj_core::state::TargetRuntimeSettings>,
+    config: &Config,
+) -> Result<targets::TargetLocator> {
+    let runtime = if runtime.is_some() || targets::locator_needs_connection(locator) {
+        Some(mj_core::state::target_runtime_settings_for(
+            session_id,
+            target_template_id,
+            Some(locator),
+            runtime,
+            config,
+        )?)
     } else {
         None
     };
     Ok(targets::TargetLocator::try_from(targets::RecordedTarget {
         locator,
         runtime: runtime.as_deref(),
-        session_id: &session.id,
+        session_id,
     })?)
 }
 

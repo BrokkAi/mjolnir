@@ -1,7 +1,7 @@
 use super::*;
 #[cfg(test)]
 use mj_core::usage::ProviderCost;
-use mj_core::usage::{TokenUsage, UsageScope};
+use mj_core::usage::{TokenUsage, UsageScope, pricing};
 
 pub(super) fn record_child_accounting(
     connection: &Connection,
@@ -37,18 +37,32 @@ pub(super) fn record_turn_selection(
 ) -> Result<()> {
     let surface =
         mj_core::acp::surface::AcpSessionSurface::from_configuration(&configuration.values);
+    // A reviewer's launch settings are the authority for its turn. Its
+    // projected configuration can record the model without the effort the
+    // harness was started with, so read the registered child's selection as
+    // the fallback. The relation still exists while the reviewer runs.
+    let stored: Option<(Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT json_extract(record_json, '$.model'),
+                    json_extract(record_json, '$.effort')
+             FROM subagent_sessions WHERE child_session_id=?1",
+            [session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (stored_model, stored_effort) = stored.unwrap_or_default();
+    let model = surface.current_model().map(str::to_owned).or(stored_model);
+    let effort = surface
+        .current_effort()
+        .map(str::to_owned)
+        .or(stored_effort);
     // The session's profile at turn start: a later restart can switch it, and
     // destroying a sub-agent deletes its session row.
     connection.execute(
         "INSERT INTO session_turn_selections(session_id, command_id, model, effort, profile)
         VALUES (?1, ?2, ?3, ?4, (SELECT last_profile FROM sessions WHERE session_id=?1))
         ON CONFLICT(session_id, command_id) DO NOTHING",
-        params![
-            session,
-            command,
-            surface.current_model(),
-            surface.current_effort()
-        ],
+        params![session, command, model, effort],
     )?;
     Ok(())
 }
@@ -111,6 +125,7 @@ fn load_session_usage_from(
         totals: summary.totals,
         coverage: summary.coverage,
         provider_session_cost: summary.provider_session_cost,
+        turn_cost_usd_ticks: summary.turn_cost_usd_ticks,
         turn_selections,
         by_model: summary.by_model,
     }))
@@ -156,6 +171,20 @@ fn counters(usage: &TokenUsage) -> BTreeMap<String, u64> {
         }
     }
     values
+}
+
+pub(super) fn estimate_model_cost(
+    usage: &TokenUsage,
+    model: Option<&str>,
+    totals: &BTreeMap<String, UsageCounterTotal>,
+) -> Result<Option<u64>> {
+    // An unattributed cache counter is unknown, not zero.
+    if (usage.cached_read_tokens.is_some() && !totals.contains_key("cached_read_tokens"))
+        || (usage.cached_write_tokens.is_some() && !totals.contains_key("cached_write_tokens"))
+    {
+        return Ok(None);
+    }
+    pricing::estimate(model, totals)
 }
 
 fn add_counters(
@@ -261,6 +290,44 @@ fn session_summary(connection: &Connection, session: &str) -> Result<UsageSummar
             Some(usage) if usage.scope == UsageScope::Turn => {
                 summary.coverage.full_turn_reports += 1;
                 add_counters(&mut summary.totals, &counters(&usage))?;
+                let provider_cost = usage
+                    .provider_details
+                    .as_ref()
+                    .and_then(|details| details.cost.as_ref().filter(|cost| !cost.is_partial));
+                let estimated = if provider_cost.is_none() {
+                    let mut attributed = BTreeMap::new();
+                    attribute(&usage, selection.clone(), &mut attributed)?;
+                    let mut sum = 0u64;
+                    let mut known = !attributed.is_empty();
+                    for (selection, totals) in attributed {
+                        let part =
+                            estimate_model_cost(&usage, selection.model.as_deref(), &totals)?;
+                        if let Some(part) = part {
+                            sum = sum.checked_add(part).context("turn cost overflow")?;
+                        } else {
+                            known = false;
+                        }
+                    }
+                    known.then_some(sum)
+                } else {
+                    None
+                };
+                let cost = if let Some(cost) = provider_cost {
+                    summary.coverage.provider_cost_turns += 1;
+                    Some(cost.usd_ticks)
+                } else if let Some(cost) = estimated {
+                    summary.coverage.estimated_cost_turns += 1;
+                    Some(cost)
+                } else {
+                    summary.coverage.missing_cost_turns += 1;
+                    None
+                };
+                if let Some(cost) = cost {
+                    summary.turn_cost_usd_ticks = summary
+                        .turn_cost_usd_ticks
+                        .checked_add(cost)
+                        .context("turn cost overflow")?;
+                }
                 attribute(&usage, selection, &mut groups)?;
             }
             Some(usage) if usage.scope == UsageScope::LastRequest => {
@@ -366,6 +433,10 @@ pub(super) fn merge_totals(
 
 fn merge_summary(target: &mut UsageSummary, source: &UsageSummary) -> Result<()> {
     merge_totals(&mut target.totals, &source.totals)?;
+    target.turn_cost_usd_ticks = target
+        .turn_cost_usd_ticks
+        .checked_add(source.turn_cost_usd_ticks)
+        .context("usage tree cost overflow")?;
     let a = &mut target.coverage;
     let b = &source.coverage;
     for (target, value) in [
@@ -375,6 +446,9 @@ fn merge_summary(target: &mut UsageSummary, source: &UsageSummary) -> Result<()>
         (&mut a.unspecified_reports, b.unspecified_reports),
         (&mut a.missing_reports, b.missing_reports),
         (&mut a.unfinished_turns, b.unfinished_turns),
+        (&mut a.provider_cost_turns, b.provider_cost_turns),
+        (&mut a.estimated_cost_turns, b.estimated_cost_turns),
+        (&mut a.missing_cost_turns, b.missing_cost_turns),
     ] {
         *target = target
             .checked_add(value)
@@ -446,7 +520,7 @@ mod tests {
         super::super::schema::restore_github_v84_schema(&connection);
         super::super::schema::restore_pre101_subagent_preference(&connection);
         super::super::schema::restore_review_state_schema(&connection, 81);
-        connection.execute_batch("ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE session_turn_selections DROP COLUMN profile; DELETE FROM schema_migrations WHERE version>=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
+        connection.execute_batch("DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE session_turn_selections DROP COLUMN profile; DELETE FROM schema_migrations WHERE version>=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
         drop(connection);
         super::super::schema::forget_verified_schema(&path);
         let connection = open(&path)?;
@@ -490,7 +564,7 @@ mod tests {
         save_session_to(&path, &super::super::tests::session("child", "project"))?;
         let connection = open(&path)?;
         connection.execute(
-            "INSERT INTO subagent_accounting VALUES ('child','root','investigate')",
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name) VALUES ('child','root','investigate')",
             [],
         )?;
         drop(connection);
@@ -575,6 +649,95 @@ mod tests {
         Ok(())
     }
 
+    // Hard-won: #1554: a reviewer's projected configuration can omit the
+    // effort its harness was launched with, leaving session_turn_selections
+    // without the effort the review-arms eval reads.
+    #[test]
+    fn reviewer_turn_selections_fall_back_to_the_registered_launch_settings() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("reviewer-selection.sqlite");
+        let parent = super::super::tests::session("root", "project");
+        save_session_to(&path, &parent)?;
+        let child = super::super::tests::session("reviewer", "project");
+        let relation: SubagentRecord = serde_json::from_value(serde_json::json!({
+            "kind": "reviewer",
+            "child_session_id": child.id,
+            "parent_session_id": parent.id,
+            "task_name": "review",
+            "profile_id": "codex",
+            "model": "gpt-6-terra",
+            "effort": "xhigh",
+            "working_directory": "",
+            "initial_prompt": "review",
+            "request_key": "review-key",
+            "created_at": "2026-11-16T00:00:00Z",
+            "handback_tool": true
+        }))?;
+        super::super::tests::register_test_subagent(&path, &child, &relation)?;
+        let events = [
+            MaterializedSessionMutation {
+                active_turn: Some(Some(MaterializedTurn {
+                    command_id: "review-turn-1".into(),
+                    accepted_ordinal: None,
+                    turn_start_position: 1,
+                    started_at_ms: 1,
+                    steered_into: None,
+                })),
+                ..Default::default()
+            },
+            MaterializedSessionMutation {
+                configuration: Some(configuration("sol", "low")),
+                active_turn: Some(Some(MaterializedTurn {
+                    command_id: "review-turn-2".into(),
+                    accepted_ordinal: None,
+                    turn_start_position: 3,
+                    started_at_ms: 3,
+                    steered_into: None,
+                })),
+                ..Default::default()
+            },
+        ];
+        apply_projection_page_to(&path, &child.id, |page| {
+            for (i, event) in events.iter().enumerate() {
+                page.apply(
+                    i as u64 + 1,
+                    &format!("{:064x}", i),
+                    &format!("{:064x}", i + 1),
+                    event,
+                )?;
+            }
+            Ok(())
+        })?;
+        let connection = open(&path)?;
+        let selection = |command: &str| -> Result<(Option<String>, Option<String>)> {
+            Ok(connection.query_row(
+                "SELECT model, effort FROM session_turn_selections
+                 WHERE session_id=?1 AND command_id=?2",
+                params![child.id, command],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        };
+        assert_eq!(
+            selection("review-turn-1")?,
+            (Some("gpt-6-terra".into()), Some("xhigh".into()))
+        );
+        assert_eq!(
+            selection("review-turn-2")?,
+            (Some("sol".into()), Some("low".into()))
+        );
+        drop(connection);
+        delete_session_from(&path, &child.id)?;
+        let connection = open(&path)?;
+        let retained: (Option<String>, Option<String>) = connection.query_row(
+            "SELECT model, effort FROM session_turn_selections
+             WHERE session_id=?1 AND command_id='review-turn-1'",
+            [&child.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(retained, (Some("gpt-6-terra".into()), Some("xhigh".into())));
+        Ok(())
+    }
+
     #[test]
     fn tree_keeps_registered_descendants_when_operational_state_is_removed() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -600,12 +763,14 @@ mod tests {
         // Operational children cannot delegate today; retained accounting
         // still traverses deeper historical/imported relationships.
         open(&path)?.execute(
-            "INSERT INTO subagent_accounting VALUES ('grandchild','child','nested')",
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name) VALUES ('grandchild','child','nested')",
             [],
         )?;
         let before = load_usage_tree_from(&path, "root")?.unwrap();
         assert_eq!(before.sessions.len(), 3);
-        save_state_to(&path, &State::default())?;
+        for id in state.sessions.keys() {
+            super::sessions::delete_session_from(&path, id)?;
+        }
         let after = load_usage_tree_from(&path, "root")?.unwrap();
         assert_eq!(after.sessions.len(), 3);
         assert!(
@@ -701,11 +866,14 @@ mod tests {
         .enumerate()
         {
             let turn = MaterializedTurnOutcome {
+                work_facts: None,
+                answered_through: None,
                 diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
                     message: "Usage limit exceeded".into(),
                     code: Some("provider.auth_error".into()),
                     http_status: Some(403),
                     reset_at: None,
+                    login_fingerprint: None,
                 }),
                 command_id: format!("p{i}"),
                 accepted_ordinal: None,
@@ -717,9 +885,9 @@ mod tests {
                 },
                 usage: scope.map(|scope| TokenUsage {
                     provider_details: Some(Box::new(mj_core::usage::ProviderTurnUsage {
-                        cost: Some(mj_core::usage::ProviderTurnCost::from_usd_ticks(
-                            88_767_200, false,
-                        )),
+                        cost: (i != 0).then(|| {
+                            mj_core::usage::ProviderTurnCost::from_usd_ticks(88_767_200, false)
+                        }),
                         model_calls: Some(2),
                         api_duration_ms: Some(1700),
                         elapsed_ms: Some(2377),
@@ -730,7 +898,7 @@ mod tests {
                     input_tokens: 20,
                     output_tokens: 10,
                     thought_tokens: None,
-                    cached_read_tokens: Some(0),
+                    cached_read_tokens: Some(if i == 0 { 16 } else { 0 }),
                     cached_write_tokens: None,
                 }),
             };
@@ -762,6 +930,11 @@ mod tests {
                 Ok(())
             })?;
         }
+        open(&path)?.execute(
+            "INSERT INTO session_turn_selections(session_id, command_id, model, effort, profile)
+             VALUES ('usage', 'p0', 'deepseek-flash', NULL, 'deepseek')",
+            [],
+        )?;
         let first = load_session_usage_from(&path, "usage", 0, 2)?.unwrap();
         assert_eq!(first.turns.len(), 2);
         let details = first.turns[0]
@@ -771,7 +944,7 @@ mod tests {
             .provider_details
             .as_ref()
             .unwrap();
-        assert_eq!(details.cost.as_ref().unwrap().usd, "0.0088767200");
+        assert!(details.cost.is_none());
         assert_eq!(details.elapsed_ms, Some(2377));
         assert_eq!(
             first.turns[0].diagnostic.as_ref().unwrap().http_status,
@@ -783,11 +956,16 @@ mod tests {
         assert_eq!(first.coverage.last_request_reports, 1);
         assert_eq!(first.coverage.unspecified_reports, 1);
         assert_eq!(first.coverage.missing_reports, 1);
+        assert_eq!(first.coverage.provider_cost_turns, 1);
+        assert_eq!(first.coverage.estimated_cost_turns, 1);
+        assert_eq!(first.coverage.missing_cost_turns, 0);
+        // Hard-won: #1449: a cached DeepSeek turn had tokens but no cost.
+        assert_eq!(first.turn_cost_usd_ticks, 88_767_200 + 132_960);
         // Only the two whole-turn reports are summed: the last-request and
         // unspecified turns stay out of the totals.
         assert_eq!(first.totals["total_tokens"].tokens, 60);
         assert_eq!(first.totals["total_tokens"].reported_turns, 2);
-        assert_eq!(first.totals["cached_read_tokens"].tokens, 0);
+        assert_eq!(first.totals["cached_read_tokens"].tokens, 16);
         assert!(!first.totals.contains_key("thought_tokens"));
         let next = load_session_usage_from(&path, "usage", first.next_after_seq, 2)?.unwrap();
         assert_eq!(next.turns.len(), 2);

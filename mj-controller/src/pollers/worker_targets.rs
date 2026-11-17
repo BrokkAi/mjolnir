@@ -98,11 +98,14 @@ pub(crate) fn staged_credential_sessions(controller: &Controller) -> BTreeSet<St
         .state
         .sessions
         .values()
+        // Every session the daemon holds a worker connection for, whatever
+        // its lifecycle state, so a login renewed while one is checkpointing
+        // or closing reaches it too. A disconnected session would only produce
+        // connection errors. A session that is starting, resuming or parked
+        // has no connection yet: its start stages the current login, and a
+        // failure on a renewed one is handled the moment it is reported.
         .filter(|session| {
-            matches!(
-                session.state,
-                SessionState::Running | SessionState::Checkpointing
-            ) && session.target.is_some()
+            session_target_is_pollable(session) && session.state != SessionState::Disconnected
         })
         .filter(|session| {
             crate::controller::local_profile_homes::session_has_a_staged_home_of_its_own(session)
@@ -127,7 +130,7 @@ pub(crate) fn credential_sync_targets_from_sources(
                     return None;
                 }
             };
-            let aws_credentials = match controller.aws_credential_source(&session.id) {
+            let aws_credentials = match controller.aws_credential_sync_source(&session.id) {
                 Ok(source) => source,
                 Err(error) => {
                     tracing::warn!(session_id = %session.id, "could not select AWS credential sync source: {error:#}");
@@ -146,7 +149,8 @@ pub(crate) fn credential_sync_targets_from_sources(
                         profile.kind,
                     ),
                 github: controller.config.github.clone(),
-                sync_github_token: target_syncs_github_token(session.target.as_ref()),
+                sync_github_token: !session.no_github_credentials
+                    && target_syncs_github_token(session.target.as_deref()),
                 skills_scope: session.target.as_ref()?.skills_scope(),
                 spec,
             })

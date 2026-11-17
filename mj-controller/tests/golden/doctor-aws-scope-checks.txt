@@ -1,0 +1,22 @@
+warning AWS credentials for profile bedrock: Sessions on podman receive the controller host's own AWS credentials, unscoped: anything running in a session can use everything those credentials allow.
+  remediation: Create an IAM role for sessions that the host's AWS login may assume, and set `[profiles.bedrock.aws] role_arn = "arn:aws:iam::<account>:role/<name>"`. Sessions then receive short-lived credentials limited to that role and to a Bedrock-only session policy.
+ready AWS credentials for profile bedrock: The host's AWS login assumed arn:aws:iam::123456789012:role/mj-bedrock for a probe session that exists only for this check, named like a real session (mj-<32 hex digits>); sessions on podman receive credentials limited to it. Those credentials last until 2099-01-01 00:00:00 UTC.
+fixable AWS credentials for profile bedrock: AWS refused AssumeRole: AccessDenied
+  remediation: Make the controller's AWS login (profile work) able to assume the role: allow sts:AssumeRole on it, and name the login in the role's trust policy. Sessions on this profile are refused until then.
+warning AWS credentials for profile bedrock on target localhost: [profiles.bedrock.aws] names arn:aws:iam::123456789012:role/mj-bedrock, but it has no effect on sessions on target localhost: raw local sessions read the host's own AWS files directly, so a role cannot limit them. Those sessions run with that target's own AWS identity, not role-scoped credentials.
+  remediation: Run this profile's Bedrock sessions on a container or SSH target without AWS credentials in its environment, or use the target's own identity deliberately and give it only the access sessions need.
+warning AWS credentials for profile bedrock on target localhost: [profiles.bedrock.aws] names arn:aws:iam::123456789012:role/mj-bedrock, but it has no effect on sessions on target localhost: raw local sessions read the host's own AWS files directly, so a role cannot limit them. Those sessions run with that target's own AWS identity, not role-scoped credentials.
+  remediation: Run this profile's Bedrock sessions on a container or SSH target without AWS credentials in its environment, or use the target's own identity deliberately and give it only the access sessions need.
+warning AWS credentials for profile bedrock on target own-identity: [profiles.bedrock.aws] names arn:aws:iam::123456789012:role/mj-bedrock, but it has no effect on sessions on target own-identity: the target's environment sets its own AWS profile or credentials, which take precedence. Those sessions run with that target's own AWS identity, not role-scoped credentials.
+  remediation: Run this profile's Bedrock sessions on a container or SSH target without AWS credentials in its environment, or use the target's own identity deliberately and give it only the access sessions need.
+ready AWS credentials for profile bedrock: The host's AWS login assumed arn:aws:iam::123456789012:role/mj-bedrock for a probe session that exists only for this check, named like a real session (mj-<32 hex digits>); sessions on podman receive credentials limited to it. Those credentials last until 2099-01-01 00:00:00 UTC.
+warning AWS credentials for profile claude: [profiles.claude.aws] names arn:aws:iam::123456789012:role/mj-bedrock, but the profile does not authenticate with the AWS credential chain (Amazon Bedrock), so it has no effect. Sessions run without role-scoped credentials.
+  remediation: Remove `[profiles.claude.aws]`, or configure Bedrock (the AWS credential chain) for this profile.
+fixable AWS credentials for profile codex-bedrock: The profile's AWS identity could not be selected: read Codex AWS profile selection: TOML parse error at line 1, column 19
+  |
+1 | model_provider = [unterminated
+  |                   ^
+invalid array
+expected `]`
+
+  remediation: Fix the profile's Codex configuration or AWS_PROFILE setting.

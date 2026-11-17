@@ -3,6 +3,7 @@ use crate::targets::{CommandExecutor, CommandPlan, CommandSpec, TargetLocator, w
 use anyhow::{Context, Result, bail, ensure};
 use mj_checkpoint::archive::validate_component;
 use mj_checkpoint::checkpoint::*;
+use mj_core::targets::SshTrafficClass;
 use std::fs;
 use std::path::{Path, PathBuf};
 /// Export by streaming the spec to the worker's standard input.
@@ -39,7 +40,7 @@ fn checkpoint_stdin_command(
 ) -> Result<CommandSpec> {
     let root = worker_root(locator, session_id)?;
     let args = vec![format!("{root}/hel"), "worker".into(), subcommand.into()];
-    crate::targets::command_on_locator(locator, session_id, args, purpose)
+    crate::targets::command_on_locator(SshTrafficClass::Bulk, locator, session_id, args, purpose)
 }
 
 pub fn export_command(
@@ -56,7 +57,13 @@ pub fn export_command(
         "--spec".into(),
         spec_path.into(),
     ];
-    crate::targets::command_on_locator(locator, session_id, args, "export target checkpoint")
+    crate::targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        locator,
+        session_id,
+        args,
+        "export target checkpoint",
+    )
 }
 
 pub fn restore_command(
@@ -73,7 +80,13 @@ pub fn restore_command(
         "--spec".into(),
         spec_path.into(),
     ];
-    crate::targets::command_on_locator(locator, session_id, args, "restore target checkpoint")
+    crate::targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        locator,
+        session_id,
+        args,
+        "restore target checkpoint",
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -211,8 +224,9 @@ fn cleanup_transfer_staging(
     let command = match locator {
         TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshDocker { ssh, .. }
-        | TargetLocator::SshAppleContainer { ssh, .. } => Some(
-            crate::targets::ssh_command(ssh, ["rm", "-f", "--", staging])
+        | TargetLocator::SshAppleContainer { ssh, .. }
+        | TargetLocator::SshNitro { ssh, .. } => Some(
+            crate::targets::ssh_command(SshTrafficClass::Control, ssh, ["rm", "-f", "--", staging])
                 .purpose("remove remote checkpoint staging"),
         ),
         _ => None,
@@ -286,18 +300,22 @@ pub fn transfer_plan(
         }
         | TargetLocator::SshAppleContainer {
             ssh, container_id, ..
+        }
+        | TargetLocator::SshNitro {
+            ssh, container_id, ..
         } => {
             vec![
-                crate::targets::ssh_command(ssh, ["mkdir", "-p", ".local/share/hel/transfers"])
-                    .purpose("create remote checkpoint staging directory"),
                 crate::targets::ssh_command(
+                    SshTrafficClass::Control,
                     ssh,
-                    [
-                        locator.container_engine().expect("remote container"),
-                        "cp",
-                        &format!("{container_id}:{remote_archive}"),
-                        staging,
-                    ],
+                    ["mkdir", "-p", ".local/share/hel/transfers"],
+                )
+                .purpose("create remote checkpoint staging directory"),
+                crate::targets::ssh_engine_command(
+                    SshTrafficClass::Bulk,
+                    ssh,
+                    locator.container_engine().expect("remote container"),
+                    ["cp", &format!("{container_id}:{remote_archive}"), staging],
                 )
                 .purpose("stage remote container checkpoint"),
             ]
@@ -305,7 +323,8 @@ pub fn transfer_plan(
     };
     if let TargetLocator::SshPodman { ssh, .. }
     | TargetLocator::SshDocker { ssh, .. }
-    | TargetLocator::SshAppleContainer { ssh, .. } = locator
+    | TargetLocator::SshAppleContainer { ssh, .. }
+    | TargetLocator::SshNitro { ssh, .. } = locator
     {
         commands.push(
             crate::targets::scp_download(ssh, staging, &local)
@@ -323,6 +342,7 @@ fn cleanup_plan(locator: &TargetLocator, session_id: &str, remote: &str) -> Resu
     worker_root(locator, session_id)?;
     let commands = vec![
         crate::targets::locator_command(
+            SshTrafficClass::Control,
             locator,
             ["rm", "-f", "--", remote].map(str::to_owned).to_vec(),
         )

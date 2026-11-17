@@ -1,31 +1,6 @@
 use super::*;
 use crate::controller::BranchDisposition;
 
-/// Point the quota refresher at the profiles the configuration currently
-/// defines, alongside the worker-poll and credential-sync targets that are
-/// rebuilt from the same reload. A profile added to `config.toml` while the
-/// server runs otherwise reaches the snapshot but never the refresher, and
-/// reads "quota unavailable" until the next restart.
-///
-/// Sending a batch restarts every profile's refresh, which spawns a harness
-/// process per profile, so the batch travels only when the profiles changed.
-/// Reports whether it did.
-pub(crate) fn republish_quota_profiles(
-    controller: &Controller,
-    published: &mut std::collections::BTreeMap<String, HarnessProfile>,
-    batch: &mut QuotaRefreshBatch,
-    profiles_tx: &tokio::sync::watch::Sender<QuotaRefreshBatch>,
-) -> bool {
-    if *published == controller.config.profiles {
-        return false;
-    }
-    published.clone_from(&controller.config.profiles);
-    batch.generation = batch.generation.saturating_add(1);
-    batch.profiles = quota_refresh_profiles(controller);
-    profiles_tx.send_replace(batch.clone());
-    true
-}
-
 pub(super) fn request_phone_action_cancellation(
     session_id: &str,
     action_sessions: &std::collections::BTreeMap<u64, String>,
@@ -39,7 +14,7 @@ pub(super) fn request_phone_action_cancellation(
                 .flatten()
         });
     if let Some(control) = control {
-        return control.request_cancel();
+        return control.request_cancel("person cancel from phone action");
     }
     false
 }
@@ -114,6 +89,41 @@ pub(super) struct PhoneActionServices<'a> {
     pub(super) daemon_runtime: &'a Arc<RuntimeState>,
 }
 
+/// The creation title and the rename a New action starts with. A phone that
+/// supplies no title gets the title the terminal would have derived, so a
+/// session started from either surface reads the same way in both. Only a
+/// title the person typed is a rename: the derived one must not hide the name
+/// the harness gives the session.
+fn new_session_titles(
+    title: Option<String>,
+    project_directory: Option<&std::path::Path>,
+    bundle_id: &str,
+    profile_id: &str,
+) -> (String, Option<String>) {
+    let typed = title.filter(|title| !title.trim().is_empty());
+    let title = typed.clone().unwrap_or_else(|| {
+        mj_core::state::default_session_title(project_directory, bundle_id, profile_id)
+    });
+    (title, typed)
+}
+
+/// Record a prompt a person is sending through the web viewer or the HTTP
+/// API, before it is submitted; see `crate::database::record_user_prompt`.
+/// A failure to record does not stop the prompt, so it is logged.
+pub(super) async fn record_user_prompt(session_id: String, command_id: String, text: String) {
+    let recorded = tokio::task::spawn_blocking({
+        let session_id = session_id.clone();
+        move || crate::database::record_user_prompt(&session_id, &command_id, &text)
+    })
+    .await;
+    let error = match recorded {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => format!("{error:#}"),
+        Err(error) => format!("the history task failed: {error}"),
+    };
+    tracing::warn!(%error, %session_id, "prompt history could not be stored");
+}
+
 pub(super) async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
@@ -124,6 +134,33 @@ pub(super) async fn apply_phone_action(
     control: &PhoneActionControl,
 ) -> Result<()> {
     match action {
+        ControllerAction::PushSubscribe { subscription } => {
+            crate::web_push::blocking(move || crate::database::push_subscribe(subscription))
+                .await?;
+            crate::web_push::wake();
+            Ok(())
+        }
+        ControllerAction::PushRenew {
+            old_endpoint,
+            subscription,
+        } => {
+            crate::web_push::blocking(move || {
+                crate::database::push_renew(old_endpoint, subscription)
+            })
+            .await?;
+            crate::web_push::wake();
+            Ok(())
+        }
+        ControllerAction::PushUnsubscribe { endpoint } => {
+            crate::web_push::blocking(move || crate::database::push_unsubscribe(&endpoint)).await?;
+            crate::web_push::wake();
+            Ok(())
+        }
+        ControllerAction::PushTest { endpoint } => {
+            crate::web_push::blocking(move || crate::database::push_test(endpoint)).await?;
+            crate::web_push::wake();
+            Ok(())
+        }
         ControllerAction::RecordOperatorActivity => {
             services.daemon_runtime.record_operator_activity().await;
             Ok(())
@@ -148,9 +185,12 @@ pub(super) async fn apply_phone_action(
             base,
             no_later_history,
             subagents,
+            oracle,
+            oracle_choice,
             review,
             no_project_memory,
             no_github_events,
+            no_github_credentials,
             dirty_ack: _dirty_ack,
         } => {
             let workspace_id = if workspace_id.is_empty() {
@@ -173,19 +213,10 @@ pub(super) async fn apply_phone_action(
             } else {
                 workspace_id
             };
-            // A phone that supplies no title gets the one the terminal would
-            // have derived, so a session started from either surface reads the
-            // same way in both.
-            let title = title.unwrap_or_else(|| {
-                mj_core::state::default_session_title(
-                    project_directory.as_deref(),
-                    &bundle_id,
-                    &profile_id,
-                )
-            });
-            let session_title_override = Some(title.clone());
+            let (title, session_title_override) =
+                new_session_titles(title, project_directory.as_deref(), &bundle_id, &profile_id);
             let (published, publication) = tokio::sync::oneshot::channel();
-            let (registered, review_turned_off, capacity_warning) = services
+            let (registered, review_notice, capacity_warning) = services
                 .daemon_runtime
                 .start_create_session_controlled(
                     CreateSessionRequest {
@@ -197,9 +228,12 @@ pub(super) async fn apply_phone_action(
                         base,
                         no_later_history,
                         subagents,
+                        oracle,
+                        oracle_choice,
                         review,
                         no_project_memory,
                         no_github_events,
+                        no_github_credentials,
                         initial_prompt: None,
                         workspace_id,
                         profile_id,
@@ -223,15 +257,27 @@ pub(super) async fn apply_phone_action(
                 .send(PhoneActionStarted {
                     action_id,
                     session: registered.session,
-                    review_turned_off,
+                    review_notice,
                     capacity_warning,
                     published,
                 })
                 .map_err(|_| anyhow::anyhow!("phone server stopped before publishing session"))?;
-            services
-                .daemon_runtime
-                .wait_create_session(&registered_session_id)
-                .await
+            // The phone already has the published session. If the daemon stops
+            // under this wait the next daemon finishes the create and updates
+            // the record the phone shows, so that is no result, not a failure.
+            let lifecycle = control
+                .lifecycle
+                .as_ref()
+                .expect("New action has a daemon create control");
+            tokio::select! {
+                outcome = services.daemon_runtime.wait_create_outcome(&registered_session_id) => {
+                    match outcome {
+                        crate::daemon::create::CreateWait::Finished => Ok(()),
+                        crate::daemon::create::CreateWait::Failed(error) => Err(error),
+                    }
+                }
+                () = lifecycle.shutdown_stopped() => Ok(()),
+            }
         }
         ControllerAction::Prompt {
             session_id,
@@ -239,12 +285,15 @@ pub(super) async fn apply_phone_action(
             images,
             command_id,
         } => {
-            services
+            let session = services
                 .sessions
                 .wait_for_session(&session_id, Duration::from_secs(5))
-                .await?
+                .await?;
+            let command_id = command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?;
+            record_user_prompt(session_id, command_id.clone(), text.clone()).await;
+            session
                 .submit(
-                    command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?,
+                    command_id,
                     RelayCommand::Prompt {
                         prompt: phone_prompt_blocks(text, images),
                     },
@@ -331,21 +380,7 @@ pub(super) async fn apply_phone_action(
             .map(|_| ()),
         ControllerAction::Move { request } => {
             let outcome = services.daemon_runtime.move_session(*request).await?;
-            match outcome.outcome.as_str() {
-                "completed" | "unchanged" | "interrupted" => Ok(()),
-                "cancelled" | "failed" => {
-                    // The daemon keeps detailed diagnostics in its durable
-                    // operation record. Only its safe recovery guidance is
-                    // copied into the phone action error, where the normal
-                    // failed-action path records a visible session error.
-                    let recovery = outcome.recovery.unwrap_or_else(|| {
-                        "Inspect the session and retry Move or Resume with previous settings."
-                            .into()
-                    });
-                    bail!("Move {}: {recovery}", outcome.outcome)
-                }
-                status => bail!("Move returned an unknown outcome: {status}"),
-            }
+            finish_phone_lifecycle(crate::daemon::DaemonReply::MoveOutcome(outcome))
         }
         ControllerAction::Open { .. } => Ok(()),
         ControllerAction::CancelContainerUpgrade { session_id } => {
@@ -412,35 +447,24 @@ pub(super) async fn apply_phone_action(
             services
                 .daemon_runtime
                 .review_host()
-                .start(&session_id, true)
+                .start(&session_id)
                 .await
                 .map_err(|refusal| {
                     anyhow::Error::new(mj_core::refusal::Refusal::precondition(refusal.to_string()))
                 })?;
             Ok(())
         }
-        ControllerAction::ResolveReview {
-            session_id,
-            resolution,
-        } => {
-            let resolution = crate::server::resolution_from_name(&resolution).ok_or_else(|| {
-                anyhow::Error::new(mj_core::refusal::Refusal::precondition(
-                    "a review is resolved by forward, dismiss, or cancel".to_owned(),
-                ))
-            })?;
-            // As with StartReview: "no review is open", "there are no
-            // findings to forward" are sentences for the caller, so they
-            // travel as refusals (409 on the API), not as internal errors.
+        ControllerAction::DismissNotification { session_id, target } => {
             services
                 .daemon_runtime
-                .review_host()
-                .resolve(&session_id, resolution)
-                .await
-                .map_err(|error| {
-                    anyhow::Error::new(mj_core::refusal::Refusal::precondition(error))
-                })?;
+                .dismiss_notification(session_id, target)
+                .await?;
             Ok(())
         }
+        ControllerAction::SetSessionNotificationsIgnored {
+            session_id,
+            ignored,
+        } => controller.set_session_notifications_ignored(&session_id, ignored),
         ControllerAction::TurnControl {
             session_id,
             command,
@@ -525,10 +549,13 @@ pub(super) async fn apply_phone_action(
         }
         ControllerAction::SetContainerSettings {
             session_id,
-            cpus,
-            memory,
+            resource_allocation,
             mounts,
         } => {
+            services
+                .daemon_runtime
+                .validate_container_settings_size(&session_id, resource_allocation.as_ref())
+                .await?;
             // The dialog that edits these owns the suggestion list, so the
             // remembered sources pass through unchanged: the update persists
             // them again beside the new mounts.
@@ -549,8 +576,7 @@ pub(super) async fn apply_phone_action(
             };
             controller.update_session_container_settings(
                 &session_id,
-                cpus,
-                memory,
+                resource_allocation,
                 mounts,
                 mount_history,
                 executor,
@@ -630,5 +656,53 @@ pub(super) async fn apply_phone_action(
         ControllerAction::RefreshQuota { .. } | ControllerAction::RefreshCapacity { .. } => {
             bail!("refresh actions must be handled by the phone control loop")
         }
+    }
+}
+
+pub(super) fn finish_phone_lifecycle(reply: crate::daemon::DaemonReply) -> Result<()> {
+    match reply {
+        crate::daemon::DaemonReply::Done => Ok(()),
+        crate::daemon::DaemonReply::MoveOutcome(outcome) => {
+            match outcome.outcome.as_str() {
+                "completed" | "unchanged" | "interrupted" => Ok(()),
+                "cancelled" | "failed" => {
+                    // The daemon keeps detailed diagnostics in its durable
+                    // operation record. Only its safe recovery guidance is
+                    // copied into the phone action error, where the normal
+                    // failed-action path records a visible session error.
+                    let recovery = outcome.recovery.unwrap_or_else(|| {
+                        "Inspect the session and retry Move or Resume with previous settings."
+                            .into()
+                    });
+                    bail!("Move {}: {recovery}", outcome.outcome)
+                }
+                status => bail!("Move returned an unknown outcome: {status}"),
+            }
+        }
+        _ => bail!("unexpected lifecycle outcome"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_session_titles;
+    use std::path::Path;
+
+    #[test]
+    fn a_new_action_without_a_title_is_not_a_rename() {
+        for title in [None, Some(String::new()), Some("  \n".to_owned())] {
+            let (created_with, rename) =
+                new_session_titles(title, Some(Path::new("/work/project")), "bundle", "claude");
+            assert_eq!(created_with, "project via claude");
+            assert_eq!(rename, None);
+        }
+    }
+
+    #[test]
+    fn a_new_action_keeps_the_title_a_person_supplied_as_a_rename() {
+        let (created_with, rename) =
+            new_session_titles(Some("My name".into()), None, "bundle", "claude");
+        assert_eq!(created_with, "My name");
+        assert_eq!(rename.as_deref(), Some("My name"));
     }
 }

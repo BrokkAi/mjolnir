@@ -5,7 +5,19 @@ pub fn spawn_dashboard_capacity_poller() -> (
     tokio::sync::mpsc::Sender<()>,
     tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
 ) {
-    spawn_capacity_poller_with(sample_capacity_target)
+    spawn_capacity_poller_with(sample_capacity_target, Arc::default())
+}
+
+/// The daemon's poller. `requested` counts refresh requests: a surface adds one
+/// to it, then sends the trigger. Each probe records the count when it starts.
+pub fn spawn_daemon_capacity_poller(
+    requested: Arc<std::sync::atomic::AtomicU64>,
+) -> (
+    tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+    tokio::sync::mpsc::Sender<()>,
+    tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
+) {
+    spawn_capacity_poller_with(sample_capacity_target, requested)
 }
 
 /// Sample one deployment host now. The periodic poller and launch admission
@@ -28,6 +40,7 @@ pub(crate) async fn sample_capacity_target(
 
 pub(super) fn spawn_capacity_poller_with<F, Fut>(
     collect: F,
+    requested: Arc<std::sync::atomic::AtomicU64>,
 ) -> (
     tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
     tokio::sync::mpsc::Sender<()>,
@@ -44,7 +57,7 @@ where
     tokio::spawn(async move {
         let mut targets = Vec::new();
         let collect = Arc::new(collect);
-        let mut samples = CapacitySamples::default();
+        let mut samples = CapacitySamples::new(requested.clone());
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + CAPACITY_POLL_INTERVAL,
             CAPACITY_POLL_INTERVAL,
@@ -79,7 +92,7 @@ where
                         Ok((id, result)) => (id, result.map_err(|error| format!("{error:#}"))),
                         Err(error) => (error.id(), Err(format!("capacity probe task failed: {error}"))),
                     };
-                    let sampled = samples.targets.remove(&id).expect("capacity task retains its target");
+                    let (sampled, refresh_generation) = samples.targets.remove(&id).expect("capacity task retains its target");
                     if let Err(error) = &result {
                         tracing::warn!(target_id = %sampled.id, %error, "capacity probe failed");
                     }
@@ -106,7 +119,18 @@ where
                         target_id: sampled.id,
                         result,
                         sampled_at_epoch_seconds: epoch_seconds(),
+                        refresh_generation,
                     });
+                    // A request that arrived while this probe was already
+                    // running is not answered by it, and the trigger skipped
+                    // the busy target; probe again now rather than wait for the
+                    // next round. The new probe starts after the request, so
+                    // this ends.
+                    if requested.load(std::sync::atomic::Ordering::Acquire) > refresh_generation
+                        && targets.contains(&current)
+                    {
+                        samples.schedule(std::iter::once(current), &collect);
+                    }
                 }
             }
         }
@@ -124,13 +148,22 @@ where
     (targets_tx, triggers_tx, updates_rx)
 }
 
-#[derive(Default)]
 pub(super) struct CapacitySamples {
     pub(super) tasks: tokio::task::JoinSet<Result<Option<DeploymentCapacityUsage>>>,
-    pub(super) targets: std::collections::HashMap<tokio::task::Id, DeploymentCapacityTarget>,
+    /// Each running probe's target and the refresh count taken before it began.
+    pub(super) targets: std::collections::HashMap<tokio::task::Id, (DeploymentCapacityTarget, u64)>,
+    requested: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacitySamples {
+    fn new(requested: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self {
+            tasks: tokio::task::JoinSet::new(),
+            targets: std::collections::HashMap::new(),
+            requested,
+        }
+    }
+
     pub(super) fn schedule<F, Fut>(
         &mut self,
         targets: impl IntoIterator<Item = DeploymentCapacityTarget>,
@@ -140,9 +173,16 @@ impl CapacitySamples {
         Fut: Future<Output = Result<Option<DeploymentCapacityUsage>>> + Send + 'static,
     {
         for target in targets {
-            if self.targets.values().any(|running| running.id == target.id) {
+            if self
+                .targets
+                .values()
+                .any(|(running, _)| running.id == target.id)
+            {
                 continue;
             }
+            // Read the count before the probe exists: any request it counts was
+            // made before the probe started, so the probe answers it.
+            let generation = self.requested.load(std::sync::atomic::Ordering::Acquire);
             let collect = collect.clone();
             let sampled = target.clone();
             let task = self.tasks.spawn(async move {
@@ -157,7 +197,7 @@ impl CapacitySamples {
                 );
                 result
             });
-            self.targets.insert(task.id(), target);
+            self.targets.insert(task.id(), (target, generation));
         }
     }
 }
@@ -212,6 +252,7 @@ pub fn aggregate_aws_capacity(
     usages: &[DeploymentCapacityUsage],
 ) -> Result<DeploymentCapacityUsage> {
     let mut total = DeploymentCapacityUsage {
+        memory_pool: false,
         cpu_percent: None,
         memory_used_bytes: 0,
         memory_total_bytes: 0,
@@ -248,6 +289,7 @@ pub(super) fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_cpu_usage();
     Ok(DeploymentCapacityUsage {
+        memory_pool: false,
         cpu_percent: Some(system.global_cpu_usage().round().clamp(0.0, 100.0) as u8),
         memory_used_bytes: system
             .total_memory()
@@ -330,37 +372,36 @@ pub(crate) async fn collect_local_capacity_with(
 /// it is retried with the same backoff the executor and the relay use (launch
 /// finding R3-5); any other failure is reported at once.
 pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<CommandOutput> {
-    use crate::targets::{SSH_RETRY_ATTEMPTS, SshRefusal, ssh_refusal, ssh_retry_delay};
-    let attempts = match command.ssh_destination {
-        Some(_) => SSH_RETRY_ATTEMPTS,
-        None => 1,
-    };
-    for attempt in 1..=attempts {
-        let (output, ssh_session) = run_resource_command(command).await?;
+    use crate::targets::{SshRefusalRetry, ssh_refusal};
+    // The poller bounds the whole probe, retries included, with
+    // `RESOURCE_POLL_TIMEOUT`; a refusal that outlasts the retry bound fails it sooner.
+    let mut retry = SshRefusalRetry::for_command(command);
+    loop {
+        let (output, ssh_session) = run_resource_command(command, retry.walk()).await?;
         if output.status == 0 {
             return Ok(output);
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // A probe that printed the start marker ran, so its status is its own.
+        let refusal = match &ssh_session {
+            Some(lease) => lease.gate().refusal(output.status, &stderr),
+            None => ssh_refusal(output.status, &stderr),
+        };
         if let Some(destination) = command.ssh_destination.as_deref()
-            && let Some(refusal) = ssh_refusal(output.status, &stderr)
+            && let Some(refusal) = refusal
         {
-            // A refused session found its master alive; a connection closed
-            // before authentication may mean the master is gone.
-            if refusal == SshRefusal::BeforeAuthentication
-                && let Some(lease) = &ssh_session
-            {
-                lease.invalidate();
-            }
-            // Only Unix leases own a shared session slot; free it before backoff.
+            // The lease records what the refusal means while it is still held.
+            let walks_on = ssh_session
+                .as_ref()
+                .is_some_and(|lease| lease.note_refusal(refusal));
+            // Only Unix leases own a shared session slot; free it before the wait.
             #[cfg(unix)]
             drop(ssh_session);
-            if attempt < attempts {
-                let delay = ssh_retry_delay(attempt);
-                refusal.log_retry(destination, &command.purpose, attempt, delay, stderr.trim());
-                tokio::time::sleep(delay).await;
-                continue;
-            }
-            refusal.log_exhausted(destination, &command.purpose, stderr.trim());
+            let delay = retry
+                .next(refusal, walks_on, destination, &command.purpose, &stderr)
+                .with_context(|| format!("{} failed", command.purpose))?;
+            tokio::time::sleep(delay).await;
+            continue;
         }
         bail!(
             "{} failed with status {}: {}",
@@ -369,29 +410,33 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
             stderr.trim()
         );
     }
-    unreachable!("the last attempt always returns")
 }
 
 /// Spawn one probe and collect its output, with the SSH session lease it ran
 /// on. The lease is returned so it outlives the child.
 async fn run_resource_command(
     command: &CommandSpec,
+    walk: &mut crate::targets::SshWalk,
 ) -> Result<(CommandOutput, Option<crate::targets::SshSessionLease>)> {
-    // A remote probe runs as one session on a shared SSH connection; the
-    // lease is held until the probe has exited.
+    // A remote probe is one session on a shared SSH connection; the lease is
+    // held until the probe has exited.
     let (command, ssh_session) = if command.ssh_session.is_some() {
         let requested = command.clone();
         let executor = crate::targets::CancellableProcessExecutor::with_timeout(
             crate::targets::SSH_MASTER_OPEN_TIMEOUT,
         );
         let _cancel_preparation = executor.cancel_on_drop();
-        tokio::task::spawn_blocking(move || {
-            requested
-                .open_ssh_session(&executor)
-                .map(crate::targets::SessionCommand::into_parts)
+        let mut walked = std::mem::take(walk);
+        let (prepared, walked) = tokio::task::spawn_blocking(move || {
+            let prepared = requested
+                .open_ssh_session(&executor, &mut walked)
+                .map(crate::targets::SessionCommand::into_parts);
+            (prepared, walked)
         })
         .await
-        .context("join the SSH session lease for a resource probe")??
+        .context("join the SSH session lease for a resource probe")?;
+        *walk = walked;
+        prepared?
     } else {
         (command.clone(), None)
     };
@@ -401,7 +446,7 @@ async fn run_resource_command(
         stdin,
         stdout,
         stderr,
-    } = crate::streamed_child::spawn_proxy(command)
+    } = crate::streamed_child::spawn_session_proxy(command, ssh_session.as_ref())
         .await
         .with_context(|| format!("start {}", command.purpose))?;
     // Resource probes do not read input; closing the writer gives a child

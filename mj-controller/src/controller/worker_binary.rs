@@ -15,7 +15,9 @@ use crate::session_manager::{
     DeferredWorkerBinaryRefresh, ProjectMemorySyncTarget, WorkerBinaryRefresh,
     WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
 };
-use crate::targets::{self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, SshTarget};
+use crate::targets::{
+    self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, ProvisionStageGuard, SshTarget,
+};
 use mj_core::config::{HarnessKind, HarnessProfile, ProjectBundle, atomic_write, data_dir};
 #[cfg(test)]
 use mj_core::harness_runtime::{CLAUDE_ACP_VERSION, CODEX_ACP_VERSION};
@@ -53,7 +55,7 @@ fn on_dedicated_thread<T: Send>(work: impl FnOnce() -> Result<T> + Send) -> Resu
 }
 
 mod launch;
-pub(in crate::controller) use launch::WorkerFilePreparation;
+pub(in crate::controller) use launch::{LaunchHistory, WorkerFilePreparation};
 mod staging;
 pub(super) use staging::*;
 mod project_memory;
@@ -75,11 +77,13 @@ mod install;
 pub(super) use install::*;
 mod store;
 use store::*;
+mod microvm;
+pub(crate) use microvm::ensure_microvm_engine;
 mod upgrade;
 pub(crate) use upgrade::*;
 mod process;
-pub(crate) use process::recorded_exit_reason;
 pub(super) use process::*;
+pub(crate) use process::{ensure_control_worker, recorded_exit_reason};
 
 #[cfg(test)]
 mod tests;

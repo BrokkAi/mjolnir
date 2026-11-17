@@ -1,0 +1,97 @@
+{
+  "id": "W130",
+  "title": "Waiting candidate 130 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "20dfe645092d91aa4140cc13a944ba60",
+    "session_title": "9755-m3-offthread-sql",
+    "reply_position": 191,
+    "captured_at": "2026-11-05T06:18:45.450Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:27",
+          "role": "assistant",
+          "text": "I’ll read the lane brief, trace the batch execution path, then use temporary fixture instrumentation to check the thread and connection. I’ll remove the probes and leave the lane clean."
+        },
+        {
+          "id": "agent:95",
+          "role": "assistant",
+          "text": "The static path already shows that the Rust prefetch routes open selected operations on Rayon workers. I’m checking how those workers capture and validate their readers, then I’ll measure the fixture paths."
+        },
+        {
+          "id": "agent:191",
+          "role": "assistant",
+          "text": "The worker input copies the selection descriptors and opens a new selected operation on a worker reader. The code validates that reader, but I have not found a mechanism that pins it to the caller’s SQLite read transaction. I’m waiting for the fixture build to finish so I can confirm which paths execute."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "The worker input copies the selection descriptors and opens a new selected operation on a worker reader. The code validates that reader, but I have not found a mechanism that pins it to the caller’s SQLite read transaction. I’m waiting for the fixture build to finish so I can confirm which paths execute.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "orker input copies the selection descriptors and opens a new selected operation on a worker reader. The code validates that reader, but I have not found a mechanism that pins it to the caller’s SQLite read transaction. I’m waiting for the fixture build to finish so I can confirm which paths execute."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-05T06:37:37.252Z",
+        "kind": "agent",
+        "text": "The first call-bindings golden passed, but its trace never entered the Rust batch function, so it cannot answer the thread question. The second fixture build is waiting on a shared mbx compile; I’ll k"
+      },
+      {
+        "at": "2026-11-05T06:41:37.346Z",
+        "kind": "agent",
+        "text": "The static investigation confirms that Rust call-target prefetch can run SQL on Rayon workers using separate selected readers. Those readers are independently validated; they are not pinned to the cal"
+      }
+    ]
+  }
+}

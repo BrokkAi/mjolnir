@@ -6,6 +6,7 @@
 //! Nothing in this module touches the filesystem.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use agent_client_protocol::schema::ProtocolVersion as AcpProtocolVersion;
 use agent_client_protocol::v1::schema::{
@@ -75,6 +76,19 @@ pub enum RelayCommand {
     HandbackReminder {
         completed_command_id: String,
         completed_ordinal: u64,
+        /// Rendered lines for work processes the child left running. Empty
+        /// gives the fixed text. Only sent to workers at protocol 67 or later:
+        /// older workers reject unknown fields.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        running: Vec<String>,
+    },
+    /// Prompt a child Mjolnir is holding for its own background work, only
+    /// while this completed turn (the reminder turn) is still current.
+    HoldFollowUp {
+        completed_command_id: String,
+        completed_ordinal: u64,
+        kind: crate::subagent::HoldFollowUpKind,
+        running: Vec<String>,
     },
     /// Add one event to the durable mailbox. Pending keys and recently
     /// delivered keys are deduplicated by the relay.
@@ -179,13 +193,58 @@ pub enum RelayCommand {
     },
 }
 
+fn process_lines(running: &[String]) -> String {
+    running
+        .iter()
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The hold's length for prompt text: "30 minutes", "1 minute".
+fn hold_minutes() -> String {
+    let minutes = crate::subagent::HOLD_GIVE_UP_MS / 60_000;
+    format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+}
+
+/// The reminder prompt: fixed when nothing is running, otherwise it names the
+/// processes and tells the child it may end its turn to wait for them.
+pub fn handback_reminder_text(running: &[String]) -> String {
+    if running.is_empty() {
+        return crate::subagent::HANDBACK_REMINDER_TEXT.to_owned();
+    }
+    format!(
+        "[handback reminder] Your turn ended without delivering a report, and commands you started are still running:\n{}\nIf your assigned task is finished, call the mj-agents handback tool now with your full report, then stop. If you are waiting for these commands to finish, you may end your turn: Mjolnir will prompt you when they have all exited, or after {}. Otherwise continue working, and hand back when the task is done.",
+        process_lines(running),
+        hold_minutes()
+    )
+}
+
+/// The prompt Mjolnir sends a held child when its processes exit or the wait
+/// reaches [`crate::subagent::HOLD_GIVE_UP_MS`].
+pub fn hold_follow_up_text(kind: crate::subagent::HoldFollowUpKind, running: &[String]) -> String {
+    match kind {
+        crate::subagent::HoldFollowUpKind::ProcessesExited => "[background work finished] The commands you were waiting for have exited. Check their results, continue your assigned task, and call the mj-agents handback tool when it is done.".to_owned(),
+        crate::subagent::HoldFollowUpKind::GiveUp => format!(
+            "[background wait ended] You have waited {} and these commands are still running:\n{}\nCall the mj-agents handback tool now with what you have: what finished, what is still running, and what your parent needs to decide. Your parent can tell you to keep waiting; Mjolnir leaves these commands running until your parent's next turn ends.",
+            hold_minutes(),
+            process_lines(running)
+        ),
+    }
+}
+
 impl RelayCommand {
     pub fn prompt_blocks(&self) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
         match self {
             Self::Prompt { prompt } => Some(std::borrow::Cow::Borrowed(prompt)),
-            Self::HandbackReminder { .. } => {
+            Self::HandbackReminder { running, .. } => {
                 Some(std::borrow::Cow::Owned(vec![ContentBlock::from(
-                    crate::subagent::HANDBACK_REMINDER_TEXT.to_owned(),
+                    handback_reminder_text(running),
+                )]))
+            }
+            Self::HoldFollowUp { kind, running, .. } => {
+                Some(std::borrow::Cow::Owned(vec![ContentBlock::from(
+                    hold_follow_up_text(*kind, running),
                 )]))
             }
             Self::MailboxWake { events } => {
@@ -212,6 +271,10 @@ impl RelayCommand {
                 .max()
                 .unwrap_or(super::RELAY_LEGACY_MAILBOX_PROTOCOL),
             Self::RestoreExecutionMode => 28,
+            Self::HoldFollowUp { .. } => super::RELAY_WORK_LIVENESS_PROTOCOL,
+            Self::HandbackReminder { running, .. } if !running.is_empty() => {
+                super::RELAY_WORK_LIVENESS_PROTOCOL
+            }
             Self::HandbackReminder { .. } | Self::InstallPromptContext { .. } => 26,
             Self::SeedAssessmentContext { .. } => crate::assessment::PROTOCOL,
             Self::SetQuotaRecovery { .. } | Self::ResumeAfterQuota { .. } => 20,
@@ -240,6 +303,7 @@ impl RelayCommand {
             self,
             Self::Prompt { .. }
                 | Self::HandbackReminder { .. }
+                | Self::HoldFollowUp { .. }
                 | Self::MailboxWake { .. }
                 | Self::ContinueAuthorizedWork { .. }
                 | Self::ResumeAfterQuota { .. }
@@ -272,6 +336,7 @@ impl RelayCommand {
             Self::ClearContext
                 | Self::Prompt { .. }
                 | Self::HandbackReminder { .. }
+                | Self::HoldFollowUp { .. }
                 | Self::MailboxWake { .. }
                 | Self::ContinueAuthorizedWork { .. }
                 | Self::ResumeAfterQuota { .. }
@@ -300,6 +365,7 @@ impl RelayCommand {
             Self::ClearContext => RelayCommandKind::ClearContext,
             Self::Prompt { .. }
             | Self::HandbackReminder { .. }
+            | Self::HoldFollowUp { .. }
             | Self::MailboxWake { .. }
             | Self::ContinueAuthorizedWork { .. }
             | Self::ResumeAfterQuota { .. } => RelayCommandKind::Prompt,
@@ -632,9 +698,22 @@ pub struct RelayCursor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment: Option<Box<crate::assessment::TurnAssessment>>,
+    pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment_context: Option<Box<crate::assessment::ContextHistory>>,
+    pub open_request: Option<crate::assessment::OpenRequest>,
+    /// Retained for checkpoint export; attention reads `open_request`.
+    #[serde(default)]
+    pub person_input_through: u64,
+    /// Whether the latest finished turn's work processes are still alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_liveness: Option<crate::work_facts::WorkLiveness>,
+    /// Keys of mailbox events the worker accepted but has not yet handed to the
+    /// agent: pending ones and those leased to a hook. The full delivered-key
+    /// map stays in the snapshot; this list is short.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undelivered_mailbox_event_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -675,6 +754,12 @@ pub struct RelayOperationalState {
     pub capacity_retry: Option<CapacityRetry>,
     #[serde(default)]
     pub retry_assessment_pending: bool,
+    /// Worker-published (process-local): the access-token hash of the failed
+    /// turn this worker will resubmit once a login with a different token is
+    /// installed. Present exactly while the worker's own retry rule allows
+    /// that; absent from older workers, which never resubmit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_retry_waiting: Option<String>,
     pub session_id: String,
     /// Start of the latest turn, retained until its background work settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -724,13 +809,19 @@ pub struct RelayOperationalState {
     /// Older workers do not report the optional ACP steering extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering_supported: Option<bool>,
+    /// When a message to this working session is delivered, as the worker
+    /// enforces it. Absent from older workers and from harnesses whose
+    /// delivery the worker has not classified; absence never means tool
+    /// boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_delivery: Option<crate::mailbox::MailboxDeliveryMode>,
     /// Actions decided by the worker against its ordered command queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_controls: Option<TurnControls>,
-    pub config_options: Vec<SessionConfigOption>,
+    pub config_options: Arc<Vec<SessionConfigOption>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<SessionModeState>,
-    pub available_commands: Vec<AvailableCommand>,
+    pub available_commands: Arc<Vec<AvailableCommand>>,
     pub config: BTreeMap<String, String>,
     pub active_prompt: Option<ActiveRelayPrompt>,
     pub queued_prompts: Vec<QueuedRelayPrompt>,
@@ -794,6 +885,42 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Whether this worker owns a persistent open request.
+    pub fn supports_open_request(&self) -> bool {
+        self.relay_protocol_version
+            .is_some_and(|version| version >= super::RELAY_OPEN_REQUEST_PROTOCOL)
+    }
+
+    /// The original question target, with compatibility for pre-64 workers.
+    pub fn question_message(&self) -> Option<&str> {
+        if self.supports_open_request() {
+            self.open_request
+                .as_ref()
+                .and_then(|request| request.question_message.as_deref())
+        } else {
+            self.assessment
+                .as_deref()
+                .filter(|assessment| assessment.inferred_question().is_some())
+                .and_then(|assessment| assessment.question_message.as_deref())
+        }
+    }
+
+    /// Reuse unchanged payloads after decoding a new worker response.
+    pub fn share_unchanged_fields(&mut self, previous: &Self) {
+        if self.assessment == previous.assessment {
+            self.assessment = previous.assessment.clone();
+        }
+        if self.assessment_context == previous.assessment_context {
+            self.assessment_context = previous.assessment_context.clone();
+        }
+        if self.available_commands == previous.available_commands {
+            self.available_commands = previous.available_commands.clone();
+        }
+        if self.config_options == previous.config_options {
+            self.config_options = previous.config_options.clone();
+        }
+    }
+
     /// Missing initialization advertises no support for image prompts.
     #[must_use]
     pub fn accepts_prompt_images(&self) -> bool {
@@ -951,6 +1078,19 @@ impl RelayOperationalState {
         crate::activity::safe_to_replace(&self.facts(), harness)
     }
 
+    /// Move's purpose-specific interruption decision.
+    #[must_use]
+    pub fn safe_to_move(
+        &self,
+        harness: HarnessKind,
+        purpose: crate::activity::MovePurpose,
+    ) -> bool {
+        if purpose == crate::activity::MovePurpose::Manual {
+            return self.safe_to_replace(harness);
+        }
+        crate::activity::safe_to_move(&self.facts(), harness, purpose)
+    }
+
     /// Terminal startup failure; this worker cannot retry preparation in place.
     #[must_use]
     pub fn harness_preparation_failed(&self) -> bool {
@@ -1059,6 +1199,21 @@ pub struct MailboxHookSteering {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
+    QuestionTargetUpdated {
+        question: crate::assessment::InferredQuestion,
+        question_message: String,
+    },
+    ManagedSubagentConfigured {
+        managed: bool,
+    },
+    /// The worker's recount of how many of a finished turn's work processes
+    /// are alive. Dropped when it names a turn other than the current one.
+    WorkLivenessChanged {
+        liveness: crate::work_facts::WorkLiveness,
+    },
+    HandbackCheckStarted {
+        assignment_id: String,
+    },
     TurnAssessmentUpdated {
         assessment: Box<crate::assessment::TurnAssessment>,
     },
@@ -1239,6 +1394,9 @@ pub enum RelayObservation {
     /// The harness reached a turn boundary on its own. `origin` is the
     /// adapter's reported origin kind, kept for diagnostics.
     HarnessTurnSettled {
+        /// Present only for an autonomous turn; absent in older journals to preserve digests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        autonomous: Option<SettledHarnessTurn>,
         origin: Option<String>,
         /// Whether a prompt of ours was still running when the turn settled.
         /// The relay keeps `Running` for it; the projection cannot see
@@ -1265,6 +1423,12 @@ pub enum RelayCommandOutcome {
 
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<crate::usage::TokenUsage>,
+        /// What the worker observed of a sub-agent's processes and working tree
+        /// when the turn ended, captured before this outcome is published, so
+        /// the facts and the outcome are one record and replay carries them.
+        /// Absent for a session that is not a sub-agent and from older workers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work_facts: Option<Box<crate::work_facts::WorkFacts>>,
     },
     UserShell {
         result: UserShellResult,
@@ -1349,9 +1513,22 @@ pub struct RelayDispatchRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredHarnessTurn {
+    /// Whether no Mjolnir prompt was in flight when this turn began.
+    #[serde(default)]
+    pub autonomous: bool,
     pub started_at_ms: i64,
     /// Ordinal of the `harness_turn_started` event that opened this turn.
     pub first_ordinal: u64,
+}
+
+/// A stop aimed at one open autonomous harness turn, named by the ordinal that
+/// opened it. The journal's `Cancel`/`CancelTurn` events own it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessTurnCancel {
+    pub first_ordinal: u64,
+    /// The runtime acknowledged a stop of this turn.
+    pub applied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1411,18 +1588,50 @@ fn relay_command_digest(command: &RelayCommand) -> anyhow::Result<String> {
     )?)))
 }
 
+/// Worker-owned assignment identity and evidence, replayed from delivery events.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HandbackChecks {
+    pub assignment_id: Option<String>,
+    pub checked: std::collections::BTreeSet<String>,
+    /// Instructions only, allocated on the first delivered parent assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::assessment::ContextHistory>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    /// Final reply of the latest completed turn, retained for its late assessment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_reply_message: Option<String>,
+    #[serde(default)]
+    pub managed_subagent: bool,
+    /// Whether the work processes the latest finished turn left running are
+    /// still alive. Owned by the worker (see [`crate::work_facts::WorkLiveness`]).
+    /// Set when a turn completes with live process identities, cleared when
+    /// the next prompt is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_liveness: Option<crate::work_facts::WorkLiveness>,
+    /// Facts of the latest autonomous harness turn of a managed child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_turn_work: Option<HarnessTurnWork>,
+    #[serde(default)]
+    pub handback_checks: HandbackChecks,
     /// Survives queue removal and receipt GC, fencing reminders for older turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_prompt_accepted_ordinal: Option<u64>,
     #[serde(default)]
     pub assessment_questions: std::collections::BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment: Option<crate::assessment::TurnAssessment>,
+    pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment_context: Option<crate::assessment::ContextHistory>,
+    /// Latest input-requiring completion, retained after the person responds.
+    pub request: Option<crate::assessment::OpenRequest>,
+    #[serde(default)]
+    /// Journal ordinal of the latest person input; only snapshot apply advances it.
+    pub person_input_through: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -1502,10 +1711,10 @@ pub struct RelaySnapshot {
     pub agent_info: Option<Implementation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<crate::harness_runtime::RuntimeReceipt>,
-    pub config_options: Vec<SessionConfigOption>,
+    pub config_options: Arc<Vec<SessionConfigOption>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<SessionModeState>,
-    pub available_commands: Vec<AvailableCommand>,
+    pub available_commands: Arc<Vec<AvailableCommand>>,
     pub config: BTreeMap<String, String>,
     pub active_prompt: Option<StoredActiveRelayPrompt>,
     pub queued_prompts: Vec<StoredQueuedRelayCommand>,
@@ -1540,6 +1749,13 @@ pub struct RelaySnapshot {
     pub harness_turn: Option<StoredHarnessTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_harness_turn_started_ordinal: Option<u64>,
+    /// The stop aimed at the open autonomous harness turn, while that turn is
+    /// open. Set when a `Cancel` or `CancelTurn` is accepted with no prompt of
+    /// ours running, so every settle the stop causes finds it however the
+    /// harness's result and the acknowledgement race. Never serialized once
+    /// the turn settles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelling_harness_turn: Option<HarnessTurnCancel>,
     /// Ignored. Protocol 26 workers persisted durable command receipts here;
     /// the field stays so their stores still open after an upgrade.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -1551,11 +1767,54 @@ pub struct RelaySnapshot {
     pub dispatches: BTreeMap<String, RelayDispatchRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledHarnessTurn {
+    pub start_ordinal: u64,
+    pub stop_reason: String,
+    /// What a managed child's worker observed when this turn ended, as for a
+    /// prompt's outcome. Absent for other sessions and in older journals,
+    /// which keeps their digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_facts: Option<Box<crate::work_facts::WorkFacts>>,
+}
+
+/// The facts a managed child's worker observed when its latest autonomous
+/// harness turn ended. A prompted turn's facts live in its handled command;
+/// this is the same record for a turn no prompt of ours started, so the
+/// worker's liveness watcher can recount its processes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessTurnWork {
+    /// The settle event's ordinal: the `completed_ordinal` of the turn.
+    pub completed_ordinal: u64,
+    pub facts: crate::work_facts::WorkFacts,
+}
+
 impl RelaySnapshot {
+    /// The stored assessment history as readers must see it: without the
+    /// user messages that today's rules attribute to Mjolnir. The history is
+    /// stored as written so journal digests stay valid; every reader that
+    /// hands it to Jev or the question locator goes through here.
+    pub fn authorization_context(&self) -> Option<crate::assessment::ContextHistory> {
+        self.assessment_context
+            .as_deref()
+            .map(crate::assessment::ContextHistory::reader_view)
+    }
+
+    /// The open turn that began without a prompt.
+    pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
+        self.harness_turn.filter(|turn| turn.autonomous)
+    }
     pub fn new(session_id: String) -> Self {
         Self {
+            handback_checks: Default::default(),
             assessment_questions: Default::default(),
+            completed_reply_message: None,
+            managed_subagent: false,
+            work_liveness: None,
+            harness_turn_work: None,
             assessment: None,
+            request: None,
+            person_input_through: 0,
             assessment_context: Some(Default::default()),
             latest_prompt_accepted_ordinal: None,
             turn_completion: None,
@@ -1589,9 +1848,9 @@ impl RelaySnapshot {
             agent_capabilities: None,
             agent_info: None,
             runtime: None,
-            config_options: Vec::new(),
+            config_options: Arc::default(),
             modes: None,
-            available_commands: Vec::new(),
+            available_commands: Arc::default(),
             config: BTreeMap::new(),
             active_prompt: None,
             queued_prompts: Vec::new(),
@@ -1608,6 +1867,7 @@ impl RelaySnapshot {
             checkpoint_ready_digest: None,
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
+            cancelling_harness_turn: None,
             retained_command_receipts: BTreeSet::new(),
             cancelled_command_admissions: BTreeSet::new(),
             handled_commands: BTreeMap::new(),
@@ -1638,10 +1898,30 @@ impl RelaySnapshot {
             .flatten()
     }
 
+    /// Semantic input is derived from the request and the person's durable frontier.
+    pub fn open_request(&self) -> Option<&crate::assessment::OpenRequest> {
+        self.request.as_ref().filter(|request| {
+            !self.managed_subagent && request.question.completed_ordinal > self.person_input_through
+        })
+    }
+
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
-            assessment: self.assessment.clone().map(Box::new),
-            assessment_context: self.assessment_context.clone().map(Box::new),
+            assessment: self.assessment.clone(),
+            open_request: self.open_request().cloned(),
+            person_input_through: self.person_input_through,
+            work_liveness: self.work_liveness.clone(),
+            undelivered_mailbox_event_keys: self
+                .pending_mailbox_events
+                .iter()
+                .chain(
+                    self.mailbox_hook_lease
+                        .iter()
+                        .flat_map(|lease| &lease.events),
+                )
+                .map(|event| event.key.clone())
+                .collect(),
+            assessment_context: self.assessment_context.clone(),
             turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),
             relay_protocol_version: None,
@@ -1667,6 +1947,7 @@ impl RelaySnapshot {
                     crate::assessment::Status::Pending | crate::assessment::Status::Failed
                 )
             }) || self.retry_assessment.is_some(),
+            authentication_retry_waiting: None,
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
             session_id: self.session_id.clone(),
@@ -1691,6 +1972,7 @@ impl RelaySnapshot {
             runtime: self.runtime.clone(),
             // Steering support belongs to the connected harness, like readiness.
             steering_supported: None,
+            mailbox_delivery: None,
             turn_controls: None,
             config_options: self.config_options.clone(),
             modes: self.modes.clone(),

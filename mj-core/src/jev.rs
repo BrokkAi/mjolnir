@@ -35,17 +35,6 @@ pub fn disabled_by_environment() -> bool {
     std::env::var(DISABLED_ENVIRONMENT).is_ok_and(|value| value == "1")
 }
 
-/// Set to `1` in a worker's launch environment when automatic continuation
-/// is off (`[continuation] enabled = false`, or Jev off). The worker then
-/// never parks a `Continue` verdict as "deferred": nobody would act on it,
-/// and `mj wait` would hold the turn open for it.
-pub const CONTINUATION_DISABLED_ENVIRONMENT: &str = "MJ_CONTINUATION_DISABLED";
-
-/// Whether this process was launched with automatic continuation turned off.
-pub fn continuation_disabled_by_environment() -> bool {
-    std::env::var(CONTINUATION_DISABLED_ENVIRONMENT).is_ok_and(|value| value == "1")
-}
-
 const SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
 const SEGMENTS: usize = 4;
 
@@ -177,6 +166,24 @@ impl DecisionLog {
     /// Publish the owner's durable state, including later admission or supersession.
     /// Request tasks must not overwrite this record with their process-local outcome.
     pub fn record_assessment(&self, session: &str, assessment: &crate::assessment::TurnAssessment) {
+        let technical = if assessment.glide.is_some() {
+            let questions: Value = serde_json::from_str(crate::activity::eot_glide::QUESTIONS)
+                .expect("bundled GLiDE turn questions are valid JSON");
+            serde_json::json!({
+                "contract": "glide-turn-v1",
+                "assessment": assessment,
+                "questions": questions,
+            })
+        } else {
+            serde_json::json!({
+                "contract": "turn-verdict-v7",
+                "assessment": assessment,
+                "automation_threshold": crate::assessment::AUTOMATION_CONFIDENCE,
+                "required_input_probability": crate::assessment::REQUIRED_INPUT_PROBABILITY,
+                "required_input_ratio": crate::assessment::REQUIRED_INPUT_RATIO,
+                "finished_work_probability": crate::assessment::FINISHED_WORK_PROBABILITY,
+            })
+        };
         self.append(&Decision {
             version: 1,
             id: format!("assessment-{session}-{}", assessment.revision),
@@ -186,11 +193,11 @@ impl DecisionLog {
             updated_at_ms: crate::clock::epoch_millis(),
             status: serde_json::to_value(assessment.status).expect("assessment status").as_str().unwrap().into(),
             checked: "What failed, is input required, and what authorized work remains?".into(),
-            answer: assessment.verdict.as_ref().map_or_else(|| "No usable Jev answer yet.".into(), |v| format!("Failure: {:?}; input: {:?}; work: {:?}.", v.failure.choice, v.input.choice, v.work.choice)),
+            answer: if assessment.glide.is_some() { format!("GLiDE: {:?}.", assessment.action) } else { assessment.verdict.as_ref().map_or_else(|| "No usable Jev answer yet.".into(), |v| format!("Failure: {:?}; input: {:?}; work: {:?}.", v.failure.choice, v.input.choice, v.work.choice)) },
             action: assessment.reason.replace('_', " "),
             scope: "Whole retained authorization messages and current completion evidence; omitted context is explicit.".into(),
             owner: owner().into(),
-            technical: Some(serde_json::json!({"contract":"turn-verdict-v7", "assessment":assessment, "questions":crate::activity::verdict::questions(), "automation_threshold":crate::assessment::AUTOMATION_CONFIDENCE, "required_input_probability":crate::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":crate::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":crate::assessment::FINISHED_WORK_PROBABILITY})),
+            technical: Some(technical),
         });
     }
 

@@ -74,10 +74,15 @@ fn setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_dra
 #[test]
 fn escape_on_the_discard_prompt_keeps_editing_and_dashboard_escape_stays_inert() {
     let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "review-model".into(),
+        effort: None,
+    }];
     dashboard.begin_setup();
     choose(&mut dashboard, "review");
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Down));
+    // Model, effort, then the reviewer's Remove button.
+    dashboard.handle_key(key(KeyCode::Tab));
+    dashboard.handle_key(key(KeyCode::Tab));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Esc));
     dashboard.handle_key(key(KeyCode::Esc));
@@ -86,7 +91,7 @@ fn escape_on_the_discard_prompt_keeps_editing_and_dashboard_escape_stays_inert()
     let Mode::Setup(dialog) = &dashboard.mode else {
         panic!("Esc on the discard prompt keeps editing")
     };
-    assert_eq!(dialog.draft["review"]["trigger"], "turn");
+    assert_eq!(dialog.draft["review"]["reviewers"], serde_json::json!([]));
     // Discard, then Esc on the plain dashboard does nothing.
     dashboard.handle_key(key(KeyCode::Esc));
     assert!(matches!(dashboard.mode, Mode::Confirm(_)));

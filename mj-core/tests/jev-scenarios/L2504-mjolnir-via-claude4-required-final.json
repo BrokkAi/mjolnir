@@ -1,0 +1,437 @@
+{
+  "id": "L2504",
+  "title": "mjolnir via claude4 required_final",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "a1a8e5e43252117ce45e6f0aef174c07",
+    "session_title": "mjolnir via claude4",
+    "reply_position": 28008,
+    "captured_at": "2026-10-24T03:59:10.997Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "find the tmux testing runbook, then test the shit out of the new dsh harness. fix the bugs that you find, pushing each as they land. loop me in before making changes that might break claude code or codex or if the right fix isn't clear. some fixes may belong in ~/Projects/dsh-acp"
+        },
+        {
+          "id": "user:898",
+          "role": "user",
+          "text": "doesn't the runbook specify scaling out with sonnet subagents?"
+        },
+        {
+          "id": "user:2287",
+          "role": "user",
+          "text": "In dsh-acp, \"Allow for this session\" currently approves the whole tool: approving `ls -la` once lets every later command run (including `sh -c ...`) without asking. How should it work?\n\nAllow scope: match the behavior in ~/Projects/{codex,codex-acp}"
+        },
+        {
+          "id": "user:5321",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nMove fix: Fix it (Recommended)\nReview fixes: both, but coordinate with review-owning agent e8566ee44d5a562c41deb74d72243980 to make sure this isn't already obsolete\nDelegation: i think we need to enable the dsh subagent package if that isn't crazy scope creep\nRelease: Release 0.2.1 and bump (Recommended)"
+        },
+        {
+          "id": "agent:9264",
+          "role": "assistant",
+          "text": "That notification is the Track B worker stopping for good. I handled its report earlier, so nothing new comes from it. The only work still running is the DSH sub-agent support. I'll review it when it reports, before anything lands on master."
+        },
+        {
+          "id": "agent:9313",
+          "role": "assistant",
+          "text": "The sub-agent work is still waiting on its own background job after about three hours. Checking whether it's progressing or stuck:"
+        },
+        {
+          "id": "agent:9326",
+          "role": "assistant",
+          "text": "It's making progress: a cargo test run in its worktree started seconds ago, and it has 23 changed files, not yet committed. I'll let it finish and review its change when it reports."
+        },
+        {
+          "id": "agent:9385",
+          "role": "assistant",
+          "text": "The DSH sub-agent support is implemented and was verified live: a DSH parent spawned a DSH child and got its answer back, with no permission forms for Mjolnir's own tools. Before landing it, I'll check two things. Do the shared paths still behave exactly as before for Claude and Codex? And is the new auto-approval of Mjolnir's MCP tools for DSH tightly bounded? Its base also predates #1342 and today's fixes, so it needs a rebase."
+        },
+        {
+          "id": "agent:9490",
+          "role": "assistant",
+          "text": "While the checks run, here's the one product decision the sub-agent work raised:"
+        },
+        {
+          "id": "user:9503",
+          "role": "user",
+          "text": "DSH sessions can now use Mjolnir sub-agents (verified live: DSH parent spawned a DSH child and got its answer). What should DSH's Delegation choice offer and default to? Note the remembered choice is shared across harnesses: a DSH session that saves None would make the next Claude/Codex session default to None.\n\nDSH default: Mjolnir/None, smart default (Recommended)"
+        },
+        {
+          "id": "agent:9558",
+          "role": "assistant",
+          "text": "Pushed (`7c08b0ab4..7feabd81c`): DSH sessions can now use Mjolnir sub-agents. The smart-default follow-up is being written in the same worktree. I'll review, validate and push it when it reports, then update the campaign record."
+        },
+        {
+          "id": "user:9575",
+          "role": "user",
+          "text": "(what happened to \"use dsh subagents package\"?)"
+        },
+        {
+          "id": "agent:9578",
+          "role": "assistant",
+          "text": "Short answer: I read it as \"let DSH sessions use Mjolnir's sub-agent toolset\" (the `mj-agents` spawn/handback tools Claude and Codex get), and that's what landed in `7feabd81c`. I never looked for a separate DSH sub-agents *package*. The agent was told to stop and report if the request meant something else, but it only checked the Mjolnir code. If you meant a specific package, I may have built the wrong thing. Checking whether one exists:"
+        },
+        {
+          "id": "agent:9644",
+          "role": "assistant",
+          "text": "You're right to ask. I misread it. Here's what happened and what's true:\n\n- **What I built:** Mjolnir sub-agents for DSH sessions (`7feabd81c`, pushed). A DSH session can spawn Mjolnir children through the `mj-agents` tools, the same mechanism Claude and Codex use. It works and was verified live, but it isn't what you named.\n- **What you named (confirmed it exists):** DeepSeek's `@deepseek-ai/dsh-subagent` package family (\"Abstract subagent seam (`ctx.subagents`)\", with backends `dsh-subagent-spawn-in-process`, `-fork-in-process`, `-codex`). It's a plugin system for DeepSeek's own harness: `~/Projects/deepseek-harness`, which is the `dsh` CLI on your PATH (0.1.2-rc.1).\n- **Why it doesn't drop in (likely, not yet verified):** Mjolnir's DSH runs BrokkAi's `dsh-acp`, a separate Rust agent with no plugin mechanism, and its docs list sub-agents as \"Not implemented\". The `dsh-subagent` packages plug into DeepSeek's TypeScript harness, not dsh-acp. Getting DSH native sub-agents through them would mean one of two things:\n  1. running DeepSeek's `dsh` itself over ACP as the harness (roughly the `kind = \"deepseek\"` harness Mjolnir removed in 5463a82ef), or\n  2. implementing sub-agents in dsh-acp.\n\n  Either is a bigger project than what I did, and I'd scope it before committing to it.\n\nOne thing in flight: the agent is building the \"Mjolnir/None\" default you just chose, which assumes my interpretation. If you meant the DeepSeek package, that work may be beside the point, and the \"hide Native for DSH\" part would be wrong once native sub-agents exist. I'd pause it until you decide.\n\nDo you want to keep the Mjolnir sub-agents for DSH as they are, and should I scope the DeepSeek-package route (options 1 or 2)? Let me know if I should stop the default work in the meantime."
+        },
+        {
+          "id": "user:9785",
+          "role": "user",
+          "text": "ok, let's leave mj subagents. carry on"
+        },
+        {
+          "id": "agent:9788",
+          "role": "assistant",
+          "text": "Keeping the Mjolnir sub-agents and carrying on. Three things in parallel:\n\n1. Land the DSH \"Mjolnir/None\" default when the agent reports.\n2. Clear dsh-acp polish for a 0.2.2: a diff preview in edit permissions (K2), and embedding the terminal in the tool call so commands stop showing two cards (K5).\n3. Prepare the reverse-direction Move fix (container → localhost fails unless the repository is named `project`) on a branch. It's in shared Move code, so I'll show it to you before pushing."
+        },
+        {
+          "id": "agent:9868",
+          "role": "assistant",
+          "text": "Four agents are running:\n\n- DSH \"Mjolnir/None\" default (will land when validated)\n- dsh-acp diff preview and terminal embedding (for 0.2.2)\n- reverse Move fix (on a branch, for your review)\n- destroy-after-Move archive cleanup (on a branch, for your review)\n\nI'll pick each up as it reports."
+        },
+        {
+          "id": "agent:10180",
+          "role": "assistant",
+          "text": "Both dsh-acp changes are done with all of dsh-acp's checks passing. Before merging, I want to see the terminal change work in Mjolnir itself: one card per command, live output, and output kept after the command ends. That needs Mjolnir to launch the branch's `dsh-acp`. After #1342, Mjolnir finds `dsh-acp` on the target's PATH. Checking whether a target's `environment` can put the branch build first:"
+        },
+        {
+          "id": "agent:10259",
+          "role": "assistant",
+          "text": "Config is valid. Running a dashboard session to see the edit preview and the command card:"
+        },
+        {
+          "id": "agent:10314",
+          "role": "assistant",
+          "text": "The wizard has a fourth step on current master, so my keystrokes stopped at the review page. Pressing Create:"
+        },
+        {
+          "id": "agent:10406",
+          "role": "assistant",
+          "text": "Pushed to dsh-acp master (`c69b19e..c3d027a`); it reaches Mjolnir only through a future 0.2.2 release. Now reviewing the B-5 branch so I can present it to you:"
+        },
+        {
+          "id": "agent:10426",
+          "role": "assistant",
+          "text": "The B-5 fix is narrow. On destroy it removes the session's recorded archive, plus any other file whose *parsed* name is an archive of exactly that session ID (a Move's handoff archive, for instance). Other sessions' archives can't match, and retained Move sources are database rows, not files, so they're untouched. It has a regression test, and the full controller suite passes (2070).\n\nStatus:\n- **Pushed:** dsh-acp diff preview and single command card, verified in a real Mjolnir session (on dsh-acp master, not yet released).\n- **Ready for your review, not pushed:** B-5 destroy cleanup (branch `b5-destroy-archive`, `f0dc53da4`).\n- **Still running:** the reverse Move fix (also for your review) and the DSH \"Mjolnir/None\" default.\n\nOnce those two report, I'll bring you one batch: the two shared-code branches, plus whether to cut dsh-acp 0.2.2 so Mjolnir picks up the edit preview and the single command card."
+        },
+        {
+          "id": "agent:10506",
+          "role": "assistant",
+          "text": "The reverse Move fix is ready on its branch: verified both ways live (podman → localhost with a repository named `widget`, and back), with a regression test and the full controller suite passing (2070). A quick look at the diff before I bring you the batch:"
+        },
+        {
+          "id": "agent:10530",
+          "role": "assistant",
+          "text": "Sound, and symmetric with the C-1 fix. Three decisions for you:"
+        },
+        {
+          "id": "user:10547",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nShared fixes: Reverse Move fix, Destroy cleanup (B-5)\ndsh-acp 0.2.2: Release 0.2.2 and bump (Recommended)"
+        },
+        {
+          "id": "agent:10599",
+          "role": "assistant",
+          "text": "Master had moved 49 commits (the review rework among them). All three cherry-picks applied cleanly. Starting validation in the background:"
+        },
+        {
+          "id": "agent:10643",
+          "role": "assistant",
+          "text": "The verification instance is fully cleaned up: no sessions, daemon, `dsh-acp`, git daemon, tmux server or containers. Now D-10, on top of the review owner's rework:"
+        },
+        {
+          "id": "agent:10823",
+          "role": "assistant",
+          "text": "It passes alone three times out of three, and it's a filesystem test in code none of these commits touch. I'm treating it as a load flake: the full run had 2074 passing. Pushing the three commits:"
+        },
+        {
+          "id": "agent:10852",
+          "role": "assistant",
+          "text": "Pushed (`d42c20536..2f1e81621`): the DSH \"Mjolnir/None\" default, the reverse Move fix, and the destroy cleanup. Checking the 0.2.2 release PR:"
+        },
+        {
+          "id": "agent:10873",
+          "role": "assistant",
+          "text": "All 13 checks pass. Merging, then waiting for the push runs on the merge commit before tagging:"
+        },
+        {
+          "id": "agent:10915",
+          "role": "assistant",
+          "text": "The 0.2.2 release PR is merged, and its preflight push runs are going. D-10 is being fixed in parallel; the review owner confirmed nothing else of theirs is in flight. I'll tag 0.2.2 once preflight passes, then bump Mjolnir's pin."
+        },
+        {
+          "id": "agent:11047",
+          "role": "assistant",
+          "text": "Preflight passed on the merge commit `6c9fc8d`. Tagging `v0.2.2` there and pushing the tag (publishes to GitHub Releases and npm, as you approved):"
+        },
+        {
+          "id": "agent:11069",
+          "role": "assistant",
+          "text": "Publication is running. After #1342, Mjolnir's pin is just `DSH_ACP_VERSION` (the managed install and its checksum file are gone). Listing what names 0.2.1 now:"
+        },
+        {
+          "id": "agent:11091",
+          "role": "assistant",
+          "text": "The remaining 0.2.1 match is an unrelated package in Codex's lockfile. Running the pin-related tests while publication finishes:"
+        },
+        {
+          "id": "agent:11127",
+          "role": "assistant",
+          "text": "dsh-acp 0.2.2 is published (GitHub release with 12 assets; npm `latest` = 0.2.2). Checking that the exact `npx` command Mjolnir now uses resolves it, then committing and pushing the pin:"
+        },
+        {
+          "id": "agent:11146",
+          "role": "assistant",
+          "text": "Pinned and pushed (`2f1e81621..0487a5706`); `npx -y @brokkai/dsh-acp@0.2.2` resolves to the new release. Only D-10 is still running. When it lands I'll update the campaign record with this second round of fixes."
+        },
+        {
+          "id": "user:11168",
+          "role": "user",
+          "text": "Claude Code requests permission:\nNative agent ae12df6a5c26b61fe: timeout 1500 cargo build -p brokk-mjolnir --bin mj -p brokk-mj-worker --bin mj-worker 2>&1 | tail -3 && cp target/debug/mj target/debug/mj-worker target-d10/bin/ && ls -la target-d10/bin/\n\nPermission: Yes"
+        },
+        {
+          "id": "user:27042",
+          "role": "user",
+          "text": "all done?"
+        },
+        {
+          "id": "agent:27052",
+          "role": "assistant",
+          "text": "Almost. Everything you approved has landed, except D-10. There is also one thing you need to act on.\n\n**You should act on this: the DeepSeek API key was exposed.** The agent fixing D-10 printed `DEEPSEEK_API_KEY` into its own transcript by accident. It was inspecting the reviewer child's `subagent_sessions.record_json` in a test instance's database, and that record holds the profile's environment, including secrets, in plain text. The test instance is deleted, but the key now sits in that agent's transcript. I recommend rotating it. The plain-text secret in that record is a separate security defect in the reviewer child code that just landed from the review-owning session.\n\n**Not landed:**\n- **D-10** (a review model named for a session picks a reviewer, but the session started without a review baseline). The fix is committed on branch `d10-review-eligibility` (`6ed75cf93`) but not pushed. It passed the full controller suite (2074), and a live check confirmed the baseline is now taken. It still needs a rebase onto current master (`10e6a4981`) and a recheck before pushing. The review owner said not to wait for them.\n- **New defect found during that live check: every DSH turn review fails at its last step.** The reviewer child ran and produced a correct verdict, but ended \"finished without calling handback\". The likely cause is that the reviewer runs DSH in plan mode, and dsh-acp refuses all MCP tools in plan mode, including `handback`. dsh-acp 0.2.1 went further and hides them from plan mode's tool list. Muse is already exempt from plan mode for reviewers, and DSH probably needs the same exemption. I haven't confirmed this or fixed it. It touches the review owner's code.\n\n**Landed since my last summary:**\n- DSH sub-agents with the Mjolnir/None default (`7feabd81c`, `2a1d7e2fb`).\n- The reverse Move fix (`ce450f408`).\n- Destroy now removes every archive of the session (`2f1e81621`).\n- dsh-acp 0.2.2 released and pinned (`0487a5706`). It adds the edit diff preview before approval and shows each command as one card.\n\nAll my test instances, tmux servers and git daemons are stopped, and no agents are running.\n\nMy recommendation: rotate the key first. Then I rebase and land D-10, and hand the plan-mode `handback` problem and the plain-text secret to the review owner, or fix the plan-mode exemption myself if you prefer. Which do you want?"
+        },
+        {
+          "id": "user:27233",
+          "role": "user",
+          "text": "keys printed locally are a non issue. go ahead and continue. make the review owner do it, good test"
+        },
+        {
+          "id": "agent:27246",
+          "role": "assistant",
+          "text": "Clean cherry-pick onto current master. Validating before push:"
+        },
+        {
+          "id": "agent:27282",
+          "role": "assistant",
+          "text": "All green: fmt, clippy, mj-core 517, full controller 2081 passing. Pushing D-10 together with the campaign-record update:"
+        },
+        {
+          "id": "agent:27322",
+          "role": "assistant",
+          "text": "Done so far, and what's still running:\n\n- **D-10 is landed** (`d3b29cb01`): a review model named for a session now gets the review baseline its chosen reviewer needs. One shared rule now serves both the reviewer chooser and the baseline check. The full controller suite passes (2081). The campaign record is updated (`2338ca736`).\n- **The review owner has taken the DSH reviewer defect.** They confirmed the diagnosis and found it is wider than DSH: Claude reviewers likely stop on a permission question for the same reason. Their fix: the reviewer's answer becomes its final message, and reviewer children no longer get `handback`. No dsh-acp change is needed. They have no DSH credentials, so they asked me to run the DSH reviewer check against their commit. I'll do that when they send it.\n- **A child is fixing three CLI reporting gaps** on its own branch: `mj wait` and `mj sessions` will show why a launch failed; `mj prompt` will say when a permission form is waiting; and it will check whether `mj usage` and `mj events` disagree on a cancelled turn's outcome. It won't change exit codes. I'll review its branch before anything lands."
+        },
+        {
+          "id": "agent:27410",
+          "role": "assistant",
+          "text": "I'll make the dsh-acp change. It follows Claude Code's rule for plan mode. One caution: the review owner says the user decided this, but that claim comes from another agent, so I'll confirm with you before publishing a release. Reading how dsh-acp stores MCP tool definitions:"
+        },
+        {
+          "id": "user:27472",
+          "role": "user",
+          "text": "The review owner says you decided reviewers keep `handback` (marked readOnlyHint) and asked me for a dsh-acp change: in plan mode, offer and allow MCP tools with readOnlyHint=true (Claude Code's rule), keep refusing others. A child is implementing it now. May I release it as dsh-acp 0.2.3 (publishes GitHub + npm) and bump Mjolnir's pin, without asking again once checks pass?\n\ndsh-acp 0.2.3: Yes, release 0.2.3 (Recommended)"
+        },
+        {
+          "id": "agent:27481",
+          "role": "assistant",
+          "text": "Two children are running: the dsh-acp plan-mode change and the CLI reporting fixes. Once the dsh-acp change is reviewed, I'll release 0.2.3, bump the pin, and run the DSH reviewer check after the review owner's commit lands."
+        },
+        {
+          "id": "agent:27515",
+          "role": "assistant",
+          "text": "Reviewing the dsh-acp diff before release:"
+        },
+        {
+          "id": "agent:27532",
+          "role": "assistant",
+          "text": "Correct and narrow. Pushing to dsh-acp master, then starting the 0.2.3 release:"
+        },
+        {
+          "id": "agent:27579",
+          "role": "assistant",
+          "text": "While publication runs, building current master (it includes the review owner's commit) so the live check can start right after the pin bump:"
+        },
+        {
+          "id": "user:27598",
+          "role": "user",
+          "text": "i'm getting warnings about my dsh config, can you fix?"
+        },
+        {
+          "id": "agent:27600",
+          "role": "assistant",
+          "text": "Looking at your real config and what `mj doctor` reports for it. This is read-only, using your installed `mj`, not a test build:"
+        },
+        {
+          "id": "agent:27682",
+          "role": "assistant",
+          "text": "The 0.2.3 PR checks are still running. I'll bump the pin and run the DSH reviewer check once it publishes."
+        },
+        {
+          "id": "agent:27700",
+          "role": "assistant",
+          "text": "The child's B-4 reasoning holds: the usage record intentionally keeps the harness's raw stop reason, so no change there. One thing to check before landing: a PTY test failed even when run alone, and the child didn't establish whether it also fails on master without its commits. Reviewing the diffs and checking that test on plain master:"
+        },
+        {
+          "id": "agent:27729",
+          "role": "assistant",
+          "text": "The change is small: two output lines in the CLI, and the timeout response now carries the pending elicitations it already had. Checking the PTY theme test on plain master:"
+        },
+        {
+          "id": "agent:27748",
+          "role": "assistant",
+          "text": "It passes on master, so I need to check it with the child's commits applied, not trust \"unrelated\":"
+        },
+        {
+          "id": "agent:27762",
+          "role": "assistant",
+          "text": "It passes with the commits too, twice. The child's failure was likely specific to its environment. Running the affected tests, then pushing:"
+        },
+        {
+          "id": "agent:27793",
+          "role": "assistant",
+          "text": "The CLI reporting fixes are pushed (`e4f2e261a..e98820f9b`):\n\n- `mj wait` now prints the session's error when a launch fails.\n- `mj sessions` points failed rows to the details command.\n- A `mj prompt` that times out while a permission form waits now says so and names `mj elicitations`, `mj respond` and `--return-on-input`.\n\ndsh-acp 0.2.3 has passed its PR checks and is merged. Its preflight runs are going, then come tagging and publication. After that I'll bump the pin and run the DSH reviewer check."
+        },
+        {
+          "id": "user:27833",
+          "role": "user",
+          "text": "still working?"
+        },
+        {
+          "id": "agent:27842",
+          "role": "assistant",
+          "text": "Yes. dsh-acp 0.2.3 is published (GitHub release, npm `latest` = 0.2.3). Bumping Mjolnir's pin now, then the DSH reviewer check:"
+        },
+        {
+          "id": "agent:27875",
+          "role": "assistant",
+          "text": "The pin is pushed (`3cee6f635`) and master is built. Running the DSH reviewer check in the isolated `dsh-v` instance, with no `dsh-acp` on PATH, so it goes through `npx` with 0.2.3:"
+        },
+        {
+          "id": "agent:27907",
+          "role": "assistant",
+          "text": "The scratch project's `origin` points to my local git daemon, which I'd stopped. Restarting it and running again:"
+        },
+        {
+          "id": "agent:27928",
+          "role": "assistant",
+          "text": "`no review is open` could mean the review already finished or that it never started. Looking at the transcript and events:"
+        },
+        {
+          "id": "agent:27941",
+          "role": "assistant",
+          "text": "The transcript says \"Review complete: no material findings\". Confirming in the daemon log that the DSH reviewer ran and reported through `handback`:"
+        },
+        {
+          "id": "agent:27997",
+          "role": "assistant",
+          "text": "Recording the final state in the campaign record:"
+        },
+        {
+          "id": "agent:28008",
+          "role": "assistant",
+          "text": "Done. Since your last check:\n\n- **DSH turn review works.** The review owner marked `handback` read-only. I released dsh-acp 0.2.3, which allows read-only MCP tools in plan mode, and pinned it in Mjolnir (`3cee6f635`). In a live check, a DSH reviewer handed back \"patch is correct\", and the session showed \"Review complete: no material findings\". The review owner has closed the defect.\n- **CLI reporting fixes are pushed.** `mj wait` shows why a launch failed, and a `mj prompt` that times out while a permission form waits now says so. B-4 turned out not to be a defect.\n- **Your config:** the auto-added `dsh` profile now references the key in `secrets.toml`, and `mj doctor` reports it ready.\n\nEverything is recorded in `.agents/docs/test-and-fix-2026-10-23-dsh.md` (`5078adae5`). All test instances, daemons and git daemons are stopped, and no children are running.\n\nStill open, each needing a decision from you:\n1. **DSH startup detection** adds a `dsh` profile without the key reference, so anyone who keeps the key in `secrets.toml` gets the warning you saw. I'd make detection add `DEEPSEEK_API_KEY = { from_secret = … }` when that secret exists. It's a small change in #1342's code.\n2. **`mj new` and `mj resume` exit 0** even when the launch later fails, because they return once the request is accepted. Changing that would change how scripts behave, so I left it.\n3. **`mj acp` can't answer DSH permission requests**, so a DSH session driven over `mj acp` on a raw target can't run commands. This matches the general documentation for `mj acp`.\n\nShould I do item 1?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "still working?",
+    "assistant_text_tail": "Done. Since your last check:\n\n- **DSH turn review works.** The review owner marked `handback` read-only. I released dsh-acp 0.2.3, which allows read-only MCP tools in plan mode, and pinned it in Mjolnir (`3cee6f635`). In a live check, a DSH reviewer handed back \"patch is correct\", and the session showed \"Review complete: no material findings\". The review owner has closed the defect.\n- **CLI reporting fixes are pushed.** `mj wait` shows why a launch failed, and a `mj prompt` that times out while a permission form waits now says so. B-4 turned out not to be a defect.\n- **Your config:** the auto-added `dsh` profile now references the key in `secrets.toml`, and `mj doctor` reports it ready.\n\nEverything is recorded in `.agents/docs/test-and-fix-2026-10-23-dsh.md` (`5078adae5`). All test instances, daemons and git daemons are stopped, and no children are running.\n\nStill open, each needing a decision from you:\n1. **DSH startup detection** adds a `dsh` profile without the key reference, so anyone who keeps the key in `secrets.toml` gets the warning you saw. I'd make detection add `DEEPSEEK_API_KEY = { from_secret = … }` when that secret exists. It's a small change in #1342's code.\n2. **`mj new` and `mj resume` exit 0** even when the launch later fails, because they return once the request is accepted. Changing that would change how scripts behave, so I left it.\n3. **`mj acp` can't answer DSH permission requests**, so a DSH session driven over `mj acp` on a raw target can't run commands. This matches the general documentation for `mj acp`.\n\nShould I do item 1?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Still open / needs you turn-ending label",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_positions": [
+      28008
+    ],
+    "user_position": 27833,
+    "input_rationale": "The DSH work is reported done, then three open items are said to need the user's decision, ending with a specific question about changing startup detection (item 1); items 2 and 3 are left as-is pending the user.",
+    "label": "required_final",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "approval_gate",
+    "request_message_ids": [
+      "agent:28008"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-24T04:10:53.838Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-24T04:22:46.986Z",
+        "kind": "user",
+        "text": "yes, then push"
+      },
+      {
+        "at": "2026-10-24T04:23:14.691Z",
+        "kind": "agent",
+        "text": "Looking at how detection builds the DSH profile after #1342:"
+      },
+      {
+        "at": "2026-10-24T04:24:51.458Z",
+        "kind": "agent",
+        "text": "All three paths build discovered profiles with `build_config`/`profiles_config` and know the config path, so I'll add one helper and call it at each:"
+      },
+      {
+        "at": "2026-10-24T04:28:50.343Z",
+        "kind": "agent",
+        "text": "Builds cleanly. Now a regression test through the real startup path. Looking at the existing startup tests:"
+      },
+      {
+        "at": "2026-10-24T04:35:26.137Z",
+        "kind": "agent",
+        "text": "Builds. Adding the regression test beside the existing every-launch detection test:"
+      }
+    ]
+  }
+}

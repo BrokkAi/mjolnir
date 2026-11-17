@@ -4,9 +4,11 @@ mod auto_afk;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
+mod observe;
 mod owner;
 mod record_index;
 mod restart;
+mod session_lifecycle;
 mod session_move;
 use crate::controller::move_session::{
     MoveMutationGuard, MoveOutcome, MovePreparation, MoveSelection, MoveSessionRequest,
@@ -54,7 +56,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
     dashboard_worker_targets, interrupted_destroy_session_ids, interrupted_suspend_session_ids,
-    reserve_recovery_or_cancel, spawn_image_refresher, unowned_interrupted_lifecycles,
+    spawn_image_refresher, unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -91,6 +93,9 @@ const FORCE_DESTROY_PREEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 pub struct LifecycleControl {
     state: Arc<AtomicU8>,
     pub cancelled: Arc<AtomicBool>,
+    cancel_cause: Arc<Mutex<Option<&'static str>>>,
+    /// Woken when shutdown stops the operation, for waiters that must end then.
+    shutdown_stop: Arc<tokio::sync::Notify>,
 }
 
 const LIFECYCLE_OPEN: u8 = 0;
@@ -100,17 +105,21 @@ const LIFECYCLE_COMMITTED: u8 = 2;
 const LIFECYCLE_CANCELLED_FOR_SHUTDOWN: u8 = 3;
 
 impl LifecycleControl {
-    pub fn request_cancel(&self) -> bool {
-        self.cancel_as(LIFECYCLE_CANCELLED)
+    pub fn request_cancel(&self, cause: &'static str) -> bool {
+        self.cancel_as(LIFECYCLE_CANCELLED, cause)
     }
 
-    fn cancel_for_shutdown(&self) -> bool {
-        self.cancel_as(LIFECYCLE_CANCELLED_FOR_SHUTDOWN)
+    pub(crate) fn cancel_for_shutdown(&self) -> bool {
+        self.cancel_as(LIFECYCLE_CANCELLED_FOR_SHUTDOWN, "server shutdown")
     }
 
     /// The state is written before the flag the executor reads, so an
     /// operation that sees its cancel also sees which cancel it was.
-    fn cancel_as(&self, cancelled: u8) -> bool {
+    fn cancel_as(&self, cancelled: u8, cause: &'static str) -> bool {
+        let mut cancel_cause = self
+            .cancel_cause
+            .lock()
+            .expect("lifecycle cancel cause poisoned");
         let accepted = self
             .state
             .compare_exchange(
@@ -121,9 +130,26 @@ impl LifecycleControl {
             )
             .is_ok();
         if accepted {
+            *cancel_cause = Some(cause);
             self.cancelled.store(true, Ordering::Release);
+            if cancelled == LIFECYCLE_CANCELLED_FOR_SHUTDOWN {
+                self.shutdown_stop.notify_waiters();
+            }
         }
         accepted
+    }
+
+    /// Completes once shutdown has stopped the operation.
+    pub(crate) async fn shutdown_stopped(&self) {
+        loop {
+            let notified = self.shutdown_stop.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.stopped_for_shutdown() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Commit the operation, unless a cancel was accepted first. Only the
@@ -152,6 +178,13 @@ impl LifecycleControl {
             self.state.load(Ordering::Acquire),
             LIFECYCLE_CANCELLED | LIFECYCLE_CANCELLED_FOR_SHUTDOWN
         )
+    }
+
+    pub(crate) fn cancel_cause(&self) -> Option<&'static str> {
+        *self
+            .cancel_cause
+            .lock()
+            .expect("lifecycle cancel cause poisoned")
     }
 
     /// Stop the operation's commands because the daemon is exiting, whether
@@ -188,13 +221,33 @@ const ATTACHMENT_LEASE: Duration = Duration::from_secs(15);
 #[derive(Default)]
 struct QuotaBoard {
     snapshot: mj_core::snapshot_map::SharedSnapshot<mj_client::quota::QuotaSnapshot>,
-    refresh: Option<tokio::sync::mpsc::Sender<()>>,
+    refresh: Option<tokio::sync::mpsc::UnboundedSender<QuotaRefreshIntent>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum QuotaRefreshIntent {
+    Force,
+    ReconcileSources,
+    /// Probe these profiles once even though they sit outside the enabled
+    /// batch (for `mj quota --with-disabled`); their reports stay served until
+    /// their identities change. A forced probe answers now, off the profile's
+    /// schedule, even with a fresh report.
+    ProbeProfiles {
+        requests: Vec<crate::quota::QuotaRefreshRequest>,
+        forced: bool,
+    },
+}
+
+struct SurfaceNotice {
+    notice: RuntimeNotice,
+    public: bool,
 }
 
 pub struct RuntimeState {
     attachments: Mutex<BTreeMap<String, Attachment>>,
     phone_status: Mutex<WebViewerStatus>,
     pub web_viewer: crate::web_viewer::ViewerControl,
+    pub(crate) api_credential: std::sync::OnceLock<String>,
     ever_attached: AtomicBool,
     revisions: RuntimeRevisions,
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
@@ -218,9 +271,6 @@ pub struct RuntimeState {
     workspace_closes: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     /// Resume ownership can precede its durable workspace assignment.
     workspace_resume_admission: Mutex<BTreeMap<String, Arc<tokio::sync::RwLock<()>>>>,
-    /// The bounded wait for each live session's harness to become usable.
-    /// Driven only by the daemon's background readiness sweep.
-    harness_readiness: Mutex<HarnessReadinessWatch>,
     /// Work waiting for one session's harness to become ready: the prompts a
     /// person typed while it started, and the hand-off a restored session
     /// carries. One ordered queue per session, each drained by one task.
@@ -231,13 +281,14 @@ pub struct RuntimeState {
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<auto_afk::Inactivity>,
     inactivity_changed: tokio::sync::Notify,
+    mbx_install_wake: crate::controller::mbx::service::InstallWake,
     projects: Arc<crate::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
     recovery_observer: RecoveryObserver,
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.
     /// Bounded: a surface that never attaches must not make this grow.
-    notices: Mutex<VecDeque<RuntimeNotice>>,
+    notices: Mutex<VecDeque<SurfaceNotice>>,
     next_notice_id: AtomicU64,
     /// Dashboard requests made on the person's behalf (`mj ui`).
     ui_requests: Mutex<ui_requests::UiRequestBoard>,
@@ -321,7 +372,7 @@ impl RuntimeRevisions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LifecycleKind {
+pub(crate) enum LifecycleKind {
     Create,
     Suspend,
     Resume,
@@ -535,6 +586,7 @@ struct StartupQueue {
 }
 
 struct ActiveLifecycle {
+    origin: lifecycle::LifecycleOrigin,
     move_operation_id: Option<String>,
     /// Durable intent bound by Restart admission; cleanup names this exact owner.
     restart_intent: Option<String>,
@@ -546,6 +598,9 @@ struct ActiveLifecycle {
     kind: LifecycleKind,
     started_at_epoch_seconds: u64,
     active_stages: BTreeMap<ProvisionStage, (usize, u64)>,
+    /// When a stage last started or finished: the one record of whether this
+    /// operation is making progress. Set by `change_lifecycle_stage` only.
+    last_stage_change: tokio::time::Instant,
     /// The workspace a resume is claiming before its durable record changes.
     /// Workspace deletion consults this so it cannot race the claim.
     resume_workspace_id: Option<String>,
@@ -554,6 +609,7 @@ struct ActiveLifecycle {
     request_key: Option<String>,
     _move_guard: Option<MoveMutationGuard>,
     result: LifecycleWatch,
+    acceptance: LifecycleAcceptance,
 }
 
 enum LifecyclePhase {
@@ -572,6 +628,37 @@ impl ActiveLifecycle {
         !matches!(self.phase, LifecyclePhase::Completed(_))
     }
 
+    fn check_request(
+        &self,
+        session_id: &str,
+        kind: LifecycleKind,
+        key: Option<&str>,
+        workspace: Option<&str>,
+        child_close: bool,
+    ) -> Result<()> {
+        ensure!(
+            child_close || self.request_key.as_deref() == key,
+            "another lifecycle request with different selections is already running for session {session_id}"
+        );
+        ensure!(
+            self.kind == kind,
+            "another lifecycle operation is already running for session {session_id}"
+        );
+        ensure!(
+            workspace.is_none() || self.resume_workspace_id.as_deref() == workspace,
+            "session {session_id} is already resuming into another workspace"
+        );
+        Ok(())
+    }
+
+    /// The stages this operation is in, oldest stage first.
+    fn stage_labels(&self) -> Vec<String> {
+        self.active_stages
+            .keys()
+            .map(|stage| stage.label())
+            .collect()
+    }
+
     fn pending_upgrade_failed(&self) -> bool {
         self.kind == LifecycleKind::UpgradeContainer
             && self.restart_intent.is_some()
@@ -588,11 +675,15 @@ impl ActiveLifecycle {
             )
     }
 
-    fn request_cancel(&mut self) -> bool {
-        self.cancel_with(LifecycleControl::request_cancel)
+    fn request_cancel(&mut self, session_id: &str, cause: &'static str) -> bool {
+        let accepted = self.cancel_with(|control| control.request_cancel(cause));
+        if accepted {
+            tracing::info!(session_id, kind = self.kind.label(), reference = %self.operation_id, cause, "lifecycle cancellation accepted");
+        }
+        accepted
     }
 
-    fn cancel_with(&mut self, cancel: fn(&LifecycleControl) -> bool) -> bool {
+    fn cancel_with(&mut self, cancel: impl FnOnce(&LifecycleControl) -> bool) -> bool {
         if !self.pending_upgrade_failed()
             && !matches!(
                 self.phase,
@@ -638,7 +729,9 @@ impl ActiveLifecycle {
     /// Stop this operation for daemon shutdown. An operation that can still be
     /// cancelled is cancelled. A committed one is interrupted, because the
     /// next daemon finishes it from its record, except a committed create,
-    /// whose caller now owns the new session and which no daemon resumes.
+    /// which is a moment from `Running` and finishes. An uncommitted create
+    /// is stopped without rolling back (see `stopped_for_shutdown`): its
+    /// create intent makes the next daemon finish it.
     fn interrupt_for_shutdown(&mut self) -> bool {
         if self.kind == LifecycleKind::UpgradeContainer
             && matches!(self.phase, LifecyclePhase::RetiringContainer)
@@ -680,6 +773,7 @@ enum DaemonLifecycleResult {
 pub(crate) struct LifecycleFailure {
     pub(crate) detail: String,
     pub(crate) refusal: Option<Refusal>,
+    pub(crate) reason: Option<crate::controller::LifecycleFailureReason>,
 }
 
 /// One lifecycle operation's outcome, and the channel every waiter reads it
@@ -687,11 +781,26 @@ pub(crate) struct LifecycleFailure {
 type LifecycleResult = std::result::Result<DaemonLifecycleResult, LifecycleFailure>;
 type LifecycleWatch = tokio::sync::watch::Receiver<Option<LifecycleResult>>;
 
+type LifecycleAcceptance =
+    tokio::sync::watch::Receiver<Option<std::result::Result<(), LifecycleFailure>>>;
+
+type LifecycleAcceptanceSender =
+    tokio::sync::watch::Sender<Option<std::result::Result<(), LifecycleFailure>>>;
+
+pub(crate) struct StartedLifecycle {
+    receipt: LifecycleReceipt,
+    result: LifecycleWatch,
+    acceptance: LifecycleAcceptance,
+}
+
 impl LifecycleFailure {
     fn of(error: &anyhow::Error) -> Self {
         Self {
             detail: format!("{error:#}"),
             refusal: Refusal::of(error),
+            reason: error
+                .downcast_ref::<crate::controller::LifecycleFailureReason>()
+                .copied(),
         }
     }
 
@@ -701,16 +810,42 @@ impl LifecycleFailure {
         Self {
             detail: detail.into(),
             refusal: None,
+            reason: None,
         }
     }
 
     /// Rebuild the error a waiter sees, with the refusal still attached.
     fn into_error(self) -> anyhow::Error {
-        match self.refusal {
+        let error = match self.refusal {
             Some(refusal) => anyhow::Error::new(refusal).context(self.detail),
             None => anyhow::Error::msg(self.detail),
+        };
+        match self.reason {
+            Some(reason) => error.context(reason),
+            None => error,
         }
     }
+
+    fn public_message(&self, prefix: &str, reference: &str) -> String {
+        lifecycle_failure_message(prefix, self.refusal.as_ref(), self.reason, reference)
+    }
+}
+
+/// Render only trusted boundary guidance; raw diagnostic chains stay in logs.
+pub(crate) fn lifecycle_failure_message(
+    prefix: &str,
+    refusal: Option<&Refusal>,
+    reason: Option<crate::controller::LifecycleFailureReason>,
+    reference: &str,
+) -> String {
+    let reason = if let Some(refusal) = refusal {
+        format!("{refusal}. Follow this guidance, then retry the action.")
+    } else if let Some(reason) = reason {
+        reason.to_string()
+    } else {
+        "The lifecycle operation could not finish. Retry the action; if the runtime is unavailable, Resume the session to repair it first.".into()
+    };
+    format!("{prefix}: {reason} Reference {reference}.")
 }
 
 impl std::fmt::Display for LifecycleFailure {
@@ -741,9 +876,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
 
 mod close;
 mod close_workspace;
-mod create;
-mod readiness;
-use readiness::{HarnessReadinessWatch, ReadinessObservation, UnreadySession};
+pub(crate) mod create;
 mod lifecycle;
 mod resume;
 mod snapshot;
@@ -757,17 +890,21 @@ use support::*;
 mod activity_cleanup;
 pub(crate) mod delegation;
 mod diagnostics;
+mod previous_daemon;
 mod process;
 pub use process::*;
 mod serve;
 use serve::*;
 mod actions;
+mod machine;
 use actions::*;
 mod guards;
 pub(crate) use guards::*;
 mod dashboard_reads;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) mod continuation;
+
+mod attention;

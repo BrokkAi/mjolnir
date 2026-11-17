@@ -60,13 +60,32 @@ pub fn open(config: &Config) -> (Value, Value) {
 
 pub fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
     draft.as_object_mut().unwrap().remove("_subagent_options");
-    for task in ["straightforward", "subtle"] {
+    draft.as_object_mut().unwrap().remove("_reviewer_options");
+    draft
+        .as_object_mut()
+        .unwrap()
+        .remove("_review_action_reason");
+    for task in ["straightforward", "subtle", "oracle"] {
         if draft["subagents"][task]["model"]
             .as_str()
             .is_none_or(|m| m.trim().is_empty())
         {
             draft["subagents"].as_object_mut().unwrap().remove(task);
         }
+        if draft["subagents"]["yolo"][task]["model"]
+            .as_str()
+            .is_none_or(|m| m.trim().is_empty())
+            && let Some(yolo) = draft["subagents"]["yolo"].as_object_mut()
+        {
+            yolo.remove(task);
+        }
+    }
+    if draft["subagents"]["yolo"]
+        .as_object()
+        .is_some_and(|yolo| yolo.is_empty())
+        && let Some(subagents) = draft["subagents"].as_object_mut()
+    {
+        subagents.remove("yolo");
     }
     // The Machines page always shows this machine. Until it carries a setting
     // of its own it is the implied machine, not an entry, so it does not turn

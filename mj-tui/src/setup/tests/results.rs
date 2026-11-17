@@ -40,6 +40,7 @@ fn detection_report_keeps_a_long_fix_reachable_until_settings_closes() {
     dashboard.setup_discovered(
         generation,
         Ok(crate::setup::SetupDetection {
+            profile_readiness: Default::default(),
             scope: DetectScope::Runtimes,
             config: Config::default(),
             rejected_runtimes: vec![RejectedRuntime {

@@ -75,6 +75,11 @@ impl SetupDialog {
                 interactive && !self.discovering && !self.saving,
             ));
         }
+        // A runtime's machine is an SSH host or template added on the
+        // Machines page; offer the jump from where the need shows up.
+        if self.path == ["targets"] {
+            actions.push((OpenMachines, "Machines", interactive));
+        }
         // The report of what a runtimes detection turned down stays readable
         // from its page until Settings closes.
         if self.path == ["targets"] && !self.detection_rejected.is_empty() {

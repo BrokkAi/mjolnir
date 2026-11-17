@@ -109,6 +109,28 @@ pub(super) fn load_materialized_session_summary_from(
                     .as_ref()
                     .is_none_or(|(user_position, _)| agent_position > user_position)
             });
+    let (agent_message_latest_content_ordinals, interruption_event_ordinals) =
+        read_materialized_unread_ordinals(&connection, session_id)?;
+
+    Ok(Some(MaterializedSessionSummary {
+        session_id: session_id.to_owned(),
+        applied_event_ordinal,
+        last_activity_at_ms,
+        execution: parse_materialized_execution(&execution, running_started_at_ms)?,
+        session_title,
+        last_agent_message: last_agent_message.map(|(_, message)| message),
+        last_user_message: last_user_message.map(|(_, message)| message),
+        last_agent_message_follows_last_user,
+        agent_message_latest_content_ordinals,
+        interruption_event_ordinals,
+    }))
+}
+
+/// Read the summary's ordinal facts without deserializing transcript bodies.
+fn read_materialized_unread_ordinals(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<(Vec<u64>, Vec<u64>)> {
     let mut ordinal_statement = connection.prepare(
         "SELECT latest_content_event_ordinal
          FROM materialized_transcript_items
@@ -161,18 +183,18 @@ pub(super) fn load_materialized_session_summary_from(
     interruption_event_ordinals.sort_unstable();
     interruption_event_ordinals.dedup();
 
-    Ok(Some(MaterializedSessionSummary {
-        session_id: session_id.to_owned(),
-        applied_event_ordinal,
-        last_activity_at_ms,
-        execution: parse_materialized_execution(&execution, running_started_at_ms)?,
-        session_title,
-        last_agent_message: last_agent_message.map(|(_, message)| message),
-        last_user_message: last_user_message.map(|(_, message)| message),
-        last_agent_message_follows_last_user,
+    Ok((
         agent_message_latest_content_ordinals,
         interruption_event_ordinals,
-    }))
+    ))
+}
+
+fn read_latest_unread_event_ordinal(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<u64>> {
+    let (agent, interruptions) = read_materialized_unread_ordinals(connection, session_id)?;
+    Ok(agent.into_iter().chain(interruptions).max())
 }
 
 /// The oldest visible user message, which is where a session's provisional
@@ -242,35 +264,35 @@ pub(super) fn materialized_user_message(
     Ok(None)
 }
 
+/// SQL form of `TranscriptItem::is_turn_start`: a user prompt (a user item
+/// that is not an elicitation reply) or a harness-started turn marker. Every
+/// store query that finds turn boundaries uses this, so loaded windows agree
+/// with `ProjectionWindow::trim`.
+fn turn_start_sql() -> String {
+    format!(
+        "(stable_id GLOB '{}*' OR (stable_id NOT GLOB '{}*' AND json_extract(body_json, '$.kind')='user'))",
+        mj_core::transcript::HARNESS_TURN_ITEM_PREFIX,
+        mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX,
+    )
+}
+
 /// Where the newest turn began: a user message, or the marker for a turn the
-/// harness started on its own. This is the recovery boundary, so it reads a
-/// position only and never has to decode a transcript body.
+/// harness started on its own. This is the recovery boundary; it reads a
+/// position only, scanning back from the newest item.
 pub(super) fn last_materialized_turn_start(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<u64>> {
     Ok(connection
         .query_row(
-            "SELECT position
-             FROM materialized_transcript_items
-             WHERE session_id = ?1
-               AND (
-                   stable_id GLOB ?2
-                   OR json_extract(
-                       CASE
-                           WHEN stable_id GLOB 'user:*' OR stable_id GLOB 'user-*'
-                           THEN body_json
-                           ELSE '{}'
-                       END,
-                       '$.kind'
-                   ) = 'user'
-               )
-             ORDER BY position DESC, stable_id DESC
-             LIMIT 1",
-            params![
-                session_id,
-                format!("{}*", mj_core::transcript::HARNESS_TURN_ITEM_PREFIX)
-            ],
+            &format!(
+                "SELECT position FROM materialized_transcript_items
+                 WHERE session_id = ?1 AND {}
+                 ORDER BY position DESC, stable_id DESC
+                 LIMIT 1",
+                turn_start_sql()
+            ),
+            params![session_id],
             |row| row.get::<_, u64>(0),
         )
         .optional()?)
@@ -409,6 +431,18 @@ pub fn load_prompt_acceptance(session_id: &str, command_id: &str) -> Result<Opti
         "input was delivered but its acceptance ordinal is unavailable; refusing to send it twice"
     );
     Ok(None)
+}
+
+/// Whether the stored projection holds a transcript item with this stable id.
+/// A prompt's item appears when the prompt starts, so this tells a started
+/// prompt from one that was only queued.
+pub fn materialized_transcript_item_exists(session_id: &str, stable_id: &str) -> Result<bool> {
+    let connection = open_reader(&database_path())?;
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items WHERE session_id=?1 AND stable_id=?2)",
+        params![session_id, stable_id],
+        |row| row.get(0),
+    )?)
 }
 
 pub(super) fn load_materialized_turn_outcome_from(
@@ -604,6 +638,60 @@ pub fn load_materialized_transcript_filtered(
     )
 }
 
+/// Join parked output for presentation without changing stored bodies or page boundaries.
+pub(super) fn hydrate_terminal_outputs(
+    connection: &Connection,
+    session_id: &str,
+    items: &mut [Arc<TranscriptItem>],
+) -> Result<()> {
+    let held = mj_core::transcript::TerminalOutputs::of(items.iter().map(AsRef::as_ref));
+    let ids = held
+        .referenced_terminal_ids()
+        .map(|id| format!("terminal:{id}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut context = Vec::new();
+    let mut statement = connection.prepare(
+        "SELECT body_json FROM materialized_transcript_items WHERE session_id=?1 AND stable_id=?2",
+    )?;
+    for id in ids {
+        let body: Option<String> = statement
+            .query_row(params![session_id, id], |row| row.get(0))
+            .optional()?;
+        if let Some(body) = body {
+            context.push(TranscriptItem {
+                stable_id: id,
+                position: 0,
+                latest_content_event_ordinal: None,
+                created_at_ms: 0,
+                last_changed_at_ms: 0,
+                body: decode_transcript_body(&body, session_id)?,
+            });
+        }
+    }
+    let outputs = mj_core::transcript::TerminalOutputs::of(
+        items.iter().map(AsRef::as_ref).chain(context.iter()),
+    );
+    let joined = items
+        .iter()
+        .map(|item| outputs.for_tool(&item.stable_id).into_owned())
+        .collect::<Vec<_>>();
+    for (item, records) in items.iter_mut().zip(joined) {
+        if matches!(item.body, TranscriptBody::Tool { .. }) {
+            let TranscriptBody::Tool {
+                terminal_outputs, ..
+            } = &mut Arc::make_mut(item).body
+            else {
+                unreachable!()
+            };
+            *terminal_outputs = records;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn load_materialized_transcript_filtered_from(
     path: &Path,
     session_id: &str,
@@ -677,7 +765,7 @@ pub(super) fn load_materialized_transcript_filtered_from(
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let items = rows
+    let mut items = rows
         .into_iter()
         .map(
             |(
@@ -739,6 +827,9 @@ pub(super) fn load_materialized_transcript_filtered_from(
     } else {
         latest_seq.max(after_seq)
     };
+    if !roles.is_empty() && !roles.contains(&mj_core::transcript::TranscriptRole::Terminal) {
+        hydrate_terminal_outputs(&connection, session_id, &mut items)?;
+    }
     Ok(Some(TranscriptPage {
         next_after_seq,
         items,
@@ -851,12 +942,10 @@ pub(super) fn compact_materialized_transcript_in(
 
 /// How many transcript items a polled projection carries.
 ///
-/// Every viewer of a polled projection is bounded already: the conversation
-/// pane keeps `chat::TAIL_SEED_ITEMS` (256) entries, and the browser
-/// transcript keeps 1,000 rendered lines. This is set above both, since an
-/// entry renders to at least one line, so the window is the whole of what any
-/// of them would show.
-pub const PROJECTION_TAIL_ITEMS: usize = 1_024;
+/// Both the browser and TUI page older history inline from the store. Keep
+/// twice the TUI's 256 seed entries for the initial window; the browser's
+/// independent 1,000 rendered-line budget may clip this window further.
+pub const PROJECTION_TAIL_ITEMS: usize = 512;
 
 /// Load the same safe window the live projector maintains, without first
 /// deserializing all of the conversation. Read metadata and bodies together.
@@ -884,34 +973,66 @@ pub(super) fn load_materialized_actor_projection_from(
             |row| row.get(0),
         )
         .optional()?;
-    // Pending tools and streams can outlive their initiating turn. Keep their
-    // turn too; the same rule is applied by ProjectionWindow::trim.
-    let mutable: Option<u64> = connection.query_row(
-        "SELECT MIN(position) FROM materialized_transcript_items WHERE session_id=?1
-         AND (json_extract(body_json, '$.streaming')=1
-              OR (json_extract(body_json, '$.kind')='tool'
-                  AND json_extract(body_json, '$.call.status') IN ('pending','in_progress')))",
-        [session_id],
-        |row| row.get(0),
-    )?;
-    let boundary = desired
-        .unwrap_or(0)
-        .min(latest_turn.unwrap_or(0))
-        .min(mutable.unwrap_or(u64::MAX));
+    let boundary = desired.unwrap_or(0).min(latest_turn.unwrap_or(0));
+    let turn_start = turn_start_sql();
     let start: u64 = connection.query_row(
-        "SELECT COALESCE(MAX(position),0) FROM materialized_transcript_items
-         WHERE session_id=?1 AND position<=?2
-         AND (json_extract(body_json, '$.kind')='user' OR stable_id LIKE 'harness-turn:%')",
+        &format!(
+            "SELECT COALESCE(MAX(position),0) FROM materialized_transcript_items
+             WHERE session_id=?1 AND position<=?2 AND {turn_start}"
+        ),
         params![session_id, boundary],
         |row| row.get(0),
     )?;
-    let transcript = read_transcript_range(&connection, session_id, start, None, None)?;
-    let omitted_items = connection.query_row(
-        "SELECT COUNT(*) FROM materialized_transcript_items WHERE session_id=?1 AND position<?2",
-        params![session_id, start],
+    // Find old unsettled turns in one JSON pass, then read only their ranges.
+    let ranges = {
+        let mut statement = connection.prepare(&format!(
+            "WITH starts AS MATERIALIZED (
+                SELECT position FROM materialized_transcript_items WHERE session_id=?1
+                AND {turn_start}
+             ), unsettled AS (
+                SELECT position FROM materialized_transcript_items WHERE session_id=?1 AND position<?2
+                AND ((json_extract(body_json, '$.kind') IN ('agent','thought') AND json_extract(body_json, '$.streaming')=1)
+                  OR (json_extract(body_json, '$.kind')='tool' AND json_extract(body_json, '$.call.status') IN ('pending','in_progress')))
+             )
+             SELECT DISTINCT COALESCE((SELECT MAX(position) FROM starts WHERE position<=u.position),0),
+                 COALESCE((SELECT MIN(position) FROM starts WHERE position>u.position),?2)
+             FROM unsettled u ORDER BY 1"
+        ))?;
+        statement
+            .query_map(params![session_id, start], |row| {
+                Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut transcript = Vec::new();
+    for (begin, end) in ranges {
+        let before = mj_core::storage::TranscriptCursor {
+            position: end,
+            stable_id: String::new(),
+        };
+        transcript.extend(read_transcript_range(
+            &connection,
+            session_id,
+            begin,
+            Some(&before),
+            None,
+        )?);
+    }
+    transcript.extend(read_transcript_range(
+        &connection,
+        session_id,
+        start,
+        None,
+        None,
+    )?);
+    let total: usize = connection.query_row(
+        "SELECT COUNT(*) FROM materialized_transcript_items WHERE session_id=?1",
+        [session_id],
         |row| row.get(0),
     )?;
+    let omitted_items = total - transcript.len();
     let window = ProjectionWindow {
+        latest_unread_event_ordinal: read_latest_unread_event_ordinal(&connection, session_id)?,
         omitted_items,
         provisional_title: first_materialized_user_message(&connection, session_id)?
             .and_then(|(_, text)| mj_core::state::provisional_session_title(&text)),
@@ -1029,7 +1150,8 @@ fn read_transcript_range(
     Ok(items)
 }
 
-/// Rehydrate explicitly referenced historical tools before deriving a delta.
+/// Rehydrate referenced historical tools and possible raw-result terminal matches
+/// before deriving a delta.
 /// A window is a cache, never evidence that a durable tool does not exist.
 pub fn load_projection_references(
     projection: &MaterializedSession,
@@ -1043,37 +1165,28 @@ pub(super) fn load_projection_references_from(
     projection: &MaterializedSession,
     events: &[mj_core::relay::RelayEvent],
 ) -> Result<Vec<Arc<TranscriptItem>>> {
-    let (mut ids, terminals) = mj_transcript::projection::historical_references(events)?;
+    let mj_transcript::projection::HistoricalReferences { mut ids } =
+        mj_transcript::projection::historical_references(events)?;
     let retained = projection
         .transcript
         .iter()
         .map(|item| item.stable_id.as_str())
         .collect::<std::collections::HashSet<_>>();
     ids.retain(|id| !retained.contains(id.as_str()));
-    if ids.is_empty() && terminals.is_empty() {
+    if ids.is_empty() {
         return Ok(Vec::new());
     }
     let mut reader = open_reader(path)?;
     let connection = reader.transaction()?;
-    // Ordinary tool updates use the stable-ID index. Only terminal attachment
-    // events need the JSON reverse-reference scan.
-    let mut parameters = vec![projection.session_id.clone(), serde_json::to_string(&ids)?];
-    let mut statement = connection.prepare(if terminals.is_empty() {
+    // Reconcile only explicit keys. Terminal owners are indexed in the live
+    // projection; output for evicted owners stays parked until read or claimed.
+    let parameters = vec![projection.session_id.clone(), serde_json::to_string(&ids)?];
+    let mut statement = connection.prepare(
         "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
                 last_changed_at_ms, body_json FROM materialized_transcript_items
          WHERE session_id=?1 AND stable_id IN (SELECT value FROM json_each(?2))
-         ORDER BY position,stable_id"
-    } else {
-        parameters.push(serde_json::to_string(&retained)?);
-        parameters.push(serde_json::to_string(&terminals)?);
-        "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
-                last_changed_at_ms, body_json FROM materialized_transcript_items
-         WHERE session_id=?1 AND stable_id NOT IN (SELECT value FROM json_each(?3))
-           AND (stable_id IN (SELECT value FROM json_each(?2))
-             OR EXISTS(SELECT 1 FROM json_each(body_json, '$.terminal_refs')
-                       WHERE value IN (SELECT value FROM json_each(?4))))
-         ORDER BY position,stable_id"
-    })?;
+         ORDER BY position,stable_id",
+    )?;
     let rows = statement
         .query_map(rusqlite::params_from_iter(parameters), |row| {
             Ok((
@@ -1144,6 +1257,7 @@ pub(super) fn load_materialized_projection_tail_from(
         |row| row.get::<_, usize>(0),
     )?;
     let window = ProjectionWindow {
+        latest_unread_event_ordinal: read_latest_unread_event_ordinal(&connection, session_id)?,
         omitted_items: total_items.saturating_sub(transcript.len()),
         provisional_title: first_materialized_user_message(&connection, session_id)?
             .and_then(|(_, text)| mj_core::state::provisional_session_title(&text)),
@@ -1312,6 +1426,71 @@ pub(super) fn load_materialized_session_with(
     connection: &rusqlite::Transaction<'_>,
     session_id: &str,
 ) -> Result<Option<MaterializedSession>> {
+    load_materialized_session_bounded(connection, session_id, None)
+}
+
+/// The projection with its transcript cut to the session's last `turns` user
+/// turns. Rendering a session's recent turns then reads those turns rather
+/// than everything that ever happened in it. A session with fewer turns is
+/// loaded whole.
+pub fn load_materialized_recent_turns(
+    session_id: &str,
+    turns: usize,
+) -> Result<Option<MaterializedSession>> {
+    load_materialized_recent_turns_from(&database_path(), session_id, turns)
+}
+
+pub(super) fn load_materialized_recent_turns_from(
+    path: &Path,
+    session_id: &str,
+    turns: usize,
+) -> Result<Option<MaterializedSession>> {
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
+    let start = match turns.checked_sub(1) {
+        None => None,
+        Some(skip) => connection
+            .query_row(
+                "SELECT position, stable_id
+                 FROM materialized_transcript_items
+                 WHERE session_id = ?1
+                   AND json_extract(
+                       CASE
+                           WHEN stable_id GLOB 'user:*' OR stable_id GLOB 'user-*'
+                           THEN body_json
+                           ELSE '{}'
+                       END,
+                       '$.kind'
+                   ) = 'user'
+                 ORDER BY position DESC, stable_id DESC
+                 LIMIT 1 OFFSET ?2",
+                params![session_id, skip as i64],
+                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?,
+    };
+    let limit = match (turns, start) {
+        (0, _) => Some(0),
+        (_, None) => None,
+        // The transcript is ordered by position, then stable id, so the items
+        // from the start onward are exactly the newest this many.
+        (_, Some((position, stable_id))) => Some(connection.query_row(
+            "SELECT COUNT(*)
+             FROM materialized_transcript_items
+             WHERE session_id = ?1
+               AND (position > ?2 OR (position = ?2 AND stable_id >= ?3))",
+            params![session_id, position as i64, stable_id],
+            |row| row.get::<_, usize>(0),
+        )?),
+    };
+    load_materialized_session_bounded(&connection, session_id, limit)
+}
+
+fn load_materialized_session_bounded(
+    connection: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    transcript_limit: Option<usize>,
+) -> Result<Option<MaterializedSession>> {
     let Some(fields) = read_materialized_session_fields(connection, session_id)? else {
         return Ok(None);
     };
@@ -1323,7 +1502,7 @@ pub(super) fn load_materialized_session_with(
         execution: fields.execution,
         session_title: fields.session_title,
         configuration: fields.configuration,
-        transcript: read_materialized_transcript(connection, session_id, None)?,
+        transcript: read_materialized_transcript(connection, session_id, transcript_limit)?,
         queued_prompts: read_materialized_queued_prompts(connection, session_id)?,
         pending_elicitations: fields.pending_elicitations,
         active_turn: fields.active_turn,
@@ -2097,7 +2276,7 @@ pub(super) fn load_continuation_evidence_from(
             row.get::<_, String>(5)?,
         ))
     })?;
-    crate::continuation::evidence_from_items(rows.map(|row| {
+    mj_transcript::authorization::evidence_from_items(rows.map(|row| {
         let (
             stable_id,
             position,

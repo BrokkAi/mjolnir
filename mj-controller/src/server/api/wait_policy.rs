@@ -60,6 +60,7 @@ pub struct WaitObservation {
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
     /// Command ids of the prompts queued behind the active turn.
     pub queued: Vec<String>,
+
     pub capacity_retry: Option<CapacityRetry>,
     pub retry_assessment_pending: bool,
     pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
@@ -71,6 +72,12 @@ pub struct WaitObservation {
     /// Mjolnir reminds the child to hand it back, so like an armed retry the
     /// turn is not an ending yet.
     pub report_pending_for: Option<String>,
+    /// Whether the processes the child's last turn left running are alive, as
+    /// its worker published it. Only the live snapshot carries it.
+    pub work_liveness: mj_core::subagent::Liveness,
+    /// When a held child, waiting for those processes, is asked to hand back
+    /// what it has. The wait wakes then.
+    pub hold_give_up_at_ms: Option<i64>,
     /// The report a child handed back, and the turn it answers.
     pub handback: Option<(String, String)>,
 }
@@ -120,7 +127,7 @@ impl WaitObservation {
     /// Jev is still reading its reply, or while a sub-agent child still owes
     /// its report for it. Nothing that starts a new command holds it: a turn
     /// the harness starts itself, background work, an expected continuation,
-    /// Mjolnir's automatic continuation, a later prompt or a goal. Those are
+    /// a later prompt or a goal. Those are
     /// what the session does next.
     ///
     /// How it ended is the harness outcome, except where the turn's own
@@ -193,8 +200,7 @@ impl WaitObservation {
             Some(StartStatus::Submitted { turn_id }) => self
                 .last_turn_outcome
                 .as_ref()
-                .and_then(|outcome| outcome.accepted_ordinal)
-                .is_none_or(|ordinal| ordinal < *turn_id),
+                .is_none_or(|turn| !turn.answers(*turn_id)),
             _ => false,
         };
         self.activity.is_idle()
@@ -241,10 +247,26 @@ impl WaitObservation {
             .iter()
             .map(|turn| turn.command_id.as_str())
             .collect::<Vec<_>>();
-        match mj_core::subagent::report_state(handback_tool, report, Some(turn), &in_flight, now_ms)
-        {
+        match mj_core::subagent::report_state(
+            handback_tool,
+            report,
+            Some(turn),
+            &self.work_liveness,
+            &in_flight,
+            now_ms,
+        ) {
             mj_core::subagent::ReportState::Pending { .. } => {
                 self.report_pending_for = Some(turn.command_id.clone());
+            }
+            // A held child waits for its own processes: its turn is no ending
+            // yet, and the wait wakes when the hold gives up.
+            mj_core::subagent::ReportState::Held {
+                give_up_at_ms,
+                follow_up,
+                ..
+            } => {
+                self.report_pending_for = Some(turn.command_id.clone());
+                self.hold_give_up_at_ms = follow_up.is_none().then_some(give_up_at_ms);
             }
             mj_core::subagent::ReportState::Delivered(message) => {
                 self.handback = Some((turn.command_id.clone(), message));
@@ -428,11 +450,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         let ended = observation
             .last_turn_outcome
             .as_ref()
-            .filter(|outcome| {
-                outcome
-                    .accepted_ordinal
-                    .is_some_and(|ordinal| ordinal >= target)
-            })
+            .filter(|outcome| outcome.answers(target))
             .and_then(|outcome| observation.turn_end(outcome));
         return match ended {
             None if request.return_on_input => observation.input_request(),

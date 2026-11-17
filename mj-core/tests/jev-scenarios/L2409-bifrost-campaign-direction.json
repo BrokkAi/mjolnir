@@ -1,0 +1,362 @@
+{
+  "id": "L2409",
+  "title": "Bifrost campaign direction",
+  "category": "still-open-user-question",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "d8443f17cb24506c5ee26277fcf319f4",
+    "session_title": "bifrost via codex3",
+    "reply_position": 256579,
+    "captured_at": "2026-10-22T05:00:42.843Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "What are your three best ideas for building an end-to-end realistic oracle-based test harness for Bifrost policies in the spirit of FIRD and FUZZ campaigns that we run for the lower-level fact extraction?"
+        },
+        {
+          "id": "user:1514",
+          "role": "user",
+          "text": "Is this something we can build deterministically? Because it sounds like I would need a coding agent to generate the test corpus, which is fine in principle, I'm just making sure I'm understanding correctly what you're proposing."
+        },
+        {
+          "id": "user:1930",
+          "role": "user",
+          "text": "Give me a prompt to build this with an agent that has access to my repo clones. Avoid over specifying the solution, it is as smart as you "
+        },
+        {
+          "id": "user:2392",
+          "role": "user",
+          "text": "Maybe we can do it here. Can you see /repos ? "
+        },
+        {
+          "id": "user:2485",
+          "role": "user",
+          "text": "Try again "
+        },
+        {
+          "id": "user:2551",
+          "role": "user",
+          "text": "Do you also have the instructions on using MJ agents in your context?"
+        },
+        {
+          "id": "user:2653",
+          "role": "user",
+          "text": "Great, please build the v1 that you proposed in that case"
+        },
+        {
+          "id": "user:4485",
+          "role": "user",
+          "text": "Okay, that's a good proof of concept, but let's build something useful now"
+        },
+        {
+          "id": "user:7109",
+          "role": "user",
+          "text": "did you include a runbook in the PR? did you tag the issues w a distinguishing mark?"
+        },
+        {
+          "id": "user:7351",
+          "role": "user",
+          "text": "add that convention to the runbook pls (new PR)"
+        },
+        {
+          "id": "user:7484",
+          "role": "user",
+          "text": "what should we build next? cover more policies? more repos? something else?"
+        },
+        {
+          "id": "user:7613",
+          "role": "user",
+          "text": "so maybe the next step is to start root causing the incomplete evidence and start fixing those?"
+        },
+        {
+          "id": "user:12095",
+          "role": "user",
+          "text": "great, please burn those down next, then continue with fixing incompleteness / expanding the policy test harness, you have the ball"
+        },
+        {
+          "id": "user:16698",
+          "role": "user",
+          "text": "Codex has questions for you. Work can continue while you answer.\n\nMay I release the validated TypeScript grammar fix in PR #4 as brokk-tree-sitter-typescript 0.23.7, including its version change, tag and crates.io publication, then pin that release in Bifrost?: Yes, release 0.23.7 and update Bifrost"
+        },
+        {
+          "id": "user:17569",
+          "role": "user",
+          "text": "are there additional streams we can kick off in parallel?"
+        },
+        {
+          "id": "user:17785",
+          "role": "user",
+          "text": "what are the most/least important bugs you've surfaced so far"
+        },
+        {
+          "id": "user:35385",
+          "role": "user",
+          "text": "What is blocking 5408?"
+        },
+        {
+          "id": "user:35588",
+          "role": "user",
+          "text": "Let's do it. Then are we ready to expand the test suite ? "
+        },
+        {
+          "id": "user:41740",
+          "role": "user",
+          "text": "go"
+        },
+        {
+          "id": "user:44431",
+          "role": "user",
+          "text": "Pls continue improving and expanding the test suite until we hit diminishing returns. Pause to fix uncovered bugs when we have a large enough set that they may mask additional defects. "
+        },
+        {
+          "id": "user:120673",
+          "role": "user",
+          "text": "Is there more we can do while waiting? "
+        },
+        {
+          "id": "user:145665",
+          "role": "user",
+          "text": "what does \"ready for validation\" mean here"
+        },
+        {
+          "id": "user:146970",
+          "role": "user",
+          "text": "is this fixing product bugs, or harness bugs, or something else?"
+        },
+        {
+          "id": "user:147150",
+          "role": "user",
+          "text": "1. what bugs are left over from our last campaign\n\n2. do we know how we should expand the next one"
+        },
+        {
+          "id": "user:147969",
+          "role": "user",
+          "text": "sounds like a plan, you have the ball"
+        },
+        {
+          "id": "user:149701",
+          "role": "user",
+          "text": "Continue "
+        },
+        {
+          "id": "user:221459",
+          "role": "user",
+          "text": "go ahead and release ts-cpp and continue"
+        },
+        {
+          "id": "user:227794",
+          "role": "user",
+          "text": "WSL restarted, continue"
+        },
+        {
+          "id": "user:242485",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:246272",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:250892",
+          "role": "user",
+          "text": "approved"
+        },
+        {
+          "id": "user:250930",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:250964",
+          "role": "user",
+          "text": "and yes 0.24.5 is approved"
+        },
+        {
+          "id": "user:253547",
+          "role": "user",
+          "text": "0.24.5's cast-macro feature regressed 4 C++ recovery tests. A narrower variant (B: macro allowed only before a cv-qualifier, e.g. `(ATTR const T*)`) fixes the Botan constructor loss but still changes recovery trees for 3 cppcheck/abseil REQUIRES fixtures, so Bifrost's constraint-macro recovery would need adapting. The gain is 15->4 recovery nodes in unity.c; cJSON stays unqualified anyway. Which way?\n\nGrammar: Park the feature (Recommended)"
+        },
+        {
+          "id": "agent:255462",
+          "role": "assistant",
+          "text": "The counterfactual answers the yield question, and the answer is low.\n\n- With `ffc.h` admitted, every `StructureUnavailable` diagnostic disappears. The scan is still inconclusive, with 123 diagnostics. They include 61 loop diagnostics from many independent causes: 26 unresolved local or parameter calls, then cleanup, resource and exception gaps, function macros, and preprocessor control.\n- The scan also took 286 s, just under the oracle's 300 s limit.\n- C/C++ has no grammar-gap repair at all (only Go overrides it), so changing the admission order would gain nothing.\n\nA statement-macro fix would therefore turn one blocker into many, and Hiredis would still not qualify. I'm recording that and not building the fix."
+        },
+        {
+          "id": "agent:255522",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The counterfactual is designed to *overstate* the fix's gain: it removes the blocking lines entirely, which no real repair would do. Even under that best case, Hiredis keeps 61 loop diagnostics from about ten independent causes. When the best case is still far from qualification, the right move is to stop.\n- C/C++ policy completeness in real repositories is a long tail. Each layer removed (recovery, admission, caching) exposes several more: macros, cleanup semantics, unresolved calls. That pattern is the \"diminishing returns\" signal you asked me to watch for.\n`─────────────────────────────────────────────────`\n\nThe Hiredis investigation is finished, and I've parked the case like itertools.\n\nEven with `ffc.h` admitted (the best case, since the blocking lines were simply removed), the scan stays inconclusive. It has 61 loop diagnostics from about ten independent C/C++ lowering gaps, and it takes 286 s, against a 300 s limit. A statement-macro fix would not get the case to qualification. C/C++ also has no grammar-gap repair, so moving admission after repair would change nothing. The findings are on #6375 and in the #5452 plan.\n\nWhere today's work stands:\n\n| Item | Status |\n| --- | --- |\n| #6380 Hiredis scan timeout (>600 s → 91.6 s) | Draft. A review fix is in progress: remembered transient failures must keep their reason. Worth landing on its own. |\n| 0.24.5 cast-macro grammar | Parked (your call). Bifrost stays on 0.24.4. Candidates kept as branches. |\n| #6365 `None` read as a binding | Parked: rejected in review, and it frees no conditions. |\n| #6366 scalar veto scope | Measured: narrowing it frees almost nothing. Left open as a diagnostics issue. |\n| itertools, cJSON, Hiredis cases | All unqualified and parked behind long tails of producer gaps. |\n\nMy read is that the current real-repository C/C++ and Rust cases have reached diminishing returns. After #6380 lands, I'd look at the shared root causes behind most of these blockers: Rust receiver resolution, and C/C++ unresolved local calls and cleanup modeling. Those are larger producer projects, so tell me if you want them, or would rather point the campaign elsewhere.\n\nWaiting on the #6380 review-fix lane."
+        },
+        {
+          "id": "agent:255713",
+          "role": "assistant",
+          "text": "The P1 fix is in `cd8847b`. One shared `RequestRead<T>` mechanism now keeps the typed reason for every negative request memo (prepared, current and live sources, and prepared syntax) and replays it on each hit. The suites pass: 1574 tests across analysis, cpp-analysis, cpp and `suite_cross_language`, plus Clippy and fmt. Hiredis still finishes, in 82 s.\n\nThe fix rewrites memo machinery used by every language, and it now records I/O errors that were previously discarded. So a focused re-review is worth it before I mark the PR ready. Meanwhile I'll merge master and compile-check."
+        },
+        {
+          "id": "agent:255767",
+          "role": "assistant",
+          "text": "The merge compiles. Master's incoming changes touch `cpp/semantic.rs` and `declarations.rs`, but not the files this PR changes. Pushing to the draft PR:"
+        },
+        {
+          "id": "agent:255790",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The fix replaced several separate negative memos with one `RequestRead<T>` type that carries its provenance. A generic carrier means a memo cannot be stored without its reason, so a future memo added the same way cannot reintroduce the leak.\n- The re-review's third question matters most. The change now records I/O, liveness and hash errors that used to be discarded silently. A normal event, such as a file deleted during an update, could start making ordinary scans incomplete in every language. A behavior change at that scale has to be checked in callers, not only in tests.\n`─────────────────────────────────────────────────`\n\nThe #6380 P1 is fixed, and the branch is up to date with master: merged, compile-checked, and pushed as head `57ee55cfc21d`. The local branch, the remote branch and the PR head all match.\n\nThe PR stays a draft until the focused re-review of `cd8847b` comes back. It checks three things:\n- the reviewer's sequence is closed\n- every negative memo path replays its reason\n- the newly recorded I/O errors do not make normal scans in other languages incomplete\n\nIf it accepts, I'll update the PR's validation section and mark it ready."
+        },
+        {
+          "id": "agent:255890",
+          "role": "assistant",
+          "text": "The re-review accepts the P1 fix but finds one P2 regression. A negative memo for *ordinary absence* now gets a synthetic `StructureUnavailable`. A membership probe such as `is_analyzed(old_file)` on a deleted or never-existing file therefore makes the query incomplete in every language. Absence is a normal answer there.\n\nMy fix: a negative memo distinguishes *absent*, which replays nothing as before, from *failed*, which carries and replays its typed reason. Callers that need structure keep recording `StructureUnavailable` themselves, as `cpp/mod.rs:707` already does."
+        },
+        {
+          "id": "agent:255935",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- This is the mirror image of the P1. The first fix stopped transient failures from passing as stable. The overcorrection made *absence* look like failure. Both come from a two-state negative (`None` with or without a reason) trying to express three states: present, legitimately absent, and failed.\n- Making Absent and Failed separate types forces each memo site to state which case it means. Neither bug is possible once the type has no \"negative with no explanation\" state.\n- Membership probes such as `is_analyzed` are where absence matters most. \"Not in the set\" is their main answer, not an edge case.\n`─────────────────────────────────────────────────`\n\nThe re-review closed the P1 but found a P2. The fix had made ordinary absence look like a failure, so a membership check on a deleted file marked the query incomplete in every language.\n\nA lane is now separating legitimately *absent* from actually *failed* as distinct variants, so absence stays complete and real failures still replay their reason. It is adding a regression that runs a deleted-file membership probe twice in one query. It will rerun the suites, including one that covers file deletion and update, and confirm Hiredis still finishes and still reports `StructureUnavailable(ffc.h)`.\n\n#6380 stays a draft until that lands."
+        },
+        {
+          "id": "agent:256069",
+          "role": "assistant",
+          "text": "The P2 is fixed in `b9bf7a063d`. `RequestRead` now has three explicit states: `Present`, `Absent` (replays nothing) and `Failed` (replays its typed reasons). The child validated it:\n- 1584 tests passed, including the scheduled-only deletion and update tests\n- Clippy and fmt are clean\n- Hiredis still finishes (134 s) and still names `StructureUnavailable(ffc.h)`\n\nThe diff is small, so I'll review it myself."
+        },
+        {
+          "id": "agent:256159",
+          "role": "assistant",
+          "text": "Master's changes are unrelated (a Kotlin golden and a README), and the tree compiles. Next: push, update the PR's validation section, check the head SHA, and mark ready."
+        },
+        {
+          "id": "agent:256176",
+          "role": "assistant",
+          "text": "The head matches everywhere, but `gh pr edit` failed on the deprecated Projects API. I'll update the body through the REST API instead."
+        },
+        {
+          "id": "agent:256198",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- Two review rounds caught two opposite mistakes in the same type. The first version could treat a transient failure as stable, and the overcorrection treated absence as failure. The final three-state `RequestRead` makes both impossible by construction. That is the CLAUDE.md preference: fix the shape of the data, not each call site.\n- The `let _ = cell.set(...)` lines look like violations of the \"never discard a fallible result\" rule, but they are not. `OnceCell::set` returns `Err` only when another thread already won the race to initialize, and that is the intended behavior.\n`─────────────────────────────────────────────────`\n\n#6380 is ready for the merge queue at head `d94ff6575d`. The local branch, the remote branch and the PR head all match, and the branch includes current master.\n\n**What it fixes:** a Hiredis policy scan used to run for more than 30 minutes; it now returns a report in 82–134 s, depending on the run. The cause was that C++ file reads which were incomplete for a deterministic reason were never cached, so each of about 1,400 call resolutions rebuilt include closures.\n\n**How it got there:**\n- The first version cached those reads together with their incompleteness reasons.\n- The first review found a P1: a transient failure could be cached as if it were stable. Fixed with typed provenance on every negative memo.\n- The second review confirmed that fix and found a P2: absent files were now reported as failures, which would have made membership checks incomplete in all languages. Fixed with explicit `Present` / `Absent` / `Failed` states.\n\n**Final validation:** 1584 tests passed across the analysis, C++ and cross-language suites, plus the scheduled-only deletion and update tests. Clippy, fmt and the drift check are clean.\n\n**What it does not fix:** Hiredis is still inconclusive because `ffc.h` is refused at admission. I diagnosed and measured that on #6375 and parked it, since even admitting `ffc.h` leaves a long tail of C/C++ lowering gaps.\n\n**Campaign state:** every current real-repository case (itertools, cJSON, Hiredis) is parked behind larger producer gaps:\n- Rust method-receiver resolution and Drop modeling\n- C/C++ unresolved local calls, cleanup semantics and macros\n\nThese cases have reached diminishing returns. The next step with real value is one of those producer projects, or moving the campaign to languages or cases with fewer blockers. Which would you like? I have no children running and nothing pending except #6380 in the queue."
+        },
+        {
+          "id": "agent:256377",
+          "role": "assistant",
+          "text": "#6380 has landed. Cleaning up: checking that the issue closed, removing the lane worktree and branch, and deleting my finished lanes' `/tmp` scratch."
+        },
+        {
+          "id": "agent:256421",
+          "role": "assistant",
+          "text": "#6380 has landed on master as `733408b107e6`, and #6375 closed with it. C++ policy scans no longer rebuild include closures for files whose reads fail the same way every time. The Hiredis scan now returns a report in 82–134 s instead of running for more than 30 minutes.\n\nI cleaned up after the finished work:\n- removed every lane worktree and its local branch\n- deleted about 4.6 GB of lane scratch from `/tmp`\n- deleted the 2 GB CLI built for the parked 0.24.5 grammar, keeping its custody and receipt files (26 MB in total) under `.agents/scratch/policy-oracle-round4/`\n\nThe findings themselves are on the issues and in the #5452 plan on the campaign branch, which is pushed.\n\nNothing else is running, and no PRs of mine are open. The question from my last message still stands. The current cases are parked behind larger gaps in what Bifrost's analysis can model: Rust method-receiver resolution and Drop handling, and C/C++ unresolved local calls, cleanup and macros. Should I take on one of those, or point the campaign at cases with fewer blockers?"
+        },
+        {
+          "id": "agent:256524",
+          "role": "assistant",
+          "text": "Another session reports that perf now works in this container. That changes a recorded fact: my profiling memory says this host has no perf. I'll check that it actually works before updating the memory."
+        },
+        {
+          "id": "agent:256543",
+          "role": "assistant",
+          "text": "It works here: `perf stat`, `perf record` and `perf script` all produce samples. Kernel symbols are hidden, which doesn't matter for profiling user-space Bifrost. Updating the memory:"
+        },
+        {
+          "id": "agent:256579",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- Real `perf` sampling avoids the main weakness of the earlier profiling. GDB stack samples of release builds blame the wrong function when identical-code folding merges same-shaped functions. That gave two false hot spots in earlier work. `perf record` with call graphs samples far more often and pays no debugger overhead. During the Hiredis diagnosis, GDB overhead had inflated memory to about 3.65 GB.\n- `perf_event_paranoid=1` allows user-space and kernel profiling of your own processes, but `/proc/kallsyms` stays restricted. So kernel frames show as raw addresses, and user-space Bifrost frames resolve normally.\n`─────────────────────────────────────────────────`\n\n`perf` now works in this container, and I checked it myself: `perf stat`, `perf record` and `perf script` all give real samples. Kernel symbols are hidden, which doesn't matter for profiling Bifrost. I updated my profiling memory to say perf is available on the morannon Mjolnir container from today, and kept the older note about GDB sampling problems for other hosts. My workspace survived the container replacement: same branch, same head (`caf6cae25e`), and the grammar clone is intact.\n\nNothing is running, and the earlier question is still open. Every current real-repository case is parked behind larger gaps in what Bifrost's analysis can model:\n- Rust: method-receiver resolution and Drop handling\n- C/C++: unresolved local calls, cleanup and macros\n\nShould I take on one of those, or move the campaign to cases with fewer blockers? Perf would help with either, for example in confirming the Hiredis scan's remaining 82–134 s cost."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "0.24.5's cast-macro feature regressed 4 C++ recovery tests. A narrower variant (B: macro allowed only before a cv-qualifier, e.g. `(ATTR const T*)`) fixes the Botan constructor loss but still changes recovery trees for 3 cppcheck/abseil REQUIRES fixtures, so Bifrost's constraint-macro recovery would need adapting. The gain is 15->4 recovery nodes in unity.c; cJSON stays unqualified anyway. Which way?\n\nGrammar: Park the feature (Recommended)",
+    "assistant_text_tail": "`★ Insight ─────────────────────────────────────`\n- Real `perf` sampling avoids the main weakness of the earlier profiling. GDB stack samples of release builds blame the wrong function when identical-code folding merges same-shaped functions. That gave two false hot spots in earlier work. `perf record` with call graphs samples far more often and pays no debugger overhead. During the Hiredis diagnosis, GDB overhead had inflated memory to about 3.65 GB.\n- `perf_event_paranoid=1` allows user-space and kernel profiling of your own processes, but `/proc/kallsyms` stays restricted. So kernel frames show as raw addresses, and user-space Bifrost frames resolve normally.\n`─────────────────────────────────────────────────`\n\n`perf` now works in this container, and I checked it myself: `perf stat`, `perf record` and `perf script` all give real samples. Kernel symbols are hidden, which doesn't matter for profiling Bifrost. I updated my profiling memory to say perf is available on the morannon Mjolnir container from today, and kept the older note about GDB sampling problems for other hosts. My workspace survived the container replacement: same branch, same head (`caf6cae25e`), and the grammar clone is intact.\n\nNothing is running, and the earlier question is still open. Every current real-repository case is parked behind larger gaps in what Bifrost's analysis can model:\n- Rust: method-receiver resolution and Drop handling\n- C/C++: unresolved local calls, cleanup and macros\n\nShould I take on one of those, or move the campaign to cases with fewer blockers? Perf would help with either, for example in confirming the Hiredis scan's remaining 82–134 s cost.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      256421,
+      256579
+    ],
+    "user_position": 253547,
+    "input_rationale": "Nothing is running and every current campaign case is parked behind large engine gaps; the agent will not choose between taking on the Rust/C++ gaps or switching cases without the user. The earlier question 'still stands' (256421).",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:256579"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-22T05:14:07.540Z",
+        "kind": "system",
+        "text": "effort set to xhigh"
+      },
+      {
+        "at": "2026-10-22T05:15:12.594Z",
+        "kind": "user",
+        "text": "take rust pls; ask 8a4e703ed8cb3c1d6878e1d73ee7a3ce to review your plan before beginning impl"
+      },
+      {
+        "at": "2026-10-22T05:15:12.601Z",
+        "kind": "system",
+        "text": "Mailbox events:   - New issue brokkai/bifrost-dev#6390 Cold workspace build parses and lowers on 2-3 of 24 cores for 30-40 minutes"
+      },
+      {
+        "at": "2026-10-22T05:16:32.630Z",
+        "kind": "agent",
+        "text": "You want me to take the Rust producer gaps: method-receiver resolution and Drop modeling. Following the lesson from earlier today, I'll measure before designing, and I'll send the plan to session `8a4"
+      },
+      {
+        "at": "2026-10-22T05:18:05.977Z",
+        "kind": "agent",
+        "text": "Four registered Rust cases. Spawning the three investigations:"
+      },
+      {
+        "at": "2026-10-22T05:18:53.168Z",
+        "kind": "agent",
+        "text": "While those run, I'll record your direction in memory so it survives a restart:"
+      }
+    ]
+  }
+}

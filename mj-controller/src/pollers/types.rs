@@ -8,13 +8,38 @@ pub struct QuotaRefreshBatch {
     /// (or missing) are probed.
     pub refresh: bool,
     pub profiles: Vec<QuotaRefreshRequest>,
+    /// Claude profiles that are not probed (disabled) but still have live
+    /// session copies. Those hold no refresh token, so the poller keeps their
+    /// grant renewed too (#1490). Never overlaps `profiles`.
+    pub grants: Vec<QuotaRefreshRequest>,
+    /// Profiles outside the batch asked about directly (`mj quota
+    /// --with-disabled`): each is probed once when it arrives, never on the
+    /// batch's schedule.
+    pub extra: Vec<QuotaRefreshRequest>,
+    /// Profiles the person asked to refresh by name, each with its request's
+    /// sequence: probed once per sequence, off the profile's schedule, even
+    /// with a fresh report. The set persists across batches, so a channel
+    /// that coalesces rapid publishes can only drop a superseded map, never a
+    /// request; the poller remembers the sequences it answered.
+    pub forced_probes: std::collections::BTreeMap<String, u64>,
+    /// Access tokens refused by failed turns; a change wakes renewal.
+    pub rejected_logins: BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 #[derive(Debug)]
 pub enum QuotaUpdate {
-    Refreshing { profile_ids: Vec<String> },
+    ClaudeGrant {
+        request: QuotaRefreshRequest,
+        check: crate::quota::ClaudeGrantCheck,
+        rejected_logins: std::collections::BTreeSet<String>,
+    },
+    Refreshing {
+        profile_ids: Vec<String>,
+    },
     Report(QuotaRefreshOutcome),
-    Finished { generation: u64 },
+    Finished {
+        generation: u64,
+    },
 }
 
 pub type WorkerPollTarget = RelaySessionTarget;
@@ -101,6 +126,10 @@ pub struct CapacityPollUpdate {
     pub target_id: String,
     pub result: std::result::Result<Option<DeploymentCapacityUsage>, String>,
     pub sampled_at_epoch_seconds: u64,
+    /// The newest refresh request taken before the probe that produced
+    /// `result` started. The probe measured the host after that request, so
+    /// the result answers it; a request taken later is not answered.
+    pub refresh_generation: u64,
 }
 
 pub fn projected_queued_prompts(

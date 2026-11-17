@@ -1,8 +1,6 @@
 //! Controller-side client for a session relay's JSON-lines proxy.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -12,16 +10,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
-use crate::targets::{
-    CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SSH_RETRY_ATTEMPTS, SshAdmission, SshPermit, SshRefusal,
-    SshSessionLease, ssh_refusal,
-};
-use mj_core::config::harness_authentication_marker;
+use crate::targets::{CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SshSessionLease, ssh_refusal};
 use mj_core::credentials::{
     CredentialSnapshot, CredentialSyncAction, CredentialSyncHandle, CredentialSyncOutcome,
-    CredentialSyncResult, CredentialSyncTarget, SYNC_INTERVAL, SyncAction, SyncTrigger, enqueue,
-    profiles_with_targets, read_credential_file, reconcile, validate_credential_payload,
-    write_credential_file,
+    CredentialSyncResult, CredentialSyncTarget, SYNC_INTERVAL, StepFailure, SyncAction, SyncStep,
+    SyncTrigger, enqueue, profiles_with_targets, read_credential_file, reconcile,
+    validate_credential_payload,
 };
 use mj_core::elicitation::ElicitationResponse;
 use mj_core::relay::{
@@ -42,9 +36,9 @@ pub(crate) type SubagentQueueSnapshot = (
 const RELAY_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);
 /// Starting a target-side proxy may page the full worker executable in and
-/// traverse a container runtime before the relay sees `hello`. That is worker
-/// startup latency, not an ordinary in-connection RPC.
-const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(300);
+/// traverse a container runtime before the relay sees `hello`. This 60-second
+/// budget applies to both initial connects and reconnect handshakes.
+const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// An attachment can decompress a transport-sized page from cold journal
 /// segments. It remains bounded by the relay frame budget, but cold or loaded
 /// storage needs a filesystem deadline rather than an in-memory RPC deadline.
@@ -92,27 +86,20 @@ type ProxyStderrTail = Arc<std::sync::Mutex<VecDeque<String>>>;
 /// its terminal, and lets a failed connect put the proxy's own complaint in
 /// the error the caller sees rather than only in the log.
 ///
-/// Until hello completes, lines go to debug level: a failed connect reports
-/// its tail once, at the level the SSH refusal classifier gives it, so a
-/// routine MaxSessions refusal is not a warning (R7-1). Once the connection
-/// is up, anything the proxy says is a warning.
+/// Raw stderr stays at debug. Connect errors carry a one-line cause to the
+/// lifecycle or actor owner that reports the failure.
 async fn drain_proxy_stderr(
     errors: proxy::ProxyReader,
     purpose: String,
     session_id: String,
     tail: ProxyStderrTail,
-    handshake_done: Arc<AtomicBool>,
 ) {
     let mut lines = BufReader::new(errors).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => {
-                if handshake_done.load(Ordering::Acquire) {
-                    tracing::warn!(%session_id, %purpose, %line, "relay proxy stderr");
-                } else {
-                    tracing::debug!(%session_id, %purpose, %line, "relay proxy stderr");
-                }
+                tracing::debug!(%session_id, %purpose, %line, "relay proxy stderr");
                 let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
                 if tail.len() == RELAY_PROXY_STDERR_TAIL {
                     tail.pop_front();
@@ -153,6 +140,9 @@ pub struct RelayClient {
     /// Why this connection can no longer be used, once a call gave up on a
     /// reply that is still in flight. See [`RelayClient::exchange`].
     abandoned: Option<String>,
+    /// Set while a job runs under a gate admission: a lifecycle operation that
+    /// cancels the admission cancels the job's exchanges too.
+    cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
     next_request: u64,
     connection_nonce: u64,
     protocol_version: u32,
@@ -168,9 +158,14 @@ pub struct RelayClient {
     /// Invalidated under this connection's exclusive borrow before applying
     /// queue changes; partial-page failures cannot leave a valid stale view.
     subagent_publication: Option<SubagentQueueSnapshot>,
-    /// The shared-connection session the proxy runs on. Unlike the admission
-    /// permit, which is released once hello completes, the session is in use
-    /// for as long as the proxy runs, so the lease lives as long as `child`.
+    /// The operational state the worker last sent on this connection and its
+    /// digest. A protocol-57 worker skips resending a state that matches it.
+    known_state: Option<(
+        String,
+        mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
+    )>,
+    /// The shared-connection session the proxy runs on, held for as long as
+    /// the proxy runs.
     ssh_session: Option<SshSessionLease>,
 }
 

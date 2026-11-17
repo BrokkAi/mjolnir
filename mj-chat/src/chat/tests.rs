@@ -66,14 +66,20 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
 #[test]
 fn review_status_omits_the_deprecated_tier() {
     let review = mj_core::config::ReviewConfig {
-        trigger: mj_core::config::ReviewTrigger::Turn,
-        tier: Some("extended".into()),
-        profile: Some("reviewer".into()),
-        ..Default::default()
+        legacy: None,
+        disabled: false,
+        brief_writer: None,
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "gpt-6-terra".into(),
+                effort: None
+            };
+            2
+        ],
     };
     assert_eq!(
         review_status_line(&review, true),
-        "Reviewing every completed turn with [review] profile \"reviewer\"; 2 reviewers. A review is open now."
+        "Review trigger is before push; 2 reviewers. A review is open now."
     );
 }
 
@@ -102,6 +108,18 @@ pub(super) fn test_image() -> ClipboardImage {
     }
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     ClipboardImage::from_png_base64(encoded).unwrap()
+}
+
+pub(super) fn test_reference_image() -> ClipboardImage {
+    use base64::Engine as _;
+    let image = test_image();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image.data_base64.as_bytes())
+        .unwrap();
+    ClipboardImage::from_reference(
+        mj_core::attachment::AttachmentRef::new(&bytes, image.mime_type, 2, 2).unwrap(),
+    )
+    .unwrap()
 }
 
 fn background_task(id: &str, command: &str, can_stop: bool) -> mj_core::relay::BackgroundCommand {
@@ -181,6 +199,11 @@ fn pending_attachment_is_failed_when_a_saved_draft_is_restored() {
     assert_eq!(chat.input, "inspect [image 1]");
     assert!(chat.input_images[0].image.is_placeholder());
     assert!(!chat.input_images[0].image.is_pending());
+    assert!(
+        chat.notice()
+            .unwrap()
+            .contains("Re-paste the failed attachment")
+    );
 }
 
 #[test]
@@ -255,29 +278,22 @@ fn clock_sampling_tracks_displayed_units_and_keeps_the_drawn_baseline() {
 }
 
 #[test]
-fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child() {
+fn subagent_control_appears_only_after_the_first_child() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
     assert!(!screen.contains("Subagents"), "{screen}");
+    assert!(chat.subagent_control_area.is_none());
 
-    chat.set_subagents_enabled(true);
+    chat.set_subagent_count(1);
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Subagents · 0 "), "{screen}");
+    assert!(screen.contains("Subagents · 0 ›"), "{screen}");
+    assert!(chat.subagent_control_area.is_some());
     // Launch finding R1-3: the ASCII symbol set draws no middle dot.
     let ascii = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
         drawn_transcript(&mut chat, 100, 24).join("\n")
     });
     assert!(ascii.contains("Subagents - 0 "), "{ascii}");
     assert!(!ascii.contains('·'), "{ascii}");
-    assert!(
-        chat.subagent_control_area.is_none(),
-        "the dimmed entry is not clickable"
-    );
-
-    chat.set_subagent_count(1);
-    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Subagents · 0 ›"), "{screen}");
-    assert!(chat.subagent_control_area.is_some());
 }
 
 #[test]
@@ -1192,7 +1208,7 @@ fn materialized_diff_counts_arrive_after_the_path_and_ignore_stale_revisions() {
         created_at_ms: 10,
         last_changed_at_ms: 10,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "edit",
                 "title": "Edit src/lib.rs",
                 "status": "completed",
@@ -1202,7 +1218,8 @@ fn materialized_diff_counts_arrive_after_the_path_and_ignore_stale_revisions() {
                     "oldText": "alpha\n",
                     "newText": "alpha\nbeta\n"
                 }]
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -2259,27 +2276,6 @@ mod golden_cases {
             None,
             |chat| details(&[&format!("control: {:?}", chat.subagent_control_area)]),
         );
-        chat.set_subagents_enabled(true);
-        state(
-            &mut output,
-            "dimmed zero count",
-            &mut chat,
-            WIDTH,
-            HEIGHT,
-            None,
-            |chat| details(&[&format!("control: {:?}", chat.subagent_control_area)]),
-        );
-        crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
-            state(
-                &mut output,
-                "dimmed zero count in ASCII",
-                &mut chat,
-                WIDTH,
-                HEIGHT,
-                None,
-                |_| details(&["symbol mode: ASCII"]),
-            );
-        });
         chat.set_subagent_count(1);
         state(
             &mut output,

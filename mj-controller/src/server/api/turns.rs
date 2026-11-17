@@ -88,11 +88,8 @@ pub(super) async fn submit_prompt(
         text: text.clone(),
         images: Vec::new(),
     };
-    // A session that is still coming up takes its prompt once its worker
-    // attaches, rather than refusing it. A caller that just created the
-    // session has nothing better to do than retry, and every caller would
-    // otherwise need its own retry loop around a refusal it cannot tell apart
-    // from a session that will never take a prompt.
+    // Wait for startup or lifecycle work to release the session instead of
+    // making every caller retry while it cannot take a prompt.
     let mut snapshot_rx = state.snapshot_rx.clone();
     let deadline = tokio::time::Instant::now() + PROMPT_READINESS_WAIT;
     let mut waiting = false;
@@ -107,15 +104,18 @@ pub(super) async fn submit_prompt(
             if session.capabilities.prompt {
                 break;
             }
-            // Between the worker's handshake and its first report the record
-            // already says running while the session still has nothing to
-            // take a prompt with, so once a start has been seen only a
-            // failure or a stop ends the wait early.
-            waiting = if waiting {
-                still_live(session)
-            } else {
-                is_coming_up(session)
-            };
+            // The lifecycle owner decides the result: Move and Restart can
+            // pass through stopped or failed records before restoring them.
+            // A transition can also precede the operation's publication.
+            // After it finishes, keep waiting for the worker's first report
+            // unless the session stopped or failed.
+            waiting = session.operation.is_some()
+                || (session.transitioning && !session.has_error)
+                || if waiting {
+                    still_live(session)
+                } else {
+                    is_coming_up(session)
+                };
             if !waiting {
                 return Err(ApiFailure::conflict(prompt_refusal(session)));
             }
@@ -129,7 +129,7 @@ pub(super) async fn submit_prompt(
                 }
                 Err(_) => {
                     return Err(ApiFailure::conflict(format!(
-                        "this session is still starting after {} seconds; try the prompt again once `mj sessions` shows it running",
+                        "this session is not ready to take a prompt after {} seconds; check `mj sessions` for its startup or lifecycle operation before trying again",
                         PROMPT_READINESS_WAIT.as_secs()
                     )));
                 }
@@ -137,9 +137,27 @@ pub(super) async fn submit_prompt(
             () = held.withdrawn() => return Err(withdrawn_prompt()),
         }
     }
+    // Recording and submitting hold an upgrade admission, so a handoff waits
+    // for the prompt instead of ending the daemon between them.
+    let _admission = crate::upgrade::activity("API prompt submission")
+        .map_err(|_| ApiFailure::unavailable("the daemon is shutting down"))?;
+    // A caller that names its command can retry it; one that does not sends
+    // a new command each time, so its record gets an identity of its own.
+    let history_command = match &command_id {
+        Some(command_id) => command_id.clone(),
+        None => mj_client::session::new_command_id("api-history")
+            .map_err(|error| ApiFailure::unavailable(format!("{error:#}")))?,
+    };
+    // The prompt is held while it is recorded, even for a session that was
+    // ready at once, so an interrupt during the write withdraws it. A
+    // withdrawn prompt stays in the history, as an abandoned draft does.
+    let held = hold.unwrap_or_else(|| state.held_prompts.hold(&session_id));
+    backend
+        .record_user_prompt(session_id.clone(), history_command, text.clone())
+        .await;
     // Taking the hold back and an interrupt withdrawing it are one decision,
     // so a prompt is either submitted or withdrawn, never both.
-    if hold.is_some_and(|held| !held.release()) {
+    if !held.release() {
         return Err(withdrawn_prompt());
     }
     Ok(backend.prompt_with_id(session_id, text, command_id).await?)
@@ -151,7 +169,7 @@ fn withdrawn_prompt() -> ApiFailure {
     )
 }
 
-/// Prompts the API is holding for sessions that are still starting.
+/// Prompts the API is holding until startup or lifecycle work finishes.
 ///
 /// A held prompt has no turn yet, so interrupting its session withdraws it
 /// rather than letting it become a turn nobody wants once the worker
@@ -223,7 +241,7 @@ impl HeldPrompts {
     }
 }
 
-/// One prompt held for a starting session. Dropping it without releasing it,
+/// One prompt held until its session is ready. Dropping it without releasing it,
 /// as every refusal does, gives the hold up.
 struct HeldPrompt<'a> {
     prompts: &'a HeldPrompts,
@@ -259,7 +277,7 @@ impl Drop for HeldPrompt<'_> {
     }
 }
 
-/// How long a prompt waits for a session that is still starting. Bounded, so
+/// How long a prompt waits for startup or lifecycle work. Bounded, so
 /// the request finishes with its own response, and shorter than the CLI's
 /// request timeout so the caller reads this answer rather than a timeout.
 const PROMPT_READINESS_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -267,15 +285,14 @@ const PROMPT_READINESS_WAIT: std::time::Duration = std::time::Duration::from_sec
 /// Why a session that is not coming up refuses a prompt. A failed session
 /// will not take one however long the caller waits, so the refusal says it
 /// failed, why, and what can be done with it instead (launch finding R5-8).
-/// Resume is named only for a session with a checkpoint, the one thing a
-/// resume restores from (launch finding R6-1).
+/// Resume can repair a retained target or restore an archive.
 fn prompt_refusal(session: &ViewerSession) -> String {
     if session.lifecycle != ViewerLifecycleCategory::Failed {
         return "this session cannot take a prompt right now".to_owned();
     }
     let id = &session.id;
     let ways_out = [
-        (session.has_checkpoint && session.capabilities.resume)
+        (session.has_resume_source() && session.capabilities.resume)
             .then(|| format!("resume it with `mj resume --session {id}`")),
         session
             .capabilities
@@ -542,6 +559,24 @@ pub(super) struct DestroyRequest {
     pub(super) delete_branch: bool,
 }
 
+/// The safe recent notices outlive their session record. Absence here says
+/// nothing about completion: an accepted Destroy can still be running.
+pub(super) async fn session_notices(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Json<Vec<mj_client::daemon::RuntimeNotice>> {
+    Json(
+        state
+            .snapshot_rx
+            .borrow()
+            .notices
+            .iter()
+            .filter(|notice| notice.session_id == session_id)
+            .cloned()
+            .collect(),
+    )
+}
+
 /// Submit an exact worker-published control without selecting a newer target.
 pub(super) async fn turn_control(
     State(state): State<ServerState>,
@@ -565,7 +600,7 @@ pub(super) async fn interrupt_turn(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
-    // A prompt still held for a starting session has no turn to stop, so
+    // A prompt held until its session is ready has no turn to stop, so
     // interrupting the session withdraws it. Only a session that also has a
     // turn of its own goes on to the daemon.
     if state.held_prompts.withdraw(&session_id) > 0 {
@@ -582,10 +617,8 @@ pub(super) async fn interrupt_turn(
     send_action(&state, ControllerAction::InterruptTurn { session_id }).await
 }
 
-/// Start a one-off review of the turn the session just finished. The
-/// controller answers once the review has opened; a review that cannot start
-/// (the session is still working, prompts are queued, a sub-agent's turn, no
-/// usable reviewer) is refused with the reason, as 409.
+/// Review committed work through the push gate. Refusals, including tracked
+/// uncommitted changes or an unsupported harness, reach the caller as 409.
 pub(super) async fn start_review(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -606,35 +639,6 @@ pub(super) async fn start_review(
     ))
 }
 
-/// Forward, dismiss, or cancel the review the session has open, as the
-/// viewer's buttons do. A resolution the review does not allow (no review is
-/// open, no findings to forward) is refused with the reason, as 409.
-pub(super) async fn resolve_review(
-    State(state): State<ServerState>,
-    Path((session_id, resolution)): Path<(String, String)>,
-) -> Result<(StatusCode, Json<ResolveReviewResponse>), ApiFailure> {
-    if !matches!(resolution.as_str(), "forward" | "dismiss" | "cancel") {
-        return Err(ApiFailure::bad_request(
-            "a review is resolved by forward, dismiss, or cancel",
-        ));
-    }
-    let status = send_action(
-        &state,
-        ControllerAction::ResolveReview {
-            session_id: session_id.clone(),
-            resolution: resolution.clone(),
-        },
-    )
-    .await?;
-    Ok((
-        status,
-        Json(ResolveReviewResponse {
-            session_id,
-            resolution,
-        }),
-    ))
-}
-
 /// The review the session has open, if any, as the viewer shows it.
 pub(super) async fn review_status(
     State(state): State<ServerState>,
@@ -643,13 +647,40 @@ pub(super) async fn review_status(
     let (trigger, review) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
-        (session.review_trigger, session.turn_review.clone())
+        (
+            session.review_trigger,
+            session.turn_review.as_deref().cloned(),
+        )
     };
     Ok(Json(ReviewStatusResponse {
         session_id,
         trigger,
         review,
     }))
+}
+
+/// A finished review's per-reviewer output. `review` selects one by id; without
+/// it the newest finished review answers.
+pub(super) async fn finished_review(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<FinishedReviewQuery>,
+) -> Result<Json<FinishedReviewResponse>, ApiFailure> {
+    {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &session_id)?;
+    }
+    let review = backend(&state)?
+        .finished_review(session_id.clone(), query.review.clone())
+        .await?;
+    if review.is_none()
+        && let Some(review_id) = query.review
+    {
+        return Err(ApiFailure::not_found(format!(
+            "no finished review {review_id} for session {session_id}"
+        )));
+    }
+    Ok(Json(FinishedReviewResponse { session_id, review }))
 }
 
 pub(super) async fn send_action(

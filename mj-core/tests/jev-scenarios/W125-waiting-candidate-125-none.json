@@ -1,0 +1,112 @@
+{
+  "id": "W125",
+  "title": "Waiting candidate 125 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "75147752f801698b135d71f8dc8a6dcd",
+    "session_title": "jvm-gate-8531-r4",
+    "reply_position": 663,
+    "captured_at": "2026-10-31T20:25:43.556Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:33",
+          "role": "assistant",
+          "text": "I’m reading the gate brief and will follow its candidate-only build and two-sided lifecycle checks, keeping all gate artifacts under the requested `/tmp/lanes/jvm-gates/8531-r4/`."
+        },
+        {
+          "id": "agent:663",
+          "role": "assistant",
+          "text": "The pinned base and merge-base checks passed, and the base binary checksum matches the required value. The candidate archive build is running; once it finishes I’ll capture base A, candidate, and base B in sequence, then proceed through the replay and golden comparisons."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "The pinned base and merge-base checks passed, and the base binary checksum matches the required value. The candidate archive build is running; once it finishes I’ll capture base A, candidate, and base B in sequence, then proceed through the replay and golden comparisons.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 27,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "The pinned base and merge-base checks passed, and the base binary checksum matches the required value. The candidate archive build is running; once it finishes I’ll capture base A, candidate, and base B in sequence, then proceed through the replay and golden comparisons."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-31T20:34:29.897Z",
+        "kind": "agent",
+        "text": "The gate run is incomplete. The report records **FAIL (no PASS established)** and lists the checks still missing: `/tmp/lanes/jvm-gates/8531-r4/REPORT.md`."
+      },
+      {
+        "at": "2026-10-31T20:34:40.379Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-31T20:34:41.842Z",
+        "kind": "user",
+        "text": "A report without a candidate verdict is a checkpoint, not a handback. Keep the binaries, the three captures and the comparator outputs and finish: (1) audit every strict seam delta: pair removed and a"
+      },
+      {
+        "at": "2026-10-31T20:34:45.894Z",
+        "kind": "agent",
+        "text": "I’ll continue from the preserved binaries and captures. I’ll first reconstruct the exact comparator outputs and gate command protocol, then finish the requested audits and remaining answer surfaces be"
+      },
+      {
+        "at": "2026-10-31T20:35:44.159Z",
+        "kind": "agent",
+        "text": "The first replay attempt stopped before comparing answers because the gate script was given the host’s durable-controls path, which is an empty mount here. The brief’s local recovered controls corpus "
+      },
+      {
+        "at": "2026-10-31T20:39:10.823Z",
+        "kind": "agent",
+        "text": "Replay completed: both 50-record environments match after ignoring `milliseconds`; the four replay130 output files differ, so I’m checking the script’s receipt and per-stream comparison semantics befo"
+      }
+    ]
+  }
+}

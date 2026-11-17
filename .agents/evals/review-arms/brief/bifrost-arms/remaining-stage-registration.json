@@ -1,0 +1,21 @@
+{
+  "recorded_at": "2026-11-17T05:02:52.014312+00:00",
+  "scope": "prepare fixed remaining-stage job order; no launches before judged relation reading sent",
+  "lead_authorization": "After relation reading sent, continue13nonrelation then40controls without waiting for another reply, under25floor/perlaunch checks; lead reports codex4week reset99%.",
+  "orders": {
+    "nonrelation": {
+      "seed": 20261120,
+      "diffs": 13,
+      "jobs": 26
+    },
+    "ordinary": {
+      "seed": 20261121,
+      "diffs": 40,
+      "jobs": 80
+    }
+  },
+  "method": "A/BT pairs in existing frozen order, then random.Random(seed).shuffle",
+  "known_corpus_sha256": "f6fda0200ac7fecbb7f03bc3a27fb193fd08620c82476118f33533972c8ea749",
+  "ordinary_corpus_sha256": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
+  "relations_sha256": "a5e9a2d5d4f731cbc95cd30a5cdd2b385a79212b07e6a03258b217743a4a6efa"
+}

@@ -139,7 +139,12 @@ const VIEW_ID_PREFIX: &str = "native:";
 
 pub fn view_id(owner: &str, child: &str) -> String {
     // Length-prefixing keeps opaque provider IDs collision-free.
-    format!("{VIEW_ID_PREFIX}{}:{owner}{child}", owner.len())
+    format!("{}{child}", owner_view_id_prefix(owner))
+}
+
+/// The start of every [`view_id`] that `owner` owns.
+pub fn owner_view_id_prefix(owner: &str) -> String {
+    format!("{VIEW_ID_PREFIX}{}:{owner}", owner.len())
 }
 
 /// Whether `id` is a native child's presentation id from [`view_id`].
@@ -188,6 +193,9 @@ pub struct NativeAgentSummary {
     pub agent: NativeAgent,
     pub projection_ordinal: u64,
     pub projection_digest: String,
+    /// Native operational facts needed by the daemon attention projection.
+    #[serde(default)]
+    pub pending_input: bool,
 }
 
 impl NativeAgentSummary {
@@ -197,6 +205,7 @@ impl NativeAgentSummary {
             agent: view.agent.clone(),
             projection_ordinal: view.projection.applied_event_ordinal,
             projection_digest: view.projection.applied_event_digest.clone(),
+            pending_input: !view.projection.pending_elicitations.is_empty(),
         }
     }
 

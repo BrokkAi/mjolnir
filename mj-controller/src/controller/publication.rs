@@ -1,5 +1,6 @@
 //! Publication evidence for a verified clone checkpoint.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
@@ -126,6 +127,7 @@ fn assess_network_checkpoint_inner(
         }
         let path = std::path::Path::new(&root).join(&meta.relative_destination);
         let command = crate::targets::command_on_locator(
+            SshTrafficClass::Control,
             &backend,
             &session.id,
             [
@@ -148,6 +150,7 @@ fn assess_network_checkpoint_inner(
                 .collect::<Vec<_>>(),
             1 => {
                 let fallback = crate::targets::command_on_locator(
+                    SshTrafficClass::Control,
                     &backend,
                     &session.id,
                     [
@@ -187,6 +190,7 @@ fn assess_network_checkpoint_inner(
         );
         for url in urls {
             let command = crate::targets::command_on_locator(
+                SshTrafficClass::Control,
                 &backend,
                 &session.id,
                 [
@@ -321,6 +325,7 @@ fn refresh_stopped_clone_publication_inner(
     let bounded = CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15));
     let source = &checkout.source_repository;
     let configured = bounded.execute(&managed_git_command(
+        SshTrafficClass::Control,
         &checkout.target,
         source,
         ["config", "--get", "remote.origin.url"],
@@ -335,6 +340,7 @@ fn refresh_stopped_clone_publication_inner(
         "source origin changed since checkpoint"
     );
     let remote = bounded.execute(&managed_git_command(
+        SshTrafficClass::Control,
         &checkout.target,
         source,
         [
@@ -444,6 +450,7 @@ fn assess_clone_checkpoint_inner(
     for (index, destination_url) in destinations.iter().enumerate() {
         let prefix = format!("refs/mj/publication/{check_id}/{index}");
         let fetch = managed_git_command(
+            SshTrafficClass::Control,
             &clone.target,
             &clone.worktree_root,
             [
@@ -514,6 +521,7 @@ fn clone_push_destinations(
     meta: &mj_core::archive::RepositoryMetadata,
 ) -> Result<Vec<String>> {
     let output = executor.execute(&managed_git_command(
+        SshTrafficClass::Control,
         &clone.target,
         &clone.worktree_root,
         ["config", "--local", "--get-all", "remote.origin.pushurl"],
@@ -556,6 +564,18 @@ fn checkpoint_has_file_changes(
     // An unfinished merge, rebase or other operation exists only in the
     // archive, even when both patches are empty.
     repository.metadata.git_operation.is_some()
+        // A linked worktree's detached HEAD and dirty files exist only in the
+        // archive as well, and so does an operation it was in the middle of.
+        || repository.linked_worktrees.iter().any(|worktree| {
+            worktree.metadata.branch.is_none()
+                || worktree.metadata.git_operation.is_some()
+                || manifest.payloads.iter().any(|payload| {
+                    (payload.path == worktree.untracked_tar_path && payload.size > 1024)
+                        || ((payload.path == worktree.staged_patch_path
+                            || payload.path == worktree.unstaged_patch_path)
+                            && payload.size > 0)
+                })
+        })
         || manifest.payloads.iter().any(|payload| {
             if payload.path == repository.untracked_tar_path {
                 // An empty tar contains two zero blocks.
@@ -574,6 +594,7 @@ fn git_text(
     args: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<String> {
     let output = executor.execute(&managed_git_command(
+        SshTrafficClass::Control,
         &clone.target,
         &clone.worktree_root,
         args,
@@ -594,6 +615,7 @@ fn published_ancestor(
     remote: &str,
 ) -> Result<bool> {
     let output = executor.execute(&managed_git_command(
+        SshTrafficClass::Control,
         &clone.target,
         &clone.worktree_root,
         ["merge-base", "--is-ancestor", saved, remote],
@@ -676,7 +698,7 @@ mod tests {
         )
         .unwrap();
         let mut session = raw_session_on("localhost", checkout.worktree_root.to_str().unwrap());
-        session.managed_worktree = Some(checkout.clone());
+        session.managed_worktree = Some(Box::new(checkout.clone()));
         let assess = || {
             let snapshot = collect_git_snapshot(
                 &SystemGit,

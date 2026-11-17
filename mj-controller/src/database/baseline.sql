@@ -281,8 +281,6 @@ CREATE TABLE sessions (
     project_directory BLOB,
     managed_worktree TEXT,
     draft_input TEXT NOT NULL DEFAULT '',
-    container_cpus TEXT,
-    container_memory TEXT,
     archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
     create_managed_worktree INTEGER
         CHECK(create_managed_worktree IN (0, 1)),

@@ -1,5 +1,15 @@
 # Continuation evaluation fixtures
 
+`github-item-controls.json` contains synthetic GitHub item matching controls with
+compaction tool summaries (names and outcomes, without raw calls or terminal
+output). It covers relevance, successful creation, reading an existing item,
+failed or planned creation, creation without item identity, and a matching
+title with a different item number.
+Run `python3 scripts/jev-github-item-eval.py` to validate offline, or add
+`--run --output <artifact.json>` to evaluate the shared prompt against Jev. Each
+case runs three times by default; every relevance and creation decision must
+match. Model evaluation is opt-in, outside CI.
+
 `continuation-controls.json` contains eight synthetic development controls. Four are redundant handoffs; four require abstention. Earlier authorization appears three and five user messages back in two controls.
 
 `continuation-mined.json` contains twenty sanitized scenarios derived from read-only local Codex-session mining. Source files, session identifiers, exact private excerpts, and subsequent user replies are retained only in the local mining report. Later user replies inform curation but never enter the evaluated evidence. The user explicitly authorized sending these sanitized scenarios to TypeSafe.

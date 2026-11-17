@@ -10,6 +10,7 @@
 //! the review host all need the plain text of a stored message, and none of
 //! them should have to reach up into the chat view to get it.
 
+use crate::packed_text::PackedText;
 use std::sync::Arc;
 
 use agent_client_protocol::v1::schema::{
@@ -29,9 +30,127 @@ pub const HARNESS_TURN_TEXT: &str = "Agent continued on its own";
 pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";
 /// User replies within an existing turn, rather than prompts that start one.
 pub const ELICITATION_REPLY_ITEM_PREFIX: &str = "elicitation-reply:";
-/// Command ID prefix for another session's message delivered as a prompt,
-/// which the controller does for workers too old to take mailbox messages.
-pub const SESSION_MESSAGE_TURN_COMMAND_PREFIX: &str = "session-message-turn-";
+
+/// Shared read-time join of embedded and parked terminal output.
+/// Standalone close-time records override embedded streaming records.
+pub struct TerminalOutputs<'a, R = TerminalOutputRecord> {
+    standalone: std::collections::HashMap<&'a str, &'a R>,
+    tools: std::collections::HashMap<&'a str, (&'a [R], &'a [String])>,
+    referenced: std::collections::HashSet<&'a str>,
+}
+
+pub trait TerminalRecord: Clone {
+    fn terminal_id(&self) -> &str;
+}
+impl TerminalRecord for TerminalOutputRecord {
+    fn terminal_id(&self) -> &str {
+        &self.terminal_id
+    }
+}
+impl TerminalRecord for crate::archive::CanonicalTerminalOutput {
+    fn terminal_id(&self) -> &str {
+        &self.terminal_id
+    }
+}
+impl<'a, R: TerminalRecord> TerminalOutputs<'a, R> {
+    fn new() -> Self {
+        Self {
+            standalone: Default::default(),
+            tools: Default::default(),
+            referenced: Default::default(),
+        }
+    }
+    fn tool(&mut self, id: &'a str, embedded: &'a [R], refs: &'a [String]) {
+        self.tools.insert(id, (embedded, refs));
+        self.referenced.extend(refs.iter().map(String::as_str));
+        self.referenced
+            .extend(embedded.iter().map(TerminalRecord::terminal_id));
+    }
+    pub fn for_tool(&self, stable_id: &str) -> std::borrow::Cow<'a, [R]> {
+        let Some((embedded, refs)) = self.tools.get(stable_id) else {
+            return std::borrow::Cow::Borrowed(&[]);
+        };
+        let mut seen = std::collections::HashSet::new();
+        if embedded.iter().all(|record| {
+            seen.insert(record.terminal_id()) && !self.standalone.contains_key(record.terminal_id())
+        }) && !refs
+            .iter()
+            .any(|id| self.standalone.contains_key(id.as_str()))
+        {
+            return std::borrow::Cow::Borrowed(embedded);
+        }
+        seen.clear();
+        let mut records = Vec::new();
+        for record in *embedded {
+            let id = record.terminal_id();
+            if seen.insert(id) {
+                records.push((*self.standalone.get(id).unwrap_or(&record)).clone());
+            }
+        }
+        for id in *refs {
+            if seen.insert(id.as_str())
+                && let Some(record) = self.standalone.get(id.as_str())
+            {
+                records.push((*record).clone());
+            }
+        }
+        std::borrow::Cow::Owned(records)
+    }
+    pub fn embedded_for_tool(&self, stable_id: &str) -> &[R] {
+        self.tools
+            .get(stable_id)
+            .map_or(&[], |(records, _)| *records)
+    }
+    pub fn referenced_terminal_ids(&self) -> impl Iterator<Item = &str> {
+        self.referenced.iter().copied()
+    }
+    pub fn has_standalone(&self) -> bool {
+        !self.standalone.is_empty()
+    }
+    pub fn shown_under_tool(&self, terminal_id: &str) -> bool {
+        self.referenced.contains(terminal_id)
+    }
+}
+impl<'a> TerminalOutputs<'a> {
+    pub fn of(items: impl IntoIterator<Item = &'a TranscriptItem>) -> Self {
+        let mut outputs = Self::new();
+        for item in items {
+            match &item.body {
+                TranscriptBody::Tool {
+                    terminal_outputs,
+                    terminal_refs,
+                    ..
+                } => outputs.tool(&item.stable_id, terminal_outputs, terminal_refs),
+                TranscriptBody::TerminalOutput { record } => {
+                    outputs.standalone.insert(&record.terminal_id, record);
+                }
+                _ => {}
+            }
+        }
+        outputs
+    }
+}
+impl<'a> TerminalOutputs<'a, crate::archive::CanonicalTerminalOutput> {
+    pub fn of_canonical(
+        items: impl IntoIterator<Item = &'a crate::archive::CanonicalTranscriptItem>,
+    ) -> Self {
+        let mut outputs = Self::new();
+        for item in items {
+            match &item.body {
+                crate::archive::CanonicalTranscriptBody::Tool {
+                    terminal_outputs,
+                    terminal_refs,
+                    ..
+                } => outputs.tool(&item.stable_id, terminal_outputs, terminal_refs),
+                crate::archive::CanonicalTranscriptBody::TerminalOutput { record } => {
+                    outputs.standalone.insert(&record.terminal_id, record);
+                }
+                _ => {}
+            }
+        }
+        outputs
+    }
+}
 
 /// Where a tool's compact presentation source came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,13 +165,156 @@ pub enum ToolSummarySourceKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallPresentation {
     pub summary: String,
-    pub source: String,
+    pub source: PackedText,
     pub source_kind: ToolSummarySourceKind,
     pub tool_kind: ToolKind,
     /// Version of the parser rules that produced `summary`. A missing value
     /// identifies presentation metadata written before parser versioning.
     #[serde(default)]
     pub summary_version: u8,
+}
+
+/// An ACP call retained as JSON text. All cached interpretations are built
+/// together; replacing the call cannot leave metadata from an older update.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "serde_json::Value")]
+pub struct OpaqueToolCall {
+    json: PackedText,
+    metadata: Box<ToolCallMetadata>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallMetadata {
+    raw_status: Option<Box<str>>,
+    typed_status: Option<ToolCallStatus>,
+    id: Option<Box<str>>,
+    terminal_ids: Vec<String>,
+    fallback: bool,
+    raw_result: Option<(u32, usize, [u8; 32])>,
+}
+
+impl Serialize for OpaqueToolCall {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde_json::value::RawValue::from_string(self.json.text().into_owned())
+            .expect("opaque JSON")
+            .serialize(serializer)
+    }
+}
+impl PartialEq for OpaqueToolCall {
+    fn eq(&self, other: &Self) -> bool {
+        self.json == other.json || self.value() == other.value()
+    }
+}
+impl Eq for OpaqueToolCall {}
+
+impl From<serde_json::Value> for OpaqueToolCall {
+    fn from(value: serde_json::Value) -> Self {
+        use agent_client_protocol::v1::schema::ToolCall;
+        use sha2::{Digest, Sha256};
+        let decoded = ToolCall::deserialize(&value).ok();
+        let raw_result = (|| {
+            if !matches!(
+                value.get("status").and_then(serde_json::Value::as_str),
+                Some("completed" | "failed")
+            ) {
+                return None;
+            }
+            let raw = value.get("rawOutput")?;
+            let exit = u32::try_from(raw.get("exit_code")?.as_u64()?).ok()?;
+            let output = raw.get("output")?;
+            let (len, digest) = match output {
+                serde_json::Value::String(s) => (s.len(), Sha256::digest(s.as_bytes()).into()),
+                serde_json::Value::Array(values) => {
+                    let mut hash = Sha256::new();
+                    for value in values {
+                        hash.update([u8::try_from(value.as_u64()?).ok()?]);
+                    }
+                    (values.len(), hash.finalize().into())
+                }
+                _ => return None,
+            };
+            Some((exit, len, digest))
+        })();
+        let metadata = ToolCallMetadata {
+            raw_status: value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(Into::into),
+            typed_status: decoded.as_ref().map(|call| call.status),
+            id: value
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+                .map(Into::into),
+            terminal_ids: tool_call_terminal_ids(&value),
+            fallback: decoded
+                .as_ref()
+                .is_some_and(crate::acp::is_fallback_terminal_tool_call),
+            raw_result,
+        };
+        Self {
+            json: serde_json::to_string(&value)
+                .expect("JSON Value serializes")
+                .into(),
+            metadata: Box::new(metadata),
+        }
+    }
+}
+
+impl OpaqueToolCall {
+    pub fn edit<R>(&mut self, edit: impl FnOnce(&mut serde_json::Value) -> R) -> R {
+        let mut value = self.value();
+        let result = edit(&mut value);
+        *self = value.into();
+        result
+    }
+    pub fn value(&self) -> serde_json::Value {
+        serde_json::from_str(&self.json.text()).expect("opaque call contains valid JSON")
+    }
+    pub fn decode(&self) -> serde_json::Result<agent_client_protocol::v1::schema::ToolCall> {
+        serde_json::from_str(&self.json.text())
+    }
+    pub fn raw_status(&self) -> Option<&str> {
+        self.metadata.raw_status.as_deref()
+    }
+    pub fn typed_status(&self) -> ToolCallStatus {
+        self.metadata
+            .typed_status
+            .unwrap_or(ToolCallStatus::Pending)
+    }
+    pub fn typed_valid(&self) -> bool {
+        self.metadata.typed_status.is_some()
+    }
+    pub fn id(&self) -> Option<&str> {
+        self.metadata.id.as_deref()
+    }
+    pub fn terminal_ids(&self) -> &[String] {
+        &self.metadata.terminal_ids
+    }
+    pub fn is_fallback(&self) -> bool {
+        self.metadata.fallback
+    }
+    pub fn matches_raw_result(&self, record: &TerminalOutputRecord, digest: &[u8; 32]) -> bool {
+        self.metadata.raw_result.is_some_and(|(exit, len, expected)| {
+            record.exit_code == Some(exit) && record.signal.is_none() && record.output.len() == len
+                && &expected == digest
+                // Keep exact ownership even in the event of a digest collision.
+                && record.matches_tool_raw_result(&self.value())
+        })
+    }
+}
+
+/// One interpretation of ACP terminal references for opaque metadata and
+/// transient JSON readers (for example summaries and relay update fields).
+pub fn tool_call_terminal_ids(call: &serde_json::Value) -> Vec<String> {
+    use agent_client_protocol::v1::schema::ToolCallContent;
+    let Some(serde_json::Value::Array(content)) = call.get("content") else {
+        return Vec::new();
+    };
+    content.iter().filter_map(|value| match ToolCallContent::deserialize(value) {
+        Ok(ToolCallContent::Terminal(terminal)) => Some(terminal.terminal_id.0.to_string()),
+        Ok(_) => None,
+        Err(error) => { tracing::warn!(%error, "ignoring malformed tool-call content while locating terminal output"); None }
+    }).collect()
 }
 
 /// The current value of one logical transcript item. ACP structures whose
@@ -83,7 +345,7 @@ pub enum TranscriptBody {
     Tool {
         /// Complete current ACP `ToolCall`, updated field-for-field as
         /// `ToolCallUpdate` notifications arrive.
-        call: serde_json::Value,
+        call: OpaqueToolCall,
         /// Output of the terminals this call's content refers to. It is a
         /// sibling of `call` rather than part of it because `ToolCall::update`
         /// replaces `content` wholesale, which would discard anything injected
@@ -226,7 +488,7 @@ fn text_chunks_mergeable(last: &serde_json::Value, next: &serde_json::Value) -> 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalOutputRecord {
     pub terminal_id: String,
-    pub output: String,
+    pub output: PackedText,
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,6 +498,12 @@ pub struct TerminalOutputRecord {
 }
 
 impl TerminalOutputRecord {
+    /// Compute once before comparing one terminal event with the tool window.
+    pub fn raw_result_digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(self.output.text().as_bytes()).into()
+    }
+
     /// Whether the command ended the way a caller asked for: exit status zero
     /// and no signal. Anything else — a nonzero exit, a signal, or no status at
     /// all because the terminal was released before one was observed — is
@@ -273,10 +541,10 @@ impl TerminalOutputRecord {
                 bytes.len() == self.output.len()
                     && bytes
                         .iter()
-                        .zip(self.output.as_bytes())
+                        .zip(self.output.text().as_bytes())
                         .all(|(value, byte)| value.as_u64() == Some(u64::from(*byte)))
             }
-            Some(serde_json::Value::String(output)) => output == &self.output,
+            Some(serde_json::Value::String(output)) => output == self.output.text().as_ref(),
             _ => false,
         }
     }
@@ -520,26 +788,18 @@ impl ChatEntry {
     }
 
     /// Whether this entry is a message the user wrote, including an answer
-    /// to an agent's question. Prompts that Hel submits on the user's behalf
-    /// are excluded: retries, automatic continuations, forwarded review
-    /// feedback, sub-agent notices, and another session's message delivered
-    /// as a turn. The rules match the ones authorization evidence uses to
-    /// leave out generated prompts.
+    /// to an agent's question. Prompts that Mjolnir submits on the user's
+    /// behalf are excluded: every [`crate::continuation::GeneratedPrompt`]
+    /// and text marked as generated. Authorization evidence asks the same
+    /// two predicates, so the two cannot disagree.
     pub fn is_user_authored(&self) -> bool {
-        if self.role != ChatRole::User || crate::continuation::is_generated_prompt_text(&self.text)
-        {
-            return false;
-        }
         // An entry without a source is a prompt submitted from this client
         // that the controller has not yet projected.
-        self.source.0.as_ref().is_none_or(|item| {
-            let command_id = item
-                .stable_id
-                .strip_prefix("user:")
-                .unwrap_or(&item.stable_id);
-            !crate::continuation::is_generated_prompt(command_id)
-                && !command_id.starts_with(SESSION_MESSAGE_TURN_COMMAND_PREFIX)
-        })
+        self.role == ChatRole::User
+            && crate::continuation::is_user_authored_message(
+                self.source.0.as_ref().map(|item| item.stable_id.as_str()),
+                &self.text,
+            )
     }
 
     pub fn plan(seq: u64, plan: Vec<PlanLine>) -> Self {
@@ -612,7 +872,9 @@ impl ChatEntry {
         }
         if let Some(presentation) = &mut self.tool_presentation {
             truncate_string_start(&mut presentation.summary, DETAIL_BYTES);
-            truncate_string_start(&mut presentation.source, TEXT_BYTES);
+            let mut source = presentation.source.text().into_owned();
+            truncate_string_start(&mut source, TEXT_BYTES);
+            presentation.source = source.into();
         }
         self.plan.truncate(DETAIL_COUNT);
         for line in &mut self.plan {
@@ -843,6 +1105,18 @@ pub fn message_item_id(event_key: &str) -> String {
     format!("message:{event_key}")
 }
 
+/// Recover an assistant message by its stable transcript identity.
+pub fn materialized_agent_message_text<'a>(
+    mut items: impl Iterator<Item = &'a TranscriptItem>,
+    stable_id: &str,
+) -> Option<String> {
+    let item = items.find(|item| item.stable_id == stable_id)?;
+    match &item.body {
+        TranscriptBody::Agent { chunks, .. } => Some(materialized_chunks_text(chunks)),
+        _ => None,
+    }
+}
+
 pub fn materialized_chunks_text(chunks: &[serde_json::Value]) -> String {
     chunks
         .iter()
@@ -976,6 +1250,8 @@ mod tests {
             ("user:quota-retry-4", "Continue."),
             ("user:server-retry-5", "Continue."),
             ("user:review-forward-2", "Review findings"),
+            // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
+            ("user:handback-reminder-36", "Please also update the docs"),
             ("user:subagent-input-3", "A sub-agent finished."),
             (
                 "user:session-message-turn-8",

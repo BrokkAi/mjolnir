@@ -8,10 +8,12 @@
 //! handoff cancels it and the next daemon starts it again. Once a handoff is
 //! waiting, the gate drains: it refuses new deferrable work, so the set of
 //! holders can only shrink. While it waits, the daemon log names each blocker
-//! with its count and age.
+//! with its count and age. A hold may carry a [`Describe`] handle, which the
+//! notice asks for the work's identity and current stage when it renders, so
+//! the owner of that fact stays the only place that records it.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long draining lasts after the most recent handoff attempt. The
@@ -21,6 +23,9 @@ const DRAIN_LAPSE: Duration = Duration::from_secs(10);
 
 /// How often a waiting handoff names its blockers again in the daemon log.
 const WAIT_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many holds of one label a notice describes before it counts the rest.
+const NAMED_HOLDS: usize = 3;
 
 /// The label a session destroy holds admission under.
 pub(crate) const DESTROY_LABEL: &str = "session destroy";
@@ -34,7 +39,7 @@ pub(crate) const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
 pub(crate) const DESTROY_WAIT_BOUND: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
-pub(crate) struct Gate(Mutex<State>);
+pub(crate) struct Gate(Mutex<State>, tokio::sync::Notify, Condvar);
 
 #[derive(Default)]
 struct State {
@@ -50,9 +55,32 @@ struct State {
     /// When the current handoff wait began, and when it last named its
     /// blockers in the log.
     handoff_wait: Option<(Instant, Instant)>,
-    /// Each hold by label, keyed by admission order, with when it began.
-    active: BTreeMap<&'static str, BTreeMap<u64, Instant>>,
+    /// Each hold by label, keyed by admission order.
+    active: BTreeMap<&'static str, BTreeMap<u64, Hold>>,
     next_hold: u64,
+    // Test synchronization only; never part of admission policy.
+    #[cfg(test)]
+    resumable_waiters: usize,
+}
+
+struct Hold {
+    began: Instant,
+    describer: Option<Arc<dyn Describe>>,
+}
+
+/// What a hold is doing, as its owner reports it when a notice renders.
+pub(crate) struct HoldDetail {
+    /// Which work this is, such as `create e5dfbd99`.
+    pub(crate) subject: String,
+    /// What the work is doing now, if its owner knows.
+    pub(crate) stage: Option<String>,
+}
+
+/// Held by an admission so a waiting handoff can name the work. The
+/// implementation reads the live fact from its owner on every call; the gate
+/// never copies it.
+pub(crate) trait Describe: Send + Sync {
+    fn describe(&self) -> HoldDetail;
 }
 
 impl State {
@@ -91,46 +119,95 @@ impl State {
                 Some(Blocker {
                     label,
                     count: holds.len(),
-                    age: oldest.elapsed(),
+                    age: oldest.began.elapsed(),
+                    named: holds
+                        .values()
+                        .filter_map(|hold| {
+                            Some(NamedHold {
+                                describer: hold.describer.clone()?,
+                                age: hold.began.elapsed(),
+                            })
+                        })
+                        .take(NAMED_HOLDS)
+                        .collect(),
                 })
             })
             .collect()
     }
 
-    /// Log what a refused handoff waits for: when the wait begins, then every
-    /// [`WAIT_REPORT_INTERVAL`], so a long wait always names its cause.
-    fn report_refused_handoff(&mut self) {
+    /// Decide whether a refused handoff reports its blockers now: when the
+    /// wait begins, then every [`WAIT_REPORT_INTERVAL`], so a long wait always
+    /// names its cause. The caller logs the report after it releases the gate,
+    /// because describing a hold reads other owners' state.
+    fn refused_handoff_report(&mut self) -> Option<RefusedHandoff> {
         let now = Instant::now();
         let (started, reported) = match self.handoff_wait {
             // A wait whose client stopped asking has ended; this is a new one.
             Some(wait) if self.draining() => wait,
             _ => {
                 self.handoff_wait = Some((now, now));
-                tracing::info!(
-                    blockers = %describe(&self.blockers()),
-                    "daemon upgrade handoff is waiting for daemon-owned work"
-                );
-                return;
+                return Some(RefusedHandoff {
+                    blockers: self.blockers(),
+                    waited_seconds: None,
+                });
             }
         };
         if now.duration_since(reported) >= WAIT_REPORT_INTERVAL {
             self.handoff_wait = Some((started, now));
-            tracing::info!(
-                blockers = %describe(&self.blockers()),
-                waited_seconds = started.elapsed().as_secs(),
+            return Some(RefusedHandoff {
+                blockers: self.blockers(),
+                waited_seconds: Some(started.elapsed().as_secs()),
+            });
+        }
+        None
+    }
+}
+
+struct RefusedHandoff {
+    blockers: Vec<Blocker>,
+    /// Absent for the first report of a wait.
+    waited_seconds: Option<u64>,
+}
+
+impl RefusedHandoff {
+    fn log(&self) {
+        let blockers = describe(&self.blockers);
+        match self.waited_seconds {
+            None => tracing::info!(
+                %blockers,
+                "daemon upgrade handoff is waiting for daemon-owned work"
+            ),
+            Some(waited_seconds) => tracing::info!(
+                %blockers,
+                waited_seconds,
                 "daemon upgrade handoff is still waiting for daemon-owned work"
-            );
+            ),
         }
     }
 }
 
-/// One label of work holding admission open: how many holds, and how long the
-/// oldest has run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One label of work holding admission open: how many holds, how long the
+/// oldest has run, and the oldest few holds that can describe themselves.
+#[derive(Clone)]
 pub(crate) struct Blocker {
     pub(crate) label: &'static str,
     pub(crate) count: usize,
     pub(crate) age: Duration,
+    named: Vec<NamedHold>,
+}
+
+#[derive(Clone)]
+struct NamedHold {
+    describer: Arc<dyn Describe>,
+    age: Duration,
+}
+
+fn format_age(age: Duration) -> String {
+    let seconds = age.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        _ => format!("{}m {:02}s", seconds / 60, seconds % 60),
+    }
 }
 
 #[cfg(test)]
@@ -145,16 +222,34 @@ impl Blocker {
 }
 
 impl std::fmt::Display for Blocker {
-    /// `session lifecycle x2 (oldest 1m 05s)`, `SessionWiki sync (12s)`.
+    /// `SessionWiki sync (12s)`, `session lifecycle x2 (oldest 1m 05s)`, and,
+    /// for holds that describe themselves, `session lifecycle x5: create
+    /// e5dfbd99 (install worker binary, 84m 42s); and 4 more`. Rendering asks
+    /// each described hold for its live detail, so call it without the gate held.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let seconds = self.age.as_secs();
-        let age = match seconds {
-            0..60 => format!("{seconds}s"),
-            _ => format!("{}m {:02}s", seconds / 60, seconds % 60),
-        };
-        match self.count {
-            1 => write!(formatter, "{} ({age})", self.label),
-            count => write!(formatter, "{} x{count} (oldest {age})", self.label),
+        if self.named.is_empty() {
+            let age = format_age(self.age);
+            return match self.count {
+                1 => write!(formatter, "{} ({age})", self.label),
+                count => write!(formatter, "{} x{count} (oldest {age})", self.label),
+            };
+        }
+        write!(formatter, "{}", self.label)?;
+        if self.count > 1 {
+            write!(formatter, " x{}", self.count)?;
+        }
+        for (index, hold) in self.named.iter().enumerate() {
+            let detail = hold.describer.describe();
+            let age = format_age(hold.age);
+            let separator = if index == 0 { ": " } else { "; " };
+            match detail.stage {
+                Some(stage) => write!(formatter, "{separator}{} ({stage}, {age})", detail.subject)?,
+                None => write!(formatter, "{separator}{} ({age})", detail.subject)?,
+            }
+        }
+        match self.count - self.named.len() {
+            0 => Ok(()),
+            more => write!(formatter, "; and {more} more"),
         }
     }
 }
@@ -182,6 +277,65 @@ struct Registration {
 }
 
 impl Gate {
+    fn publish(&self) {
+        self.1.notify_waiters();
+        self.2.notify_all();
+    }
+
+    /// Resumable work owns no admission while handoff drains. The same lock
+    /// decides whether to resume control or yield to a closed daemon.
+    pub(crate) fn enter_after_draining(
+        self: &Arc<Self>,
+        label: &'static str,
+    ) -> anyhow::Result<Work> {
+        let mut state = self.lock();
+        loop {
+            anyhow::ensure!(
+                !state.closed,
+                mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                    .with_code(HANDOFF_REFUSAL_CODE)
+            );
+            if !state.draining() {
+                return Ok(self.register_as(&mut state, label, None, None));
+            }
+            // This is the owner's existing lapse deadline, not a polling
+            // interval or a bound on the resumable operation.
+            let deadline = state.drain_requested.expect("draining has a request") + DRAIN_LAPSE;
+            #[cfg(test)]
+            {
+                state.resumable_waiters += 1;
+                self.1.notify_waiters();
+            }
+            (state, _) = self
+                .2
+                .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[cfg(test)]
+            {
+                state.resumable_waiters -= 1;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_resumable_waiter_for_test(&self) {
+        loop {
+            let notified = self.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.lock().resumable_waiters > 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_drain_for_test(&self) {
+        self.lock().drain_requested = Some(Instant::now() - DRAIN_LAPSE);
+        self.publish();
+    }
+
     pub(crate) fn is_open(&self) -> bool {
         !self.lock().closed
     }
@@ -193,16 +347,44 @@ impl Gate {
         state.closed || state.draining()
     }
 
+    /// Publish a drain from the same owner that decides admission. Queued,
+    /// unaccepted requests release their outer client hold when this wakes.
+    pub(crate) fn begin_draining(&self) {
+        self.lock().drain_requested = Some(Instant::now());
+        self.publish();
+    }
+
+    pub(crate) async fn wait_until_draining(&self) {
+        loop {
+            let notified = self.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_draining() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Admit a short control operation. The handoff waits for it. Refused
     /// only once the handoff has happened.
     pub(crate) fn enter(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
+        self.enter_described(label, None)
+    }
+
+    /// [`Self::enter`] for work that can name itself in the wait notice.
+    pub(crate) fn enter_described(
+        self: &Arc<Self>,
+        label: &'static str,
+        describer: Option<Arc<dyn Describe>>,
+    ) -> anyhow::Result<Work> {
         let mut state = self.lock();
         anyhow::ensure!(
             !state.closed,
             mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
                 .with_code(HANDOFF_REFUSAL_CODE)
         );
-        Ok(self.register(&mut state, label))
+        Ok(self.register_as(&mut state, label, None, describer))
     }
 
     /// Admit work the handoff waits for but that can be put off. Refused while
@@ -210,6 +392,15 @@ impl Gate {
     pub(crate) fn enter_unless_draining(
         self: &Arc<Self>,
         label: &'static str,
+    ) -> anyhow::Result<Work> {
+        self.enter_unless_draining_described(label, None)
+    }
+
+    /// [`Self::enter_unless_draining`] for work that can name itself.
+    pub(crate) fn enter_unless_draining_described(
+        self: &Arc<Self>,
+        label: &'static str,
+        describer: Option<Arc<dyn Describe>>,
     ) -> anyhow::Result<Work> {
         let mut state = self.lock();
         anyhow::ensure!(
@@ -222,20 +413,35 @@ impl Gate {
             mj_core::refusal::Refusal::precondition("a daemon upgrade handoff is waiting")
                 .with_code(HANDOFF_REFUSAL_CODE)
         );
-        Ok(self.register(&mut state, label))
+        Ok(self.register_as(&mut state, label, None, describer))
     }
 
     /// Admit the destroy of `session_id`. The handoff and the graceful stop
     /// wait for it, but only up to [`DESTROY_WAIT_BOUND`].
     pub(crate) fn enter_destroy(self: &Arc<Self>, session_id: &str) -> anyhow::Result<Work> {
-        let mut state = self.lock();
-        anyhow::ensure!(!state.closed, "daemon upgrade handoff is underway");
-        state.destroying.push(session_id.to_owned());
-        Ok(self.register_as(&mut state, DESTROY_LABEL, Some(session_id.to_owned())))
+        self.enter_destroy_mode(session_id, false)
     }
 
-    fn register(self: &Arc<Self>, state: &mut State, label: &'static str) -> Work {
-        self.register_as(state, label, None)
+    pub(crate) fn enter_destroy_unless_draining(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> anyhow::Result<Work> {
+        self.enter_destroy_mode(session_id, true)
+    }
+
+    fn enter_destroy_mode(
+        self: &Arc<Self>,
+        session_id: &str,
+        deferrable: bool,
+    ) -> anyhow::Result<Work> {
+        let mut state = self.lock();
+        anyhow::ensure!(
+            !state.closed && (!deferrable || !state.draining()),
+            mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                .with_code(HANDOFF_REFUSAL_CODE)
+        );
+        state.destroying.push(session_id.to_owned());
+        Ok(self.register_as(&mut state, DESTROY_LABEL, Some(session_id.to_owned()), None))
     }
 
     fn register_as(
@@ -243,14 +449,17 @@ impl Gate {
         state: &mut State,
         label: &'static str,
         destroying: Option<String>,
+        describer: Option<Arc<dyn Describe>>,
     ) -> Work {
         let hold = state.next_hold;
         state.next_hold += 1;
-        state
-            .active
-            .entry(label)
-            .or_default()
-            .insert(hold, Instant::now());
+        state.active.entry(label).or_default().insert(
+            hold,
+            Hold {
+                began: Instant::now(),
+                describer,
+            },
+        );
         Work {
             _registration: Arc::new(Registration {
                 gate: self.clone(),
@@ -277,7 +486,10 @@ impl Gate {
             return false;
         }
         state.drain_requested = Some(Instant::now());
-        state.destroy_wait_holds()
+        let holds = state.destroy_wait_holds();
+        drop(state);
+        self.publish();
+        holds
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -309,8 +521,13 @@ impl Gate {
         if !state.holds_only_destroys_or_nothing()
             || (!state.destroying.is_empty() && state.destroy_wait_holds())
         {
-            state.report_refused_handoff();
+            let report = state.refused_handoff_report();
             state.drain_requested = Some(Instant::now());
+            drop(state);
+            self.publish();
+            if let Some(report) = report {
+                report.log();
+            }
             return false;
         }
         // Logged on every close, so a handoff's start is on record even when
@@ -323,6 +540,8 @@ impl Gate {
             "daemon upgrade handoff closed admission; the daemon is shutting down"
         );
         state.closed = true;
+        drop(state);
+        self.publish();
         true
     }
 }
@@ -362,8 +581,26 @@ pub(crate) fn activity_unless_draining(label: &'static str) -> anyhow::Result<Wo
     gate().enter_unless_draining(label)
 }
 
+pub(crate) fn activity_described(
+    label: &'static str,
+    describer: Arc<dyn Describe>,
+) -> anyhow::Result<Work> {
+    gate().enter_described(label, Some(describer))
+}
+
+pub(crate) fn activity_unless_draining_described(
+    label: &'static str,
+    describer: Arc<dyn Describe>,
+) -> anyhow::Result<Work> {
+    gate().enter_unless_draining_described(label, Some(describer))
+}
+
 pub(crate) fn destroy_activity(session_id: &str) -> anyhow::Result<Work> {
     gate().enter_destroy(session_id)
+}
+
+pub(crate) fn destroy_activity_unless_draining(session_id: &str) -> anyhow::Result<Work> {
+    gate().enter_destroy_unless_draining(session_id)
 }
 
 pub(crate) fn is_draining() -> bool {
@@ -375,7 +612,8 @@ pub(crate) fn active_labels() -> Vec<String> {
     gate().active_labels()
 }
 
-/// What a waiting handoff names: each blocking label with its count and age.
+/// What a waiting handoff names: each blocking label with its count and age,
+/// and the oldest few holds that can describe themselves.
 pub(crate) fn blockers() -> Vec<Blocker> {
     gate().blockers()
 }
@@ -436,7 +674,7 @@ mod tests {
             let mut state = gate.lock();
             let holds = state.active.get_mut("session lifecycle").unwrap();
             let first = holds.values_mut().next().unwrap();
-            *first -= Duration::from_secs(65);
+            first.began -= Duration::from_secs(65);
         }
         assert_eq!(
             gate.blockers()
@@ -452,7 +690,7 @@ mod tests {
         drop(oldest);
         let lifecycle = gate.blockers()[1].clone();
         assert_eq!((lifecycle.label, lifecycle.count), ("session lifecycle", 1));
-        assert!(lifecycle.age < Duration::from_secs(60), "{lifecycle:?}");
+        assert!(lifecycle.age < Duration::from_secs(60), "{lifecycle}");
         drop((newer, sync));
         assert!(gate.blockers().is_empty());
     }
@@ -520,7 +758,7 @@ mod tests {
         let gate = Arc::new(Gate::default());
         let running = gate.enter("session lifecycle").unwrap();
         assert!(!gate.try_close());
-        gate.lock().drain_requested = Some(Instant::now() - DRAIN_LAPSE);
+        gate.expire_drain_for_test();
         assert!(!gate.is_draining());
         assert!(gate.enter_unless_draining("worker swap").is_ok());
         drop(running);
@@ -607,5 +845,32 @@ mod tests {
             drop(admitted);
             assert!(gate.try_close());
         }
+    }
+    // Hard-won: 5b46f3845: queued client admission could not observe a draining handoff.
+    #[tokio::test]
+    async fn drain_publication_wakes_existing_and_late_waiters() {
+        let gate = Arc::new(Gate::default());
+        let held = gate.enter("client request").unwrap();
+        let mut waiting = Box::pin(gate.wait_until_draining());
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(!gate.try_close());
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap();
+        assert!(
+            gate.enter_destroy_unless_draining("queued-destroy")
+                .is_err()
+        );
+        let mut late = Box::pin(gate.wait_until_draining());
+        assert!(futures::poll!(&mut late).is_ready());
+        drop(held);
+        assert!(gate.try_close());
+        let gate = Arc::new(Gate::default());
+        let mut closing = Box::pin(gate.wait_until_draining());
+        assert!(futures::poll!(&mut closing).is_pending());
+        assert!(gate.try_close());
+        tokio::time::timeout(Duration::from_secs(1), closing)
+            .await
+            .unwrap();
     }
 }

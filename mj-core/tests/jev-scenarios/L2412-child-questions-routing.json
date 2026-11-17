@@ -1,0 +1,234 @@
+{
+  "id": "L2412",
+  "title": "child questions routing",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "e965bcdb8c5c3036d6dcfbeb6120fe68",
+    "session_title": "mjolnir via claude",
+    "reply_position": 6158,
+    "captured_at": "2026-10-23T13:33:09.479Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:4586",
+          "role": "user",
+          "text": ". ! status in a session should be cleared after the session is focused"
+        },
+        {
+          "id": "user:4632",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nClient: TUI dashboard (mj)\nStatus: Awaiting input / blocked\nOther: i just know it's marked with ! (at this writing d8443f17cb24506c5ee26277fcf319f4 is an example)"
+        },
+        {
+          "id": "user:4956",
+          "role": "user",
+          "text": "did the parent not see that child stopped w question?\n\nchild statuses should be surfaced to parent not to human"
+        },
+        {
+          "id": "agent:4974",
+          "role": "assistant",
+          "text": "I can't answer the first question with a quick search. I'll send it to the child agent that did the first diagnosis, since it already has this session's data loaded."
+        },
+        {
+          "id": "agent:4991",
+          "role": "assistant",
+          "text": "I agree with your design position. For a child agent, its \"user\" is the parent agent. The child's question about how to prove non-implementation is the kind of thing the parent can answer from its own task context. The human should see it only if the parent decides to pass it on.\n\nThere is one case to keep in mind: some child requests, such as permission approvals or login prompts, may need a person no matter what. The parent could pass those on, or they could keep going to the human directly. That depends on what the routing code already does, so I'll decide after the investigation.\n\nThe child agent is checking three things:\n1. Whether any delegation path (`list_agents`, mailbox, report) tells a parent that a child has a pending question.\n2. What the parent `d8443f17…` actually received, and when. For example, whether the parent ended its turn waiting on the child while the child was waiting on its question.\n3. Where routing questions to the parent would fit in the existing code.\n\nI'll report back when it finishes."
+        },
+        {
+          "id": "agent:5074",
+          "role": "assistant",
+          "text": "No, the parent never saw it. The child didn't stop either. It is still running and waiting for an answer that nothing sends to the parent. **Confirmed** from the session records and the code.\n\n**Timeline (2026-10-23, UTC):**\n- 11:33:21: the parent gives child `9645b51a` its schema-19 assignment.\n- 11:34:40: the parent ends its turn. Its last message lists that work as running.\n- 11:35:33: the child asks its question (`elicitation-1`), 52 seconds after the parent went idle.\n- After that, the parent has no events, no mailbox deliveries, and no wake-up. Its last `list_agents` call was at 10:38, before the question was asked.\n\n**Why nothing reached the parent:**\n- `list_agents` reports a running child as plain `running`. It never checks for pending questions (`subagent_status`, `mj-controller/src/server_runtime/api.rs:1668`).\n- The mailbox has no event type for a child's question. The child-related events are `SubagentFinished`, `ParentMessage` and `SessionMessage` (`mj-core/src/mailbox.rs:197`). Parents are only woken when a child finishes.\n- The question is recorded and offered only to human clients: the TUI, the web viewer and the HTTP elicitation routes (`mj-controller/src/server/api/routes.rs:83-86`). The `!` on the parent row is the TUI's attempt to make up for that.\n- The parent has no way to answer the question either. `send_message` delivers plain text and does not resolve the child's question form.\n\nSo this is a missing delivery path, not a parent that saw the question and ignored it. Nothing in the code or docs shows that human-only routing was chosen on purpose. It looks like the delegation feature never covered child questions.\n\n**Proposed fix**, reusing existing pieces:\n1. When a child asks a question, add a mailbox event that wakes the parent. It would include the child, the question ID and the question text. Each question gets its own ID, so a restart or retry delivers it only once. The existing wake-on-finish mechanism (`mj-controller/src/database/delegation.rs:172-238`) already works this way.\n2. Have `list_agents` show such a child as waiting for an answer, with the question text.\n3. Let the parent answer through the existing answer path, which ends in `ResolveElicitation` (`server_runtime/actions.rs:366`).\n4. Remove the inherited `!` from parent rows in the TUI, as you said.\n\nI need your decisions on three points:\n\n- **How the parent answers.** I recommend a separate answer tool that takes the question ID and the field values. These questions are forms with fields and choices, so a free-text `send_message` can't fill them in reliably. It would also be unclear whether a message is an answer or a new instruction. The cost is one more tool. That doesn't conflict with your \"one mechanism\" rule: `send_message` stays the only way to send instructions, and the new tool only answers questions.\n- **When a person still sees the question.** I recommend sending every child question only to the parent. The parent can pass it on to you in its own reply if it needs you. Requests for secrets or permissions might be an exception. Do you want those to keep going to the human directly?\n- **Nested children.** I recommend sending a question only to the child's direct parent, not further up the chain.\n\n`★ Insight ─────────────────────────────────────`\n- The parent ended its turn 52 seconds before the child asked. Delegation only wakes a parent when a child finishes, so the parent could not have found out without calling `list_agents` again, and even then the output says only `running`.\n- Codex marks this kind of question as non-blocking (\"Work can continue while you answer\"). That is why the child shows as running rather than stopped, and why nothing in the child-status code noticed it.\n`─────────────────────────────────────────────────`\n\nI haven't changed any code. Tell me which options you want and I'll plan the implementation."
+        },
+        {
+          "id": "user:5348",
+          "role": "user",
+          "text": "1. i don't want a new tool. parent can \"type out\" its answer in send_message. just cancel the elicitation and let the parent response drive it from there, this should work everywhere\n2. no\n3. agreed"
+        },
+        {
+          "id": "agent:5402",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- Reusing the existing `SessionMessage` type means the parent sees the question exactly like a message from another session. The rendering already adds \"reply with send_message to session …\" (`mj-core/src/mailbox.rs:316-324`), so the parent needs no new tool and no new message format.\n- The daemon saves the parent's message before it cancels the child's question. If the daemon crashes between those two steps, the question is still pending when it restarts, so it can safely retry the cancel. Each question has a stable ID, so the retry does not send the parent a second copy.\n`─────────────────────────────────────────────────`\n\nTwo child agents are working on this:\n- **A, routing** (`aed94104`): sends a child's question to its parent as a message, cancels the question on the child's side, and adds one sentence to the children's instructions. It covers permission requests too, as you decided.\n- **B, TUI** (`73dc0c24`): removes the `!` that a child's question puts on its parent's row, and the notification for it.\n\nNeither will commit. I'll review both sets of changes together when they report back."
+        },
+        {
+          "id": "agent:5484",
+          "role": "assistant",
+          "text": "The child agent found two real problems. My decisions:\n\n1. **Cancel race.** I'm moving the cancel into the child's worker. The worker holds the open request, so it can cancel it the moment it arrives. That means the daemon never sends a cancel by ID, and an ID reused after a restart can't cancel the wrong question.\n2. **Nested parents.** Today a parent that is itself a child agent can't `send_message` to its own children (`subagent_input.rs:94-98`). I'm approving the proposed narrow fix: allow it only when the target is the sender's own direct child."
+        },
+        {
+          "id": "agent:5529",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The race happened because the worker numbers its question IDs starting from 1 again on every restart (`mj-worker/src/acp/drive.rs:100-103`). A cancel that refers only to an ID can therefore reach a newer question with the same ID. When the worker cancels the request it is holding at that moment, no ID lookup is needed.\n- Each part now has one owner. The worker owns the child's request. The daemon owns delivery to the parent, and it keys each delivery on an event sequence number (API seq) that never restarts from zero.\n`─────────────────────────────────────────────────`\n\nChild A is now implementing the changed design: the worker cancels questions, the daemon only delivers them, and nested parents can message their own children. Child B is still removing the TUI promotion. I'll review both sets of changes together when they're done."
+        },
+        {
+          "id": "user:5602",
+          "role": "user",
+          "text": "push when complete"
+        },
+        {
+          "id": "agent:5604",
+          "role": "assistant",
+          "text": "Understood. Once both parts are finished and I've reviewed the combined changes and the test results, I'll commit and push to `master`. Waiting for both children now."
+        },
+        {
+          "id": "agent:5666",
+          "role": "assistant",
+          "text": "Waiting on two children: A (routing) and a check of whether the terminal-drawing test also fails on clean `master`."
+        },
+        {
+          "id": "agent:5717",
+          "role": "assistant",
+          "text": "Waiting on child A (routing child questions to the parent)."
+        },
+        {
+          "id": "agent:5732",
+          "role": "assistant",
+          "text": "Nesting isn't supported anywhere. `State::validate_subagent` (`mj-core/src/state.rs:2425`) refuses a child whose parent is itself a child agent. So the authorization change I approved would never run. I'm keeping the rule against nesting and telling A to remove that exception."
+        },
+        {
+          "id": "agent:5755",
+          "role": "assistant",
+          "text": "While A finishes testing, I'll review its main changes."
+        },
+        {
+          "id": "agent:5808",
+          "role": "assistant",
+          "text": "One more thing to check. If the daemon ever rebuilds a session's event projection from the start, old questions could be sent to the parent again under new sequence numbers. I'll ask A to check this."
+        },
+        {
+          "id": "agent:5825",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The permission code has two layers. First, the session's policy can approve a request automatically (YOLO mode). Only requests that get past that layer turn into forms for a person. \"Send to parent instead of the human\" belongs only at the second layer. Putting it at the first layer would have turned silent approvals into refusals.\n- Deduplication only works if the key stays the same every time the daemon creates the same event. The API seq never restarts, but a rebuild that inserts old events again would give them new seq values. That is why I asked A to check for that case.\n`─────────────────────────────────────────────────`\n\nWaiting on A. It is removing the nesting exception, fixing the full-access permission regression, checking the projection-rebuild case, and running the full tests, clippy and the terminal-drawing test. Once it reports back, I'll commit and push."
+        },
+        {
+          "id": "agent:5912",
+          "role": "assistant",
+          "text": "The shortened rules keep their meaning. Next I'll check the migration and the frontier logic, since that changes saved data."
+        },
+        {
+          "id": "agent:5968",
+          "role": "assistant",
+          "text": "The test passes, and no install build is running. Next I'll commit, and fetch to see whether `origin/master` has moved."
+        },
+        {
+          "id": "agent:5982",
+          "role": "assistant",
+          "text": "`origin/master` gained two commits. Before merging, I'll check whether either one also adds a schema migration 93."
+        },
+        {
+          "id": "agent:5996",
+          "role": "assistant",
+          "text": "Upstream already used migration 93, so ours must become 94. I'll read upstream's migration to see which compatibility floor it sets."
+        },
+        {
+          "id": "agent:6009",
+          "role": "assistant",
+          "text": "Upstream's migration 93 is also compatible and keeps the floor at 92. I'll merge and renumber ours to 94, with the floor still at 92."
+        },
+        {
+          "id": "agent:6085",
+          "role": "assistant",
+          "text": "The background build will notify me when it finishes, so I don't need a separate monitor. Still waiting for the controller rebuild and the schema and child-question tests. After they pass, I'll finish the merge commit and push."
+        },
+        {
+          "id": "agent:6121",
+          "role": "assistant",
+          "text": "The migration tests pass, including upstream's `turn_profile` test and ours. They were slow, but none failed. I'll run clippy on the controller crate, then finish the merge and push."
+        },
+        {
+          "id": "agent:6158",
+          "role": "assistant",
+          "text": "I pushed the change to `master`. Child agents' questions now go to their parent agent instead of waiting for a person. Commits: `8421a0695` (the change) and `b9286fa31` (merge with upstream).\n\n**What changed:**\n- **Child's worker:** when a child would show a question or permission form to a person, the worker records it and closes it at once. Requests that full-access mode approves automatically are not affected.\n- **Daemon:** sends the question text to the direct parent as a message from the child, which wakes the parent. The message ends with \"Its question form is already closed. Answer with send_message to session_id …\". The parent answers with ordinary `send_message`. No new tool and no new protocol version. This works the same way for every harness.\n- **Repeats:** a new compatible schema migration (94) stops a rebuild of a session's history from sending old questions to the parent again. The floor for older daemons stays at 92.\n- **Older workers:** questions still open on workers from before this change are sent to the parent too. Those workers keep the form open until they are replaced.\n- **TUI:** a parent row no longer shows `!` because of a child's question.\n- **Children's instructions** now say that questions go to the parent and the answer comes back as a message.\n\n**Two changes from the plan:**\n- I dropped the nested-parent permission change. Child agents can't have children of their own (`State::validate_subagent`), so it would never run.\n- Our migration was renumbered from 93 to 94, because upstream had already used 93.\n\n**Test results:**\n- **Before the merge:** clippy across the whole workspace passed. The full test suites for the five affected crates ran about 4,000 tests, and 11 failed on the first run. Each of those 11 passed when rerun alone, so the full run never passed cleanly in one go:\n  - Six failed on timeouts (5 seconds) or a port conflict.\n  - Two failed because the instruction text grew past a length limit; the child agent shortened the wording, and both pass now.\n  - The terminal-drawing test failed only when `NO_COLOR` was set, and passed 3 out of 3 times without it.\n- **After the merge:** clippy on the controller passed, and the schema and child-question tests passed.\n- **Not run:** an end-to-end test with a real daemon. Older workers still keep their forms open, as noted above.\n\n**What this means for `d8443f17…`:** the new build isn't installed. Once it is, the mailbox sweep should send child `9645b51a`'s open question to `d8443f17…` (likely, not verified), and the `!` on its row should go away.\n\nI saved your rule (child status goes to the parent, no new tools, no exceptions for the human) as a memory for future sessions.\n\n`★ Insight ─────────────────────────────────────`\n- Upstream and this change both took migration 93 in the same short window. Because each migration checks `version < N` and runs in its own transaction, renumbering ours to 94 was enough. The test had to change too: after a failed 94 step, the schema now stays at 93, not 92.\n- Each part of this has one owner. The worker answers the request it holds, and the daemon handles delivery. That split is what removed the race where a cancel could reach a newer question with the same ID.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "push when complete",
+    "assistant_text_tail": "r own (`State::validate_subagent`), so it would never run.\n- Our migration was renumbered from 93 to 94, because upstream had already used 93.\n\n**Test results:**\n- **Before the merge:** clippy across the whole workspace passed. The full test suites for the five affected crates ran about 4,000 tests, and 11 failed on the first run. Each of those 11 passed when rerun alone, so the full run never passed cleanly in one go:\n  - Six failed on timeouts (5 seconds) or a port conflict.\n  - Two failed because the instruction text grew past a length limit; the child agent shortened the wording, and both pass now.\n  - The terminal-drawing test failed only when `NO_COLOR` was set, and passed 3 out of 3 times without it.\n- **After the merge:** clippy on the controller passed, and the schema and child-question tests passed.\n- **Not run:** an end-to-end test with a real daemon. Older workers still keep their forms open, as noted above.\n\n**What this means for `d8443f17…`:** the new build isn't installed. Once it is, the mailbox sweep should send child `9645b51a`'s open question to `d8443f17…` (likely, not verified), and the `!` on its row should go away.\n\nI saved your rule (child status goes to the parent, no new tools, no exceptions for the human) as a memory for future sessions.\n\n`★ Insight ─────────────────────────────────────`\n- Upstream and this change both took migration 93 in the same short window. Because each migration checks `version < N` and runs in its own transaction, renumbering ours to 94 was enough. The test had to change too: after a failed 94 step, the schema now stays at 93, not 92.\n- Each part of this has one owner. The worker answers the request it holds, and the daemon handles delivery. That split is what removed the race where a cancel could reach a newer question with the same ID.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 5602,
+    "input_rationale": "The user asked to push when complete and it is pushed. The open items are that the new build is not installed (not requested) and child 9645b51a's question, which the change now routes to its parent agent automatically; neither is a question to the user.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-23T14:46:18.960Z",
+        "kind": "system",
+        "text": "Clearing context…"
+      },
+      {
+        "at": "2026-10-23T14:46:20.450Z",
+        "kind": "system",
+        "text": "Context cleared — a new conversation starts here."
+      },
+      {
+        "at": "2026-10-23T14:46:30.694Z",
+        "kind": "user",
+        "text": "e8566ee44d5a562c41deb74d72243980 didn't get subagent-finished delivered until i interrupted it"
+      },
+      {
+        "at": "2026-10-23T14:47:02.985Z",
+        "kind": "agent",
+        "text": "Checking the worker's relay journal for when the stuck turn started. The daemon handed off both messages within a second. The worker then held them because it thought a turn was still running."
+      },
+      {
+        "at": "2026-10-23T14:47:43.527Z",
+        "kind": "agent",
+        "text": "I found where the session got stuck. I'm now pulling the full record of that moment from the daemon database, because the worker's own log file was rotated while I was reading it."
+      },
+      {
+        "at": "2026-10-23T14:48:26.095Z",
+        "kind": "agent",
+        "text": "The evidence is complete. I'm doing one last check: whether a fix landed after this session's worker was built."
+      }
+    ]
+  }
+}

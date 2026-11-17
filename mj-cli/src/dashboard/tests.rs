@@ -80,13 +80,19 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
             mj_core::config::HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
+                claude_permission_mode: None,
+                aws: None,
                 codex_profile: None,
-                kind,
-                home: std::path::PathBuf::from("/profiles").join(id),
                 environment: Default::default(),
+                ..mj_core::config::HarnessProfile::new(
+                    kind,
+                    std::path::PathBuf::from("/profiles").join(id),
+                )
             },
         );
     }
@@ -123,6 +129,9 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
         state.sessions.insert(
             id.into(),
             mj_core::state::SessionRecord {
+                oracle_choice: None,
+                oracle: true,
+                notifications_ignored: false,
                 project: None,
                 target_runtime: None,
                 launch_base: None,
@@ -135,8 +144,6 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 archived: false,
-                container_cpus: None,
-                container_memory: None,
                 id: id.into(),
                 title: title.into(),
                 harness_kind: mj_core::config::HarnessKind::Codex,
@@ -147,6 +154,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 target_template_id: "podman".into(),
                 resource_allocation: None,
                 additional_mounts: Vec::new(),
@@ -160,6 +168,8 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 viewed_through_event_ordinal: 0,
                 draft_input: String::new(),
                 last_error: None,
+                dismissed_failure: None,
+                failure_generation: 0,
                 last_checkpoint_error: None,
                 checkpoint: None,
             },
@@ -386,6 +396,86 @@ fn clearing_a_draft_during_attach_does_not_restore_the_old_cached_text() {
         ""
     );
     assert_eq!(cache.open(&session.id, "stale daemon draft").text, "");
+}
+
+#[tokio::test]
+async fn standby_paste_and_clear_supersede_warm_text_while_a_save_is_pending() {
+    let mut dashboard = populated_dashboard();
+    let mut cache = ComposerDraftCache::default();
+    let session = live_session("session-1", "2026-09-19T00:00:00Z");
+    let mut warm = open_test_chat("session-1");
+    warm.set_draft("older warm text".into());
+    let chats = BTreeMap::from([("session-1".into(), warm)]);
+    cache.capture("session-1", "standby".into(), "");
+    let (first, _) = cache.start("session-1", false).unwrap();
+    drafts::prepare_attach_draft(&mut cache, &mut dashboard, &session);
+    dashboard.select_active_session(&session.id);
+    dashboard.set_current_session(Some(&session.id));
+    dashboard.set_opening_session(Some(&session.id));
+    dashboard.focus_prompt();
+    // Paste results arrive through event dispatch rather than a key edit.
+    dashboard.handle_event_result(Event::Paste(" pasted after capture".into()));
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, &session.id, "");
+    assert!(
+        cache
+            .get(&session.id)
+            .unwrap()
+            .text
+            .contains("pasted after capture")
+    );
+    assert!(cache.start(&session.id, false).is_none());
+    dashboard.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL,
+    ));
+    dashboard.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('k'),
+        KeyModifiers::CONTROL,
+    ));
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, &session.id, "");
+    cache.complete(&session.id, first, true);
+    let (cleared, draft) = cache.start(&session.id, false).unwrap();
+    assert!(draft.text.is_empty(), "empty standby must beat warm text");
+    cache.complete(&session.id, cleared, true);
+    // Navigation/re-attach and final flush without edits issue no request.
+    drafts::prepare_attach_draft(&mut cache, &mut dashboard, &session);
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, &session.id, "");
+    assert!(cache.start(&session.id, true).is_none());
+}
+
+// Hard-won: #1486: lifecycle disposal left standby text for autosave to revive.
+#[tokio::test]
+async fn discarded_parked_composer_cannot_be_captured_or_saved_again() {
+    let mut dashboard = populated_dashboard();
+    let mut cache = ComposerDraftCache::default();
+    let mut warm = open_test_chat("session-1");
+    warm.set_draft("parked unsent prompt".into());
+    let composer = warm.take_live_composer().unwrap();
+    dashboard.adopt_standby_composer("session-1", composer);
+    let mut chats = BTreeMap::from([("session-1".into(), warm)]);
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, "session-1", "");
+    let (pending, _) = cache.start("session-1", false).unwrap();
+    cache.capture("session-1", "newer abandoned prompt".into(), "");
+
+    // Both stopped-child and workspace-removal owners use this disposal path.
+    discard_session_composer(&mut dashboard, &mut chats, &mut cache, "session-1");
+    assert!(
+        !dashboard
+            .standby_session_ids()
+            .iter()
+            .any(|id| id == "session-1")
+    );
+    assert!(!chats.contains_key("session-1"));
+    // Even a capture already holding the ID cannot resurrect the removed editor.
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, "session-1", "stale seed");
+    assert!(cache.get("session-1").unwrap().text.is_empty());
+    cache.complete("session-1", pending, false);
+    assert!(!cache.is_saving());
+    assert!(cache.start("session-1", false).is_none());
+    assert!(
+        cache.start("session-1", true).is_none(),
+        "no request can reach an unknown/deleted session"
+    );
 }
 
 /// The transcript on screen must belong to the row the selection is on.
@@ -751,24 +841,26 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
 
     let mut materialized = mj_core::state::MaterializedSession::empty(session_id);
     materialized.session_title = Some("r5 suspend probe".into());
-    let update = crate::pollers::WorkerPollUpdate {
-        session_id: session_id.to_owned(),
-        view: mj_controller::session_manager::ManagedSessionView {
+    let update = crate::pollers::WorkerPollUpdate::from_view(
+        session_id.to_owned(),
+        mj_controller::session_manager::ManagedSessionView {
+            attention: Default::default(),
             snapshot: Some(mj_core::state::ManagedSessionSnapshot {
                 window: mj_core::state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational: mj_core::relay::RelaySnapshot::new(session_id.to_owned())
-                    .operational_state(),
+                    .operational_state()
+                    .into(),
                 latest_credential_sync_signal: None,
                 worker_build: None,
-                subagent_requests: Vec::new(),
-                subagent_completions: Vec::new(),
+                subagent_requests: Default::default(),
+                subagent_completions: Default::default(),
                 subagent_queue_error: None,
             }),
             connected: true,
             error: None,
         },
-    };
+    );
 
     let projection = crate::pollers::apply_worker_poll_update(&mut dashboard, update);
 
@@ -787,7 +879,12 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
     assert_ne!(sessions, controller.state.sessions, "the record changed");
     controller.state.sessions = sessions;
     dashboard.set_state(controller.state.clone());
-    crate::dashboard::drains::refresh_open_chats(&mut chats, &controller, &dashboard);
+    crate::dashboard::drains::refresh_open_chats(
+        &mut chats,
+        &controller,
+        &dashboard,
+        &Default::default(),
+    );
 
     assert_eq!(
         dashboard.session_record(session_id).unwrap().listed_title(),
@@ -802,16 +899,17 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
 fn missing_target_poll_preserves_the_daemon_notice() {
     let mut dashboard = populated_dashboard();
     dashboard.set_notice("The daemon found the target missing.");
-    let update = crate::pollers::WorkerPollUpdate {
-        session_id: "missing-target".into(),
-        view: mj_controller::session_manager::ManagedSessionView {
+    let update = crate::pollers::WorkerPollUpdate::from_view(
+        "missing-target".into(),
+        mj_controller::session_manager::ManagedSessionView {
+            attention: Default::default(),
             snapshot: None,
             connected: false,
             error: Some(mj_controller::session_manager::ViewError::TargetMissing(
                 "working directory is missing".into(),
             )),
         },
-    };
+    );
     assert!(crate::pollers::apply_worker_poll_update(&mut dashboard, update).is_none());
     assert_eq!(
         dashboard.notice().as_deref(),
@@ -821,6 +919,9 @@ fn missing_target_poll_preserves_the_daemon_notice() {
 
 fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
     mj_core::state::SessionRecord {
+        oracle_choice: None,
+        oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -833,8 +934,6 @@ fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: id.into(),
         title: id.into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -845,6 +944,7 @@ fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -858,6 +958,8 @@ fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -1056,6 +1158,8 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     let mut materialized = MaterializedSession::empty("session-1");
     materialized.applied_event_ordinal = 4;
     materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         command_id: "prompt-1".into(),
         accepted_ordinal: Some(1),
         turn_start_position: Some(2),
@@ -1089,27 +1193,28 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
 
     let mut dashboard = populated_dashboard();
     let mut relay = mj_core::relay::RelaySnapshot::new("session-1".into());
-    relay.assessment = Some(assessment.clone());
+    relay.assessment = Some(std::sync::Arc::new(assessment.clone()));
     let snapshot = mj_core::state::ManagedSessionSnapshot {
         window: mj_core::state::ProjectionWindow::of(&materialized),
         materialized: materialized.clone(),
-        operational: relay.operational_state(),
+        operational: relay.operational_state().into(),
         latest_credential_sync_signal: None,
         worker_build: None,
-        subagent_requests: Vec::new(),
-        subagent_completions: Vec::new(),
+        subagent_requests: Default::default(),
+        subagent_completions: Default::default(),
         subagent_queue_error: None,
     };
     let projection = crate::pollers::apply_worker_poll_update(
         &mut dashboard,
-        crate::pollers::WorkerPollUpdate {
-            session_id: "session-1".into(),
-            view: mj_controller::session_manager::ManagedSessionView {
+        crate::pollers::WorkerPollUpdate::from_view(
+            "session-1".into(),
+            mj_controller::session_manager::ManagedSessionView {
+                attention: Default::default(),
                 snapshot: Some(snapshot),
                 connected: true,
                 error: None,
             },
-        },
+        ),
     )
     .expect("worker projection");
     // Completion reaches the UI before Jev's answer. The later publication
@@ -1146,6 +1251,10 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     };
     let prepared = result.unwrap();
     assert!(dashboard.apply_prepared_materialized_session(*prepared));
+    dashboard.set_session_attention_for(
+        "session-1",
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
     assert_eq!(
         dashboard.attention_level("session-1"),
         mj_tui::AttentionLevel::Waiting
@@ -1175,6 +1284,8 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     // A verdict for a different completion or one already superseded cannot
     // revive a question, even if its old action was AwaitInput.
     for status in [Status::Consumed, Status::Superseded] {
+        dashboard
+            .set_session_attention_for("session-1", mj_core::attention::SessionAttention::Idle);
         let mut stale = assessment.clone();
         stale.status = status;
         let prepared = PreparedMaterializedSessionDetail::from_assessed_materialized(
@@ -1602,7 +1713,7 @@ async fn delayed_lifecycle_completion_cannot_retire_replacement_chat_or_attach()
 /// session as unknown.
 #[tokio::test]
 async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft() {
-    let mut controller = Controller {
+    let controller = Controller {
         config: Config::default(),
         state: State::default(),
     };
@@ -1610,18 +1721,18 @@ async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft(
     let departed = live_session("session-1", "2026-09-19T00:00:00Z");
     let (updates, _received) = tokio::sync::mpsc::unbounded_channel();
     let (tracker, _changed) = CriticalOperationTracker::new();
-    let detached = || DetachedChatState {
+    let detached = || TerminalDraftState {
         client_id: "client",
         session_id: "session-1",
-        event_ordinal: 4,
+        revision: 1,
         draft: DetachedSessionDraft {
             text: "unsent".into(),
             inherited_input: None,
         },
     };
 
-    let saved = record_chat_detach_state(
-        &mut controller,
+    let saved = record_terminal_draft_state(
+        &controller,
         Some(&departed),
         &mut dashboard,
         detached(),
@@ -1635,8 +1746,8 @@ async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft(
     assert_eq!(dashboard.notice(), None);
 
     assert!(
-        record_chat_detach_state(
-            &mut controller,
+        record_terminal_draft_state(
+            &controller,
             None,
             &mut dashboard,
             detached(),

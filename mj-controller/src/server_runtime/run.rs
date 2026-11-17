@@ -29,6 +29,19 @@ impl StartupSteps {
     }
 }
 
+fn quota_reports_for_viewer(
+    publications: &crate::quota::QuotaReportMap,
+) -> std::collections::BTreeMap<String, crate::quota::ProfileQuota> {
+    publications
+        .iter()
+        .filter_map(|(id, publication)| {
+            publication
+                .effective_report(id)
+                .map(|report| (id.clone(), report))
+        })
+        .collect()
+}
+
 pub(crate) async fn run_server(
     args: ServerArgs,
     termination: tokio_util::sync::CancellationToken,
@@ -49,7 +62,7 @@ pub(crate) async fn run_server(
     daemon_revisions.borrow_and_update();
     workspace_updates.borrow_and_update();
     let mut quota_updates = services.quotas.clone();
-    let mut quotas = quota_updates.borrow_and_update().clone();
+    let mut quotas = quota_reports_for_viewer(&quota_updates.borrow_and_update());
     let api_backend = services.backend.clone();
     let mut revision = daemon_runtime.allocate_revision();
     let mut conversations = mj_core::snapshot_map::SnapshotMap::new();
@@ -92,13 +105,13 @@ pub(crate) async fn run_server(
         .capacity_feed()
         .context("the daemon capacity service is not running")?;
     let mut capacity_targets_rx = capacity_feed.targets.clone();
-    let mut capacity_updates_rx = capacity_feed.updates.subscribe();
+    let mut capacity_states_rx = capacity_feed.states.clone();
     track_capacity_targets(
         &capacity_targets_rx.borrow_and_update(),
         &mut capacity_state,
     );
     let container_capacities = initial.metadata.container_capacities.clone();
-    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(publication.snapshot(
+    let mut first_snapshot = publication.snapshot(
         &controller,
         &workspace_updates.borrow().clone(),
         &quotas,
@@ -114,12 +127,18 @@ pub(crate) async fn run_server(
             project_sources: &project_sources,
             operations: &operations,
             move_recoveries: &move_recoveries,
-            capacity: &viewer_capacity(&capacity_state, &container_capacities),
+            capacity: &viewer_capacity(
+                &capacity_state,
+                &capacity_states_rx.borrow(),
+                &container_capacities,
+            ),
             launch_failures: &launch_failures,
             reviews: &review_views(&daemon_runtime),
         },
         revision,
-    ));
+    );
+    first_snapshot.notices = daemon_runtime.public_notices();
+    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(first_snapshot);
     startup.finished("build first viewer snapshot");
     let (conversation_tx, conversation_rx) = tokio::sync::watch::channel(conversations.clone());
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(32);
@@ -162,16 +181,25 @@ pub(crate) async fn run_server(
     startup.finished("load cookie credentials");
     // The documented `/api/v1` surface authenticates with a persisted bearer
     // token and drives sessions through the daemon-side backend.
-    options.set_api_token(crate::server::load_or_create_api_token(
-        &crate::server::api_token_path(),
-    )?);
+    let token = crate::server::load_or_create_api_token(&crate::server::api_token_path())?;
+    daemon_runtime
+        .api_credential
+        .set(token)
+        .map_err(|_| anyhow::anyhow!("API credential already initialized"))?;
+    options.set_api_token(daemon_runtime.api_credential.get().unwrap().clone());
     options.set_subagent_backend(api_backend.clone());
     // A launch onto a target the daemon has no worker binary for is refused at
     // admission, from the configuration as it is on disk right now.
-    options.set_worker_source_check(std::sync::Arc::new(|target_id| {
+    options.set_worker_source_check(std::sync::Arc::new(|target_id, bundle_id| {
         let controller = Controller::load().ok()?;
-        let template = controller.config.targets.get(target_id)?;
-        crate::controller::worker_source_problem(template, &crate::targets::ProcessExecutor)
+        let template = crate::controller::backend::session_target(
+            &controller.config,
+            bundle_id.unwrap_or_default(),
+            target_id,
+            &crate::targets::ProcessExecutor,
+        )
+        .ok()?;
+        crate::controller::worker_source_problem(&template, &crate::targets::ProcessExecutor)
     }));
     startup.finished("configure API and source checks");
     let renewal_cancellation = termination.child_token();
@@ -224,6 +252,7 @@ pub(crate) async fn run_server(
         local_address: None,
     };
 
+    let image_builds = options.image_builds.clone();
     let mut serve = ViewerServer::spawn({
         let daemon_runtime = daemon_runtime.clone();
         async move {
@@ -347,7 +376,7 @@ pub(crate) async fn run_server(
                     .map(|view| (view.session_id.clone(), viewer_operation(view)))
                     .collect();
                 let container_capacities = runtime.metadata.container_capacities;
-                let snapshot = publication.snapshot(
+                let mut snapshot = publication.snapshot(
                     &controller,
                     &workspace_updates.borrow().clone(),
                     &quotas,
@@ -363,12 +392,17 @@ pub(crate) async fn run_server(
                         project_sources: &project_sources,
                         operations: &operations,
                         move_recoveries: &move_recoveries,
-                        capacity: &viewer_capacity(&capacity_state, &container_capacities),
+                        capacity: &viewer_capacity(
+                            &capacity_state,
+                            &capacity_states_rx.borrow(),
+                            &container_capacities,
+                        ),
                         launch_failures: &launch_failures,
                         reviews: &review_views(&daemon_runtime),
                     },
                     $revision,
                 );
+                snapshot.notices = daemon_runtime.public_notices();
                 if let Err(error) = snapshot_tx.send(snapshot) {
                     tracing::debug!(revision = $revision, %error, "phone snapshot delivery failed; no viewer is subscribed");
                 }
@@ -480,44 +514,18 @@ pub(crate) async fn run_server(
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
-                update = capacity_updates_rx.recv() => {
-                    let update = match update {
-                        Ok(update) => update,
-                        // Readings are latest-wins; a skipped one is replaced
-                        // by the next poll.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::debug!(skipped, "phone server skipped capacity readings");
-                            continue;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
-                            break;
-                        }
-                    };
-                    if let Some(entry) = capacity_state.get_mut(&update.target_id) {
-                        entry.refreshing = false;
-                        entry.sampled_at_epoch_seconds = Some(update.sampled_at_epoch_seconds);
-                        match update.result {
-                            Ok(usage) => {
-                                // A fleet with nothing running reports no
-                                // figures, and that is an answer rather than a
-                                // failure.
-                                entry.on_demand = usage.is_none();
-                                entry.usage = usage;
-                                entry.failed = false;
-                            }
-                            // The last good reading stays on screen beside the
-                            // failure: one failed probe is not a reason to
-                            // forget what the machine was doing.
-                            Err(_) => entry.failed = true,
-                        }
+                changed = capacity_states_rx.changed() => {
+                    if changed.is_err() {
+                        failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
+                        break;
                     }
+                    capacity_states_rx.borrow_and_update();
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
                 changed = quota_updates.changed() => {
                     if changed.is_err() { anyhow::bail!("daemon quota feed stopped"); }
-                    quotas = quota_updates.borrow_and_update().clone();
+                    quotas = quota_reports_for_viewer(&quota_updates.borrow_and_update());
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
@@ -573,25 +581,6 @@ pub(crate) async fn run_server(
                     publication.dirty.insert(update.session_id.clone());
                     apply_worker_record_update(&mut controller, &update);
                     if let Some(snapshot) = update.view.snapshot {
-                        if snapshot.operational.native_session_is_ready()
-                            && operational.get(&update.session_id).is_none_or(|old: &mj_core::relay::RelayOperationalState| old.config_options != snapshot.operational.config_options)
-                            && let Some(session) = controller.state.sessions.get(&update.session_id)
-                            && let Some(check) = session.target.as_ref().and_then(crate::controller::profile_config::observation_check)
-                            && let Some(build) = snapshot.worker_build.clone()
-                        {
-                            let profile = session.last_profile.clone();
-                            let state = snapshot.operational.clone();
-                            let catalog = api_backend.profile_catalog().clone();
-                            let Ok(upgrade_task) = crate::upgrade::activity("profile choice cache") else { continue };
-                            tokio::spawn(async move {
-                                let _upgrade_task = upgrade_task;
-                                match crate::controller::profile_config::observe(profile.clone(), build, state, check).await {
-                                    Ok(true) => catalog.reread_failed(&profile),
-                                    Ok(false) => {}
-                                    Err(error) => tracing::warn!(%error, "could not cache observed profile choices"),
-                                }
-                            });
-                        }
                         let materialized = snapshot.materialized;
                         let operational_state = snapshot.operational;
                         materialized_activity.insert(
@@ -814,11 +803,12 @@ pub(crate) async fn run_server(
                                         "all" => crate::database::HistoryScope::All,
                                         _ => crate::database::HistoryScope::Project,
                                     };
-                                    let found = crate::database::search_prompts_bounded(
+                                    let found = crate::database::search_prompt_page(
                                         &session_id,
                                         &bundle,
                                         scope,
                                         &query,
+                                        None,
                                         crate::server::MAX_HISTORY_MATCHES,
                                     )?;
                                     anyhow::Ok(crate::server::ViewerPromptHistory {
@@ -827,7 +817,7 @@ pub(crate) async fn run_server(
                                             .into_iter()
                                             .map(|entry| entry.text)
                                             .collect(),
-                                        truncated: found.truncated,
+                                        truncated: found.next.is_some(),
                                     })
                                 })
                                 .await;
@@ -932,6 +922,7 @@ pub(crate) async fn run_server(
                     // same disk, so it runs on the same supervised task set
                     // and under the same cap as a new-session preflight.
                     let crate::server::NewPreflightRequest {
+                        profile_id, workspace_id,
                         additional_mounts,
                         bundle_id,
                         target_id,
@@ -978,7 +969,14 @@ pub(crate) async fn run_server(
                     let config = controller.config.clone();
                     let project_validation = project_directory.is_some();
                     let task_termination = termination.clone();
-                    let Ok(upgrade_task) = crate::upgrade::activity("project preflight") else { continue };
+                    // Disposable reads are cancelled with the server during
+                    // handoff. Only confirmed Git repairs mutate machine state.
+                    let upgrade_task = if remote_repairs.is_empty() {
+                        None
+                    } else {
+                        let Ok(work) = crate::upgrade::activity("new-session preflight remote repairs") else { continue };
+                        Some(work)
+                    };
                     preflight_jobs.spawn(async move {
                         let _upgrade_task = upgrade_task;
                         let cancelled = Arc::new(AtomicBool::new(false));
@@ -986,25 +984,13 @@ pub(crate) async fn run_server(
                         let mut blocking = tokio::task::spawn_blocking(move || {
                             let executor = CancellableProcessExecutor::new(cancelled.clone())
                                 .with_deadline(Duration::from_secs(30));
-                            let mount_controller = config_only_controller(config.clone());
-                            for mount in &additional_mounts {
-                                if let Err(error) = mount_controller.validate_mount_source(
-                                    &target_id, &mount.source, &executor,
-                                ) {
-                                    tracing::debug!(%error, "phone attached directory check failed");
-                                    return Err(PreflightFailure::InvalidMount);
-                                }
-                            }
-                            run_new_preflight_with_cancellation(
-                                config,
-                                bundle_id,
-                                target_id,
-                                project_directory,
-                                cancelled,
-                                remote_repairs,
-                            ).map_err(|error| {
-                                tracing::debug!(%error, project_validation, "phone preflight check failed");
-                                if project_validation {
+                            preflight_new_request(config, mj_client::daemon::NewSessionPreflightRequest {
+                                additional_mounts, bundle_id, target_id, project_directory,
+                                remote_repairs, profile_id, workspace_id,
+                            }, executor).map_err(|error| {
+                                if error.downcast_ref::<InvalidNewMount>().is_some() {
+                                    PreflightFailure::InvalidMount
+                                } else if project_validation {
                                     PreflightFailure::Validation
                                 } else {
                                     PreflightFailure::InvalidRepository(format!("{error:#}"))
@@ -1166,16 +1152,17 @@ pub(crate) async fn run_server(
                             let known = capacity_state.contains_key(target_id);
                             // One queued nudge refreshes every target. Do not
                             // block the consumer while readings wait for it.
-                            let accepted = known && capacity_feed.request_refresh();
+                            let generation = known.then(|| capacity_feed.request_refresh()).flatten();
+                            let accepted = generation.is_some();
                             if known && !accepted {
                                 tracing::warn!("phone capacity refresh rejected: poller stopped");
                             }
                             if known {
                                 if let Some(entry) = capacity_state.get_mut(target_id) {
-                                    entry.refreshing = accepted;
-                                    if !accepted {
-                                        entry.failed = true;
-                                    }
+                                    entry.refresh = match generation {
+                                        Some(generation) => PhoneRefresh::Waiting { generation },
+                                        None => PhoneRefresh::Rejected,
+                                    };
                                 }
                                 revision = daemon_runtime.allocate_revision();
                                 publish_snapshot!('control, revision);
@@ -1263,7 +1250,7 @@ pub(crate) async fn run_server(
                     };
                     let ControllerRequest { action, reply } = request;
                     // A destroy holds admission as a destroy from the moment it is accepted, so a stop right after "accepted" waits for it (#1191).
-                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
+                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), /* registration holds "session admission"; the create wait holds no daemon work */ ControllerAction::New { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
                         Ok(work) => work,
                         Err(error) => {
                             let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
@@ -1291,7 +1278,9 @@ pub(crate) async fn run_server(
                     if let Some(session_id) = &session_id {
                         action_sessions.insert(action_id, session_id.clone());
                     }
-                    let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }) {
+                    let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }
+                        | ControllerAction::PushSubscribe { .. } | ControllerAction::PushRenew { .. }
+                        | ControllerAction::PushUnsubscribe { .. } | ControllerAction::PushTest { .. }) {
                         Some(reply)
                     } else {
                         action_replies.accept(action_id, &action, reply);
@@ -1308,7 +1297,8 @@ pub(crate) async fn run_server(
                     let notice_sessions = session_control.clone();
                     let failure_runtime = daemon_runtime.clone();
                     let lifecycle_failure_prefix = match &action {
-                        ControllerAction::Suspend { .. } => Some(mj_core::state::CLOSE_FAILURE_PREFIX),
+                        // Admitted Suspend failures belong to the lifecycle
+                        // supervisor; an unaccepted phone request owns no close.
                         ControllerAction::Destroy { .. } => Some(mj_core::state::DESTRUCTION_FAILURE_PREFIX),
                         _ => None,
                     };
@@ -1322,18 +1312,19 @@ pub(crate) async fn run_server(
                                 // Move admission can probe an uncached host and load the
                                 // store. Keep that preparation off the control loop,
                                 // but refuse it before acknowledging the request.
-                                if let ControllerAction::Move { request } = &action {
-                                    anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
-                                    mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??;
-                                    if let Some(reply) = admission_reply.take() {
-                                        let _ = reply.send(ActionOutcome::accepted());
+                                let lifecycle = match &action {
+                                    ControllerAction::Move { request } => {
+                                        anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
+                                        Some(mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??)
                                     }
-                                }
-                                if let ControllerAction::Suspend { session_id, .. } = &action {
-                                    mj_core::runtime::block_on(daemon_runtime.prepare_suspension(session_id))??;
-                                    if let Some(reply) = admission_reply.take() {
-                                        let _ = reply.send(ActionOutcome::accepted());
-                                    }
+                                    ControllerAction::Suspend { session_id, acknowledge_unpublished_work } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(session_id.clone(), *acknowledge_unpublished_work, false, control.lifecycle.clone().expect("Suspend has a lifecycle control")))??),
+                                    _ => None,
+                                };
+                                if let Some(mut started) = lifecycle {
+                                    mj_core::runtime::block_on(started.confirm_acceptance())??;
+                                    if let Some(reply) = admission_reply.take() { let _ = reply.send(ActionOutcome::accepted()); }
+                                    let outcome = mj_core::runtime::block_on(started.wait())??;
+                                    return super::actions::finish_phone_lifecycle(outcome);
                                 }
                                 if control.cancelled.load(Ordering::Acquire) {
                                     bail!("phone action cancelled");
@@ -1373,7 +1364,7 @@ pub(crate) async fn run_server(
                         };
                         if let (Err(failure), Some(prefix), Some(id)) = (&result, lifecycle_failure_prefix, &session_id) {
                             failure_runtime.record_lifecycle_failure(id, &action_reference(action_id), &crate::daemon::LifecycleFailure {
-                                detail: failure.detail.clone(), refusal: failure.refusal.clone(),
+                                detail: failure.detail.clone(), refusal: failure.refusal.clone(), reason: failure.reason,
                             }, prefix).await;
                         }
                         let notice = match (&result, notice_action, &session_id) {
@@ -1406,9 +1397,7 @@ pub(crate) async fn run_server(
                     // Registration turned review off for a session it cannot
                     // review; tell whoever asked for it.
                     let started_notice = [
-                        started.review_turned_off.then(|| {
-                            mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF.to_owned()
-                        }),
+                        started.review_notice.map(str::to_owned),
                         started.capacity_warning,
                     ].into_iter().flatten().collect::<Vec<_>>();
                     let started_notice = (!started_notice.is_empty()).then(|| started_notice.join("\n"));
@@ -1434,7 +1423,7 @@ pub(crate) async fn run_server(
                     if publication.is_err()
                         && let Some(control) = action_cancellations.get(&started.action_id)
                     {
-                        control.request_cancel();
+                        control.request_cancel("phone action publication failed");
                     }
                     // The phone asked for a session, and now there is one to
                     // point at: that is what its request was waiting for.
@@ -1586,7 +1575,7 @@ pub(crate) async fn run_server(
         // Every exit stops in-flight work, whether it was asked for or forced.
         crate::controller::profile_config::cancel_all();
         for control in action_cancellations.values() {
-            control.request_cancel();
+            control.stop_for_server_shutdown();
         }
         match failure {
             Some(failure) => Err(failure),
@@ -1610,6 +1599,9 @@ pub(crate) async fn run_server(
     {
         tracing::warn!(%error, "native API activity recorder panicked");
     }
+    // Image builds are reproducible work, so shutdown cancels and reaps them
+    // before aborting the HTTP task that accepted them.
+    image_builds.finish().await;
     // Dropping the handle aborts the server task, which is what dropping the
     // server future used to do when this `select!` owned it directly.
     drop(serve);

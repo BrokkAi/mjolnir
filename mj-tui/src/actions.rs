@@ -26,7 +26,6 @@ pub enum CommandId {
     OpenSession,
     PinSession,
     ChangeWorkspace,
-    UnpinSession,
     OpenSessionSplitRight,
     OpenSessionSplitBelow,
     ClosePane,
@@ -55,7 +54,9 @@ pub enum CommandId {
     ResumeDialog,
     RenameSession,
     ChangedFiles,
-    DismissQuestion,
+    DismissNotification,
+    OpenWaitingQuestion,
+    IgnoreNotifications,
     ContainerSettings,
     MoveSession,
     CopySessionId,
@@ -280,54 +281,61 @@ fn selected_session_ready(dashboard: &DashboardState) -> Availability {
     }
 }
 
-fn dismiss_question_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
+fn dismiss_notification_available(dashboard: &DashboardState) -> Availability {
+    match dashboard.command_session() {
+        Some(session) => dismiss_notification_available_for(dashboard, &session.id),
+        None => Availability::Hidden,
+    }
+}
+
+/// [`dismiss_notification_available`] for a named session, so a menu on one
+/// row answers for that row and not for the selected session.
+pub(crate) fn dismiss_notification_available_for(
+    dashboard: &DashboardState,
+    session_id: &str,
+) -> Availability {
+    if !dashboard.state.sessions.contains_key(session_id) {
         return Availability::Hidden;
-    };
-    if dashboard.question_dismissal_pending(&session.id) {
-        return Availability::Blocked("Dismissing question");
     }
-    let Some(detail) = dashboard.session_details.get(&session.id) else {
-        return Availability::Blocked("No prose question is active");
-    };
-    if !session.state.is_active()
-        || detail.dismissible_question.is_none()
-        || !detail.pending_elicitations.is_empty()
-        || detail.current_turn_started_at.is_some()
-        || !detail.queued_prompts.is_empty()
+    // A child's open form is answered in the child, never dismissed here:
+    // Open sub-agent question takes this row's place.
+    if dashboard.waiting_child_of(session_id).is_some() {
+        return Availability::Hidden;
+    }
+    if dashboard.notification_dismissal_pending(session_id) {
+        return Availability::Blocked("Dismissing notification");
+    }
+    if dashboard
+        .notification_dismissal_target(session_id)
+        .is_none()
     {
-        return Availability::Blocked("No prose question is active");
-    }
-    if !detail.activity.dismiss_question_supported {
-        return Availability::Blocked("This worker does not support question dismissal yet");
-    }
-    if dashboard.session_operations.contains_key(&session.id)
-        || dashboard.unreachable_sessions.contains(&session.id)
-    {
-        return Availability::Blocked("Wait for the session to reconnect");
+        return Availability::Blocked("No dismissible notification is active");
     }
     Availability::Ready
 }
 
-fn pin_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    if dashboard.pin_id(&session.id).is_some() {
-        Availability::Blocked("this session is already pinned")
-    } else {
-        Availability::Ready
+fn open_waiting_question_available(dashboard: &DashboardState) -> Availability {
+    match dashboard.command_session() {
+        Some(session) if dashboard.waiting_child_of(&session.id).is_some() => Availability::Ready,
+        _ => Availability::Hidden,
     }
 }
 
-fn unpin_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    if dashboard.pin_id(&session.id).is_some() {
+fn ignore_notifications_available(dashboard: &DashboardState) -> Availability {
+    // Always applies to a session: the row's label says which way it flips.
+    if dashboard.command_session().is_some() {
         Availability::Ready
     } else {
-        Availability::Blocked("this session is not pinned")
+        Availability::Hidden
+    }
+}
+
+fn pin_session_available(dashboard: &DashboardState) -> Availability {
+    // The row flips with the pin state: it pins, or it unpins.
+    if dashboard.command_session().is_some() {
+        Availability::Ready
+    } else {
+        Availability::Hidden
     }
 }
 
@@ -510,7 +518,7 @@ fn interrupt_available(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.command_session_id() else {
         return Availability::Hidden;
     };
-    if dashboard.attention_level(session) == crate::AttentionLevel::Working {
+    if dashboard.own_turn_is_running(session) {
         Availability::Ready
     } else {
         Availability::Blocked("no turn is running")
@@ -578,7 +586,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::PinSession,
         label: "Pin session…",
-        description: "Keep a session visible while browsing others.",
+        description: "Keep a session visible while browsing others; when pinned, leaves this pane without stopping the session.",
         scope: Scope::Session,
         pane_keys: &[],
         action: None,
@@ -586,18 +594,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: pin_session_available,
-    },
-    CommandSpec {
-        id: CommandId::UnpinSession,
-        label: "Unpin session",
-        description: "Leave this pane empty without stopping its session.",
-        scope: Scope::Session,
-        pane_keys: &[],
-        action: None,
-        footer: no_footer,
-        footer_group: FooterGroup::Pane,
-        footer_rank: 0,
-        available: unpin_session_available,
     },
     CommandSpec {
         id: CommandId::OpenSessionSplitRight,
@@ -945,7 +941,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::NextAttention,
         label: "Next session needing you",
-        description: "Jump to the session that most needs a person: a question first, then a failure, then unread activity, in any workspace.",
+        description: "Jump to the session that most needs a person: a failure first, then a question, then unread activity, in any workspace.",
         scope: Scope::Global,
         pane_keys: &[],
         action: Some(KeyAction::NextAttention),
@@ -1015,16 +1011,40 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: live_session,
     },
     CommandSpec {
-        id: CommandId::DismissQuestion,
-        label: "Dismiss question",
-        description: "Dismiss this question without sending input or granting approval.",
+        id: CommandId::DismissNotification,
+        label: "Dismiss notification",
+        description: "Dismiss this notification without sending input or granting approval.",
         scope: Scope::Session,
         pane_keys: &[],
         action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: dismiss_question_available,
+        available: dismiss_notification_available,
+    },
+    CommandSpec {
+        id: CommandId::OpenWaitingQuestion,
+        label: "Open sub-agent question",
+        description: "Go to the sub-agent whose question or permission request makes this session wait.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: open_waiting_question_available,
+    },
+    CommandSpec {
+        id: CommandId::IgnoreNotifications,
+        label: "Ignore notifications",
+        description: "Toggle whether this session raises bell, desktop, and push notifications. Its attention state still renders.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: ignore_notifications_available,
     },
     CommandSpec {
         id: CommandId::InterruptTurn,
@@ -1605,7 +1625,7 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
                         | CommandId::RenameSession
                         | CommandId::ContainerSettings
                         | CommandId::ChangedFiles
-                        | CommandId::DismissQuestion
+                        | CommandId::DismissNotification
                         | CommandId::MoveSession
                         | CommandId::ChangeWorkspace
                         | CommandId::DestroySession
@@ -1690,7 +1710,7 @@ impl DashboardState {
                     | CommandId::RenameSession
                     | CommandId::ContainerSettings
                     | CommandId::ChangedFiles
-                    | CommandId::DismissQuestion
+                    | CommandId::DismissNotification
                     | CommandId::MoveSession
                     | CommandId::ChangeWorkspace
                     | CommandId::SuspendSession
@@ -1721,17 +1741,15 @@ impl DashboardState {
         }
         match id {
             CommandId::PinSession => {
-                if let Some(session) = self.command_session_id().map(str::to_owned) {
-                    self.begin_pin_menu(session);
+                match self.command_session_id().map(str::to_owned) {
+                    Some(session_id) if self.pin_id(&session_id).is_some() => {
+                        return DashboardAction::UnpinSession { session_id };
+                    }
+                    Some(session_id) => self.begin_pin_menu(session_id),
+                    None => {}
                 }
                 DashboardAction::None
             }
-            CommandId::UnpinSession => self
-                .command_session_id()
-                .map(str::to_owned)
-                .map_or(DashboardAction::None, |session_id| {
-                    DashboardAction::UnpinSession { session_id }
-                }),
             CommandId::OpenSession => self.open_selected_session(),
             CommandId::OpenSessionSplitRight => {
                 self.split_command(ratatui::layout::Direction::Horizontal)
@@ -1760,8 +1778,7 @@ impl DashboardState {
                     // A suspend stops the sub-agents without a checkpoint.
                     // Only the ones still at their task lose anything.
                     let children_not_handed_back = self.subagents_not_handed_back(&session.id);
-                    let interrupting =
-                        self.attention_level(&session.id) == crate::AttentionLevel::Working;
+                    let interrupting = self.own_turn_is_running(&session.id);
                     let unverified_clone = session.publication_state().is_some();
                     if !interrupting && children_not_handed_back.is_empty() && !unverified_clone {
                         return DashboardAction::Suspend {
@@ -1811,7 +1828,7 @@ impl DashboardState {
                 }
                 // Mid-turn work is lost by a restart, so that case asks first;
                 // an idle session restarts at once.
-                if self.attention_level(&session_id) == crate::AttentionLevel::Working {
+                if self.own_turn_is_running(&session_id) {
                     self.mode = crate::Mode::Confirm(
                         ConfirmDialog::new(Confirmation::InterruptWork {
                             session_id,
@@ -1853,14 +1870,37 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::ChangedFiles => self.begin_changed_files(),
-            CommandId::DismissQuestion => match dismiss_question_available(self) {
-                Availability::Ready => self.begin_dismiss_question(),
+            CommandId::DismissNotification => match dismiss_notification_available(self) {
+                Availability::Ready => self.begin_dismiss_notification(),
                 Availability::Blocked(reason) => {
                     self.set_notice(sentence(reason));
                     DashboardAction::None
                 }
                 Availability::Hidden => DashboardAction::None,
             },
+            CommandId::OpenWaitingQuestion => {
+                match self
+                    .command_session_id()
+                    .and_then(|session| self.waiting_child_of(session))
+                {
+                    Some(child) => {
+                        // The menu's session was the parent; from here the
+                        // command moves the selection, and Open must read it.
+                        self.command_session_override = None;
+                        self.focus_session_from_cpu_report(&child)
+                    }
+                    None => DashboardAction::None,
+                }
+            }
+            CommandId::IgnoreNotifications => self
+                .command_session()
+                .map(|session| (session.id.clone(), session.notifications_ignored))
+                .map_or(DashboardAction::None, |(session_id, ignored)| {
+                    DashboardAction::SetSessionNotificationsIgnored {
+                        session_id,
+                        ignored: !ignored,
+                    }
+                }),
             CommandId::InterruptTurn => match interrupt_available(self) {
                 Availability::Ready => self
                     .command_session_id()
@@ -2074,7 +2114,7 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::SessionUsageReport => {
-                self.begin_session_usage_report();
+                self.begin_session_usage_report(None);
                 DashboardAction::None
             }
             CommandId::NoticeLog => {
@@ -2280,6 +2320,24 @@ mod tests {
             (spec(CommandId::InterruptAll).available)(&dashboard),
             Availability::Blocked("no turn is running here or in its sub-agents")
         );
+        // A pre-64 worker's question may have no daemon dismissal target; its
+        // latest-turn rule still makes the turn unfinished. A protocol-64
+        // worker's question counts only through the daemon's identity.
+        let child = dashboard.session_details.get_mut("child-session").unwrap();
+        child.legacy_awaiting_input = true;
+        assert_eq!(
+            (spec(CommandId::InterruptAll).available)(&dashboard),
+            Availability::Ready
+        );
+        let child = dashboard.session_details.get_mut("child-session").unwrap();
+        child.supports_open_request = true;
+        assert_eq!(
+            (spec(CommandId::InterruptAll).available)(&dashboard),
+            Availability::Blocked("no turn is running here or in its sub-agents")
+        );
+        dashboard
+            .session_details
+            .insert("child-session".into(), Default::default());
 
         crate::test_support::set_working(&mut dashboard, "child-session");
         assert_eq!(
@@ -2439,6 +2497,8 @@ mod tests {
             source_unavailable: false,
             conversion: None,
             selection: mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 session_id: "session-1".into(),

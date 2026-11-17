@@ -66,63 +66,251 @@ impl RuntimeProjection {
     /// Publish row detail for live work and the families the client has opened.
     /// Compact relationship metadata remains available for counts/navigation.
     pub fn for_subagent_parents(&self, parents: &BTreeSet<String>) -> Self {
-        let operations = self
+        ScopedProjection::new(self, parents.clone()).projection
+    }
+}
+
+/// A projection scoped to opened families, with the inputs its selection read.
+/// [`Self::advance`] scopes a later publication from what changed between the
+/// two, so a terminal's poll costs its changes rather than the whole history.
+#[derive(Debug, Clone)]
+pub struct ScopedProjection {
+    pub projection: RuntimeProjection,
+    selection: ScopeSelection,
+}
+
+/// What decides membership besides each session's own record and relation.
+#[derive(Debug, Clone)]
+struct ScopeSelection {
+    /// Sessions with an active lifecycle or move operation.
+    operations: BTreeSet<String>,
+    /// The opened parents and all of their ancestors.
+    ancestors: BTreeSet<String>,
+}
+
+impl ScopeSelection {
+    fn of(full: &RuntimeProjection, parents: &BTreeSet<String>) -> Self {
+        let operations = full
             .metadata
             .lifecycles
             .iter()
             .map(|operation| operation.session_id.clone())
             .chain(
-                self.moves
+                full.moves
                     .iter()
                     .filter(|(_, operation)| operation.is_active())
                     .map(|(id, _)| id.clone()),
             )
-            .collect::<BTreeSet<_>>();
+            .collect();
         let mut ancestors = parents.clone();
         for parent in parents {
             let mut id = parent.as_str();
             let mut seen = BTreeSet::new();
             while seen.insert(id.to_owned()) {
-                let Some(relation) = self.subagents.get(id) else {
+                let Some(relation) = full.subagents.get(id) else {
                     break;
                 };
                 ancestors.insert(relation.parent_session_id.clone());
                 id = &relation.parent_session_id;
             }
         }
-        let mut result = self.clone();
-        result.subagent_parents = parents.clone();
-        result.records = self.records.filtered(|id, record| {
-            let relation = self.subagents.get(id);
-            let in_family =
-                relation.is_some_and(|relation| parents.contains(&relation.parent_session_id));
-            let live = match relation {
-                None => record.state != mj_core::state::SessionState::Stopped,
-                Some(_) => !matches!(
-                    record.state,
-                    mj_core::state::SessionState::Stopped | mj_core::state::SessionState::Parked
-                ),
-            };
-            operations.contains(id)
-                || (!record.archived && (live || in_family || ancestors.contains(id)))
-        });
+        Self {
+            operations,
+            ancestors,
+        }
+    }
+
+    fn keeps(&self, full: &RuntimeProjection, parents: &BTreeSet<String>, id: &str) -> bool {
+        let Some(record) = full.records.get(id) else {
+            return false;
+        };
+        let relation = full.subagents.get(id);
+        let in_family =
+            relation.is_some_and(|relation| parents.contains(&relation.parent_session_id));
+        let live = match relation {
+            None => record.state != mj_core::state::SessionState::Stopped,
+            Some(_) => !matches!(
+                record.state,
+                mj_core::state::SessionState::Stopped | mj_core::state::SessionState::Parked
+            ),
+        };
+        // Notification membership is the daemon's served answer, including
+        // stopped sessions that have no live Sessions-pane row.
+        let notification = relation.is_none()
+            && full
+                .metadata
+                .session_attention
+                .get(id)
+                .is_some_and(|attention| {
+                    matches!(
+                        attention,
+                        mj_core::attention::SessionAttention::NeedsInput
+                            | mj_core::attention::SessionAttention::Important
+                            | mj_core::attention::SessionAttention::Failed
+                            | mj_core::attention::SessionAttention::Unreachable
+                    )
+                });
+        notification
+            || self.operations.contains(id)
+            || (!record.archived && (live || in_family || self.ancestors.contains(id)))
+    }
+}
+
+/// Relationships stay for counts and navigation unless their session is
+/// archived. A lifecycle can retain an archived row; its relationship stays
+/// too, so clients still recognize it as a child throughout cleanup.
+fn keeps_relation(full: &RuntimeProjection, id: &str, row_kept: bool) -> bool {
+    row_kept || full.records.get(id).is_some_and(|record| !record.archived)
+}
+
+impl ScopedProjection {
+    pub fn new(full: &RuntimeProjection, parents: BTreeSet<String>) -> Self {
+        let selection = ScopeSelection::of(full, &parents);
+        let mut result = full.clone();
+        result.records = full
+            .records
+            .filtered(|id, _| selection.keeps(full, &parents, id));
+        result.subagent_parents = parents;
+        let kept = &result.records;
         result
             .subagents
-            .retain(|id, _| self.records.get(id).is_some_and(|record| !record.archived));
-        result
+            .retain(|id, _| keeps_relation(full, id, kept.contains_key(id)));
+        result.sessions = full
             .sessions
-            .retain(|id, _| result.records.contains_key(id));
-        result.moves.retain(|id, _| result.records.contains_key(id));
-        result
+            .filtered(|id, _| result.records.contains_key(id));
+        result.moves = full.moves.filtered(|id, _| result.records.contains_key(id));
+        result.session_cpu = full
             .session_cpu
-            .retain(|id, _| result.records.contains_key(id));
-        result
+            .filtered(|id, _| result.records.contains_key(id));
+        result.transcripts = full
             .transcripts
-            .retain(|id, _| result.records.contains_key(id));
-        result
+            .filtered(|id, _| result.records.contains_key(id));
+        result.native_agents = full
             .native_agents
-            .retain(|_, agent| result.records.contains_key(&agent.agent.owner_session_id));
-        result
+            .filtered(|_, agent| result.records.contains_key(&agent.agent.owner_session_id));
+        Self {
+            projection: result,
+            selection,
+        }
+    }
+
+    /// Scope `after` given that `self` scopes `before`. Only sessions whose
+    /// rows or selection inputs changed are visited, and unchanged rows keep
+    /// their shared tree nodes, so a delta from `self` costs what changed.
+    pub fn advance(&self, before: &RuntimeProjection, after: &RuntimeProjection) -> Self {
+        let parents = &self.projection.subagent_parents;
+        let selection = ScopeSelection::of(after, parents);
+        let mut result = self.projection.clone();
+        result.revision = after.revision;
+        result.metadata = after.metadata.clone();
+
+        let mut candidates = BTreeSet::new();
+        candidates.extend(before.records.changes(&after.records).map(|(id, _)| id));
+        candidates.extend(before.subagents.changes(&after.subagents).map(|(id, _)| id));
+        candidates.extend(
+            before
+                .metadata
+                .session_attention
+                .changes(&after.metadata.session_attention)
+                .map(|(id, _)| id),
+        );
+        candidates.extend(
+            self.selection
+                .operations
+                .symmetric_difference(&selection.operations),
+        );
+        candidates.extend(
+            self.selection
+                .ancestors
+                .symmetric_difference(&selection.ancestors),
+        );
+        let mut moved = BTreeSet::new();
+        for id in candidates {
+            let keep = selection.keeps(after, parents, id);
+            if result.records.contains_key(id) != keep {
+                moved.insert(id.clone());
+            }
+            result.records.copy_entry(&after.records, id, keep);
+            result
+                .subagents
+                .copy_entry(&after.subagents, id, keeps_relation(after, id, keep));
+        }
+
+        let records = &result.records;
+        follow_records(
+            &mut result.sessions,
+            &before.sessions,
+            &after.sessions,
+            records,
+            &moved,
+        );
+        follow_records(
+            &mut result.moves,
+            &before.moves,
+            &after.moves,
+            records,
+            &moved,
+        );
+        follow_records(
+            &mut result.session_cpu,
+            &before.session_cpu,
+            &after.session_cpu,
+            records,
+            &moved,
+        );
+        follow_records(
+            &mut result.transcripts,
+            &before.transcripts,
+            &after.transcripts,
+            records,
+            &moved,
+        );
+        let owned = moved
+            .iter()
+            .map(|owner| mj_core::native_agent::owner_view_id_prefix(owner))
+            .collect::<Vec<_>>();
+        let agents = before
+            .native_agents
+            .changes(&after.native_agents)
+            .map(|(id, _)| id)
+            .chain(
+                owned
+                    .iter()
+                    .flat_map(|prefix| after.native_agents.keys_with_prefix(prefix)),
+            )
+            .collect::<BTreeSet<_>>();
+        for id in agents {
+            let keep = after
+                .native_agents
+                .get(id)
+                .is_some_and(|agent| records.contains_key(&agent.agent.owner_session_id));
+            result
+                .native_agents
+                .copy_entry(&after.native_agents, id, keep);
+        }
+        Self {
+            projection: result,
+            selection,
+        }
+    }
+}
+
+/// Bring a per-session map to `after` for sessions whose entry changed or
+/// whose record entered or left the scope.
+fn follow_records<T: Clone + PartialEq>(
+    scoped: &mut SnapshotMap<String, T>,
+    before: &SnapshotMap<String, T>,
+    after: &SnapshotMap<String, T>,
+    records: &SnapshotMap<String, SessionRecord>,
+    moved: &BTreeSet<String>,
+) {
+    let changed = before
+        .changes(after)
+        .map(|(id, _)| id)
+        .chain(moved)
+        .collect::<BTreeSet<_>>();
+    for id in changed {
+        scoped.copy_entry(after, id, records.contains_key(id));
     }
 }
 
@@ -136,6 +324,15 @@ pub struct RuntimeContainerCapacity {
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
+    #[serde(default)]
+    pub unread_frontiers: SnapshotMap<String, u64>,
+    #[serde(default)]
+    pub notification_dismissals: SnapshotMap<String, mj_core::attention::NotificationDismissal>,
+    /// Whose form the person answers for each row: the session itself takes
+    /// precedence over a descendant holding a person-owned form.
+    #[serde(default)]
+    pub form_holders: SnapshotMap<String, String>,
+    pub session_attention: SnapshotMap<String, mj_core::attention::SessionAttention>,
     #[serde(default)]
     pub operator_presence: mj_core::state::OperatorPresence,
     #[serde(default)]
@@ -259,6 +456,9 @@ pub type TailKey = (u64, String);
 /// changed rather than the whole tail.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTail {
+    /// Latest person-authored transcript position, retained before trimming items
+    /// or clearing the header. Clients consume served attention, not this watermark.
+    pub latest_user_position: Option<u64>,
     /// The session's projection without its transcript.
     pub header: MaterializedSession,
     pub window: ProjectionWindow,
@@ -270,6 +470,7 @@ impl SessionTail {
     /// what `materialized.transcript` already leaves out.
     pub fn of(materialized: &MaterializedSession, window: &ProjectionWindow, limit: usize) -> Self {
         let mut tail = Self {
+            latest_user_position: materialized.latest_person_position(),
             header: transcript_header(materialized),
             window: window.clone(),
             items: SnapshotMap::new(),
@@ -288,6 +489,7 @@ impl SessionTail {
         window: &ProjectionWindow,
         limit: usize,
     ) {
+        self.latest_user_position = materialized.latest_person_position();
         let start = materialized.transcript.len().saturating_sub(limit);
         // The daemon calls this for every view it publishes, so it walks the
         // held items and the published ones side by side in key order, and
@@ -437,6 +639,7 @@ fn same_header(header: &MaterializedSession, materialized: &MaterializedSession)
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionTailReply {
     Tail {
+        #[serde(serialize_with = "serialize_client_projection")]
         header: Box<MaterializedSession>,
         window: ProjectionWindow,
         /// Oldest first.
@@ -473,6 +676,7 @@ impl SessionTail {
             header,
             window,
             items: map,
+            latest_user_position: None,
         }
     }
 }
@@ -481,6 +685,7 @@ impl SessionTail {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptItems {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_client_projection")]
     pub header: Option<Box<MaterializedSession>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<ProjectionWindow>,
@@ -685,6 +890,21 @@ impl RuntimeReplica {
     }
 }
 
+/// Older clients strictly decode the shared internal outcome inside projections.
+pub(crate) fn serialize_client_projection<T: Serialize, S: serde::Serializer>(
+    projection: &T,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = serde_json::to_value(projection).map_err(serde::ser::Error::custom)?;
+    if let Some(outcome) = value
+        .get_mut("last_turn_outcome")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        outcome.remove("answered_through");
+    }
+    value.serialize(serializer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +919,8 @@ mod tests {
 
     fn session(id: &str) -> RuntimeSessionView {
         RuntimeSessionView {
+            attention: Default::default(),
+            policy_config_keys: Vec::new(),
             session_id: id.into(),
             projection_ordinal: 0,
             projection_digest: String::new(),
@@ -752,21 +974,72 @@ mod tests {
         assert!(replica.projection.sessions["new"].connected);
     }
 
+    /// A daemon newer than this client serves configuration keys the client
+    /// has no field for, at any depth. The client still reads the feed. Only
+    /// the file loader refuses an unread key, because a person wrote it.
+    // Hard-won: #1557: an older TUI stopped refreshing sessions once a profile set a newer field
+    #[test]
+    fn a_client_reads_configuration_keys_added_after_it_was_built() {
+        let profile = serde_json::json!({"kind": "codex", "home": "/home/agent/codex"});
+        let mut config = Config::default().with_local_targets();
+        config.profiles.insert(
+            "codex".into(),
+            serde_json::from_value(profile.clone()).unwrap(),
+        );
+        let metadata = RuntimeMetadata {
+            config: config.clone().into(),
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&metadata).unwrap();
+        let newer = &mut value["config"];
+        newer["a_later_section"] = serde_json::json!({"setting": 1});
+        newer["profiles"]["codex"]["a_later_profile_field"] = true.into();
+        newer["review"]["a_later_review_field"] = "on".into();
+        newer["targets"]["docker"]["a_later_runtime_setting"] = 1.into();
+        newer["targets"]["docker"]["build_cache"] = serde_json::json!({"a_later_cache_field": 1});
+        let received: RuntimeMetadata = serde_json::from_value(value).unwrap();
+        assert_eq!(received.config.profiles, config.profiles);
+        assert_eq!(received.config.review, config.review);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "version = {}\n[profiles.codex]\nkind = \"codex\"\nhome = \"/home/agent/codex\"\n\
+                 a_later_profile_field = true\n",
+                mj_core::config::CONFIG_VERSION
+            ),
+        )
+        .unwrap();
+        let refusal = format!("{:#}", Config::load_from(&path).unwrap_err());
+        assert!(
+            refusal.contains("`profiles.codex.a_later_profile_field`"),
+            "{refusal}"
+        );
+    }
+
     #[test]
     fn default_target_origin_survives_the_wire_and_an_older_daemon_sends_none() {
         let mut metadata = RuntimeMetadata {
             config: Config::default().with_local_targets().into(),
             ..Default::default()
         };
+        metadata
+            .form_holders
+            .insert("parent".into(), "child".into());
         metadata.default_targets = metadata.config.default_targets.clone();
         assert!(metadata.default_targets.contains("docker"));
         let mut value = serde_json::to_value(&metadata).unwrap();
         let received: RuntimeMetadata = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(received.form_holders["parent"], "child");
         // The config alone loses the origin; the field restores it.
         assert!(!received.config.is_default_target("docker"));
         assert!(received.installed_config().is_default_target("docker"));
         value.as_object_mut().unwrap().remove("default_targets");
+        value.as_object_mut().unwrap().remove("form_holders");
         let older: RuntimeMetadata = serde_json::from_value(value).unwrap();
+        assert!(older.form_holders.is_empty());
         assert!(!older.installed_config().is_default_target("docker"));
         let held = metadata.clone();
         metadata.config.advanced.auto_afk_minutes = 3;
@@ -891,7 +1164,53 @@ mod tests {
             "s".into(),
             SessionTail::from_parts(*header, fetched_window, fetched),
         );
-        assert_eq!(replica.projection.transcripts["s"], daemon);
+        // Daemon-local watermarks are deliberately absent from the transport.
+        assert_eq!(
+            wire(&SessionTailReply::of(&replica.projection.transcripts["s"])),
+            wire(&SessionTailReply::of(&daemon))
+        );
+        let mut with_answer = daemon.clone();
+        with_answer.header.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            work_facts: None,
+            answered_through: Some(50),
+            diagnostic: None,
+            usage: None,
+            command_id: "task".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(2),
+            completed_ordinal: 50,
+            completed_at_ms: 100,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+        });
+        let reply = serde_json::to_value(SessionTailReply::of(&with_answer)).unwrap();
+        assert!(
+            reply["header"]["last_turn_outcome"]
+                .get("answered_through")
+                .is_none()
+        );
+        assert_eq!(
+            with_answer
+                .header
+                .last_turn_outcome
+                .as_ref()
+                .unwrap()
+                .answered_through,
+            Some(50)
+        );
+        let delta = TranscriptItems {
+            header: Some(Box::new(with_answer.header.clone())),
+            window: None,
+            upserts: vec![],
+            removes: vec![],
+        };
+        let encoded = serde_json::to_value(delta).unwrap();
+        assert!(
+            encoded["header"]["last_turn_outcome"]
+                .get("answered_through")
+                .is_none()
+        );
 
         type Step = Box<dyn Fn(&mut Vec<Arc<TranscriptItem>>)>;
         let steps: Vec<Step> = vec![
@@ -933,7 +1252,12 @@ mod tests {
                 })
                 .unwrap();
             let held = &replica.projection.transcripts["s"];
-            assert_eq!(held, &daemon, "after step {}", sequence - 1);
+            assert_eq!(
+                wire(&SessionTailReply::of(held)),
+                wire(&SessionTailReply::of(&daemon)),
+                "after step {}",
+                sequence - 1
+            );
             assert_eq!(held.materialized(), daemon.materialized());
             for (key, now) in held.items.iter() {
                 if let Some(before) = held_before.items.get(key)

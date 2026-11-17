@@ -8,6 +8,9 @@ use super::*;
 /// How long a whole park may run: an idle reservation, one stop, one write.
 const PARK_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Preparation may download a harness; it holds no daemon handoff admission.
+const UNPARK_TIMEOUT: Duration = Duration::from_secs(600);
+
 impl RuntimeState {
     pub(crate) fn install_report_backend(
         &self,
@@ -30,6 +33,94 @@ impl RuntimeState {
             backend.reconcile_parent_reports(parent_id).await?;
         }
         Ok(())
+    }
+
+    /// What a session's live worker says about the processes its last
+    /// finished turn left running. A session that may be running but has no
+    /// connected worker view is `Unknown`, not empty.
+    pub(crate) async fn work_liveness(&self, session_id: &str) -> mj_core::subagent::Liveness {
+        if self
+            .session_record(session_id)
+            .is_none_or(|record| !crate::server_runtime::api::record_may_be_running(record.state))
+        {
+            return mj_core::subagent::Liveness::Known(None);
+        }
+        let handle = self
+            .session_manager
+            .client()
+            .session(session_id.to_owned())
+            .await
+            .ok();
+        crate::server_runtime::api::liveness_of(
+            handle.as_ref().map(|handle| handle.view()).as_ref(),
+        )
+    }
+
+    /// Ask an idle child's worker to stop the background tasks its harness
+    /// tracks, the capability behind `mj stop-task`. Nothing is stopped while a
+    /// turn runs or a prompt is queued. One failed stop never skips the rest,
+    /// and a task that already ended is not a failure. The whole step is bound
+    /// by [`PARK_TIMEOUT`], the park's own bound; a step that runs out leaves
+    /// the idle reservation to refuse the park, which is retried.
+    async fn stop_idle_background_tasks(&self, session_id: &str) {
+        let Ok(handle) = self
+            .session_manager
+            .client()
+            .session(session_id.to_owned())
+            .await
+        else {
+            return;
+        };
+        let tasks = |handle: &mj_client::session::SessionHandle| {
+            let view = handle.view();
+            let snapshot = view.snapshot.as_ref().filter(|_| view.connected)?;
+            let idle = matches!(
+                snapshot.materialized.execution,
+                mj_core::state::MaterializedExecutionState::Idle
+            ) && snapshot.materialized.active_turn.is_none()
+                && snapshot.materialized.queued_prompts.is_empty();
+            idle.then(|| {
+                snapshot
+                    .operational
+                    .background_commands
+                    .iter()
+                    .filter(|command| command.can_stop)
+                    .map(|command| command.id.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let Some(wanted) = tasks(&handle) else {
+            return;
+        };
+        let stopping = async {
+            let mut stopped = 0;
+            for task in &wanted {
+                match handle.stop_background_task(task.clone()).await {
+                    Ok(()) => stopped += 1,
+                    // Ended on its own since the view was read: nothing to stop.
+                    Err(_) if tasks(&handle).is_none_or(|now| !now.contains(task)) => {}
+                    Err(error) => tracing::warn!(
+                        session_id,
+                        task,
+                        error = format!("{error:#}"),
+                        "could not stop a sub-agent's background task before its park"
+                    ),
+                }
+            }
+            stopped
+        };
+        match tokio::time::timeout(PARK_TIMEOUT, stopping).await {
+            Ok(0) => {}
+            Ok(stopped) => tracing::info!(
+                session_id,
+                stopped,
+                "stopped a told sub-agent's background tasks before its park"
+            ),
+            Err(_) => tracing::warn!(
+                session_id,
+                "stopping a sub-agent's background tasks outlasted the park bound"
+            ),
+        }
     }
 
     /// Park a sub-agent whose turn ended and whose parent was told. A child
@@ -110,21 +201,37 @@ impl RuntimeState {
             .run_lifecycle(
                 child_session_id,
                 LifecycleKind::Park,
-                move |state, session_id, _cancelled| async move {
+                move |state, session_id, _cancelled, session_admission| async move {
                     // A park is short and not cancellable: a close that asks for
                     // the child waits for it instead, so it never finds a worker
                     // stopped under a record that still says running.
-                    let never = AtomicBool::new(false);
-                    let _recovery_reservation = blocking({
-                        let observer = state.recovery_observer.clone();
-                        let session_id = session_id.clone();
-                        move || reserve_recovery_or_cancel(&observer, &session_id, &never)
-                    })
-                    .await?;
                     if state.close_is_requested(&session_id) {
                         return Ok(DaemonLifecycleResult::Park(
                             crate::controller::ParkOutcome::NotRunning,
                         ));
+                    }
+                    // The parent may have answered the child while its turn was
+                    // ending; the message is in the outbox before the worker has
+                    // it, so the park decision, serialized here, sees it. A
+                    // failed start has no task to lose.
+                    if failure.is_none() && {
+                        let child = session_id.clone();
+                        blocking(move || crate::database::child_has_undelivered_mail(&child))
+                            .await?
+                    } {
+                        return Ok(DaemonLifecycleResult::Park(
+                            crate::controller::ParkOutcome::Busy,
+                        ));
+                    }
+                    // The park refuses while the harness tracks background
+                    // commands. The gate is open (the parent was told and its
+                    // grace turn is over, or nothing is alive) and no message of
+                    // the parent is waiting, so the child's own worker is asked
+                    // to stop them. Doing it here, in the serialized decision,
+                    // means a later message waits for this park instead of
+                    // finding its tasks gone.
+                    if failure.is_none() {
+                        state.stop_idle_background_tasks(&session_id).await;
                     }
                     let controller = blocking(Controller::load).await?;
                     let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
@@ -132,6 +239,7 @@ impl RuntimeState {
                         None => {
                             controller
                                 .park_subagent_worker(
+                                    &session_admission,
                                     &session_id,
                                     &executor,
                                     &state.session_manager,
@@ -141,6 +249,7 @@ impl RuntimeState {
                         Some(cause) => {
                             controller
                                 .fail_subagent_start_worker(
+                                    &session_admission,
                                     &session_id,
                                     cause,
                                     &executor,
@@ -177,27 +286,13 @@ impl RuntimeState {
                 LifecycleKind::Unpark,
                 // A close cancels preparation or readiness observation, then
                 // settles the child through its ordinary lifecycle.
-                // There is no deadline: preparation sends the profile archive
-                // and may download a harness, and over a slow link that takes
-                // as long as the link needs (#1571). Close cancels it, and it
-                // holds no daemon handoff admission.
-                |state, session_id, cancelled| async move {
+                |state, session_id, cancelled, _session_admission| async move {
                     let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled.clone()),
+                        CancellableProcessExecutor::new(cancelled.clone())
+                            .with_deadline(UNPARK_TIMEOUT),
                         state.clone(),
                         session_id.clone(),
                     );
-                    executor.begin_resumable_work()?;
-                    // Waiting for a cancelled recovery copy is interruptible
-                    // preparation, not an admitted database operation.
-                    let _recovery_reservation = tokio::task::spawn_blocking({
-                        let observer = state.recovery_observer.clone();
-                        let session_id = session_id.clone();
-                        let cancelled = cancelled.clone();
-                        move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-                    })
-                    .await
-                    .context("reserve recovery for sub-agent wake")??;
                     let controller = blocking(Controller::load).await?;
                     controller
                         .unpark_subagent_worker(&session_id, &executor)

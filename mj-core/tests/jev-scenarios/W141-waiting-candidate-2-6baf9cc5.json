@@ -1,0 +1,178 @@
+{
+  "id": "W141",
+  "title": "waiting candidate 2 6baf9cc5",
+  "category": "waiting-on-automation",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "6baf9cc50be9b371f860c9d77e2b39cc",
+    "session_title": "bifrost-ci-monitor via claude4",
+    "reply_position": 24571,
+    "captured_at": "2026-10-17T22:32:19.203Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:23431",
+          "role": "user",
+          "text": "how much are we spending on Merge Marshall? ec2 and agents, monthly, pls. skip the first ~2 abnormally large MM runs"
+        },
+        {
+          "id": "agent:23465",
+          "role": "assistant",
+          "text": "Status: I have the EC2 numbers from Cost Explorer. Now I'm pulling agent token usage from the CI host."
+        },
+        {
+          "id": "agent:23511",
+          "role": "assistant",
+          "text": "Status: merge-agent token usage is exported. Now I'm checking which sessions are missing usage reports and finding the two outlier runs."
+        },
+        {
+          "id": "agent:23567",
+          "role": "assistant",
+          "text": "Status: the AWS bill shows more Opus spend than the merge sessions account for. I'm checking all CI-host sessions to find the gap."
+        },
+        {
+          "id": "agent:23609",
+          "role": "assistant",
+          "text": "**Merge Marshall costs about $1,600–1,800 a month at list prices: roughly $1,200 for the EC2 host and $400–600 for the merge agents.** Right now AWS credits cover all of the EC2 cost, so the cash you are actually paying is mostly Bedrock Opus.\n\nThese figures leave out the two large early batches you mentioned: `0c204df2` (69 PRs, Oct 7) and `803bae46` (24 PRs, Oct 8–9). Together those two cost about $48 in Opus.\n\n| Item | Monthly | Basis |\n|---|---|---|\n| EC2 host `bifrost-ci-agents` (c6id.8xlarge, on-demand) | **~$1,200** | $1.61/h × 730 h, plus a 200 GB gp3 volume and a public IPv4 address. Cost Explorer shows 252 h = $407 since Oct 7. The CI account's bill nets to $0 because of credits. |\n| Merge agents, Opus 5.5 (batches with more than one PR) | **~$360–490** | Low end: costs reported per session by the agents. High end: the Bedrock bill. Both cover Oct 10–17 (199 batches). |\n| Merge agents, DeepSeek Flash (one-PR batches) | **~$20–100** | Token counts × DeepSeek list price. The range comes from two possible cache-hit prices (see below). |\n| Merge agents, Luna subagents | ~$1 | Not used since Oct 9. |\n\n**Why the Opus figure is a range:** the true value is somewhere between the two ends.\n- The low end is likely too low. The usage records on the host have gaps: 581 of 976 merge turns have no usage report.\n- The high end is likely too high. The main account's Bedrock bill includes Opus use that isn't from CI. Before Merge Marshall started (Oct 1–6), that other use was already about $5–20 on weekdays.\n\n**Effect of the start date:** I started the window at Oct 10. That is the first full day with the current setup, where one-PR batches go to DeepSeek. If you start right after the second large batch instead (Oct 9 03:00), Opus rises to about $510 a month, because Oct 9 still sent one-PR batches to Opus.\n\n**Not included:**\n- The host also runs triage and the issue fixer. I charged the whole host to Merge Marshall because I have no basis for splitting it. Their DeepSeek use adds up to about $240 a month at most.\n- The RunsOn Spot runners in the same account are GitHub Actions CI, not Merge Marshall. They were about $1,000 over the same 11 days, also covered by credits.\n\n**Unconfirmed price:** I could not reach DeepSeek's own pricing page. Third-party sources give $0.14 per million input tokens and $0.28 per million output tokens. They disagree on the price of cached input, giving either $0.0028 or $0.028 per million, and that is why the DeepSeek range is wide.\n\n`★ Insight ─────────────────────────────────────`\n- Bedrock charges about 10% more than Anthropic's own price list. Cost Explorer works out to $4.40 / $22 / $0.22 per million tokens for input, output and cache reads, against the listed $4 / $20 / $0.20. Most of the Opus bill is cache traffic, not output: in the Oct 1–17 Bedrock bill, cache writes and reads were $356 of $424.\n- Moving one-PR batches to DeepSeek on Oct 9 cut Opus spend by about 30% (from about $510 to about $360 a month). DeepSeek handles 1.07 billion tokens for roughly $5–25, because nearly all of its input is served from cache.\n`─────────────────────────────────────────────────`\n\nI saved the method and its caveats to memory so this can be rerun later.\n\nSources: [AWS GPT-6 Luna model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-luna.html), [CloudZero DeepSeek pricing](https://cloudzero.com/blog/deepseek-pricing/), [ZenMux V4 Flash pricing](https://zenmux.ai/blog/deepseek-v4-flash-api-pricing), [PricePerToken V4 Flash](https://pricepertoken.com/pricing-page/model/deepseek-deepseek-v4-flash)."
+        },
+        {
+          "id": "user:23879",
+          "role": "user",
+          "text": "1. why aren't subagents being used?\n2. pls give triage and fixbot costs as well"
+        },
+        {
+          "id": "agent:23912",
+          "role": "assistant",
+          "text": "Status: subagents are still enabled. The Opus agent is choosing not to spawn them. Now I'm confirming which batches did delegate and computing triage and fixer costs."
+        },
+        {
+          "id": "agent:23928",
+          "role": "assistant",
+          "text": "**1. Why subagents aren't used**\n\nLuna subagents are still turned on. The Opus agent is choosing not to start them.\n\n- **Turned on:** every multi-PR Opus session through today is configured with Luna subagents (`subagents: single_model, gpt-6-luna, high`, from `mj sessions`). One-PR DeepSeek batches have them turned off by design.\n- **The tool works:** batch `75c15f80` called `mcp__mj-agents__spawn`, then `wait` and `close`, and all three completed.\n- **Never chosen since Oct 9:** only 4 batches have used Luna. Those were 69, 24, 8 and 2 PRs, all on Oct 7–9. None of the 61 multi-PR batches since Oct 10 used it. The recent sessions I sampled made no spawn calls at all, only shell commands.\n\nThe likely reason, not verified, is a combination of two things:\n- **Small batches:** since Oct 10, multi-PR batches are mostly 2–3 PRs, and the largest was 10.\n- **Optional wording in the prompt:** `MERGE_DELEGATION_GUIDANCE` (`automerge.py:102`) offers delegation \"for bounded independent investigation\" and to \"divide large merges\". It then spends most of its length warning that builds are expensive. At 2–3 PRs, Opus reasonably decides nothing qualifies. That text has not changed since Oct 9.\n\nOne more possible factor I haven't checked: the Claude harness may hide the spawn tool until the agent loads it, which would make delegation slightly harder to reach.\n\nChanging this may be worth it for cost. Most of the Opus bill is cache reads of long contexts, and Luna's prices are about a tenth of Opus's ($0.02 vs $0.22 per million cache-read tokens; $0.75 vs $22 per million output tokens). Sending reading-heavy investigation to Luna could lower Opus spend. That would need a prompt change, and I haven't made one.\n\n**2. Triage and fixer costs**\n\nBoth use only DeepSeek Flash. These are monthly rates from Oct 10–17:\n\n| Service | Jobs (Oct 10–17) | Tokens | Monthly |\n|---|---|---|---|\n| Triage | 277 | 1.12 B input (98% cached), 11 M output | **~$35–140** |\n| Fixer | 78 | 828 M input (99% cached), 5 M output | **~$18–97** |\n\nThe range comes from the price of cached input. About 99% of their input is served from cache. Third-party sources give that price as either $0.0028 or $0.028 per million tokens, and I couldn't confirm which is correct. Your DeepSeek billing dashboard would settle it.\n\nNeither service has gaps in its usage records (0 missing reports, unlike the merge sessions), so these token counts are reliable.\n\n**Updated total, all three services:** about $1,650–2,030 a month at list prices.\n- EC2 host: ~$1,200, currently covered by credits. Triage and the fixer share this host with the merger.\n- Merge agents: ~$380–590.\n- Triage and fixer: ~$55–240.\n\n`★ Insight ─────────────────────────────────────`\n- Triage handles more tokens than the merger's DeepSeek batches (1.12 B vs 1.07 B over similar periods), but its cost is close to nothing because almost every token is a cache hit. With DeepSeek, how much input repeats matters far more than how many jobs run.\n- The Luna results suggest Opus delegates only when the work is obviously parallel (69- and 24-PR merges). Wording like \"large merges\" acts as a size threshold in practice, even though the prompt doesn't state one.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:24176",
+          "role": "user",
+          "text": "hmm what version of mj is this running, we changed subagent config"
+        },
+        {
+          "id": "agent:24227",
+          "role": "assistant",
+          "text": "**The CI host is running mj 2.34.0**, so the subagent configuration changes haven't reached it.\n\n- **CI host:** `mj 2.34.0`. It is a patched build of source `c48ec826`, which dates from Oct 7, with the Move hotfix backported. The binary was rebuilt and the daemon started on Oct 10 at 13:02 UTC.\n- **Workstation:** `mj 2.46.0` (Oct 15).\n- **When the new config arrived:** setting subagents up by task type (straightforward/subtle) came in `d745b9472`, first released in **v2.42.0**. The command-line overrides came in v2.43.0.\n\nSo CI still uses the old single-model policy, sending everything to Luna at high effort. Its config only has `max_concurrent = 16` and `eligible_profiles.bedrock-luna`. It has no `[subagents.straightforward]` or `[subagents.subtle]` sections.\n\nI don't think the old version explains why Opus doesn't delegate, though. The delegation instructions in the CI build already said \"Delegate … by default\" (`mj-worker/src/subagent_mcp.rs` at `c48ec826`). The spawn tool also worked in batch `75c15f80` on Oct 9. Batch size and the optional wording in the monitor's prompt are still the likely reasons, but I haven't verified them.\n\n**If you upgrade CI to 2.46, update the monitor at the same time.** The monitor launches merge batches with `--subagents single-model --subagent-model … --subagent-effort …` (`automerge.py:1978`). In v2.46.0 those flags are errors: the parser test in `mj-cli/src/api_commands.rs` requires both `--subagents single-model` and `--subagent-model` to be rejected. As things stand, upgrading would break every multi-PR batch launch until three changes are in place:\n1. `automerge.py` uses `--subagents mjolnir`, plus `--subagent-straightforward` / `--subagent-subtle` if you want per-batch overrides.\n2. The CI config gets both task-type sections, each set to Luna or whichever models you choose. Mjolnir subagents stay unavailable until both exist.\n3. The monitor's tests and CLAUDE.md drop the `single-model` wording.\n\nOld stored sessions keep working: stored single-model policies load as \"Mjolnir, straightforward.\"\n\nI haven't changed anything. Do you want me to prepare the monitor change and the CI config for an upgrade?\n\n`★ Insight ─────────────────────────────────────`\n- The CI daemon is deliberately pinned. It was rebuilt from its exact deployed source with backports, instead of upgraded, so that a native handoff could replace it without losing session IDs. That is why it is 12 releases behind.\n- 2.42 removed the single-model setting outright. It only translates old *stored* settings on load. Commands that pass the old flags, like the monitor's launch, fail instead of being translated.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:24410",
+          "role": "user",
+          "text": "do upgrade them and make the changes needed for the new config\n\nbut then switch merge to use deepseek flash/max with no subagents"
+        },
+        {
+          "id": "agent:24470",
+          "role": "assistant",
+          "text": "Both agents are running: one is changing the monitor, the other is preparing the CI upgrade. I'll review their results before deploying anything."
+        },
+        {
+          "id": "agent:24487",
+          "role": "assistant",
+          "text": "Nothing is deployed yet. The order once both agents report:\n1. Review and commit the monitor change, then deploy it to the CI host.\n2. Have the upgrade agent install 2.46.0, add the two Luna task-type sections to the CI config, and replace the daemon without losing session IDs."
+        },
+        {
+          "id": "agent:24521",
+          "role": "assistant",
+          "text": "The monitor change is done. Reviewing the diff now."
+        },
+        {
+          "id": "agent:24548",
+          "role": "assistant",
+          "text": "The diff looks right. Committing, pushing, and deploying it to the CI checkout."
+        },
+        {
+          "id": "agent:24571",
+          "role": "assistant",
+          "text": "The monitor change is live on the CI host as commit `94b7a34`. From the next cron tick, new merge batches launch on DeepSeek Flash at max effort with no subagents. Live batches keep their current setup.\n\nI'm waiting for the upgrade agent's plan before letting it touch the daemon."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "The monitor change is live on the CI host as commit `94b7a34`. From the next cron tick, new merge batches launch on DeepSeek Flash at max effort with no subagents. Live batches keep their current setup.\n\nI'm waiting for the upgrade agent's plan before letting it touch the daemon.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 0
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-17T22:45:43.409Z",
+        "kind": "user",
+        "text": "how much downtime do we have on the CI host? is it worth splitting into a cheaper always-on control plane host + spin up merge / fix VMs on demand? (maybe triage too? not sure if it needs to do heavyw"
+      },
+      {
+        "at": "2026-10-17T22:47:21.517Z",
+        "kind": "agent",
+        "text": "**Short answer:** the host is idle about half the time, but mostly in short gaps. Splitting it would save about $400 a month at list price, and only if the worker is stopped between jobs. Doing that c"
+      },
+      {
+        "at": "2026-10-17T22:51:19.470Z",
+        "kind": "system",
+        "text": "Subagent \"ci-mj-upgrade-prep\" (8d6de6db) finished turn 20 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-17T22:51:19.531Z",
+        "kind": "user",
+        "text": "One or more sub-agents finished. Call wait to collect their reports."
+      },
+      {
+        "at": "2026-10-17T22:52:09.233Z",
+        "kind": "agent",
+        "text": "Phase 1 checked out: - The 2.46.0 build passed 2,000 controller tests. - It contains both Move hotfix backports and keeps ACP 1.13.7. - The database migration goes to revision 82 (not 81 as I said ear"
+      },
+      {
+        "at": "2026-10-17T23:02:09.548Z",
+        "kind": "system",
+        "text": "Subagent \"ci-mj-upgrade-prep\" (8d6de6db) finished turn 2966 (completed, end of turn)."
+      }
+    ]
+  }
+}

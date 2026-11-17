@@ -1,50 +1,15 @@
 use super::*;
 use crate::acp::verdict_client::{VerdictClient, VerdictSource};
-use crate::test_support::wait_for;
+use crate::test_support::{scoped_log_capture_sees_every_callsite, wait_for};
 use mj_core::activity::ActivityState;
 use tokio::io::AsyncReadExt;
 use tracing::instrument::WithSubscriber;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
-/// tracing-core caches each callsite's interest process-wide. While at most
-/// one dispatcher is registered it asks only the current thread's default, so
-/// a parallel test reaching a Jev callsite first without a subscriber caches
-/// it as `never`, and this file's scoped log capture silently loses the line.
-/// A global subscriber that answers `sometimes` keeps every callsite asking
-/// the scoped subscriber per event.
-struct DeferToScoped;
-
-impl tracing::Subscriber for DeferToScoped {
-    fn register_callsite(
-        &self,
-        _: &'static tracing::Metadata<'static>,
-    ) -> tracing::subscriber::Interest {
-        tracing::subscriber::Interest::sometimes()
-    }
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        false
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, _: &tracing::Event<'_>) {}
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-fn scoped_log_capture_sees_every_callsite() {
-    static INSTALLED: std::sync::Once = std::sync::Once::new();
-    INSTALLED.call_once(|| {
-        tracing::subscriber::set_global_default(DeferToScoped)
-            .expect("no other global subscriber in worker unit tests");
-    });
-}
-
 #[derive(Clone, Copy)]
 enum WhileClassifying {
+    Child,
     Wait,
     Stop,
     KeepCurrent,
@@ -74,7 +39,7 @@ async fn completed_turn_response(
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let (requested_tx, requested_rx) = tokio::sync::oneshot::channel();
+    let (requested_tx, mut requested_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -93,12 +58,12 @@ async fn completed_turn_response(
         let mut body = vec![0; length];
         stream.read_exact(&mut body).await.unwrap();
         let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(request["state"]["phase"], "replied");
+        assert_eq!(request["phase"], "replied");
         assert_eq!(
-            request["state"]["assistant_text_tail"],
+            request["assistant_text_tail"],
             "Waiting for my agent to finish."
         );
-        assert_eq!(request["state"]["background_commands"], tasks);
+        assert_eq!(request["background_commands"], tasks);
         requested_tx.send(()).unwrap();
         if release_rx.await.is_err() {
             return;
@@ -109,12 +74,46 @@ async fn completed_turn_response(
             choice
         };
         let input = if choice == "user" { "required" } else { "none" };
-        let body = serde_json::json!({"answers": {
-            "work": {"type":"choice", "choice":work, "confidence":confidence, "probabilities": {"finished": if work == "finished" { work_probability } else { (1.0 - work_probability) / 3.0 }, "authorized_unfinished": if work == "authorized_unfinished" { work_probability } else { (1.0 - work_probability) / 3.0 }, "waiting": if work == "waiting" { work_probability } else { (1.0 - work_probability) / 3.0 }, "unclear": if work == "unclear" { work_probability } else { (1.0 - work_probability) / 3.0 }}},
-            "input": {"type":"choice", "choice":input, "confidence":if choice == "user" { confidence } else { 0.99 }, "probabilities": {"none": if input == "none" { 1.0 } else { 0.0 }, "redundant_request": if input == "redundant_request" { 1.0 } else { 0.0 }, "required": if input == "required" { 1.0 } else { 0.0 }, "unclear": if input == "unclear" { 1.0 } else { 0.0 }}},
-            "failure": {"type":"choice", "choice":"none", "confidence":0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}}
-        }})
-        .to_string();
+        let questions: serde_json::Value =
+            serde_json::from_str(mj_core::activity::eot_glide::QUESTIONS).unwrap();
+        let mut answers = serde_json::json!({});
+        for (axis, question) in questions.as_object().unwrap() {
+            let winner = match axis.as_str() {
+                "work" => work,
+                "input" => input,
+                "failure" | "attention" => "none",
+                "background" => "unclear",
+                "permission_veto" => "unknown",
+                "turn_state" => {
+                    if work == "finished" {
+                        "finished"
+                    } else {
+                        "wait"
+                    }
+                }
+                _ => unreachable!(),
+            };
+            let criteria = question["criteria"].as_object().unwrap();
+            let probability = if axis == "work" || axis == "turn_state" {
+                work_probability
+            } else {
+                1.0
+            };
+            let mut scores = serde_json::Map::new();
+            for name in criteria.keys() {
+                scores.insert(
+                    name.clone(),
+                    serde_json::json!(if name == winner {
+                        probability
+                    } else {
+                        (1.0 - probability) / (criteria.len() - 1) as f64
+                    }),
+                );
+            }
+            answers[axis] = serde_json::json!({"probabilities":scores});
+        }
+        let body = serde_json::json!({"answers":answers}).to_string();
+        let _ = confidence;
         stream
             .write_all(
                 format!(
@@ -128,6 +127,9 @@ async fn completed_turn_response(
     });
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap();
+    durable
+        .set_managed_subagent(matches!(action, WhileClassifying::Child))
+        .unwrap();
     durable.set_turn_verdict_harness(HarnessKind::Claude);
     durable.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AirTasks);
     durable
@@ -157,7 +159,7 @@ async fn completed_turn_response(
         assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
     };
     submit(&mut durable, "prompt-1");
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(crate::relay::RelayCell::new(durable));
     let (events_tx, events_rx) = mpsc::channel(16);
     let (wakes_tx, wakes_rx) = mpsc::channel(1);
     let (commands_tx, mut commands_rx) = mpsc::channel(4);
@@ -166,11 +168,7 @@ async fn completed_turn_response(
         BTreeMap::new(),
         events_tx.clone(),
     );
-    let client = VerdictClient::new(VerdictSource::Direct {
-        key: "fake-key".into(),
-        endpoint,
-    })
-    .unwrap();
+    let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
     scoped_log_capture_sees_every_callsite();
     let log_path = temp.path().join("worker.log");
     let log = std::fs::File::create(&log_path).unwrap();
@@ -188,6 +186,7 @@ async fn completed_turn_response(
             user_shells,
             None,
             Some(client),
+            None,
         )
         .with_subscriber(subscriber),
     );
@@ -201,6 +200,18 @@ async fn completed_turn_response(
         commands_rx.recv().await.unwrap(),
         CommandRequest::Prompt { .. }
     ));
+    if matches!(action, WhileClassifying::Child) {
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert!(requested_rx.try_recv().is_err());
+        assert!(
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_prompt
+                .is_some()
+        );
+    }
     events_tx.send(RuntimeEvent::SessionUpdate { update: serde_json::json!({"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Waiting for my agent to finish."}}) }).await.unwrap();
     events_tx
         .send(RuntimeEvent::PromptFinished {
@@ -211,6 +222,35 @@ async fn completed_turn_response(
         })
         .await
         .unwrap();
+    if matches!(action, WhileClassifying::Child) {
+        wait_for("child completion", async {
+            while relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_prompt
+                .is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert!(requested_rx.try_recv().is_err());
+        let state = relay.lock().unwrap().operational_state();
+        assert!(!state.retry_assessment_pending);
+        assert!(!state.assessment.as_ref().unwrap().current());
+        assert_eq!(state.is_quiet(), tasks == 0);
+        assert!(relay.lock().unwrap().handback_verdict_client.is_some());
+        events_tx.send(RuntimeEvent::Stopped).await.unwrap();
+        wait_for("child coordinator shutdown", coordinator)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        return;
+    }
     wait_for("the local classifier request", requested_rx)
         .await
         .unwrap();
@@ -236,7 +276,7 @@ async fn completed_turn_response(
         drop(release_tx);
         server.await.unwrap();
         let log = std::fs::read_to_string(&log_path).unwrap();
-        assert!(log.contains("Jev classification requested"), "{log}");
+        assert!(log.contains("GLiDE classification requested"), "{log}");
         assert!(log.contains("cancelled"), "{log}");
         return;
     }
@@ -395,7 +435,7 @@ async fn completed_turn_response(
         .unwrap()
         .unwrap();
     let log = std::fs::read_to_string(&log_path).unwrap();
-    assert!(log.contains("Jev classification requested"), "{log}");
+    assert!(log.contains("GLiDE classification requested"), "{log}");
     assert!(log.contains("summary_bytes="), "{log}");
     assert!(
         !log.contains("Waiting for my agent to finish."),
@@ -404,8 +444,8 @@ async fn completed_turn_response(
     assert!(log.contains(SESSION_ID), "{log}");
     assert!(!log.contains("fake-key"));
     if matches!(action, WhileClassifying::Wait) {
-        assert!(log.contains("Jev classification received"), "{log}");
-        assert!(log.contains(&format!("confidence={confidence}")), "{log}");
+        assert!(log.contains("GLiDE classification received"), "{log}");
+        assert!(log.contains("probabilities="), "{log}");
         assert!(log.contains("applied"), "{log}");
     }
 }
@@ -413,6 +453,8 @@ async fn completed_turn_response(
 #[tokio::test]
 async fn replied_verdict_publishes_without_delaying_completion_and_clears_on_output() {
     completed_turn_verdict(WhileClassifying::Wait).await;
+    completed_turn_verdict(WhileClassifying::Child).await;
+    completed_turn_with_background(WhileClassifying::Child, "finished", 1).await;
 }
 
 /// I2-3: the classifier's answer landed after a close's checkpoint cut and
@@ -431,7 +473,7 @@ async fn shutdown_cancels_pending_replied_verdict() {
 #[tokio::test]
 async fn probability_qualified_completion_and_input_reach_activity_at_low_confidence() {
     for choice in ["finished", "user"] {
-        completed_turn_response(WhileClassifying::Wait, choice, 4, 0.2, 0.8, 200).await;
+        completed_turn_response(WhileClassifying::Wait, choice, 4, 0.2, 0.95, 200).await;
     }
 }
 
@@ -458,8 +500,7 @@ fn ask_once_without_a_classifier() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let client = VerdictClient::new(VerdictSource::Direct {
-            key: "k".into(),
+        let client = VerdictClient::new(VerdictSource::Hosted {
             endpoint: "http://127.0.0.1:1".into(),
         })
         .unwrap();
@@ -478,7 +519,9 @@ fn ask_once_without_a_classifier() {
             user_prompt_tail: String::new(),
             assistant_text_tail: String::new(),
         };
-        let _ = client.ask_logged("s", 1, &evidence).await;
+        let _ = client
+            .ask_glide_logged("s", 1, &evidence, &Default::default(), 0)
+            .await;
     });
 }
 
@@ -502,5 +545,5 @@ fn scoped_log_capture_keeps_a_callsite_first_reached_without_a_subscriber() {
         .unwrap();
     tracing::dispatcher::with_default(&dispatch, ask_once_without_a_classifier);
     let log = std::fs::read_to_string(&log_path).unwrap();
-    assert!(log.contains("Jev classification requested"), "{log}");
+    assert!(log.contains("GLiDE classification requested"), "{log}");
 }

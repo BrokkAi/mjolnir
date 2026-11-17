@@ -1,0 +1,37 @@
+{
+  "recorded_at": "2026-11-17T03:57:00.127384+00:00",
+  "stage": "relation17 only; no briefs or reviewers launched",
+  "source_base": "7106e3fab",
+  "registration_commit": "b2976d481",
+  "harness_files": {
+    "driver.py": "0aca7b9b18f79f15f8c606f5513000c9ab556db9cd9720e3e623c75c2343ed36",
+    "brief_driver.py": "efda957e92fad2cec0e34cafe6a8fdb11f8fd8b625522c05c1e0fd4b2a2a71cb",
+    "verify_driver.py": "e0a8d6f9a88b617125e2469afa246c4e71977a11f08c93f11975455faeca6abb",
+    "brief_oracle.py": "730716e02d4fe502fe33d9b4babe2d6acbe24c33cdfb46361f980b881d2f94da",
+    "brief_score.py": "4977cc022b7b2fb09161894a3c699860dc82079c0a053998611960dae5fa208a",
+    "brief_writer_terra.py": "6d61b76958a56d4e4a5834cac82a4abeb8ec499bc36cd58764de3c3d6ddcc5e7",
+    "build_verify.py": "ceb28ca62e815eece31eb6499c1e05b35639c95485f51d8a3a0d8968ea183058",
+    "score.py": "3659aaa994c631a3656f06b5308da3a09a1a77f6aab0913f2e1ee5bea5c1b896",
+    "carrier_test.py": "14e7e64f16665b5b461508b800050cf70b7133ec5c82fa221e8065efd540f66a",
+    "mjx": "03168f1bd86b5427964e5241d18255a46618c5f0446a61d0427a7beed435e714",
+    "brief/WRITER.md": "ce7ff171838c0c1071a01877844b56ea423d48cd7dd93be6b2fec9a244d333e5",
+    "judge/SPEC.md": "424d065e62c57a8d103262017fb2a4b9f401fdb3d02f4b27f6b1f334b2770a4c",
+    "inventory.py": "0bb074b955e56d8165237e29c87c2f32137b3993c7033107f7bc0f941f2114aa",
+    "test_runtime_source.py": "b5495b12f32926fe80058e2fc406efc059584cf98ac59d60cbcc3183c9ce3f09",
+    "test_scoring_interfaces.py": "8c4b551b53379b733bbe6fbe42c4d485d565f83029a3f1ed6a7bf8bfd70534be"
+  },
+  "input_files": {
+    "arms/sets.json": "3ac4178ce4cdff9465a77f1fb52f3d8c055386eb39828888a21479a031d77738",
+    "stageB-relation-jobs.json": "5bb088ac7115791f82874facef293a1ad72f762c3d910ba76406b6b5abb68eb5",
+    "arms/relation-writer-ids.json": "c85086313c319b0f0495e09bea682f267069ae3d27740fffa2fc4bb1fac20295",
+    "arms/environment.json": "0645458150e4b6bd0a423f1904355e2bb90784d479896551d51402af3b5c29b5",
+    "registration/PLAN-bifrost-bugs-before-arms.md": "befcfe3fa92de8ff44a1e6d8c5c315adf9d774ac415c19cd5bd481f22ae2dfa7"
+  },
+  "offline_checks": {
+    "runtime_source_workspace_instance_tests": 6,
+    "scoring_leak_default_tests": 13,
+    "frozen_source_import": "70records/P17S13C0/3TerraAandBT/selectedSolwriter"
+  },
+  "reviewer_tool_audit_and_latency": "unavailable; role sessions destroyed #1554/#1559; no capture",
+  "profile_floor": "codex4=25"
+}

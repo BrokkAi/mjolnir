@@ -1,0 +1,124 @@
+{
+  "id": "L2903",
+  "title": "Rust audit closeout gaps",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "e65c99e141a12361e8f0a3d210afda0d",
+    "session_title": "10202-deep-pass-acceptance-audit",
+    "reply_position": 223,
+    "captured_at": "2026-11-06T13:22:09.158Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:59",
+          "role": "assistant",
+          "text": "Status: I've read the issue, the plan's progress log and the dispositions ledger. Next I'll check the rest of the plan, the source-catalog unknown reporting, the PR states and the durable receipts."
+        },
+        {
+          "id": "agent:115",
+          "role": "assistant",
+          "text": "Status: the catalog is metadata only, with no per-body role column. I'm now checking whether any roll-up or issue comment partitions all 4,257 bodies into the five acceptance roles."
+        },
+        {
+          "id": "agent:168",
+          "role": "assistant",
+          "text": "Status: I'm reading the final combined-validation receipt, then I'll check the durable retention of the receipts and write the verdict."
+        },
+        {
+          "id": "agent:223",
+          "role": "assistant",
+          "text": "The bounded pass meets its mutation-evidence acceptance, but it is not ready to call complete. Three stated deliverables are still open (items 1–3 below). I edited nothing and ran no builds. The handback went to the parent.\n\n**What holds up**\n- **Hold and scope:** the #5658 hold and the \"no whole-crate or current-master claim\" are stated consistently in the plan, the ledger and the PR bodies.\n- **Fault counts:** the ledger's 49 + 2 + 1 + 2 + 3 gives 57 unique faults, and the 11 replays are not added to that count.\n- **Foreign crates:** the eight foreign crates are source-only with no Rust fault selected, and the unknowns are stated.\n- **Delivery:** #10305 and #10311 are ready and mergeable. Their base branch head matches the #10327 head. The union validation at 7c0c775 passed its 5 tests, Clippy and static checks.\n\n**Missing before the parent calls it complete**\n1. **Public conclusions:** the last #10202 comment is from 11:26Z and still says the final input and semantic builds are running. The final catches, the PR heads, the union validation, #10334 and the ledger are not posted.\n2. **Role accounting:** the source catalog is metadata only (cfg true/false/unknown, bodyless, const and macro gaps). It has no held-or-eligible column. The final report must say the remaining cfg-true bodies are not individually classified.\n3. **Retention:** the dependency ledger, the edge reconciliation and the combined-validation receipts are not under `.agents/scratch/10202-rust-deep`.\n4. **Stale receipt labels:** the admission and publication bundle receipts still say independent review is pending, though the plan calls them independently audited.\n5. **Survivors:** survivors have counts only, with no per-survivor line saying meaningful, deferred or uncertain.\n6. **PR #10335:** it is still a draft, and its body says it stays one until the union receipt is accepted. That receipt is now accepted.\n7. **Plan close-out:** the plan still has unchecked progress items and says \"active\".\n\nThe full notes are in `.mj/agents/e65c99e141a12361e8f0a3d210afda0d/verdict.md`."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "utation-evidence acceptance, but it is not ready to call complete. Three stated deliverables are still open (items 1–3 below). I edited nothing and ran no builds. The handback went to the parent.\n\n**What holds up**\n- **Hold and scope:** the #5658 hold and the \"no whole-crate or current-master claim\" are stated consistently in the plan, the ledger and the PR bodies.\n- **Fault counts:** the ledger's 49 + 2 + 1 + 2 + 3 gives 57 unique faults, and the 11 replays are not added to that count.\n- **Foreign crates:** the eight foreign crates are source-only with no Rust fault selected, and the unknowns are stated.\n- **Delivery:** #10305 and #10311 are ready and mergeable. Their base branch head matches the #10327 head. The union validation at 7c0c775 passed its 5 tests, Clippy and static checks.\n\n**Missing before the parent calls it complete**\n1. **Public conclusions:** the last #10202 comment is from 11:26Z and still says the final input and semantic builds are running. The final catches, the PR heads, the union validation, #10334 and the ledger are not posted.\n2. **Role accounting:** the source catalog is metadata only (cfg true/false/unknown, bodyless, const and macro gaps). It has no held-or-eligible column. The final report must say the remaining cfg-true bodies are not individually classified.\n3. **Retention:** the dependency ledger, the edge reconciliation and the combined-validation receipts are not under `.agents/scratch/10202-rust-deep`.\n4. **Stale receipt labels:** the admission and publication bundle receipts still say independent review is pending, though the plan calls them independently audited.\n5. **Survivors:** survivors have counts only, with no per-survivor line saying meaningful, deferred or uncertain.\n6. **PR #10335:** it is still a draft, and its body says it stays one until the union receipt is accepted. That receipt is now accepted.\n7. **Plan close-out:** the plan still has unchecked progress items and says \"active\".\n\nThe full notes are in `.mj/agents/e65c99e141a12361e8f0a3d210afda0d/verdict.md`.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "The task was an acceptance audit; the verdict is the deliverable. The missing items (public conclusions, role accounting, retention) are the parent's work list from the audit, with no decision asked. The parent then assigned item 2 back to the auditor. (Borderline: could be read as a handoff.)",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": true,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T13:26:40.118Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-11-06T13:26:43.819Z",
+        "kind": "user",
+        "text": "Address item2 with explicit conservative structured accounting, no broad new source review: own a new /tmp/qs-rust-deep/source-role-accounting-closeout-r1 builder+JSON+MD. From frozen structured r2 ca"
+      },
+      {
+        "at": "2026-11-06T13:27:40.263Z",
+        "kind": "agent",
+        "text": "Status: the r2 catalog and the reviewed scope catalogs are joinable by path, body hash and span. I'm now writing the builder."
+      },
+      {
+        "at": "2026-11-06T13:29:05.723Z",
+        "kind": "agent",
+        "text": "Item 2 is done and I've handed back the report to the parent. The role accounting builds reproducibly from the frozen r2 catalog.  - **Output:** `/tmp/qs-rust-deep/source-role-accounting-closeout-r1/`"
+      },
+      {
+        "at": "2026-11-06T13:32:05.283Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-11-06T13:32:08.851Z",
+        "kind": "user",
+        "text": "Bounded final report review while parser final Clippy runs: /tmp/qs-rust-deep/final-issue-conclusions-draft.md now includes corrected exclusive accounting from your output, all12 survivor lines (ccac "
+      }
+    ]
+  }
+}

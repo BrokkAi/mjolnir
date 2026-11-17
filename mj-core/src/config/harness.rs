@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{Environment, default_true, is_true, validate_id};
+use super::{Environment, default_true, is_false, is_true, validate_id};
 use crate::codex_provider::{BuiltInCodexProvider, CodexProvider, CodexProviderDefinition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -19,6 +19,7 @@ pub enum HarnessKind {
     Muse,
     OpenCode,
     Dsh,
+    Antigravity,
 }
 
 /// The operating system of the machine a harness's own CLI runs on, as far as
@@ -41,6 +42,71 @@ impl HarnessHost {
     }
 }
 
+/// Where a profile's login lives on the machine that runs its harness's CLI.
+/// See [`HarnessKind::login_store`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessLoginStore {
+    /// The login is the file at `marker`.
+    File { marker: PathBuf },
+    /// The login is the macOS Keychain item [`CLAUDE_KEYCHAIN_SERVICE`], which
+    /// every Claude profile there shares because its commands run with
+    /// `CLAUDE_CONFIG_DIR` unset, and nothing else: a `.credentials.json` on a
+    /// Mac (a profile home's, left by earlier releases, or Claude Code's own
+    /// plaintext fallback when its Keychain write fails) is not a login.
+    /// Claude Code takes its refresh locks under `~/.claude`; see
+    /// [`HarnessLoginStore::lock_marker`].
+    MacKeychain,
+}
+
+/// The Keychain item Claude Code stores its login in when `CLAUDE_CONFIG_DIR`
+/// is unset (CC 2.1.321: a set variable adds `-<sha256(dir)[:8]>`).
+pub const CLAUDE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// The Keychain account Claude Code uses when `$USER` is missing or holds
+/// characters outside `[a-zA-Z0-9._-]`.
+const CLAUDE_KEYCHAIN_FALLBACK_ACCOUNT: &str = "claude-code-user";
+
+/// The account of Claude Code's Keychain item, by Claude Code's own rule
+/// (2.1.321): `$USER` when it is non-empty and made only of
+/// `[a-zA-Z0-9._-]`, otherwise a fixed name. Reading and writing with the
+/// same account addresses the item Claude Code uses instead of adding a
+/// second one.
+pub fn claude_keychain_account(user: Option<&str>) -> String {
+    match user {
+        Some(user)
+            if !user.is_empty()
+                && user.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                }) =>
+        {
+            user.to_owned()
+        }
+        _ => CLAUDE_KEYCHAIN_FALLBACK_ACCOUNT.to_owned(),
+    }
+}
+
+impl HarnessLoginStore {
+    /// The credential file whose directory carries the locks every writer of
+    /// this login takes. For a file that is the file itself. For the Keychain
+    /// it is `~/.claude/.credentials.json`: Claude Code derives its lock
+    /// directories from its config directory, which is `~/.claude` while the
+    /// variable is unset, so Mjolnir's renewals serialize with Claude Code's
+    /// own.
+    pub fn lock_marker(&self) -> anyhow::Result<PathBuf> {
+        match self {
+            Self::File { marker } => Ok(marker.clone()),
+            Self::MacKeychain => {
+                let home = crate::path_input::user_home()
+                    .context("the user's home directory is unknown")?;
+                Ok(harness_authentication_marker(
+                    HarnessKind::Claude,
+                    &home.join(HarnessKind::Claude.default_home_leaf()),
+                ))
+            }
+        }
+    }
+}
+
 /// The target-level execution policy Hel applies independently of the selected
 /// harness. Raw targets may preserve configured approvals; isolated targets
 /// force full access because their boundary contains the blast radius.
@@ -50,18 +116,19 @@ pub enum ExecutionPolicy {
     /// Preserve the harness and profile's configured approval behavior.
     ConfiguredApprovals,
     /// Run without sandboxing. Most harnesses also skip approval checks,
-    /// including Muse unless its profile opts back into auto-review.
+    /// Muse included.
     Unconstrained,
 }
 
-/// Approval behavior selected for a named raw SSH target.
+/// Approval behavior of a target that runs the harness directly on a machine:
+/// chosen for a named SSH machine, always `Guardian` on localhost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionMode {
     /// Preserve the selected harness profile's approval behavior.
     Guardian,
     /// Run without sandboxing. Most harnesses also skip approval checks,
-    /// including Muse unless its profile opts back into auto-review.
+    /// Muse included.
     Yolo,
 }
 
@@ -72,6 +139,46 @@ impl PermissionMode {
             Self::Yolo => ExecutionPolicy::Unconstrained,
         }
     }
+}
+
+/// The Claude Code permission mode a Claude profile's sessions run in on
+/// targets that keep configured approvals (localhost, guardian SSH).
+/// Unconstrained targets always run Claude in bypassPermissions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaudePermissionMode {
+    /// Claude Code's own classifier approves or denies each action.
+    #[default]
+    Auto,
+    /// File edits run without asking; other actions ask.
+    AcceptEdits,
+    /// Every action that needs permission asks.
+    Manual,
+}
+
+impl ClaudePermissionMode {
+    /// The claude-agent-acp mode id that realizes this choice.
+    pub const fn acp_mode(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Manual => "default",
+        }
+    }
+
+    pub fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
+/// A profile's own choices about how its harness realizes an execution
+/// policy. The controller reads them from the profile and the worker from its
+/// launch config, and both resolve the enforcement through
+/// [`HarnessKind::resolve_execution_enforcement`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApprovalChoices {
+    /// See [`HarnessProfile::claude_permission_mode`].
+    pub claude_permission_mode: ClaudePermissionMode,
 }
 
 impl ExecutionPolicy {
@@ -159,6 +266,33 @@ impl StagedSetting {
 }
 
 impl ExecutionEnforcement {
+    /// ACP selectors reserved for the target's execution policy: the selector
+    /// the policy mode lives on, and the policy setting. The mode selector is
+    /// the policy's named one when the bridge has it, else its Mode selector
+    /// (Muse images before muse-acp 0.10 carry approvals on `mode`). It stays
+    /// owned when the bridge does not offer the policy's mode right now, such
+    /// as Auto on a model without it, so no other mode can be chosen then.
+    pub fn owned_config_keys(
+        self,
+        options: &[agent_client_protocol::v1::schema::SessionConfigOption],
+    ) -> Vec<String> {
+        // `mode` resolves the way a SetConfig for it does: the option with
+        // that id, else the Mode-category one.
+        let mode = self.acp_mode.and_then(|_| {
+            self.acp_mode_selector
+                .and_then(|selector| {
+                    options
+                        .iter()
+                        .find(|option| option.id.to_string() == selector)
+                })
+                .or_else(|| crate::acp::find_session_config_option(options, "mode"))
+                .map(|option| option.id.to_string())
+        });
+        mode.into_iter()
+            .chain(self.acp_setting.map(|(key, _)| key.to_owned()))
+            .collect()
+    }
+
     /// Name reported to the UI for the mode this session runs in.
     pub const fn label(self) -> &'static str {
         self.label
@@ -251,6 +385,10 @@ impl HarnessKind {
             self.home_env().into(),
             crate::target_path::text(config_root),
         );
+        if self == Self::Antigravity {
+            // The managed pin owns updates, including during login/discovery.
+            environment.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into());
+        }
         if self == Self::Kimi {
             // Kimi treats a session lock recorded under another hostname, or
             // under a live process with the recorded PID, as held forever.
@@ -350,15 +488,33 @@ impl HarnessKind {
     /// Whether this harness keeps its login inside its home on `host`, so that
     /// pointing [`HarnessKind::home_env`] at a home selects that home's login.
     ///
-    /// Claude Code on macOS keeps every profile's OAuth credentials in one
-    /// Keychain item, `Claude Code-credentials`, whatever `CLAUDE_CONFIG_DIR`
-    /// says (anthropics/claude-code#20553). A Claude home there holds
-    /// settings, history and MCP servers, but not the login. A session still
-    /// runs from its own staged home there; only the commands that act on the
-    /// person's own home leave the variable unset
-    /// ([`HarnessKind::configure_profile_home_environment`]).
+    /// Claude Code on macOS keeps the login in the Keychain. With
+    /// `CLAUDE_CONFIG_DIR` unset the item is `Claude Code-credentials`, so
+    /// every profile whose commands run that way shares one item; with the
+    /// variable set it looks for an item named after a hash of the directory,
+    /// which Mjolnir never creates. A Claude home there holds settings,
+    /// history and MCP servers, but not the host's login. A session still runs
+    /// from its own staged home there, with a copy of the login staged as a
+    /// file; only the commands that act on the person's own home leave the
+    /// variable unset ([`HarnessKind::configure_profile_home_environment`]).
+    ///
+    /// [`HarnessKind::login_store`] is the one place that turns this into a
+    /// location; ask it, not this, where a login is.
     pub const fn keeps_login_in_home(self, host: HarnessHost) -> bool {
         !matches!((self, host), (Self::Claude, HarnessHost::MacOs))
+    }
+
+    /// Where the login of the profile with home `home` lives on `host`. This
+    /// is the one owner of that fact: credential sync, the grant refresher,
+    /// staging and the authentication check all ask it.
+    pub fn login_store(self, host: HarnessHost, home: &Path) -> HarnessLoginStore {
+        if self.keeps_login_in_home(host) {
+            HarnessLoginStore::File {
+                marker: harness_authentication_marker(self, home),
+            }
+        } else {
+            HarnessLoginStore::MacKeychain
+        }
     }
 
     /// Whether this harness's home is a named subdirectory of the directory
@@ -376,7 +532,38 @@ impl HarnessKind {
         }
     }
 
-    pub const ALL: [Self; 7] = [
+    /// Extra CLI arguments required to point this harness's ACP or login
+    /// command at `home`, in addition to [`Self::configure_home_environment`].
+    pub fn home_cli_args(self, home: &Path) -> Vec<String> {
+        match self {
+            Self::Antigravity => vec!["--gemini-dir".into(), crate::target_path::text(home)],
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh => Vec::new(),
+        }
+    }
+
+    /// Extra CLI arguments for `self` derived from `environment`, failing if a
+    /// harness that requires a CLI home argument is missing its home variable.
+    pub fn home_cli_args_from_environment(
+        self,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>> {
+        let args = match environment.get(self.home_env()) {
+            Some(value) => self.home_cli_args(&self.home_from_environment(value)),
+            None => Vec::new(),
+        };
+        if self == Self::Antigravity && args.is_empty() {
+            bail!("Antigravity staged home is missing");
+        }
+        Ok(args)
+    }
+
+    pub const ALL: [Self; 8] = [
         Self::Codex,
         Self::Claude,
         Self::Kimi,
@@ -384,6 +571,7 @@ impl HarnessKind {
         Self::Muse,
         Self::OpenCode,
         Self::Dsh,
+        Self::Antigravity,
     ];
 
     /// Environment variable used to isolate this harness's configuration.
@@ -399,6 +587,7 @@ impl HarnessKind {
             // sessions and would otherwise default to `.dsh-acp` inside the
             // directory it runs in.
             Self::Dsh => "DSH_ACP_DATA_DIR",
+            Self::Antigravity => "MJ_ANTIGRAVITY_HOME",
         }
     }
 
@@ -417,6 +606,7 @@ impl HarnessKind {
             // serves a session is installed on demand and proves nothing
             // about one.
             Self::Dsh => ".dsh",
+            Self::Antigravity => ".gemini",
         }
     }
 
@@ -440,6 +630,7 @@ impl HarnessKind {
             // authenticates with an API key and nothing that decides a login
             // reads this. No dsh-acp release writes the file.
             Self::Dsh => "auth.json",
+            Self::Antigravity => "antigravity-cli/antigravity-oauth-token",
         }
     }
 
@@ -457,9 +648,13 @@ impl HarnessKind {
     pub const fn api_key_variable(self) -> Option<&'static str> {
         match self {
             Self::Dsh => Some("DEEPSEEK_API_KEY"),
-            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => {
-                None
-            }
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Antigravity => None,
         }
     }
 
@@ -478,9 +673,13 @@ impl HarnessKind {
                     "the target's permission mode decides it",
                 ),
             ],
-            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => {
-                &[]
-            }
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Antigravity => &[],
         }
     }
 
@@ -510,6 +709,7 @@ impl HarnessKind {
             // serve sessions: a machine carrying the bridge but no DeepSeek
             // installation has nothing to detect.
             Self::Dsh => "dsh",
+            Self::Antigravity => "agy",
         }
     }
 
@@ -519,9 +719,13 @@ impl HarnessKind {
             Self::Claude => "CLAUDE.md",
             // dsh-acp reads AGENTS.md from its data directory and workspace
             // roots ([`crate::harness_runtime::dsh_acp_script`]).
-            Self::Codex | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Dsh => {
-                "AGENTS.md"
-            }
+            Self::Codex
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh
+            | Self::Antigravity => "AGENTS.md",
         }
     }
 
@@ -539,7 +743,8 @@ impl HarnessKind {
             | Self::Grok
             | Self::Muse
             | Self::OpenCode
-            | Self::Dsh => &["skills"],
+            | Self::Dsh
+            | Self::Antigravity => &["skills"],
         }
     }
 
@@ -561,7 +766,12 @@ impl HarnessKind {
         match self {
             Self::Claude => &["skills/synced", "skills/.trash"],
             Self::Codex => &["skills/.system"],
-            Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Dsh => &[],
+            Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh
+            | Self::Antigravity => &[],
         }
     }
 
@@ -575,6 +785,7 @@ impl HarnessKind {
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
             Self::Dsh => "dsh",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -588,6 +799,7 @@ impl HarnessKind {
             Self::Muse => "Muse Code",
             Self::OpenCode => "OpenCode",
             Self::Dsh => "DSH",
+            Self::Antigravity => "Antigravity",
         }
     }
 
@@ -618,23 +830,51 @@ impl HarnessKind {
 
     /// How this harness realizes a target-level execution policy. Configured
     /// approvals preserve harness configuration, except that Codex, Claude,
-    /// and Muse select their guardian mode explicitly. Unconstrained targets
-    /// run every harness without approval checks; only the sandbox is
-    /// disabled for Muse, whose profile may opt back into auto-review.
+    /// Muse and Antigravity select their guardian mode explicitly.
+    /// Unconstrained targets run every harness without approval checks; only
+    /// the sandbox is disabled for Muse, whose profile may opt back into
+    /// auto-review.
     pub const fn execution_enforcement(
         self,
         policy: ExecutionPolicy,
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
+            // Antigravity's guardian is its Auto mode: agy approves workspace
+            // edits, runs commands in its terminal sandbox, and has a separate
+            // reviewer agent clear or ask about commands that would leave it.
+            // Unconstrained targets use Default mode, which has no reviewer,
+            // and the flag that approves every request except agy's own
+            // system command denylist.
+            (Self::Antigravity, policy) => Some(ExecutionEnforcement {
+                label: if policy.is_unconstrained() {
+                    "default / skip-permissions"
+                } else {
+                    "auto / guardian"
+                },
+                acp_mode: Some(if policy.is_unconstrained() {
+                    "default"
+                } else {
+                    "auto"
+                }),
+                acp_mode_selector: None,
+                acp_setting: None,
+                launch_flag: if policy.is_unconstrained() {
+                    Some("--dangerously-skip-permissions")
+                } else {
+                    None
+                },
+                launch_environment: None,
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
+            }),
             (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 // Isolated targets run Muse without permission checks, like
                 // OpenCode's `permission = "allow"`: `allowAll` emits no
                 // permission requests, so the adapter's client-side
                 // auto-review would have nothing to decide, and it stays
                 // off. The container remains the isolation boundary, so only
-                // the sandbox is off. A profile that sets `muse_auto_review
-                // = true` opts back into the reviewer (see
-                // `HarnessProfile::execution_enforcement`).
+                // the sandbox is off.
                 label: "allowAll / no-review / sandbox-off / :ask-me",
                 // muse-acp 0.10 puts Default, Read-only, and Plan on `mode`
                 // and the approval policy on `approval_mode`. Container images
@@ -704,20 +944,11 @@ impl HarnessKind {
                 session_sandbox: None,
                 staged_setting: None,
             }),
-            // Claude's guardian is its Auto mode: Claude decides each
-            // permission itself instead of asking the client, which has no
-            // per-tool approval surface of its own.
-            (Self::Claude, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
-                label: "auto / guardian",
-                acp_mode: Some("auto"),
-                acp_mode_selector: None,
-                acp_setting: None,
-                launch_flag: None,
-                launch_environment: None,
-                launch_argument: None,
-                session_sandbox: None,
-                staged_setting: None,
-            }),
+            // Claude's guardian defaults to its Auto mode; a profile's
+            // `claude_permission_mode` picks another.
+            (Self::Claude, ExecutionPolicy::ConfiguredApprovals) => Some(
+                Self::claude_guardian_enforcement(ClaudePermissionMode::Auto),
+            ),
             // dsh-acp records each session's permission policy and keeps it
             // across `session/load`, so the policy is selected on every open:
             // a resumed session, or one moved from a container to a raw
@@ -802,46 +1033,38 @@ impl HarnessKind {
         }
     }
 
-    /// The unconstrained Muse enforcement with auto-review on: the behavior
-    /// before isolated targets defaulted to no permission checks. A Muse
-    /// profile with `muse_auto_review = true` selects this instead of the
-    /// default `allowAll` / `off` enforcement above.
-    pub const fn muse_unconstrained_review_enforcement() -> ExecutionEnforcement {
+    /// Claude under configured approvals, in the profile's chosen mode.
+    pub const fn claude_guardian_enforcement(mode: ClaudePermissionMode) -> ExecutionEnforcement {
         ExecutionEnforcement {
-            label: "promptUnmatched / auto-review / sandbox-off / :ask-me",
-            acp_mode: Some("promptUnmatched"),
-            acp_mode_selector: Some("approval_mode"),
-            acp_setting: Some(("auto_review", "on")),
+            label: match mode {
+                ClaudePermissionMode::Auto => "auto / guardian",
+                ClaudePermissionMode::AcceptEdits => "acceptEdits / guardian",
+                ClaudePermissionMode::Manual => "default / guardian",
+            },
+            acp_mode: Some(mode.acp_mode()),
+            acp_mode_selector: None,
+            acp_setting: None,
             launch_flag: None,
-            launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
-            launch_argument: Some(LaunchArgument {
-                variable: "MUSE_SERVE_ARGS",
-                word: "--disable-sandbox",
-                present: true,
-            }),
+            launch_environment: None,
+            launch_argument: None,
             session_sandbox: None,
-            staged_setting: Some(StagedSetting {
-                file: "settings.json",
-                path: &["permissions", "default_profile"],
-                value: ":ask-me",
-                object_version: Some(("schema_version", 1)),
-            }),
+            staged_setting: None,
         }
     }
 
-    /// Execution enforcement for `policy`, honoring a Muse profile's
-    /// `muse_auto_review` choice. The worker carries that choice in its
-    /// launch config because it only knows the harness kind; the controller
-    /// resolves it from the profile. Guardian targets always review.
+    /// Execution enforcement for `policy`, honoring a Claude profile's
+    /// `claude_permission_mode` choice.
     pub fn resolve_execution_enforcement(
         self,
         policy: ExecutionPolicy,
-        muse_auto_review: bool,
+        choices: ApprovalChoices,
     ) -> Option<ExecutionEnforcement> {
-        if self == Self::Muse && policy == ExecutionPolicy::Unconstrained && muse_auto_review {
-            return Some(Self::muse_unconstrained_review_enforcement());
+        match (self, policy) {
+            (Self::Claude, ExecutionPolicy::ConfiguredApprovals) => Some(
+                Self::claude_guardian_enforcement(choices.claude_permission_mode),
+            ),
+            _ => self.execution_enforcement(policy),
         }
-        self.execution_enforcement(policy)
     }
 
     /// Apply the launch environment required to realize `policy`. The
@@ -928,24 +1151,50 @@ impl HarnessKind {
         match self {
             Self::Claude => Some(".claude.json"),
             Self::Kimi => Some("mcp.json"),
-            Self::Codex | Self::Grok | Self::Muse | Self::OpenCode | Self::Dsh => None,
+            Self::Codex
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh
+            | Self::Antigravity => None,
         }
     }
 
     /// Whether this harness receives Mjolnir's delegation tools: a parent's
     /// `spawn` and related tools, and a child's `handback`. Such a harness
     /// gets the subagent choice in the wizards. Claude reads the tools from
-    /// its staged profile; Codex and DSH take them over ACP, and DSH reads
-    /// the delegation policy from its staged `AGENTS.md`.
+    /// its staged profile; Codex, DSH and OpenCode take them over ACP, and
+    /// DSH and OpenCode read the delegation policy from their staged
+    /// `AGENTS.md`.
     pub const fn supports_delegation_tools(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex | Self::Dsh)
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::Dsh | Self::OpenCode | Self::Antigravity
+        )
+    }
+
+    /// Whether a session on this harness is offered the review tools, and a
+    /// primary one can be held to push review: the `mj-review` server, the
+    /// push hook and `MJ_REVIEW_GATE`. Separate from
+    /// `supports_delegation_tools`, which OpenCode satisfies without having
+    /// the gate.
+    pub const fn supports_review_gate(self) -> bool {
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::Dsh | Self::Kimi | Self::Antigravity
+        )
+    }
+
+    /// Claude and Codex publish background inventory through the pinned AIR bridge.
+    pub const fn has_reliable_background_inventory(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
     }
 
     /// Whether the harness has sub-agents of its own, which the Native
     /// delegation choice keeps. dsh-acp has none, so Native would do nothing
     /// for DSH and is not offered there.
     pub const fn has_native_subagents(self) -> bool {
-        !matches!(self, Self::Dsh)
+        !matches!(self, Self::Dsh | Self::Antigravity)
     }
 
     /// The harness-home-relative directories that hold its native session
@@ -958,6 +1207,9 @@ impl HarnessKind {
             Self::Muse => &[".data/muse/sessions"],
             Self::OpenCode => &[".data/opencode"],
             Self::Dsh => &["sessions"],
+            // agy's conversation database and, beside it, the files each
+            // conversation owns, such as the full output of a long command.
+            Self::Antigravity => &["antigravity-cli/conversations", "antigravity-cli/brain"],
         }
     }
 
@@ -975,7 +1227,12 @@ impl HarnessKind {
         match self {
             Self::Grok => Some("bin/agent"),
             Self::Claude => Some("node_modules/.bin/claude"),
-            Self::Codex | Self::Kimi | Self::Muse | Self::OpenCode | Self::Dsh => None,
+            Self::Codex
+            | Self::Kimi
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh
+            | Self::Antigravity => None,
         }
     }
 
@@ -988,6 +1245,10 @@ impl HarnessKind {
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),
             Self::OpenCode => vec!["acp"],
+            Self::Antigravity => ["acp", "--disable-telemetry"]
+                .into_iter()
+                .chain(flag)
+                .collect(),
         }
     }
 }
@@ -1004,7 +1265,6 @@ impl std::str::FromStr for HarnessKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HarnessProfile {
     /// Whether Mjolnir may select this profile for new work or probe it.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -1028,21 +1288,43 @@ pub struct HarnessProfile {
     /// Mjolnir generates the catalog only for those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_review_model: Option<String>,
+    /// Whether load balancing may pick this subscription profile once its
+    /// quota for the requested model is gone and only paid credits remain.
+    /// Off by default: a profile out of subscription quota is not offered
+    /// until the quota resets. Usage-priced profiles are unaffected.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub load_balancing_may_consume_credits: bool,
     /// A Codex profile overlay, `<home>/<name>.config.toml`, layered over the
     /// home's `config.toml` as `codex --profile <name>` would layer it. See
     /// [`crate::codex_provider::effective_config`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_profile: Option<String>,
-    /// Whether an unconstrained Muse session (containers, EC2, `yolo` SSH)
-    /// keeps muse-acp's auto-review on. Absent or `false` runs without
-    /// permission checks, like OpenCode's `permission = "allow"`: `allowAll`
-    /// approvals with auto-review off and only the sandbox disabled. `true`
-    /// restores the reviewer (`promptUnmatched` approvals with auto-review
-    /// on) inside the container boundary. Only valid on a Muse profile; the
-    /// guardian policy (raw local, guardian SSH) always reviews, so this
-    /// changes nothing there.
+    /// Legacy Muse review toggle. It is consumed and ignored because Muse now
+    /// follows its runtime's policy like every harness.
+    #[serde(default, rename = "muse_auto_review", skip_serializing)]
+    pub legacy_muse_auto_review: Option<serde_json::Value>,
+    /// The Claude Code permission mode this Claude profile's sessions run in
+    /// where the target keeps configured approvals (localhost, guardian
+    /// SSH): `"auto"` (the default when absent) lets Claude's classifier
+    /// decide each action, `"accept-edits"` runs file edits and asks for the
+    /// rest, and `"manual"` asks for every action that needs permission.
+    /// Unconstrained targets always bypass permissions. Only valid on a
+    /// Claude profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub muse_auto_review: Option<bool>,
+    pub claude_permission_mode: Option<ClaudePermissionMode>,
+    /// The IAM role Mjolnir assumes for each session of a profile that
+    /// authenticates with the AWS credential chain (Bedrock), so the session
+    /// gets short-lived credentials limited to that role instead of a copy
+    /// of the controller host's credentials. See [`AwsRoleConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<super::AwsRoleConfig>,
+    /// The models Mjolnir offers from this profile, as exact values from the
+    /// profile's advertised catalogue (`openrouter/deepseek/deepseek-v4.1-flash-1017`).
+    /// Empty offers everything the harness advertises. Some harnesses, such as
+    /// OpenCode on OpenRouter, advertise hundreds of models and ignore their
+    /// own allow-lists. The profile's current model is always offered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
     /// Consume legacy per-profile choices without migrating them to global settings.
     #[serde(default, rename = "subagents", skip_serializing)]
     pub legacy_subagents: Option<serde_json::Value>,
@@ -1121,6 +1403,25 @@ fn installation_home(path: &Path) -> PathBuf {
 }
 
 impl HarnessProfile {
+    /// Creates an enabled profile with all optional settings unset.
+    pub fn new(kind: HarnessKind, home: impl Into<PathBuf>) -> Self {
+        Self {
+            enabled: true,
+            kind,
+            home: home.into(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            codex_profile: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            models: Default::default(),
+            legacy_subagents: None,
+        }
+    }
+
     pub fn discovery_inputs(&self) -> ProfileDiscoveryInputs {
         ProfileDiscoveryInputs {
             kind: self.kind,
@@ -1157,23 +1458,19 @@ impl HarnessProfile {
     }
 
     pub fn execution_enforcement(&self, policy: ExecutionPolicy) -> Option<ExecutionEnforcement> {
-        // A Muse profile that opts back into review keeps the previous
-        // unconstrained behavior: the reviewer answers each approval inside
-        // the container boundary, with only the sandbox disabled.
         self.kind
-            .resolve_execution_enforcement(policy, self.muse_auto_review.unwrap_or(false))
+            .resolve_execution_enforcement(policy, self.approval_choices())
     }
 
-    /// Whether this Muse profile keeps auto-review on in unconstrained
-    /// targets. Guardian targets always review; this only changes the
-    /// unconstrained enforcement above.
-    pub fn muse_auto_review_unconstrained(&self) -> bool {
-        self.kind == HarnessKind::Muse && self.muse_auto_review.unwrap_or(false)
+    /// This profile's choices about how its harness realizes a policy.
+    pub fn approval_choices(&self) -> ApprovalChoices {
+        ApprovalChoices {
+            claude_permission_mode: self.claude_permission_mode.unwrap_or_default(),
+        }
     }
 
-    /// Apply the launch environment for `policy`, honoring this profile's
-    /// `muse_auto_review` choice for Muse. The controller writes this into
-    /// new launch configs, and the worker repeats it so persisted configs
+    /// Apply the launch environment for `policy`. The controller writes this
+    /// into new launch configs, and the worker repeats it so persisted configs
     /// from older releases acquire the same enforcement after an upgrade.
     pub fn configure_execution_environment(
         &self,
@@ -1451,8 +1748,11 @@ impl HarnessProfile {
                 );
             }
         }
-        if self.muse_auto_review.is_some() && self.kind != HarnessKind::Muse {
-            bail!("profile {id:?}: `muse_auto_review` applies only to a Muse profile");
+        if self.claude_permission_mode.is_some() && self.kind != HarnessKind::Claude {
+            bail!("profile {id:?}: `claude_permission_mode` applies only to a Claude profile");
+        }
+        if let Some(aws) = &self.aws {
+            aws.validate(id)?;
         }
         Ok(())
     }
@@ -1972,15 +2272,9 @@ mod tests {
     #[test]
     fn a_managed_harness_upgrade_invalidates_discovered_capabilities() {
         let profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Muse,
-            home: PathBuf::from("/profiles/muse"),
             environment: Environment::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
             legacy_subagents: None,
+            ..HarnessProfile::new(HarnessKind::Muse, PathBuf::from("/profiles/muse"))
         };
         let inputs = profile.discovery_inputs();
         assert_eq!(inputs.managed_install, pin(HarnessKind::Muse).install_id);

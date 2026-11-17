@@ -5,7 +5,7 @@ use mj_client::session::ViewError;
 
 const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const INPUT_POLL: Duration = Duration::from_millis(250);
-const MIN_SESSION_ID_PREFIX_LENGTH: usize = 8;
+const MIN_SESSION_ID_PREFIX_LENGTH: usize = mj_core::state::SHORT_ID_LEN;
 use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 
 pub(super) enum SubagentInputDelivery {
@@ -45,14 +45,7 @@ pub(super) fn ensure_subagent_child_can_receive_work(
     work: &str,
 ) -> Result<()> {
     ensure!(
-        matches!(
-            record.state,
-            SessionState::Provisioning
-                | SessionState::Running
-                | SessionState::Disconnected
-                | SessionState::Checkpointing
-                | SessionState::Parked
-        ),
+        record.state.can_receive_child_work(),
         "child session is {:?}; queued {work} was not delivered{}",
         record.state,
         record
@@ -93,6 +86,16 @@ impl ApiBackend {
                 None,
                 &requested_target_for_auth,
             )?;
+            // The oracle is asked with ask_oracle, never addressed directly.
+            if crate::database::load_subagent(&target_id)?.is_some_and(|relation| {
+                relation.kind == mj_core::subagent::SubagentKind::Oracle
+                    && relation.parent_session_id == sender_for_auth
+            }) {
+                anyhow::bail!(mj_core::refusal::Refusal::unusable(format!(
+                    "target session {} does not exist or was destroyed",
+                    requested_target_for_auth
+                )));
+            }
             let target = state.sessions.get(&target_id).cloned().ok_or_else(|| {
                 anyhow::Error::new(mj_core::refusal::Refusal::unusable(format!(
                     "target session {} does not exist or was destroyed",
@@ -135,33 +138,14 @@ impl ApiBackend {
                     )));
                 }
             }
-            Ok((target_id, own_child, managed_child, sender.title.clone()))
+            Ok((target_id, own_child, managed_child, sender.message_name()))
         })
         .await?;
 
         if own_child {
-            let request = SubagentToolRequest {
-                originating_command_id: None,
-                request_id: request_id.clone(),
-                created_at_ms,
-                action: SubagentToolAction::SendMessage {
-                    child_session_id: target_session_id.clone(),
-                    message: text.clone(),
-                },
-            };
-            let delivery = self
-                .deliver_subagent_input(&target_session_id, &text, &request)
-                .await?;
-            let (via, turn_id) = match delivery {
-                SubagentInputDelivery::Mailbox => ("mailbox", None),
-                SubagentInputDelivery::Turn { ordinal } => ("turn", Some(ordinal)),
-            };
-            return Ok(crate::server::api::SessionMessageResponse {
-                session_id: target_session_id,
-                via: via.into(),
-                turn_id,
-                managed_child: true,
-            });
+            return self
+                .deliver_to_own_child(target_session_id, text, request_id, created_at_ms)
+                .await;
         }
 
         if managed_child {
@@ -197,22 +181,25 @@ impl ApiBackend {
         if mailbox_route_exists {
             self.enqueue_session_message(&target_session_id, &event, &event_key, managed_child)
                 .await?;
+            let mailbox_delivery = self.published_mailbox_delivery(&target_session_id).await;
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
                 via: "mailbox".into(),
+                note: mailbox_delivery_note(mailbox_delivery.as_ref()),
+                mailbox_delivery,
                 turn_id: None,
                 managed_child: false,
             });
         }
 
-        let command_id = format!(
-            "{}{request_id}",
-            mj_core::transcript::SESSION_MESSAGE_TURN_COMMAND_PREFIX
-        );
+        let command_id =
+            mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id(&request_id);
         if let Some(ordinal) = prompt_acceptance(&target_session_id, &command_id).await? {
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
                 via: "turn".into(),
+                mailbox_delivery: None,
+                note: None,
                 turn_id: Some(ordinal),
                 managed_child: false,
             });
@@ -238,9 +225,12 @@ impl ApiBackend {
         if mailbox_supported {
             self.enqueue_session_message(&target_session_id, &event, &event_key, managed_child)
                 .await?;
+            let mailbox_delivery = self.published_mailbox_delivery(&target_session_id).await;
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
                 via: "mailbox".into(),
+                note: mailbox_delivery_note(mailbox_delivery.as_ref()),
+                mailbox_delivery,
                 turn_id: None,
                 managed_child: false,
             });
@@ -253,9 +243,65 @@ impl ApiBackend {
         Ok(crate::server::api::SessionMessageResponse {
             session_id: target_session_id,
             via: "turn".into(),
+            mailbox_delivery: None,
+            note: None,
             turn_id: Some(turn_id),
             managed_child: false,
         })
+    }
+
+    /// A parent's message to one of its children: through the child's mailbox,
+    /// waking it when parked, or as a turn, keyed by the request for replay.
+    pub(super) async fn deliver_to_own_child(
+        &self,
+        child_session_id: String,
+        text: String,
+        request_id: String,
+        created_at_ms: i64,
+    ) -> Result<crate::server::api::SessionMessageResponse> {
+        let request = SubagentToolRequest {
+            originating_command_id: None,
+            request_id,
+            created_at_ms,
+            action: SubagentToolAction::SendMessage {
+                child_session_id: child_session_id.clone(),
+                message: text.clone(),
+            },
+        };
+        let delivery = self
+            .deliver_subagent_input(&child_session_id, &text, &request)
+            .await?;
+        let (via, turn_id) = match delivery {
+            SubagentInputDelivery::Mailbox => ("mailbox", None),
+            SubagentInputDelivery::Turn { ordinal } => ("turn", Some(ordinal)),
+        };
+        let mailbox_delivery = if via == "mailbox" {
+            self.published_mailbox_delivery(&child_session_id).await
+        } else {
+            None
+        };
+        Ok(crate::server::api::SessionMessageResponse {
+            session_id: child_session_id,
+            via: via.into(),
+            note: mailbox_delivery_note(mailbox_delivery.as_ref()),
+            mailbox_delivery,
+            turn_id,
+            managed_child: true,
+        })
+    }
+
+    /// Read the capability from the worker state already published by its
+    /// session actor. Older or disconnected workers leave it unknown.
+    pub(super) async fn published_mailbox_delivery(
+        &self,
+        session_id: &str,
+    ) -> Option<mj_core::mailbox::MailboxDeliveryMode> {
+        self.sessions
+            .session(session_id.to_owned())
+            .await
+            .ok()
+            .and_then(|handle| handle.view().snapshot)
+            .and_then(|snapshot| snapshot.operational.mailbox_delivery)
     }
 
     async fn enqueue_session_message(
@@ -269,12 +315,17 @@ impl ApiBackend {
         let event_key = event_key.to_owned();
         let target = target.to_owned();
         let admission = crate::upgrade::activity_unless_draining("session message outbox write")?;
-        blocking("enqueue session message", move || {
+        let recipient = target.clone();
+        let enqueued = blocking("enqueue session message", move || {
             let _admission = admission;
             crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, true, unpark)
         })
-        .await
-        .map(|_| ())
+        .await?;
+        anyhow::ensure!(
+            enqueued != crate::database::Enqueued::TargetGone,
+            "session {recipient} no longer exists, so the message was not delivered"
+        );
+        Ok(())
     }
 
     pub(super) async fn subagent_input_progress(&self, parent: &str) -> Result<InputProgress> {
@@ -310,6 +361,7 @@ impl ApiBackend {
         message: &str,
         request: &SubagentToolRequest,
     ) -> Result<SubagentInputDelivery> {
+        let picked_up = tokio::time::Instant::now();
         ensure!(
             !self.exports.close_is_requested(child),
             "child session is closing; queued message was not delivered"
@@ -340,7 +392,8 @@ impl ApiBackend {
             return Ok(SubagentInputDelivery::Mailbox);
         }
 
-        let command_id = format!("subagent-input-{}", request.request_id);
+        let command_id =
+            mj_core::continuation::GeneratedPrompt::subagent_input_id(&request.request_id);
         // A prior accepted turn fixes the route before checking the current
         // worker protocol.
         if let Some(ordinal) = prompt_acceptance(child, &command_id).await? {
@@ -373,11 +426,11 @@ impl ApiBackend {
             return Ok(SubagentInputDelivery::Mailbox);
         }
 
-        let elapsed_ms = mj_core::clock::epoch_millis()
-            .saturating_sub(request.created_at_ms)
-            .max(0) as u64;
-        let remaining = START_DEADLINE.saturating_sub(Duration::from_millis(elapsed_ms));
-        let deadline = tokio::time::Instant::now() + remaining;
+        // The window runs from this daemon's first look at the request. The
+        // request's own creation stamp is not the start: it comes from the
+        // parent's clock, and a request that waited in the durable queue while
+        // the daemon was away (#1445) has spent no time with a child yet.
+        let deadline = picked_up + START_DEADLINE;
         loop {
             ensure!(
                 !self.exports.close_is_requested(child),
@@ -415,6 +468,15 @@ impl ApiBackend {
                     {
                         tracing::debug!(child, %error, "child wake admission deferred; retaining queued input");
                         tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    // The wake was accepted and the child is starting under
+                    // its durable boot intent; slow readiness is not a failed
+                    // delivery. Wait for it within the delivery deadline. A
+                    // reattach can fail at once, so pause before asking again
+                    // rather than restarting the worker in a tight loop.
+                    Err(error) if error.downcast_ref::<super::WakeNotReady>().is_some() => {
+                        tracing::debug!(child, %error, "accepted child wake is not ready yet; retaining queued input");
+                        tokio::time::sleep(INPUT_POLL).await;
                     }
                     result => {
                         result?;
@@ -538,7 +600,8 @@ impl ApiBackend {
                     via: "mailbox",
                     source,
                 })?;
-        blocking("enqueue parent message for child", move || {
+        let recipient = target.clone();
+        let enqueued = blocking("enqueue parent message for child", move || {
             let _admission = admission;
             crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, true, true)
         })
@@ -547,7 +610,27 @@ impl ApiBackend {
             via: "mailbox",
             source,
         })?;
+        if enqueued == crate::database::Enqueued::TargetGone {
+            return Err(InputDeliveryFailure {
+                via: "mailbox",
+                source: anyhow::anyhow!(
+                    "session {recipient} no longer exists, so the message was not delivered"
+                ),
+            }
+            .into());
+        }
         Ok(())
+    }
+}
+
+pub(super) fn mailbox_delivery_note(
+    delivery: Option<&mj_core::mailbox::MailboxDeliveryMode>,
+) -> Option<String> {
+    match delivery {
+        Some(mj_core::mailbox::MailboxDeliveryMode::TurnBoundary) => Some(
+            "If the recipient is working, delivery is deferred until its current turn ends.".into(),
+        ),
+        Some(mj_core::mailbox::MailboxDeliveryMode::ToolBoundary) | None => None,
     }
 }
 
@@ -617,7 +700,7 @@ pub(super) fn resolve_session_target(
         _ => {
             let candidates = permitted_matches
                 .iter()
-                .map(|(id, record)| format!("{id} ({:?})", record.title))
+                .map(|(id, record)| format!("{id} ({:?})", record.message_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(mj_core::refusal::Refusal::unusable(format!(
@@ -663,7 +746,7 @@ impl InputProgress {
                 _ => {}
             }
         }
-        for result in &snapshot.subagent_completions {
+        for result in snapshot.subagent_completions.iter() {
             let Some(mut value) = result.input_delivery.clone() else {
                 continue;
             };
@@ -790,12 +873,23 @@ impl InputProgress {
         }
     }
 
+    /// The child's state with queued messages taken into account. A message
+    /// that is queued for a child that can take it means the child is about
+    /// to run, whatever its last turn said. Nothing else changes the state: a
+    /// delivery that failed is a fact about the message (see
+    /// [`Self::last_failed_delivery`]), not about the child, whose record
+    /// alone says whether it can be given work (#1381).
     pub fn status(
         &self,
         child: &str,
+        record: Option<&mj_core::state::SessionRecord>,
         current: (String, Option<String>, bool),
     ) -> (String, Option<String>, bool) {
-        if matches!(current.0.as_str(), "stopping" | "stopped") {
+        // `stopping` is how `subagent_status` reports an accepted close while
+        // the record is still `Running`; a queued message cannot run then.
+        if matches!(current.0.as_str(), "stopping" | "stopped")
+            || !record.is_some_and(|record| record.state.can_receive_child_work())
+        {
             return current;
         }
         if self
@@ -805,20 +899,19 @@ impl InputProgress {
         {
             return ("running".into(), None, false);
         }
-        if let Some(last) = self.deliveries.get(child).and_then(|items| items.last())
-            && last["status"] == "failed"
-        {
-            return (
-                "failed".into(),
-                Some(format!(
-                    "Message {}: {}",
-                    last["request_id"].as_str().unwrap_or_default(),
-                    last["error"].as_str().unwrap_or("delivery failed")
-                )),
-                true,
-            );
-        }
         current
+    }
+
+    /// The request id and error of the child's newest message delivery, when
+    /// that delivery failed. A later delivery that succeeded supersedes it.
+    pub fn last_failed_delivery(&self, child: &str) -> Option<(&str, &str)> {
+        let last = self.deliveries.get(child)?.last()?;
+        (last["status"] == "failed").then(|| {
+            (
+                last["request_id"].as_str().unwrap_or_default(),
+                last["error"].as_str().unwrap_or("delivery failed"),
+            )
+        })
     }
 
     pub fn annotate(&self, child: &str, entry: &mut serde_json::Value) {
@@ -834,5 +927,30 @@ impl InputProgress {
             // Earlier parents already consume these field names.
             entry["input_deliveries"] = deliveries;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: 60adf13fe: a queued message turned a child whose close was running back to "running".
+    #[test]
+    fn a_queued_message_does_not_hide_a_running_close() {
+        let mut record = crate::controller::test_support::checkpoint_test_session("child");
+        record.state = SessionState::Running;
+        let progress = InputProgress {
+            pending: BTreeMap::from([("child".to_owned(), vec!["message-1".to_owned()])]),
+            deliveries: BTreeMap::new(),
+        };
+        assert_eq!(
+            progress.status("child", Some(&record), ("stopping".into(), None, false)),
+            ("stopping".into(), None, false)
+        );
+        assert_eq!(
+            progress.status("child", Some(&record), ("completed".into(), None, true)),
+            ("running".into(), None, false),
+            "a child that can take the queued message is about to run"
+        );
     }
 }

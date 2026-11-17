@@ -29,9 +29,12 @@ Then run any command:
 mj sessions
 ```
 
-The first start pulls the agent-development image, creates the named volume
-and the container, and starts `mj daemon-run` inside it. Later starts reuse the
+The first start pulls the release's agent-development image, creates the named
+volume and the container, and starts `mj daemon-run` inside it. Later starts reuse the
 same container and volume. `mj daemon status` reports the container name.
+
+This default is separate from the `buildpack-deps:noble` default for session
+containers. Changing a session target image does not change the daemon image.
 
 The image carries the daemon, the session worker, and every harness, so local
 sessions run their worker inside the same container. Files and harness logins

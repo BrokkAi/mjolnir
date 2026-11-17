@@ -24,7 +24,7 @@
 
     <header id="shell-header">
       <button id="back" class="icon-button hidden" aria-label="Back">&#8592;</button>
-      <h1 id="shell-title">MJ</h1>
+      <h1 id="shell-title">Mjolnir</h1>
       <button id="operator-away-indicator" class="operator-away hidden" type="button" aria-label="End AFK">AFK</button>
       <button
         id="menu-button"
@@ -76,17 +76,24 @@
            make them, and a phone has no room to lay them side by side. -->
       <div id="workspaces" class="workspace-bar">
         <select id="workspace-select" aria-label="Workspace"></select>
+        <button id="notifications-badge" class="secondary notifications-badge hidden" type="button"></button>
         <div id="subagent-workspace" class="virtual-workspace hidden"></div>
       </div>
       <div id="launch-failures" aria-live="polite"></div>
 
       <section id="dashboard" class="page">
+        <aside id="notification-offer" hidden>
+          <span id="notification-offer-text"></span>
+          <button type="button" id="notification-offer-enable">Enable</button>
+          <button type="button" id="notification-offer-dismiss" class="secondary">Not now</button>
+          <span id="notification-offer-error" role="alert"></span>
+        </aside>
         <div class="row page-actions">
           <button data-route="new">New session</button>
           <button data-route="resume" class="secondary">Resume a session</button>
         </div>
-        <div id="sessions"></div>
         <p id="action-error" role="alert"></p>
+        <div id="sessions"></div>
       </section>
 
       <section id="new-page" class="page hidden">
@@ -155,6 +162,14 @@
         <h2 id="settings-heading">Settings</h2>
         <p id="settings-help" class="dim"></p>
         <div id="settings-notices"></div>
+        <fieldset id="device-notifications">
+          <legend>Notifications on this device</legend>
+          <p id="device-notification-state" role="status">Checking notification support…</p>
+          <button type="button" id="device-notification-enable">Enable notifications on this device</button>
+          <button type="button" id="device-notification-disable" class="secondary">Disable notifications</button>
+          <button type="button" id="device-notification-test" class="secondary">Send test notification</button>
+          <p class="dim">Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.</p>
+        </fieldset>
         <div id="settings"></div>
         <div id="settings-entry-actions" class="row"></div>
         <p id="settings-error" role="alert"></p>
@@ -187,6 +202,7 @@
           <p id="conversation-transition-error" class="error" role="alert"></p>
           <button id="conversation-transition-cancel" class="danger hidden" type="button">Cancel operation</button>
         </section>
+        <section id="conversation-move-failure" class="card" hidden role="alert"></section>
         <div id="conversation-scroll" class="conversation-scroll">
           <button id="earlier-messages" type="button">Earlier messages</button>
           <div id="conversation-feed"></div>
@@ -210,14 +226,24 @@
               <div id="conversation-background-tasks"></div>
             </div>
           </details>
-          <button
-            type="button"
-            id="subagents-button"
-            class="secondary hidden"
-            aria-label="Open sub-agent workspace"
-          >
-            Sub-agents
-          </button>
+          <div class="child-workspace-buttons">
+            <button
+              type="button"
+              id="subagents-button"
+              class="secondary hidden"
+              aria-label="Open sub-agent workspace"
+            >
+              Sub-agents
+            </button>
+            <button
+              type="button"
+              id="reviewers-button"
+              class="secondary hidden"
+              aria-label="Open reviewers workspace"
+            >
+              Reviewers
+            </button>
+          </div>
         </div>
         <form id="prompt-form" class="composer">
           <div
@@ -238,7 +264,6 @@
             contenteditable="true"
             role="textbox"
             aria-multiline="true"
-            enterkeyhint="send"
             spellcheck="true"
             aria-label="Message the agent"
             data-placeholder="Message the agent or use !command"
@@ -252,6 +277,14 @@
               aria-label="Open sub-agent workspace"
             >
               Sub-agents
+            </button>
+            <button
+              type="button"
+              id="reviewers-button-desktop"
+              class="secondary hidden"
+              aria-label="Open reviewers workspace"
+            >
+              Reviewers
             </button>
           </div>
           <div id="composer-actions" class="row composer-actions">
@@ -287,6 +320,7 @@
       </section>
     </main>
 
+    <script src="/push-sync.js"></script>
     <script type="module" src="/viewer.js"></script>
   </body>
 </html>

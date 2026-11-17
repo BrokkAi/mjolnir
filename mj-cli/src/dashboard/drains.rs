@@ -59,13 +59,7 @@ impl DashboardContext {
         self.usage_report.cancel();
         self.cancel_chat_open();
         self.critical_operations.cancel_all();
-        if let Some(cancelled) = &self.review_discovery_cancel {
-            cancelled.store(true, Ordering::Release);
-        }
         self.cancel_session_preflight();
-        for operation in self.lifecycle_operations.values() {
-            operation.cancelled.store(true, Ordering::Release);
-        }
         if let Some(active) = self.active_import.as_ref() {
             active.cancelled.store(true, Ordering::Release);
         }
@@ -92,7 +86,6 @@ impl DashboardContext {
             self.dashboard.set_profile_capabilities(capabilities);
         }
         self.drain_capacity_updates();
-        self.drain_aws_resource_options();
         self.drain_import_profiles();
         self.drain_import_tasks();
         self.drain_lifecycle_updates();
@@ -100,8 +93,11 @@ impl DashboardContext {
             self.startup_prompts.observe_move(&session, id, terminal);
         }
         self.reconcile_composer_ownership();
-        self.startup_prompts
-            .flush_held(&self.dashboard_io_tx, &self.critical_operations);
+        self.startup_prompts.flush_held(
+            &self.controller.state,
+            &self.dashboard_io_tx,
+            &self.critical_operations,
+        );
         let composer_completed = self.collect_prepared_startup_prompts();
         self.startup_prompts.poll(&self.dashboard_io_tx);
         let pending_completed = self.drain_dashboard_io();
@@ -121,7 +117,6 @@ impl DashboardContext {
             self.runtime_config.take_delivered(),
             self.lifecycle.take_delivered(),
             self.capacity.take_delivered(),
-            self.aws_options.take_delivered(),
             self.import_profiles.take_delivered(),
             self.import_tasks.take_delivered(),
             self.dashboard_io.take_delivered(),
@@ -194,7 +189,10 @@ impl DashboardContext {
         for action in actions {
             if let DashboardAction::QueueStartupPrompt { session_id, prompt } = action {
                 self.startup_prompts.enqueue(
-                    session_id,
+                    io::NamedSession {
+                        name: io::session_notice_name(&self.controller.state, &session_id),
+                        id: session_id,
+                    },
                     prompt,
                     None,
                     self.dashboard_io_tx.clone(),
@@ -210,7 +208,10 @@ impl DashboardContext {
             changed |= !prepared.is_empty();
             for prompt in prepared {
                 self.startup_prompts.enqueue(
-                    session_id.clone(),
+                    io::NamedSession {
+                        name: io::session_notice_name(&self.controller.state, session_id),
+                        id: session_id.clone(),
+                    },
                     prompt,
                     None,
                     self.dashboard_io_tx.clone(),
@@ -227,7 +228,8 @@ impl DashboardContext {
     /// task can write it through the shared slot without waking this loop, so
     /// the slot is compared with what the frame on screen was drawn from.
     pub(super) fn clock_tick_redraws(&mut self) -> bool {
-        self.dashboard.clock_changed()
+        self.dashboard.tick_review_autoconfigure()
+            || self.dashboard.clock_changed()
             || self.notices.generation() != self.drawn_notice_generation
             || self.visible_chat().is_some_and(|chat| chat.clock_changed())
     }
@@ -441,6 +443,12 @@ impl DashboardContext {
         self.dashboard
             .set_operator_presence(update.operator_presence);
         self.dashboard.set_launch_recency(update.launch_recency);
+        self.dashboard
+            .set_session_attention(update.session_attention);
+        self.dashboard.set_form_holders(update.form_holders);
+        self.dashboard.set_unread_frontiers(update.unread_frontiers);
+        self.dashboard
+            .set_notification_dismissals(update.notification_dismissals);
         self.dashboard.set_recent_launch(update.recent_launch);
         self.dashboard
             .set_container_upgrade_sessions(update.container_upgrade_sessions);
@@ -450,6 +458,7 @@ impl DashboardContext {
         self.select_workspace(next_workspace);
         self.apply_runtime_records(
             update.records,
+            update.sessions,
             update.subagents,
             update.last_subagent_policies,
         );
@@ -542,9 +551,10 @@ impl DashboardContext {
             chats,
             controller,
             dashboard,
+            runtime_sessions,
             ..
         } = self;
-        refresh_open_chats(chats, controller, dashboard);
+        refresh_open_chats(chats, controller, dashboard, runtime_sessions);
     }
 
     pub(crate) fn drain_runtime_config(&mut self) {
@@ -584,6 +594,10 @@ impl DashboardContext {
     pub(crate) fn apply_runtime_records(
         &mut self,
         records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+        runtime_sessions: mj_core::snapshot_map::SnapshotMap<
+            String,
+            mj_client::daemon::RuntimeSessionView,
+        >,
         subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentMetadata>,
         last_subagent_policies: std::collections::BTreeMap<
             String,
@@ -592,6 +606,12 @@ impl DashboardContext {
     ) {
         let mut sessions = records;
         read_receipts::preserve_read_positions(&mut sessions, &self.controller.state.sessions);
+        // Live views change on nearly every feed update; chats read only their
+        // own session's policy keys, and ignore an unchanged list.
+        self.runtime_sessions = runtime_sessions;
+        for chat in self.chats.values_mut() {
+            apply_policy_config_key(chat, &self.runtime_sessions);
+        }
         let Self {
             chats, dashboard, ..
         } = self;
@@ -677,14 +697,6 @@ impl DashboardContext {
         }
     }
 
-    pub(crate) fn drain_aws_resource_options(&mut self) {
-        while let Some((target_id, result)) = self.aws_options.next_ready() {
-            self.resolving_aws_resource_options.remove(&target_id);
-            self.dashboard
-                .apply_aws_resource_options(&target_id, result);
-        }
-    }
-
     pub(crate) fn drain_import_profiles(&mut self) {
         while let Some((discovery_id, profile)) = self.import_profiles.next_ready() {
             self.dashboard.apply_resume_profile(discovery_id, profile);
@@ -694,6 +706,24 @@ impl DashboardContext {
     pub(crate) fn drain_import_tasks(&mut self) {
         while let Some(update) = self.import_tasks.next_ready() {
             match update {
+                DashboardImportUpdate::Uploading { task_id } => {
+                    if self
+                        .active_import
+                        .as_ref()
+                        .is_some_and(|active| active.task_id == task_id)
+                    {
+                        self.dashboard.show_import_upload();
+                    }
+                }
+                DashboardImportUpdate::Registering { task_id } => {
+                    if self
+                        .active_import
+                        .as_ref()
+                        .is_some_and(|active| active.task_id == task_id)
+                    {
+                        self.dashboard.show_import_registration();
+                    }
+                }
                 DashboardImportUpdate::Progress {
                     task_id,
                     step,
@@ -729,6 +759,7 @@ impl DashboardContext {
                                 prompt.omitted_non_git_dirs,
                                 prompt.scratch_git_roots,
                                 prompt.managed_worktree,
+                                prompt.recorded_root,
                             );
                         }
                         Ok(DashboardImportTaskResult::Imported(imported)) => {
@@ -816,8 +847,13 @@ pub(crate) fn refresh_open_chats(
     chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
     controller: &Controller,
     dashboard: &DashboardState,
+    runtime_sessions: &mj_core::snapshot_map::SnapshotMap<
+        String,
+        mj_client::daemon::RuntimeSessionView,
+    >,
 ) {
     for chat in chats.values_mut() {
+        apply_policy_config_key(chat, runtime_sessions);
         let record = controller.state.sessions.get(chat.session_id());
         chat.refresh_context(
             &controller.config,
@@ -827,11 +863,18 @@ pub(crate) fn refresh_open_chats(
         if dashboard.go_mode().is_some() {
             chat.set_display_title(dashboard.go_conversation_title(chat.session_id()));
         }
-        chat.set_subagents_enabled(record.is_some_and(|session| {
-            session_uses_subagents(session, controller.state.is_subagent_session(&session.id))
-        }));
     }
     refresh_subagent_counts(chats, dashboard);
+}
+
+pub(crate) fn apply_policy_config_key(
+    chat: &mut mj_chat::chat::ActiveChat,
+    sessions: &mj_core::snapshot_map::SnapshotMap<String, mj_client::daemon::RuntimeSessionView>,
+) {
+    let keys = sessions
+        .get(chat.session_id())
+        .map_or(&[][..], |view| view.policy_config_keys.as_slice());
+    chat.set_policy_config_keys(keys);
 }
 
 /// Hands every open conversation the dashboard's count of its sub-agents and
@@ -850,19 +893,6 @@ pub(crate) fn refresh_subagent_counts(
         chat.set_reviewer_counts(dashboard.reviewer_counts_for(&session_id));
         chat.set_subagent_working_count(dashboard.working_subagent_count_for(&session_id));
     }
-}
-
-/// Whether a session was created with Mjolnir sub-agents, matching the
-/// worker launch rule: the session's own choice, with `None` meaning native
-/// sub-agents; never for a child, and only for harnesses that can receive
-/// the tools.
-fn session_uses_subagents(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
-    session
-        .subagents
-        .clone()
-        .unwrap_or_default()
-        .for_launch(session.harness_kind, is_child)
-        .uses_mjolnir()
 }
 
 /// The tab to show after a feed frame: a workspace the user just created once

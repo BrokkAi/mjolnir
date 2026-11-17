@@ -66,7 +66,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 21
+version = 23
 ```
 
 The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
@@ -74,17 +74,16 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `21`. |
+| `version` | integer | yes | none | Configuration schema version; use `23`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
-| `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
+| `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed in the resume dialog. A stopped session whose failure needs you also stays in Sessions until dismissed, resumed, or destroyed. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
 | `theme` | string enum | no | `"midnight"` | Terminal color palette: `auto`, `midnight`, `light`, `darcula`, `high-contrast`, `high-contrast-light`, `colorblind-dark`, `colorblind-light`, `catppuccin-mocha`, `catppuccin-latte`, `campbell`, `one-half-dark`, `one-half-light`, `solarized-dark`, `solarized-light`, `terminal-dark`, `terminal-light`, or `mono` (no colors). `auto` asks the terminal for its background color at startup and uses `midnight` on a dark background and `light` on a light one, or `midnight` when the terminal does not answer. The colorblind palettes keep failures distinct from success and warnings with red-green or blue-yellow color blindness. The Campbell, One Half, and Solarized palettes match the Windows Terminal schemes of the same name; `terminal-dark` and `terminal-light` use the terminal's own background and 16 ANSI colors, with a neutral gray for secondary text. A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
-| `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
+| `phone` | table | no | default `[phone]` values | Browser viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
-| `review` | table | no | default `[review]` values | Automatic review trigger and reviewer settings. |
-| `continuation` | table | no | enabled | Automatic continuation of already-requested unfinished work; also requires Jev. |
-| `jev` | table | no | enabled | Hosted turn classification, continuation checks, and semantic help search. |
+| `review` | table | no | default `[review]` values | Reviewer settings for push review. |
+| `jev` | table | no | enabled | Hosted turn classification and the quota recovery that depends on it. |
 | `daemon` | table | no | runs on the host | Where the daemon runs: on this computer or in a Podman or Docker container. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
@@ -101,7 +100,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 21 configuration. Older
+A missing or empty file is treated as an empty version 22 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -195,8 +194,8 @@ The default bindings:
 | `palette` | `prefix+:` | Open the command palette |
 | `cancel_operation` | `prefix+shift+c` | Cancel an in-flight launch, resume, or stop |
 | `mark_all_read` | `prefix+a` | Mark unread session activity as read |
-| `next_attention` | `prefix+o` | Open the next session that needs you |
-| `previous_attention` | `prefix+shift+o` | Open the previous session that needs you |
+| `next_attention` | `prefix+o` | Visit the next session that needs you |
+| `previous_attention` | `prefix+shift+o` | Visit the previous session that needs you |
 | `web_viewer` | `prefix+u` | Show the web viewer address and access code |
 | `rename_session` | `prefix+shift+t` | Rename the selected session |
 | `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |
@@ -298,8 +297,8 @@ The terminal Settings screen edits these settings under **Notifications**.
 
 ## Web viewer `[phone]`
 
-The historical section name remains `phone`, although it controls both the web
-viewer and the native desktop shell.
+The historical section name remains `phone`, although it controls the web
+viewer.
 
 ```toml
 [phone]
@@ -331,50 +330,32 @@ the conflict is resolved.
 A non-loopback `bind` is rejected unless both explicit TLS paths are present.
 When Tailscale detection succeeds, Mjolnir may advertise a secure non-loopback
 listener without changing the configured loopback fallback. Explicit TLS takes
-precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
+precedence. See [Web viewer](/web-viewer/) for access and login.
 
 ## Automatic review `[review]`
 
 ```toml
 [review]
-trigger = "turn"
-count = 2
-profile = "reviewer"
-# model = "provider-model-id"
-# effort = "high"
+[[review.reviewers]]
+model = "gpt-6.10-terra"
+effort = "high"
+
+[[review.reviewers]]
+model = "gpt-6.1-sol"
+effort = "medium"
 ```
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews eligible completed turns after queued work drains, and `"push"` reviews commits before push. An unchanged turn delta resolves without a review prompt. |
-| `count` | positive integer | no | `2` | Independent reviewer sessions per review. 1–3 reviewers are reasonable; more have diminishing returns. Counts above 3 are allowed. |
-| `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
-| `profile` | string | no | Auto (unset) | Auto tries Terra, DeepSeek Flash, Haiku, and Grok on subscriptions, then API billing, then other models by price; always at High effort. A named enabled review-capable profile is honored, including the primary profile. |
-| `model` | string | no | unset (harness default) | Reviewer model override for a named profile. `[review]` refuses it with Auto, which uses fixed model-family defaults; a session's `--review-model` still works with Auto. |
-| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto always requires `high`, including when a session requests another effort. Required effort is checked against the selected model. |
+| `reviewers` | array of tables | no | empty | Up to three choices, each with a nonempty `model` and optional `effort`. Each choice is served by an enabled profile offering that model and effort. |
 
-Auto prefers a different model family from the primary within each billing group. It selects the newest advertised version of each preferred family, skips exhausted quota and unsupported High effort, and uses the shared usage-report prices for its cheapest-model fallback. Unknown prices sort after known prices and are disclosed if selected. Reviewers run as hidden child sessions, use the configured review
-profile, model, and effort, and show their transcripts in the review view. See
-[Code review](/turn-review/).
+An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra at high effort plus Sol at medium effort; two Sonnet reviewers at high effort; two DeepSeek Pro reviewers at high effort; two Grok reviewers at high effort; or two Kimi reviewers at high effort. Other providers, including Gemini, GLM, and Muse, use two copies of their best advertised full model at high effort. When Terra and Sol are available, Anthropic models are not added. Within a family, full models are preferred over reduced variants such as Flash or Mini, then subscription offerings win over usage-priced offerings, then models offered by more enabled profiles, then the newest advertised version. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
 
-The reviewers use the same resolved profile and model in separate conversations. Findings from every reviewer are labeled with their session and may overlap. A group is clean only when every reviewer finishes cleanly; a failed or missing reviewer keeps the push gate blocked.
+Push review is available for Claude Code, Codex, DSH, Antigravity, and Kimi primaries. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
 
-Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
+Older `enabled`, `count`, `profile`, `model`, `effort`, and `tier` settings remain readable. Saving writes the new reviewer list. An old explicit model becomes up to three reviewer choices. On daemon startup, an old Auto selection is upgraded once after capability discovery and saved as chosen reviewer rows, or as an empty list when no model qualifies.
 
-An older configuration with `enabled = true` still loads as `trigger = "turn"`;
-`enabled = false` or an absent `enabled` loads as `"off"`. Saving settings
-writes `trigger`, not `enabled`.
-
-`mj new --review off|turn|push` and `mj import <harness> --review off|turn|push`
-set the trigger for one session, overriding `[review]`. `--review-model <model>`
-and `--review-effort <effort>` set reviewer choices while keeping the configured trigger. `--review-count <count>` overrides the number of reviewers for that session. Use `--review off|turn|push` to select a trigger explicitly. In Auto, Mjolnir picks an enabled profile that offers
-the model, including DSH or any other enabled profile. Auto always uses High effort; the effort override applies only to a named reviewer profile.
-`/review` remains available when the trigger is `off`.
-
-The deprecated `mj new --review-tier quick|extended` option still accepts
-either value, but the value is ignored and does not change the configured
-trigger. `mj import <harness>` accepts the same compatibility option. Existing
-`tier` values in session settings are also ignored.
+`mj new` and `mj import <harness>` accept `--review off|push` and repeatable `--reviewer MODEL[:EFFORT]` (up to three). A session-level reviewer choice replaces `[review]` for that session and enables review unless the session uses `--review off`. `/review` starts a push review of committed work.
 
 In the terminal, these review fields are edited inside **Settings** so one Save or
 Cancel applies to the entire configuration draft. Settings can discover the
@@ -429,11 +410,11 @@ enabled = false
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `true` | `false` stops every request to the hosted Jev service: turn classification, automatic continuation, and semantic help search. |
+| `enabled` | boolean | no | `true` | `false` stops every request to the hosted Jev service: turn classification and quota recovery. |
 
-Jev reads recent conversation text to answer three questions: whether a
-silent turn is waiting for you, whether a finished reply left work undone,
-and which help rows match what you typed. [Security
+GLiDE (Fastino), through the hosted proxy, classifies current requests. The
+completed-turn verdict uses recent conversation and activity evidence; other
+classifiers receive their task-specific evidence. [Security
 boundaries](/security/#what-leaves-this-machine-by-default) lists exactly what
 each request sends and where.
 
@@ -443,8 +424,8 @@ With `enabled = false`:
   turn that goes quiet while the agent waits for an answer stays **Working**
   until the harness reports the end of the turn, and after a reply the
   session's state follows the harness's own background-task reports.
-- Automatic continuation does not run, whatever `[continuation]` says.
-- The help filter matches text only and shows no related shortcuts.
+- Quota recovery does not run: a session stopped by a quota limit is not
+  resumed after the reset.
 
 Workers read the switch when they start, so a running session follows the
 new value after it is next resumed or restarted. In the terminal the switch
@@ -452,8 +433,28 @@ is **Settings → Privacy → Jev (hosted service)**.
 
 ## GitHub events `[github.watch]`
 
+`local_inference` defaults to `false`: every GitHub relevance classification
+goes to the hosted GLiDE classifier through the public proxy, and no local
+model or native runtime is downloaded or loaded. Set `local_inference = true`
+to opt in to local scoring with GLiDE handling the middle band and unavailable
+local scoring. Changes apply on the next watcher poll; disabling local inference
+also stops model preparation and retries and releases the loaded model.
+
+`use_gpu` defaults to `true` and applies only when local inference is enabled.
+The local relevance model selects DirectML on Windows, CoreML on Apple-silicon
+macOS, and CUDA on Linux x64 when its libraries are installed. Other supported
+hosts use CPU. Linux CUDA requires the NVIDIA driver, CUDA 12 and cuDNN 9 libraries
+installed by the administrator; the daemon reports missing libraries and uses CPU.
+The model and runtime are fetched lazily on the first classification request.
+Its native-runtime choice is fixed at the first preparation, so installing libraries
+or enabling GPU scoring on Linux/Windows after CPU preparation requires the next
+daemon start. A GPU must beat the CPU
+on measured real-pair latency; otherwise the preparation owner retains CPU and
+reports why. Set `use_gpu = false` for CPU-only scoring. Device failures also
+select CPU with a visible notice.
+
 `enabled` is a boolean that defaults to `true`. Together with `[jev] enabled`,
-it controls the GitHub watcher as an event source. Jev classifies GitHub
+it controls the GitHub watcher as an event source. The hosted GLiDE service classifies GitHub
 activity. Neither setting disables mailbox delivery, peer messages, child
 reports, drain hooks or idle wakes. The old `[mailbox] enabled` key still loads
 silently. If either key is `false`, the watcher stays off. Saving writes only
@@ -468,8 +469,8 @@ old. Saved progress preserves unfinished ranges across pauses and failed
 requests. An item can still be missed if page movement affects both reads.
 The watcher also overlaps processing times by 30 seconds to allow for response
 timing and clock differences. Repeated event IDs deliver only once.
-Jev classifies new items only for sessions that were already running when the
-item was created. When Jev identifies a session as the creator, that session
+GLiDE classifies new items only for sessions that were already running when the
+item was created. When GLiDE identifies a session as the creator, that session
 receives new comments, reviews and pull request lifecycle events from the item's
 timeline. Pull request line comments are read separately and saved with the
 timeline events. Each source keeps its own cursor, and both are saved in one
@@ -477,23 +478,6 @@ item transaction. A failed item does not block delivery for other items. Failed
 classifications retry with a delay that grows from one minute to one hour; new
 work is classified before retries. Notices always include the repository name. Comments and reviews
 written by the token owner during that session's turn do not wake it.
-
-## Automatic continuation `[continuation]`
-
-```toml
-[continuation]
-enabled = false
-```
-
-| Field | TOML type | Required | Default | Validation and behavior |
-| --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `true` | Allows Jev to check ended turns and continue work already requested by the user. Requires `[jev] enabled = true`. |
-
-There are at most three automatic continuations between user messages. New
-input or an interrupt cancels a pending check; continuation never supplies
-missing approval or answers a question. See [Automatic
-continuation](/sessions/#automatic-continuation) for background work, goals,
-quota recovery, and the text sent to the classifier.
 
 ## Session index `[sessionwiki]`
 
@@ -535,14 +519,17 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude, Codex, or DSH session can use Mjolnir's `spawn` tool. Create and Move offer
-Native or Mjolnir. Native uses the harness's own delegation. DSH has none, so
+A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn` tool. Create and Move offer
+Native or Mjolnir. Native uses the harness's own delegation. OpenCode gets the tools
+as `mj-agents_spawn` and so on, learns of finished children at the end of its turn (it has
+no steering), and loses its own `subagent` tool unless the choice is Native. DSH has none, so
 for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
 last choice was Mjolnir and it is configured; a DSH session's None does not
 change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
 straightforward choice, configured in Settings → Sub-agents or config.toml, or a
-session override. The subtle choice is optional, but cannot be configured without
-straightforward:
+session override. A YOLO target uses `[subagents.yolo.straightforward]` when
+the split is enabled. The subtle choice is optional, but cannot be configured
+without straightforward:
 
 ```toml
 [subagents]
@@ -555,7 +542,41 @@ effort = "high"
 [subagents.subtle]
 model = "your-claude-model"
 effort = "high"
+
+[subagents.oracle]
+model = "your-strongest-model"
+effort = "high"
 ```
+
+`max_concurrent` is shared by every target. By default the task choices above
+are shared too. To give SSH bare targets with `permissions = "yolo"` their own
+choices, turn off **Use the same subagents on all targets** in Settings, which
+writes `use_same_on_all_targets = false`, and set the `[subagents.yolo.*]`
+tables:
+
+```toml
+[subagents]
+use_same_on_all_targets = false
+
+[subagents.yolo.straightforward]
+model = "your-cheaper-model"
+effort = "high"
+
+[subagents.yolo.oracle]
+model = "your-strongest-model"
+```
+
+The YOLO set starts empty when the box is first unchecked. An empty YOLO set
+means Mjolnir sub-agents and the oracle are unavailable on YOLO targets; it
+does not fall back to the shared choices. While `use_same_on_all_targets` is
+true, any `[subagents.yolo.*]` values are ignored but retained, so checking
+the box again hides and disables them, and unchecking restores them. Only an
+SSH bare target with `permissions = "yolo"` uses this set; container runtimes
+are unconstrained but have no permission mode and use the shared choices.
+
+`[subagents.oracle]` is optional and independent of the other two: it can be set
+without straightforward. It names the read-only advisor behind the `ask_oracle`
+tool, which every top-level session is offered whatever its delegation choice.
 
 Each choice requires a non-empty model. Effort is optional and must be offered
 by that model when specified; omitted effort uses the harness default. Adaptive
@@ -581,8 +602,17 @@ optional effort must be offered by an enabled profile. Each effort flag requires
 its matching model flag; `adaptive` and combining an override with `native` or
 `none` are rejected. Omitted effort uses the harness default. The retired
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
-four per-type flags. `none` (CLI only) gives a Claude, Codex, or DSH session no
-delegation tools.
+four per-type flags. `none` (CLI only) gives a session no
+delegation tools, whatever its harness.
+
+`mj new` and `mj move` take `--oracle enabled|disabled` and `--subagent-oracle M`
+(with optional `--subagent-oracle-effort E`, which requires the model and rejects
+`adaptive`). The model flag implies `enabled` and is refused with
+`--oracle disabled`; none of them needs `--subagents mjolnir`. `mj new` without
+`--oracle` uses the choice last made for the profile, starting enabled; `mj move`
+without it retains the session's choice, and turning the oracle off keeps its
+model override. Asking for the oracle when no model is configured or given starts
+or moves the session with the oracle off and a notice.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
@@ -599,8 +629,9 @@ before a 5-hour reset is plenty, while 5% left six days before a weekly reset
 is not. The window furthest behind decides. A limit for one model, such as a
 weekly Fable limit, counts only for that model. A pay-per-use profile counts as
 exactly on pace, so a subscription with quota to spare comes first. A profile
-with no quota left, then one with no quota report, comes last. On a tie, the
-parent's own profile wins. `mj doctor` shows, for each profile, where its quota
+with no quota left, then one with no quota report, comes last. Profiles named
+in `[quota] prefer` lead, most preferred first, while their quota tier allows.
+On a tie, the parent's own profile wins. `mj doctor` shows, for each profile, where its quota
 comes from and that sub-agents may use it.
 
 A sub-agent ends its task by handing its report back to the session that
@@ -624,6 +655,7 @@ home = "/home/me/.codex-work"
 # enabled = false
 # context_window_bytes = 131072
 # guardian_review_model = "newest-flash"
+# models = ["openrouter/deepseek/deepseek-v4.1-flash-1017"]
 
 [profiles.codex-work.environment]
 # PATH = "/opt/node/bin:/usr/local/bin:/usr/bin:/bin"
@@ -634,12 +666,12 @@ home = "/home/me/.codex-work"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
-| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `opencode`, or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. A profile whose kind is `mimo`, the removed MiMo Code harness, is ignored with a warning when the configuration loads and is removed from the file on the next save. |
+| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `open-code` (OpenCode), or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. A profile whose kind is `mimo`, the removed MiMo Code harness, is ignored with a warning when the configuration loads and is removed from the file on the next save. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
 | `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
-| `muse_auto_review` | boolean | no | unset (`false`) | Whether an unconstrained Muse session (containers, EC2, `yolo` SSH) keeps muse-acp's auto-review on. Unset or `false` runs without permission checks, like OpenCode's `permission = "allow"`. `true` restores the reviewer inside the container boundary. Only valid on a Muse profile; guardian targets always review. |
+| `models` | array of strings | no | empty (offer everything) | Exact model values, as `mj models --profile <id> --unrestricted` lists them, that Mjolnir offers from this profile in session model pickers, sub-agent choices, review slots and Autoconfigure. The profile's current model is always offered. Edits apply without rediscovery. `mj doctor` warns when a profile advertises more than 50 models without this list, and about entries the profile does not advertise. See [Profiles](/profiles/#limit-the-models-a-profile-offers). |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
 instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
@@ -664,7 +696,9 @@ use their image-provided runtime or the documented installer fallback. The
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 or `/config` inside a session, or configure the harness's own defaults in its
-home. For
+home. For example, an OpenCode profile's default model and OpenRouter provider
+routing go in `opencode.json` in its home, which sessions receive unchanged
+except for `permission`. For
 credential files, staging allowlists, skills, quotas, and harness limitations,
 see [Profiles and harnesses](/profiles/).
 
@@ -710,6 +744,31 @@ an older build reports the entry as an invalid type. Plain strings keep
 working everywhere.
 
 ## Session GitHub token `[github]`
+
+Use `mj new --no-github-credentials` to withhold GitHub authentication from a
+session and all its Mjolnir children, including oracles and reviewers. The API
+creation payload and child `spawn` tool accept `no_github_credentials: true`.
+A child can also opt out individually; it cannot undo its parent's opt-out.
+This choice is saved with the session and survives restart, resume and Move.
+`--no-github-events` independently controls watcher delivery.
+
+To withhold credentials by default from new sessions in this instance:
+
+```toml
+[github]
+session_credentials = false
+```
+
+Changing this default does not change existing sessions. Opted-out workers
+receive no GitHub token environment or token file, refuse token refreshes,
+and use separate unauthenticated `gh` and Git configurations. Git author
+name and email remain available. Public repositories and API data can still be
+read anonymously. A bare target shares the Unix account's readable files; this
+setting does not isolate the filesystem or prevent deliberate use of other
+credentials on that account. A child also shares its parent's filesystem.
+The daemon may still authenticate its own repository provisioning without
+passing the credential to the worker.
+
 
 Set a controller-side token file to give sessions a dedicated GitHub PAT instead
 of the host GitHub CLI login:
@@ -833,7 +892,7 @@ it when it carries a setting of its own.
 
 | Field | TOML type | Required | Default | Accepted values |
 | --- | --- | --- | --- | --- |
-| `kind` | string enum | yes | none | `local`, `ssh`, or `aws-ec2`. Only the id `local` may hold `kind = "local"`. |
+| `kind` | string enum | yes | none | `local` or `ssh`. Only the id `local` may hold `kind = "local"`. |
 
 ### `local`
 
@@ -876,37 +935,13 @@ login home.
 Two machines may not describe the same SSH connection; one machine is one
 host.
 
-### `aws-ec2`
+### Persistent EC2 hosts
 
-```toml
-[machines.fleet]
-kind = "aws-ec2"
-aws_profile = "default"
-region = "eu-west-1"
-launch_template = "lt-0123456789abcdef0"
-# launch_template_version = "3"
-ssh_user = "ubuntu"
-address_source = "public-dns"
-# identity_file = "/home/me/.ssh/mjolnir-ec2"
-ssh_args = ["-o", "ServerAliveInterval=30"]
-```
-
-| Field | TOML type | Required | Default | Validation and behavior |
-| --- | --- | --- | --- | --- |
-| `aws_profile` | string | no | unset (runtime uses `"default"`) | AWS CLI profile; cannot be an empty string when set. |
-| `region` | string | yes | none | Non-blank AWS region. |
-| `launch_template` | string | yes | none | Non-blank launch-template ID or name. |
-| `launch_template_version` | string | no | unset (runtime uses `"$Default"`) | Cannot be an empty string when set. |
-| `ssh_user` | string | yes | none | Non-blank login user for the launched instance. |
-| `address_source` | string enum | no | `"public-dns"` | `public-dns`, `public-ip`, `private-dns`, or `private-ip`. |
-| `identity_file` | path string | no | unset (SSH/config default) | Private-key path passed to SSH; it is not required to be absolute. |
-| `ssh_args` | array of strings | no | empty | Additional SSH arguments, passed in order. Note the field name differs from an SSH machine's `extra_args`. |
-
-The launch template owns networking, security groups, storage, AMI, and any
-default instance type. The new-session wizard may override the instance type
-for one session. An EC2 machine runs a bare harness only: it accepts no
-container runtime and no build cache, because each session gets its own
-instance. See [AWS EC2](/aws/).
+`mj ec2 create <instance-type> --zone <zone>` provisions an SSH machine with a
+Podman target. `mj ec2 list --region <region>` lists hosts and
+`mj ec2 destroy <name> --region <region>` removes one. Instances outlive sessions.
+The former `aws-ec2` machine kind is read only for historical records and cannot
+launch sessions. Use [AWS EC2](/aws/) for command and storage options.
 
 ### Build cache `[machines.<id>.build_cache]`
 
@@ -1001,7 +1036,7 @@ when it is `local`.
 
 | Field | TOML type | Required | Default | Accepted values |
 | --- | --- | --- | --- | --- |
-| `kind` | string enum | yes | none | `bare`, `podman`, `docker`, or `apple-container`. |
+| `kind` | string enum | yes | none | `bare`, `podman`, `docker`, `apple-container`, or `nitro`. |
 | `machine` | string | no | `"local"` | The id of a `[machines.<id>]` entry, or `local`. |
 | `enabled` | boolean | no | `true` | `false` keeps the runtime configured but out of every picker; launch, resume and move refuse it, and running sessions continue. Written only when `false`. Detection never adds a kind its machine already has configured, enabled or not. |
 
@@ -1031,7 +1066,7 @@ permissions = "guardian"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks and approval checks. Muse runs without permission checks under `yolo` too, unless its profile sets `muse_auto_review = true`. It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
+| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks and approval checks. Muse runs without permission checks under `yolo` too. It has no meaning on `local`, where the harness keeps its configured approvals, on other machines. |
 
 The new-session wizard asks for an existing absolute project directory on the
 runtime's machine. A local bare directory may be a plain folder and does not
@@ -1040,8 +1075,7 @@ there is no container or instance boundary; Muse's guardian is muse-acp's
 auto-review, see [Harness limitations](/profiles/#harness-limitations). On an
 SSH machine the wizard separately asks for an existing absolute remote Git
 directory; when **Create isolated checkout** is checked on the final review,
-the new checkout is created below the repository's own `.mj/clones/` tree. A
-bare runtime on an EC2 machine launches one instance per session. See
+the new checkout is created below the repository's own `.mj/clones/` tree. For EC2 hosts, `mj ec2 create` configures a persistent Podman runtime. See
 [SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
 
 Review needs a committed Git checkout to capture changes. A local directory
@@ -1053,7 +1087,7 @@ work when Git is older.
 
 ### Common container fields
 
-`podman`, `docker`, and `apple-container` accept the same container fields.
+`podman`, `docker`, `apple-container`, and `nitro` accept the same container fields.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
@@ -1167,6 +1201,28 @@ All common fields except a non-default `workspace_storage` are supported. With
 runs on that remote Apple-silicon Mac, which must run macOS 26 or newer. See
 [Apple container](/apple-container/).
 
+### `nitro`
+
+```toml
+[machines.ec2]
+kind = "ssh"
+host = "ec2-host.example.com"
+
+[targets.nitro]
+kind = "nitro"
+machine = "ec2"
+cpus = "4"
+memory = "8g"
+```
+
+A session runs in its own Firecracker microVM (an AWS Nitro Sandbox) on an EC2
+host reached over SSH; `machine` must name an `ssh` machine, and
+`mj ec2 create --runtime nitro` writes both tables. All common fields except a
+non-default `workspace_storage` are supported, but a sandbox cannot attach host
+directories or share the host's mbx build cache: a session that asks for them
+starts without and says so. RAM is a hard limit, taken from the memory pool the
+host reserved at boot.
+
 ### Files written before version 12
 
 Before version 12 one `[targets.<id>]` table fused the machine and the runtime,
@@ -1185,7 +1241,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 21
+version = 23
 
 [phone]
 enabled = true
@@ -1194,7 +1250,10 @@ tailscale_detect = true
 
 [review]
 trigger = "off"
-profile = "claude-review"
+
+[[review.reviewers]]
+model = "claude-haiku-4.5"
+effort = "high"
 
 [profiles.codex-work]
 kind = "codex"
@@ -1236,13 +1295,9 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_WORKER_DIR` | Directory containing architecture-named portable Linux workers. |
 | `MJ_WORKER_URL` | Fallback worker URL template; `{target}` expands to the target triple. Requires `MJ_WORKER_SHA256`. |
 | `MJ_WORKER_SHA256` | Required 64-character hexadecimal digest for `MJ_WORKER_URL`. |
-| `MJ_DESKTOP_BINARY` | Path to `mj-desktop` used by `mj app`. |
-| `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
-| `MJ_SSH_MAX_CONCURRENT` | Cap on concurrent SSH connections per host; see the SSH target guide. |
-| `MJ_SSH_SESSIONS_PER_CONNECTION` | Sessions per shared OpenSSH connection; defaults to `8`. See the [SSH guide](/ssh/#sharing-connections-per-host). |
-| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. |
+| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. Mjolnir learns how many sessions each shared connection carries from the server's refusal and has no setting for it; see the [SSH guide](/ssh/#sharing-connections-per-host). |
 | `MJ_DEV_RESTART_STALE_DAEMON` | When set to any value, a client restarts a running daemon whose executable was replaced, or whose development workers changed, since it started, unless the daemon's build is newer than the client's. For development checkouts. |
 | `MJ_TURN_STALL_TIMEOUT_MS` | Milliseconds of harness silence, with no tool call open, after which the worker ends the turn with the reason `harness_inactive`. Off unless set to a positive value. |
 | `MJ_TURN_TOOL_STALL_TIMEOUT_MS` | Milliseconds one tool call may run before the worker ends the turn the same way. Off unless set to a positive value. |

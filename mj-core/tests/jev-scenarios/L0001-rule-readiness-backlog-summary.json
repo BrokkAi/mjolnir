@@ -1,0 +1,132 @@
+{
+  "id": "L0001",
+  "title": "Rule readiness backlog summary",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "6d3de1dc989ebbb6e7055a6acd3251fe",
+    "session_title": "bifrost via claude2",
+    "reply_position": 122,
+    "captured_at": "2026-08-17T13:36:08.562Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:12",
+          "role": "user",
+          "text": "skim our ticket backlog. what do we need to finish before unleashing a cheaper Sonnet-level agent with a mandate to author RQL rules that match semgrep/codeql free/public rules libraries?\n\nokay to split out by rule type; David's comment: Taint analysis/data leak rules will be easier to do today - typestate related rules may need to wait until we have more testing around it"
+        },
+        {
+          "id": "agent:14",
+          "role": "assistant",
+          "text": "I'll look at how the backlog is stored in this repo first, then skim it."
+        },
+        {
+          "id": "agent:40",
+          "role": "assistant",
+          "text": "Only 3 open issues on the public repo — this looks like an open-core projection, so the real backlog is probably elsewhere. Let me check."
+        },
+        {
+          "id": "agent:88",
+          "role": "assistant",
+          "text": "Found it — the real backlog lives in the private `BrokkAi/bifrost-dev` repo. Let me pull its open issues."
+        },
+        {
+          "id": "agent:112",
+          "role": "assistant",
+          "text": "Good picture forming. Let me check a few more: the taint correctness regressions and the \"silent empty results\" reliability issue, which matter a lot for an autonomous agent."
+        },
+        {
+          "id": "agent:122",
+          "role": "assistant",
+          "text": "## TL;DR\n\nThe backlog supports David's split, with one important caveat: \"taint is easier today\" is only true *relative to typestate*. The shipped taint policy currently scores **0 findings / 0 FPs / 0 false-greens on OWASP Benchmark — it abstains on all 1,572 cases** (#1935), and there's a live correctness regression (#2314). The good news is #1935 converts that zero into a short, concrete punch-list. Here's what needs to finish, by bucket.\n\n## Cross-cutting: things that gate the *agent*, regardless of rule type\n\nThese block an autonomous Sonnet-level author because they either break selector binding or silently lie to it:\n\n- **RQL binding fixes from #1935 (items 1–3).** No arity predicate (a no-arg `execute()` aborts the whole sqli rule compile against overloads), the 100-result RQL limit truncates workspace-wide source selectors before binding, and require-model demands all sources+sinks in one completely-discovered region. Any semgrep/codeql-parity rule with workspace-wide sources hits all three. These are upstream of everything else.\n- **#2325 — store/listing failures degrade into empty results.** For a human this is an annoyance; for an agent tuning rules by observed match counts, \"error looks like zero matches\" means it will silently mis-tune rules. Same class: #1886 (silent clamping of `max_duration_secs`). I'd call this bucket mandatory for unsupervised authoring.\n- **#1640 — keyed equijoin/anti-join over typed row sets.** Deferred awaiting \"a second consumer\"; a rule-authoring agent is that consumer. Many codeql-parity rules are \"same site, different classification\" shapes that `union`/`intersect`/`except` over whole endpoints can't express. Not a day-one blocker, but it caps the reachable rule surface. (#1652, canonical identity rows, is in the same \"deferred until a consumer arrives\" state.)\n- **Guardrails already exist — reuse them.** #1598 spells out the pack promotion bar (per-language positive *and* near-miss fixtures, stable policy IDs, schema versions, semantic hash, suppression-diff against this repo). That's exactly the acceptance contract to hand the agent; it needs writing up as the agent's mandate, not building. Docs support is thin though (#1132 cookbook examples, #1639 stale schema prose).\n\n## Taint / data-leak rules — closest, but three gates first\n\n1. **Fix the v0.10.1 regression #2314** (Java DataFlowBench went from 32/32 to FPs + a false negative + inconclusives) plus #2310 (Python/JS retain killed flow across overwrites/branches/loops). An agent tuning rules against a regressed engine will bake engine bugs into rule definitions.\n2. **Land the #1935 punch-list** (the three RQL items above, plus item 4).\n3. **Ship at least one stdlib procedure-summary pack — #1871.** Zero ship today, so `require-model` fails closed on nearly every real flow (URLDecoder, List, Map, StringBuilder…) and `paranoid` over-approximates everything. #1935 is explicit that the RQL fixes alone produce no score without summary content. Parent epic #1877 (external code honestly indexed/reported) and #1981/#2298 are the longer tail.\n\nWith those three done, I'd unleash the agent on **Java taint rules first** — the OWASP bakeoff harness already landed and gives it a reproducible scoring loop. Python/JS taint waits on #2310/#2312 (no exception-flow support); the bakeoff wall issues (#2307, #2308) will surface more binding edge cases as it goes.\n\n## Typestate rules — backlog confirms \"wait\"\n\nDavid's caution matches the evidence exactly:\n\n- Epic #824's own status says feature construction is complete but \"the remaining phase is correctness hardening, regression ownership, and performance evidence\" — #1564 (lifecycle/scaling benchmarks) is still open.\n- **Typestate contracts are regressed on master right now** (#2304: the `typestate.subjects` metric is absent from reports, flagged as needing a design call, not a test bless).\n- #1957: Ruby typestate call binding is wholly broken (the fix taint already got in #1953 hasn't been ported), and public issue #1 notes the extension surface doesn't expose typestate at all.\n\nI wouldn't hand typestate to an autonomous agent until #2304 is resolved and #1564's evidence exists — an agent can't distinguish \"my rule is wrong\" from \"typestate didn't run\" while the subjects metric can vanish silently.\n\n## One addition to David's split\n\nSemgrep's public library is mostly *structural* pattern rules, and that's actually the readiest bucket: the `bifrost.code-smells` pack, promotion bar, and suppression workflow all exist (#1598). The known cost is FP volume until the loop-invariance predicate is promoted (~250 of 284 findings in the self-run shared that one missing predicate). Starting the agent on structural + Java taint, holding typestate, is my recommended sequencing."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "skim our ticket backlog. what do we need to finish before unleashing a cheaper Sonnet-level agent with a mandate to author RQL rules that match semgrep/codeql free/public rules libraries?\n\nokay to split out by rule type; David's comment: Taint analysis/data leak rules will be easier to do today - typestate related rules may need to wait until we have more testing around it",
+    "assistant_text_tail": "* Zero ship today, so `require-model` fails closed on nearly every real flow (URLDecoder, List, Map, StringBuilder…) and `paranoid` over-approximates everything. #1935 is explicit that the RQL fixes alone produce no score without summary content. Parent epic #1877 (external code honestly indexed/reported) and #1981/#2298 are the longer tail.\n\nWith those three done, I'd unleash the agent on **Java taint rules first** — the OWASP bakeoff harness already landed and gives it a reproducible scoring loop. Python/JS taint waits on #2310/#2312 (no exception-flow support); the bakeoff wall issues (#2307, #2308) will surface more binding edge cases as it goes.\n\n## Typestate rules — backlog confirms \"wait\"\n\nDavid's caution matches the evidence exactly:\n\n- Epic #824's own status says feature construction is complete but \"the remaining phase is correctness hardening, regression ownership, and performance evidence\" — #1564 (lifecycle/scaling benchmarks) is still open.\n- **Typestate contracts are regressed on master right now** (#2304: the `typestate.subjects` metric is absent from reports, flagged as needing a design call, not a test bless).\n- #1957: Ruby typestate call binding is wholly broken (the fix taint already got in #1953 hasn't been ported), and public issue #1 notes the extension surface doesn't expose typestate at all.\n\nI wouldn't hand typestate to an autonomous agent until #2304 is resolved and #1564's evidence exists — an agent can't distinguish \"my rule is wrong\" from \"typestate didn't run\" while the subjects metric can vanish silently.\n\n## One addition to David's split\n\nSemgrep's public library is mostly *structural* pattern rules, and that's actually the readiest bucket: the `bifrost.code-smells` pack, promotion bar, and suppression workflow all exist (#1598). The known cost is FP volume until the loop-invariance predicate is promoted (~250 of 284 findings in the self-run shared that one missing predicate). Starting the agent on structural + Java taint, holding typestate, is my recommended sequencing.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 12,
+    "input_rationale": "The user asked what must finish before a cheaper agent can author RQL rules; the reply answers it by bucket and gives a recommendation. The open backlog items it lists are the project's work, not a pending user decision or action.",
+    "label": "none",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-08-17T13:40:16.133Z",
+        "kind": "user",
+        "text": "pls burn down \"things that gate the agent and taint\", including loop-invariance predicate promotion if it's not in those lists. you own design + review, implement w parallel Opus where possible"
+      },
+      {
+        "at": "2026-08-17T13:40:48.616Z",
+        "kind": "agent",
+        "text": "I'll set this up as a parallel burn-down: clone the dev repo, triage each item deeply enough to write implementation briefs, then fan out to Opus agents in worktrees while I review and integrate. Firs"
+      },
+      {
+        "at": "2026-08-17T13:41:05.683Z",
+        "kind": "agent",
+        "text": "While the clone runs, I'll set up the burn-down task list and check for in-flight work on these issues (open PRs, recent comments) so agents don't duplicate anything."
+      },
+      {
+        "at": "2026-08-17T13:41:27.839Z",
+        "kind": "agent",
+        "text": "Clone is done. Now checking for in-flight work on these issues and reading the dev repo's conventions."
+      },
+      {
+        "at": "2026-08-17T13:41:51.155Z",
+        "kind": "user",
+        "text": "David says: pls review https://github.com/brokkAi/dataflowbench for examples of TPs and TNs and allow this to inform your work"
+      },
+      {
+        "at": "2026-08-17T13:42:02.234Z",
+        "kind": "user",
+        "text": "you are welcome to clone that locally"
+      }
+    ]
+  }
+}

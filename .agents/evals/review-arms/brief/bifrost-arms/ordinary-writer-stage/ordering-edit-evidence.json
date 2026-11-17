@@ -1,0 +1,124 @@
+{
+  "records": [
+    {
+      "stable_id": "tool:exec-89c91269-b550-41da-b729-d96c14391c10",
+      "position": 116,
+      "seq": 116,
+      "role": "tool",
+      "text": "python\n/bin/bash: line 1: python: command not found\n\nexited 127",
+      "created_at_ms": 1794901713774,
+      "last_changed_at_ms": 1794901713776,
+      "body": {
+        "kind": "tool",
+        "call": {
+          "toolCallId": "exec-89c91269-b550-41da-b729-d96c14391c10",
+          "title": "python - <<'PY'\nfrom pathlib import Path\np = Path('brief.md')\ns = p.read_text()\nlines = s.splitlines()\na = next(i for i, line in enumerate(lines) if line.startswith('- Go\\'s builder callback'))\nb = next(i for i, line in enumerate(lines) if line.startswith('- Go derives'))\nlines[a], lines[b] = lines[b], lines[a]\np.write_text('\\n'.join(lines) + '\\n')\nPY",
+          "name": "exec_command",
+          "kind": "execute",
+          "status": "failed",
+          "content": [
+            {
+              "type": "terminal",
+              "terminalId": "exec-89c91269-b550-41da-b729-d96c14391c10"
+            }
+          ],
+          "rawInput": {
+            "command": "python - <<'PY'\nfrom pathlib import Path\np = Path('brief.md')\ns = p.read_text()\nlines = s.splitlines()\na = next(i for i, line in enumerate(lines) if line.startswith('- Go\\'s builder callback'))\nb = next(i for i, line in enumerate(lines) if line.startswith('- Go derives'))\nlines[a], lines[b] = lines[b], lines[a]\np.write_text('\\n'.join(lines) + '\\n')\nPY",
+            "cwd": "/workspace/96be565ed7f378c3f07b1e40685106de/bifrost-dev"
+          },
+          "_meta": {
+            "terminal_info": {
+              "cwd": "/workspace/96be565ed7f378c3f07b1e40685106de/bifrost-dev",
+              "terminal_id": "exec-89c91269-b550-41da-b729-d96c14391c10"
+            }
+          }
+        },
+        "terminal_outputs": [
+          {
+            "terminal_id": "exec-89c91269-b550-41da-b729-d96c14391c10",
+            "output": "/bin/bash: line 1: python: command not found\n",
+            "exit_code": 127
+          }
+        ],
+        "terminal_refs": [
+          "exec-89c91269-b550-41da-b729-d96c14391c10"
+        ],
+        "presentation": {
+          "summary": "python",
+          "source": "python - <<'PY'\nfrom pathlib import Path\np = Path('brief.md')\ns = p.read_text()\nlines = s.splitlines()\na = next(i for i, line in enumerate(lines) if line.startswith('- Go\\'s builder callback'))\nb = next(i for i, line in enumerate(lines) if line.startswith('- Go derives'))\nlines[a], lines[b] = lines[b], lines[a]\np.write_text('\\n'.join(lines) + '\\n')\nPY",
+          "source_kind": "raw_input",
+          "tool_kind": "execute",
+          "summary_version": 8
+        }
+      }
+    },
+    {
+      "stable_id": "tool:exec-05a36ad9-d0cf-4972-ace9-79e17ea2944c",
+      "position": 119,
+      "seq": 119,
+      "role": "tool",
+      "text": "python3\nexited 0",
+      "created_at_ms": 1794901718286,
+      "last_changed_at_ms": 1794901718290,
+      "body": {
+        "kind": "tool",
+        "call": {
+          "toolCallId": "exec-05a36ad9-d0cf-4972-ace9-79e17ea2944c",
+          "title": "python3 - <<'PY'\nfrom pathlib import Path\np = Path('brief.md')\nlines = p.read_text().splitlines()\na = next(i for i, line in enumerate(lines) if line.startswith('- Go\\'s builder callback'))\nb = next(i for i, line in enumerate(lines) if line.startswith('- Go derives'))\nlines[a], lines[b] = lines[b], lines[a]\np.write_text('\\n'.join(lines) + '\\n')\nPY",
+          "name": "exec_command",
+          "kind": "execute",
+          "status": "completed",
+          "content": [
+            {
+              "type": "terminal",
+              "terminalId": "exec-05a36ad9-d0cf-4972-ace9-79e17ea2944c"
+            }
+          ],
+          "rawInput": {
+            "command": "python3 - <<'PY'\nfrom pathlib import Path\np = Path('brief.md')\nlines = p.read_text().splitlines()\na = next(i for i, line in enumerate(lines) if line.startswith('- Go\\'s builder callback'))\nb = next(i for i, line in enumerate(lines) if line.startswith('- Go derives'))\nlines[a], lines[b] = lines[b], lines[a]\np.write_text('\\n'.join(lines) + '\\n')\nPY",
+            "cwd": "/workspace/96be565ed7f378c3f07b1e40685106de/bifrost-dev"
+          },
+          "_meta": {
+            "terminal_info": {
+              "cwd": "/workspace/96be565ed7f378c3f07b1e40685106de/bifrost-dev",
+              "terminal_id": "exec-05a36ad9-d0cf-4972-ace9-79e17ea2944c"
+            }
+          }
+        },
+        "terminal_outputs": [
+          {
+            "terminal_id": "exec-05a36ad9-d0cf-4972-ace9-79e17ea2944c",
+            "output": "",
+            "exit_code": 0
+          }
+        ],
+        "terminal_refs": [
+          "exec-05a36ad9-d0cf-4972-ace9-79e17ea2944c"
+        ],
+        "presentation": {
+          "summary": "python3",
+          "source": "python3 - <<'PY'\nfrom pathlib import Path\np = Path('brief.md')\nlines = p.read_text().splitlines()\na = next(i for i, line in enumerate(lines) if line.startswith('- Go\\'s builder callback'))\nb = next(i for i, line in enumerate(lines) if line.startswith('- Go derives'))\nlines[a], lines[b] = lines[b], lines[a]\np.write_text('\\n'.join(lines) + '\\n')\nPY",
+          "source_kind": "raw_input",
+          "tool_kind": "execute",
+          "summary_version": 8
+        }
+      }
+    }
+  ],
+  "prompt_completion": {
+    "command_id": "brief-b56d02bbda6bbbe41fba1ef4c1cf1ebd",
+    "accepted_ordinal": 14,
+    "turn_start_position": 15,
+    "completed_ordinal": 129,
+    "completed_at_ms": 1794901721166,
+    "outcome": {
+      "kind": "completed",
+      "stop_reason": "EndTurn"
+    }
+  },
+  "initial_literal_sha256": "d2ded1c44bdd060cd536d142743d4c5b44e6cb48f319e742597256a0d077e986",
+  "final_sha256": "30e98aa7931fcda98810b6f7fd37f0cf1a688bf4ad59f31c43791e3f57d2bb54",
+  "same_initial_accepted_turn": true,
+  "lint_repairs": 0,
+  "verification": "Parent AST-checked recorded command and replayed only its line swap in memory; original files untouched. Failed Python attempt did not execute the script."
+}

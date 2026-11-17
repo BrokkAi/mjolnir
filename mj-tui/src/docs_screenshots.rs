@@ -112,15 +112,10 @@ fn documentation_dashboard() -> DashboardState {
     config.profiles.insert(
         "kimi-1".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     );
 
@@ -194,6 +189,8 @@ fn documentation_dashboard() -> DashboardState {
         (
             "kimi-1".into(),
             ProfileQuota {
+                paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 profile_id: "kimi-1".into(),
                 harness: HarnessKind::Kimi,
@@ -202,12 +199,14 @@ fn documentation_dashboard() -> DashboardState {
                 error: None,
                 refreshed_at_epoch_seconds: refreshed,
                 rate_limited_until_epoch_seconds: None,
+                next_check_at_epoch_seconds: None,
             },
         ),
     ]);
     let mut dashboard = DashboardState::new(
         config,
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -263,6 +262,7 @@ fn documentation_dashboard() -> DashboardState {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(27),
             memory_used_bytes: 19 * 1024 * 1024 * 1024,
             memory_total_bytes: 64 * 1024 * 1024 * 1024,
@@ -295,13 +295,14 @@ fn documentation_conversation() -> MaterializedSession {
             transcript_item(
                 3,
                 TranscriptBody::Tool {
-                    call: serde_json::json!({
+                    call: (serde_json::json!({
                         "toolCallId": "inspect-terminal",
                         "title": "Inspect terminal layout and shared styles",
                         "kind": "read",
                         "status": "completed",
                         "content": []
-                    }),
+                    }))
+                    .into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,
@@ -351,6 +352,8 @@ fn profile_quota(
     refreshed: u64,
 ) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,
@@ -380,6 +383,7 @@ fn profile_quota(
         error: None,
         refreshed_at_epoch_seconds: refreshed,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 

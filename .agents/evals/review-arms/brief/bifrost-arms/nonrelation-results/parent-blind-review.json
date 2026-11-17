@@ -1,0 +1,290 @@
+{
+  "recorded_at": "2026-11-17T07:34:49.968902+00:00",
+  "scope": "All28requiredfulloutputs, frozen defect/trigger/match_rule/near_misses; parent review before assessor proposal and private arm-key contents.",
+  "private_arm_key_read": false,
+  "assessor_proposal_read": false,
+  "complete_full_output_review": true,
+  "nonmatching_findings_not_verified": true,
+  "records": {
+    "01e7eab53851371e": {
+      "label": "caught",
+      "why": "Explicitly distinguishes failed/unknown conversion proof from proven inapplicability and connects discarding the unresolved competitor to fabricated exact/unique selection. Other array/layout findings are not needed for this label.",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "full_output_sha256": "87403fa0ecf959016168b0775a0cbad60c5b4a6bd109cdee42760bb33e6c160a",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "08dba19cbc43c879": {
+      "label": "caught",
+      "why": "Explicitly identifies while_expression body versus consequence, the failed lookup/None and lost pattern binding. Other branch/let-chain claims do not supply this label.",
+      "bug": "rust-while-let-binder-body-field",
+      "full_output_sha256": "e619dc5a449b1e2f16c8282725ee0d91bac68060ba3c403ca5a3ba8e81a81e40",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "1519da597540dc64": {
+      "label": "caught",
+      "why": "Explicitly identifies promoting a selected nonterminal constant segment to the whole scope_resolution and resolving the terminal declaration instead. This is the focused-segment loss, not a general mixin/navigation complaint.",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "full_output_sha256": "2e467ba636f2ebbd1c2108108351127c875dce09f5ebb20d335860688fb17c05",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "20c952e71f6ecaed": {
+      "label": "caught",
+      "why": "Explicitly identifies promoting a selected nonterminal constant segment to the whole scope_resolution and resolving the terminal declaration instead. This is the focused-segment loss, not a general mixin/navigation complaint.",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "full_output_sha256": "c8a72cc1b7527e5b110b01493a52cea404beb3543b3fd52155006ede2aeb9dd7",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "270d26c32aa546f7": {
+      "label": "caught",
+      "why": "Explicitly identifies unconditional Option<Foo> return-type stripping before an ordinary receiver is unwrapped. The alternative make().is_some() trigger names the same fabricated payload owner; SPEC permits a different trigger and match_rule includes member navigation.",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "full_output_sha256": "4d0909fe33cb72605c94855450cdc0a249f5249e63605c730d1698bc72cfdd3d",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "2ec9c41a1e14be31": {
+      "label": "caught",
+      "why": "Explicitly identifies several namespace blocks reduced to one physical-file namespace and connects that approximation to omitted references and candidate selection. Each output goes beyond general namespace precedence: it states the multiple-block routing/omission consequence.",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "full_output_sha256": "42d9611d5462f496ac335688d7cbb51ae68af16879c5a5be36563c787faf130a",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "3c9e87973358a73b": {
+      "label": "caught",
+      "why": "Explicitly says more valid files than max_files leaves omitted files while input_truncated/truncated stays false. This distinguishes actual omission from exact fit; declaration-cap/line-number claims do not supply the label.",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "full_output_sha256": "076f2c0d50f930f5776c76affcffe95a904b8b45d06c41950b5d6ea38a0cb283",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "5bc50a8004638643": {
+      "label": "caught",
+      "why": "Explicitly says more valid files than max_files leaves omitted files while input_truncated/truncated stays false. This distinguishes actual omission from exact fit; declaration-cap/line-number claims do not supply the label.",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "full_output_sha256": "74dfabdfc333ae41898a09ee0d516f6f089192c72e1848c95f6ff3ed5d2efea1",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "69ecf142bfb7d2ee": {
+      "label": "caught",
+      "why": "Explicitly distinguishes failed/unknown conversion proof from proven inapplicability and connects discarding the unresolved competitor to fabricated exact/unique selection. Other array/layout findings are not needed for this label.",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "full_output_sha256": "7f6566ceafd675682b3bfeaf1ddd7fc8e981c6044466b2d3808e3e2b91a61406",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "76cb0b03725fa98f": {
+      "label": "caught",
+      "why": "Explicitly identifies several namespace blocks reduced to one physical-file namespace and connects that approximation to omitted references and candidate selection. Each output goes beyond general namespace precedence: it states the multiple-block routing/omission consequence.",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "full_output_sha256": "b550e84c7fcef8e25f49dbb48afd930b2f8c08fc1e89ba880fe411da40cde2fc",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "78a861a7d8bb829d": {
+      "label": "caught",
+      "why": "Explicitly identifies while_expression body versus consequence, the failed lookup/None and lost pattern binding. Other branch/let-chain claims do not supply this label.",
+      "bug": "rust-while-let-binder-body-field",
+      "full_output_sha256": "70d6f168e440684aa3872306263edff6fe1253cfcfe81bd382e2c23bb02bc157",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "7b91bb0c78dbb616": {
+      "label": "caught",
+      "why": "Explicitly distinguishes failed/unknown conversion proof from proven inapplicability and connects discarding the unresolved competitor to fabricated exact/unique selection. Other array/layout findings are not needed for this label.",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "full_output_sha256": "ae76736117876753534f9961fb8bef6fac3cecfabcc2ad8625ab2c3dfd3c1873",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "837f84dcab8b35fb": {
+      "label": "caught",
+      "why": "Explicitly says more valid files than max_files leaves omitted files while input_truncated/truncated stays false. This distinguishes actual omission from exact fit; declaration-cap/line-number claims do not supply the label.",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "full_output_sha256": "8b65c6c19c9ae8738079d1f4d08ad94d683f47120924d5e27f85b04ce78cff55",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "878e20ba89942028": {
+      "label": "caught",
+      "why": "Explicitly identifies while_expression body versus consequence, the failed lookup/None and lost pattern binding. Other branch/let-chain claims do not supply this label.",
+      "bug": "rust-while-let-binder-body-field",
+      "full_output_sha256": "3faa8adcaae08379c761bd5b93efa80a3ba76b01dfe01509401bee60021264c6",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "89256679c057960a": {
+      "label": "caught",
+      "why": "Explicitly says more valid files than max_files leaves omitted files while input_truncated/truncated stays false. This distinguishes actual omission from exact fit; declaration-cap/line-number claims do not supply the label.",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "full_output_sha256": "e71d1973d8eaa81a78a5e3834fd2bd5b6b1c7f5743fb94f1069e1446defa9dd2",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "8c978fbc8eeecc67": {
+      "label": "caught",
+      "why": "Explicitly identifies while_expression body versus consequence, the failed lookup/None and lost pattern binding. Other branch/let-chain claims do not supply this label.",
+      "bug": "rust-while-let-binder-body-field",
+      "full_output_sha256": "5332b2de5d5bc00b6fc2ff7ecf3a0c198aa9d0dfa779b5f2dbe13cf208dd6636",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "8faddbde7a79aeb3": {
+      "label": "caught",
+      "why": "Explicitly identifies while_expression body versus consequence, the failed lookup/None and lost pattern binding. Other branch/let-chain claims do not supply this label.",
+      "bug": "rust-while-let-binder-body-field",
+      "full_output_sha256": "58c190734d4974d1c9f129c1fef842f73523a76eaed0167c7e3f3cd1c0c6e967",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "9758bf302b2162c5": {
+      "label": "caught",
+      "why": "Explicitly identifies several namespace blocks reduced to one physical-file namespace and connects that approximation to omitted references and candidate selection. Each output goes beyond general namespace precedence: it states the multiple-block routing/omission consequence.",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "full_output_sha256": "1825fa76850e72758b7d0cc14598e12ea0732d7412b0833a473eab68c542db2c",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "a3b2cb7d0ccf1e08": {
+      "label": "caught",
+      "why": "Explicitly identifies promoting a selected nonterminal constant segment to the whole scope_resolution and resolving the terminal declaration instead. This is the focused-segment loss, not a general mixin/navigation complaint.",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "full_output_sha256": "2c21d377b3c3a71738e497a26d596e90fb8190b3b9f44a3a4f5016997fc5d2cf",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "a8d34d5aa073af0f": {
+      "label": "caught",
+      "why": "Explicitly identifies while_expression body versus consequence, the failed lookup/None and lost pattern binding. Other branch/let-chain claims do not supply this label.",
+      "bug": "rust-while-let-binder-body-field",
+      "full_output_sha256": "7f427d7d8b73c54f846136fda3feeb65e90a775b1ec99bfcdabb290a4faf61a3",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "ac3f2c234532a0a2": {
+      "label": "caught",
+      "why": "Explicitly identifies several namespace blocks reduced to one physical-file namespace and connects that approximation to omitted references and candidate selection. Each output goes beyond general namespace precedence: it states the multiple-block routing/omission consequence.",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "full_output_sha256": "87d4466579991287f3d30d048ec419f9c394f780cc6f56838d7576626accc2aa",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "b575f25f3fa5d9f5": {
+      "label": "caught",
+      "why": "Explicitly says more valid files than max_files leaves omitted files while input_truncated/truncated stays false. This distinguishes actual omission from exact fit; declaration-cap/line-number claims do not supply the label.",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "full_output_sha256": "93fa5c87b94eef644de756f8abb0fca265b391c9ffe842cc3db6eb1f5cb81854",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "b6d1e3ecd0b383cb": {
+      "label": "caught",
+      "why": "Explicitly distinguishes failed/unknown conversion proof from proven inapplicability and connects discarding the unresolved competitor to fabricated exact/unique selection. Other array/layout findings are not needed for this label.",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "full_output_sha256": "cb92601342bce687e3b08d4c199cb1138158294a72afa156c14c9754879dd9e5",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "c7da8e99ca03b977": {
+      "label": "caught",
+      "why": "Explicitly identifies promoting a selected nonterminal constant segment to the whole scope_resolution and resolving the terminal declaration instead. This is the focused-segment loss, not a general mixin/navigation complaint.",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "full_output_sha256": "3e80681801ca09bdf272b68e19e8420b9913d070019d16d185a6f2d649bbda81",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "d94f239f956aaca0": {
+      "label": "caught",
+      "why": "Explicitly identifies promoting a selected nonterminal constant segment to the whole scope_resolution and resolving the terminal declaration instead. This is the focused-segment loss, not a general mixin/navigation complaint.",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "full_output_sha256": "a4a482ae2e08bc02ea569e0c391c4108293b736425bd75d700beadb22a130c8e",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "dd8b616edebc9dfd": {
+      "label": "caught",
+      "why": "Explicitly distinguishes failed/unknown conversion proof from proven inapplicability and connects discarding the unresolved competitor to fabricated exact/unique selection. Other array/layout findings are not needed for this label.",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "full_output_sha256": "0936700bc0f09b8febb0bd55fc2191d7a3800c33ac8db18963107c6d9defe4bf",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "e4d929beb05ea0fd": {
+      "label": "caught",
+      "why": "Explicitly says more valid files than max_files leaves omitted files while input_truncated/truncated stays false. This distinguishes actual omission from exact fit; declaration-cap/line-number claims do not supply the label.",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "full_output_sha256": "1bfaae5f64cd0dea225b0f91db6a6fab62d7b5a43cee8a3e9d253b2ce8605238",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    },
+    "f1f712fa4b5b7176": {
+      "label": "caught",
+      "why": "Explicitly identifies promoting a selected nonterminal constant segment to the whole scope_resolution and resolving the terminal declaration instead. This is the focused-segment loss, not a general mixin/navigation complaint.",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "full_output_sha256": "fc39d85b2685acad20ff5a3f387c5134bd1aaa373ab6d1dc8b6fae74b4905ae3",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ]
+    }
+  }
+}

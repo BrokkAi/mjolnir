@@ -23,6 +23,10 @@ const MANAGED_NODE_DIR: &str = "node";
 /// compatible runtime. Keep this in lockstep with `assets/node/runtime.json`.
 pub const NODE_VERSION: &str = "24.22.1";
 
+/// Keep in lockstep with `assets/mise/runtime.json`. Static musl binary hashes:
+/// https://github.com/jdx/mise/releases/download/v2026.11.9/SHASUMS256.txt
+pub const MISE_VERSION: &str = "2026.11.9";
+
 /// The install receipt written by the worker and checked by managed clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,17 +119,18 @@ pub fn managed_harness_manifest_matches(
 
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
 pub const CODEX_ACP_VERSION: &str = "1.15.0";
-pub const CODEX_CLI_VERSION: &str = "0.165.0";
-pub const CLAUDE_ACP_VERSION: &str = "0.99.0";
-pub const CLAUDE_CLI_VERSION: &str = "2.1.308";
-pub const KIMI_VERSION: &str = "2.4.0";
-pub const GROK_VERSION: &str = "1.0.70";
+pub const CODEX_CLI_VERSION: &str = "0.168.0";
+pub const CLAUDE_ACP_VERSION: &str = "0.107.3";
+pub const CLAUDE_CLI_VERSION: &str = "2.1.325";
+pub const KIMI_VERSION: &str = "2.6.1";
+pub const GROK_VERSION: &str = "1.0.77";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
 pub const MUSE_ACP_VERSION: &str = "0.21.0";
 pub const MUSE_VERSION: &str = "1.4.14-R7309.1";
-pub const OPENCODE_VERSION: &str = "2.2.1";
-pub const DSH_ACP_VERSION: &str = "0.5.0";
+pub const OPENCODE_VERSION: &str = "2.2.7";
+pub const DSH_ACP_VERSION: &str = "0.6.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
+pub const ANTIGRAVITY_VERSION: &str = "1.5.8";
 
 /// The shell commands that start OpenCode's ACP server with the executable
 /// named by `$opencode`, for the managed install and the container fallback
@@ -293,6 +298,10 @@ pub fn fallback_launch(
     policy: crate::config::ExecutionPolicy,
 ) -> (String, Vec<String>) {
     match harness {
+        HarnessKind::Antigravity => {
+            let flag = harness.launch_flag_for(policy).unwrap_or("");
+            ("sh".into(), vec!["-c".into(), format!("if command -v agy >/dev/null 2>&1; then agy=agy; elif [ -x \"$HOME/.local/bin/agy\" ]; then agy=\"$HOME/.local/bin/agy\"; else echo 'Antigravity requires agy installed on this target (PATH or ~/.local/bin/agy)' >&2; exit 127; fi; exec \"$agy\" acp --gemini-dir \"$MJ_ANTIGRAVITY_HOME\" --disable-telemetry {flag}")])
+        }
         HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse => {
             let bridge = npm_bridge(harness).expect("npm harness has a bridge");
             (
@@ -455,6 +464,12 @@ pub struct HarnessPin {
 
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
+        HarnessKind::Antigravity => HarnessPin {
+            install_id: "antigravity-1.5.8",
+            display_version: ANTIGRAVITY_VERSION,
+            entrypoint: "bin/agy",
+            cli_entrypoint: "bin/agy",
+        },
         HarnessKind::Muse => HarnessPin {
             install_id: "muse-acp-0.21.0_muse-1.4.14-R7309.1",
             display_version: "muse-acp 0.21.0 + Muse Code 1.4.14-R7309.1",
@@ -462,8 +477,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "bin/muse",
         },
         HarnessKind::Codex => HarnessPin {
-            install_id: "brokkai-codex-acp-1.15.0_codex-0.165.0",
-            display_version: "@brokkai/codex-acp 1.15.0 + codex 0.165.0",
+            install_id: "brokkai-codex-acp-1.15.0_codex-0.168.0",
+            display_version: "@brokkai/codex-acp 1.15.0 + codex 0.168.0",
             entrypoint: "node_modules/.bin/codex-acp",
             cli_entrypoint: CODEX_CLI_ENTRYPOINT,
         },
@@ -471,32 +486,32 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             // pkg2: the asset lists @anthropic-ai/claude-code in allowScripts.
             // Installs made before that change kept the package's native-binary
             // stub, so their identity must not match this pin.
-            install_id: "claude-agent-acp-0.99.0_claude-2.1.308_pkg2",
-            display_version: "claude-agent-acp 0.99.0 + Claude Code 2.1.308",
+            install_id: "claude-agent-acp-0.107.3_claude-2.1.325_pkg2",
+            display_version: "claude-agent-acp 0.107.3 + Claude Code 2.1.325",
             entrypoint: "node_modules/.bin/claude-agent-acp",
             cli_entrypoint: "node_modules/.bin/claude",
         },
         HarnessKind::Kimi => HarnessPin {
-            install_id: "kimi-2.4.0",
-            display_version: "Kimi Code 2.4.0",
+            install_id: "kimi-2.6.1",
+            display_version: "Kimi Code 2.6.1",
             entrypoint: "bin/kimi",
             cli_entrypoint: "bin/kimi",
         },
         HarnessKind::Grok => HarnessPin {
-            install_id: "grok-1.0.70",
-            display_version: "Grok 1.0.70",
+            install_id: "grok-1.0.77",
+            display_version: "Grok 1.0.77",
             entrypoint: "bin/grok",
             cli_entrypoint: "bin/grok",
         },
         HarnessKind::OpenCode => HarnessPin {
-            install_id: "opencode-2.2.1",
-            display_version: "OpenCode 2.2.1",
+            install_id: "opencode-2.2.7",
+            display_version: "OpenCode 2.2.7",
             entrypoint: "opencode",
             cli_entrypoint: "opencode",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.5.0",
-            display_version: "dsh-acp 0.5.0",
+            install_id: "dsh-acp-0.6.0",
+            display_version: "dsh-acp 0.6.0",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },

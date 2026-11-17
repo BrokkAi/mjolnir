@@ -64,6 +64,19 @@ impl ElicitationRequest {
         lines.join("\n")
     }
 
+    /// Whether a managed child sends this form to its parent agent instead of
+    /// a person. A parent answers questions with a message, but it has no
+    /// way to grant a tool permission or approve a plan, so those stay open
+    /// for a person, as harnesses do for their native sub-agents. A secret
+    /// stays with the person too: a message would keep it in plain text,
+    /// where a form answer is masked.
+    #[must_use]
+    pub fn goes_to_parent(&self) -> bool {
+        self.tool_permission.is_none()
+            && !crate::acp::is_plan_review_id(&self.id)
+            && !self.fields.iter().any(|field| field.secret)
+    }
+
     /// Whether the form offers Skip (the `decline` action). Every surface
     /// asks this, and [`Self::harness_response`] refuses a Skip it denies.
     #[must_use]
@@ -251,6 +264,17 @@ impl ElicitationRequest {
             .map(|index| (index, self.fields[index].companion_role()))
     }
 
+    /// Companion answers inherit the secrecy of the field they answer.
+    #[must_use]
+    pub fn field_is_secret(&self, field: &ElicitationField) -> bool {
+        field.secret
+            || field
+                .custom_answer_for
+                .as_ref()
+                .and_then(|id| self.fields.iter().find(|parent| parent.id == *id))
+                .is_some_and(|parent| parent.secret)
+    }
+
     /// The user's reply for conversation history. Mask secrets here, before
     /// the runtime event or durable journal can retain them.
     pub fn reply_text(&self, response: &ElicitationResponse) -> String {
@@ -271,7 +295,7 @@ impl ElicitationRequest {
                     let title = parent
                         .filter(|parent| !content.contains_key(&parent.id))
                         .map_or(&field.title, |parent| &parent.title);
-                    let text = if field.secret || parent.is_some_and(|parent| parent.secret) {
+                    let text = if self.field_is_secret(field) {
                         "[hidden]".to_owned()
                     } else {
                         field.reply_value_text(value)

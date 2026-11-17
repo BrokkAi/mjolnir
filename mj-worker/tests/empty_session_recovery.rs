@@ -222,6 +222,14 @@ for line in sys.stdin:
         launch["native_session_id"] = serde_json::json!("missing-thread");
     }
     std::fs::write(&config, serde_json::to_vec(&launch).unwrap()).unwrap();
+    // Stage both the running worker and this build's lifecycle control worker.
+    std::fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_mj-worker"), root.join("hel")).unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_mj-worker"),
+        mj_controller::targets::control_worker_path(root.to_str().unwrap()),
+    )
+    .unwrap();
     let mut command = CommandSpec::new(
         env!("CARGO_BIN_EXE_mj-worker"),
         [
@@ -263,8 +271,8 @@ for line in sys.stdin:
         }
     })();
     let stop = mj_controller::targets::stop_worker_daemon_script(root.to_str().unwrap());
-    let stopped =
-        BoundedProcessExecutor::new(IO_TIMEOUT).execute(&CommandSpec::new("sh", ["-c", &stop]));
+    let stopped = BoundedProcessExecutor::new(IO_TIMEOUT)
+        .execute(&CommandSpec::new("sh", ["-c", stop.unstaged_script()]));
     let owner = worker.join().expect("worker owner panicked");
     let worker_log = std::fs::read_to_string(root.join("worker.log"))
         .expect("read the owning worker's diagnostics");

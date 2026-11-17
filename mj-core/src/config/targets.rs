@@ -13,7 +13,6 @@ use super::{
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectRepository {
     /// Stable name within the bundle, used by `primary_repo`.
     pub id: String,
@@ -30,7 +29,6 @@ pub struct ProjectRepository {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectBundle {
     /// Repository id used as the ACP session cwd.
     pub primary_repo: String,
@@ -162,7 +160,7 @@ pub struct TargetBuildCache {
 /// container. `memory` is an admission budget used to weight concurrent
 /// compilations, not an operating-system memory limit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct BuildCacheScheduler {
     /// Number of compiler permits shared across all mbx builds on the machine.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,8 +178,10 @@ impl BuildCacheScheduler {
 }
 
 /// Consume obsolete budgets without interpreting or migrating their values.
+/// They are read whole rather than as `IgnoredAny`, which the file loader
+/// counts as a key no setting reads.
 #[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct BuildCacheSettings {
     enabled: Option<bool>,
     directory: Option<PathBuf>,
@@ -189,9 +189,9 @@ struct BuildCacheSettings {
     max_total_size: Option<String>,
     scheduler: BuildCacheScheduler,
     #[serde(rename = "max_size")]
-    _legacy_max_size: Option<serde::de::IgnoredAny>,
+    _legacy_max_size: Option<serde_json::Value>,
     #[serde(rename = "target_max_size")]
-    _legacy_target_max_size: Option<serde::de::IgnoredAny>,
+    _legacy_target_max_size: Option<serde_json::Value>,
 }
 
 impl From<BuildCacheSettings> for TargetBuildCache {
@@ -324,14 +324,14 @@ pub fn build_cache_configuration_directory(directory: &Path) -> PathBuf {
 /// The image a container target runs when its table names none: the
 /// reference image CI publishes, which `mj setup` also writes.
 fn default_container_image() -> String {
-    super::DEFAULT_CONTAINER_IMAGE.to_owned()
+    super::DEFAULT_SESSION_IMAGE.to_owned()
 }
 
 /// Whether a container image is exactly this build's default. A template that
 /// keeps the default writes no `image` line, so an upgraded install follows
 /// the image built for its own version.
 fn is_default_image(image: &String) -> bool {
-    image == super::DEFAULT_CONTAINER_IMAGE
+    image == super::DEFAULT_SESSION_IMAGE
 }
 
 /// Every key a container runtime's table may carry beside `kind` and
@@ -350,7 +350,6 @@ pub(super) const CONTAINER_TEMPLATE_KEYS: [&str; 8] = [
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ContainerTemplate {
     #[serde(
         default = "default_container_image",
@@ -381,7 +380,7 @@ pub struct ContainerTemplate {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum PodmanWorkspaceStorage {
     #[default]
     PodmanVolume,
@@ -454,7 +453,6 @@ pub enum AwsAddressSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SshConnection {
     /// OpenSSH destination such as `builder.example.com` or an SSH config alias.
     pub host: String,
@@ -568,9 +566,22 @@ pub enum TargetTemplate {
         #[serde(flatten)]
         container: ContainerTemplate,
     },
+    /// An AWS Nitro Sandbox: one Firecracker microVM per session on an EC2
+    /// host reached over SSH, driven by `mj-worker microvm` as root.
+    SshNitro {
+        #[serde(flatten)]
+        ssh: SshConnection,
+        #[serde(flatten)]
+        container: ContainerTemplate,
+    },
 }
 
 impl TargetTemplate {
+    /// One availability rule for runtime kinds retained only to read history.
+    pub fn launch_refusal(&self) -> Option<&'static str> {
+        matches!(self, Self::AwsEc2 { .. }).then_some(super::LEGACY_EC2_TARGET_NOTICE)
+    }
+
     /// Whether a session can start on this target: every environment
     /// reference its container names resolved. Like
     /// [`HarnessProfile::ensure_ready`](super::HarnessProfile::ensure_ready),
@@ -593,7 +604,8 @@ impl TargetTemplate {
             | Self::AppleContainer { container }
             | Self::SshPodman { container, .. }
             | Self::SshDocker { container, .. }
-            | Self::SshAppleContainer { container, .. } => Some(container),
+            | Self::SshAppleContainer { container, .. }
+            | Self::SshNitro { container, .. } => Some(container),
             _ => None,
         }
     }
@@ -606,7 +618,8 @@ impl TargetTemplate {
             | Self::AppleContainer { container }
             | Self::SshPodman { container, .. }
             | Self::SshDocker { container, .. }
-            | Self::SshAppleContainer { container, .. } => Some(container),
+            | Self::SshAppleContainer { container, .. }
+            | Self::SshNitro { container, .. } => Some(container),
             _ => None,
         }
     }
@@ -623,6 +636,7 @@ impl TargetTemplate {
             Self::SshPodman { .. } => "ssh-podman",
             Self::SshDocker { .. } => "ssh-docker",
             Self::SshAppleContainer { .. } => "ssh-apple-container",
+            Self::SshNitro { .. } => "ssh-nitro",
         }
     }
 
@@ -642,25 +656,37 @@ impl TargetTemplate {
             | Self::AppleContainer { container }
             | Self::SshPodman { container, .. }
             | Self::SshDocker { container, .. }
-            | Self::SshAppleContainer { container, .. } => container.build_cache = None,
+            | Self::SshAppleContainer { container, .. }
+            | Self::SshNitro { container, .. } => container.build_cache = None,
             Self::LocalBare | Self::AwsEc2 { .. } | Self::SshBare { .. } => {}
         }
         stripped
     }
 
     pub const fn execution_policy(&self) -> ExecutionPolicy {
-        match self {
-            Self::LocalBare => ExecutionPolicy::ConfiguredApprovals,
-            Self::SshBare { permissions, .. } => permissions.execution_policy(),
-            _ => ExecutionPolicy::Unconstrained,
+        match self.permission_mode() {
+            Some(mode) => mode.execution_policy(),
+            None => ExecutionPolicy::Unconstrained,
         }
     }
 
+    /// The approval behavior of a target that runs the harness directly on a
+    /// machine, or `None` for a target whose container or instance boundary
+    /// replaces approvals. Localhost has no setting for it: the harness
+    /// always keeps its configured approvals there.
     pub const fn permission_mode(&self) -> Option<PermissionMode> {
         match self {
+            Self::LocalBare => Some(PermissionMode::Guardian),
             Self::SshBare { permissions, .. } => Some(*permissions),
             _ => None,
         }
+    }
+
+    /// Whether this target runs with `permissions = "yolo"`. Container
+    /// runtimes are unconstrained inside their boundary but have no
+    /// permission mode, so they are not YOLO targets.
+    pub const fn is_yolo(&self) -> bool {
+        matches!(self.permission_mode(), Some(PermissionMode::Yolo))
     }
 
     pub(super) fn validate(&self, id: &str) -> Result<()> {
@@ -734,6 +760,19 @@ impl TargetTemplate {
                 }
                 Ok(())
             }
+            // A Nitro sandbox keeps its workspace on a named volume the
+            // engine creates; no other storage shape exists.
+            Self::SshNitro { ssh, container } => {
+                ssh.validate(id)?;
+                container.validate(id)?;
+                if !container.workspace_storage.is_default() {
+                    bail!(
+                        "target template {id:?} workspace storage is only supported by Podman; \
+                         a Nitro sandbox always uses a volume"
+                    );
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -746,7 +785,8 @@ impl From<&TargetTemplate> for crate::state::ResourceAllocationKind {
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
-            | TargetTemplate::SshAppleContainer { .. } => Self::Container,
+            | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. } => Self::Container,
             TargetTemplate::AwsEc2 { .. } => Self::AwsEc2,
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => Self::Fixed,
         }
@@ -774,6 +814,7 @@ pub fn is_container_target(template: &TargetTemplate) -> bool {
             | TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
             | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. }
     )
 }
 
@@ -781,13 +822,17 @@ pub fn is_container_target(template: &TargetTemplate) -> bool {
 ///
 /// Apple's `container` runs each session in its own VM, and the macOS
 /// Virtualization framework does not return memory the guest frees, so a
-/// long-lived session's footprint grows toward its configured size. Every
-/// other runtime's limit is a cgroup ceiling that an idle container does not
-/// use, so its host may be overcommitted with a warning.
+/// long-lived session's footprint grows toward its configured size. A Nitro
+/// sandbox takes its memory from a pool reserved at boot, which cannot be
+/// overcommitted. Every other runtime's limit is a cgroup ceiling that an
+/// idle container does not use, so its host may be overcommitted with a
+/// warning.
 pub fn container_memory_is_hard_limit(template: &TargetTemplate) -> bool {
     matches!(
         template,
-        TargetTemplate::AppleContainer { .. } | TargetTemplate::SshAppleContainer { .. }
+        TargetTemplate::AppleContainer { .. }
+            | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. }
     )
 }
 
@@ -801,9 +846,18 @@ pub fn mount_history_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::AwsEc2 { .. } => Some("local"),
         TargetTemplate::SshPodman { ssh, .. }
         | TargetTemplate::SshDocker { ssh, .. }
-        | TargetTemplate::SshAppleContainer { ssh, .. } => Some(&ssh.host),
+        | TargetTemplate::SshAppleContainer { ssh, .. }
+        | TargetTemplate::SshNitro { ssh, .. } => Some(&ssh.host),
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => None,
     }
+}
+
+/// Whether a launch surface should offer attached host directories for
+/// `template`. A Nitro sandbox is a VM that cannot attach one, but a request
+/// that carries attachments (an API call, a resumed session) is still
+/// accepted: the launch drops them and says so, instead of refusing.
+pub fn offers_attached_directories(template: &TargetTemplate) -> bool {
+    mount_history_host(template).is_some() && !matches!(template, TargetTemplate::SshNitro { .. })
 }
 
 /// The host key whose project-directory history belongs to `template`.
@@ -819,7 +873,8 @@ pub fn project_history_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::AwsEc2 { .. }
         | TargetTemplate::SshPodman { .. }
         | TargetTemplate::SshDocker { .. }
-        | TargetTemplate::SshAppleContainer { .. } => None,
+        | TargetTemplate::SshAppleContainer { .. }
+        | TargetTemplate::SshNitro { .. } => None,
     }
 }
 
@@ -831,7 +886,8 @@ pub fn container_size_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::AppleContainer { .. } => Some("local"),
         TargetTemplate::SshPodman { ssh, .. }
         | TargetTemplate::SshDocker { ssh, .. }
-        | TargetTemplate::SshAppleContainer { ssh, .. } => Some(&ssh.host),
+        | TargetTemplate::SshAppleContainer { ssh, .. }
+        | TargetTemplate::SshNitro { ssh, .. } => Some(&ssh.host),
         TargetTemplate::LocalBare
         | TargetTemplate::SshBare { .. }
         | TargetTemplate::AwsEc2 { .. } => None,

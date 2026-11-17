@@ -39,6 +39,7 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
     // many, and will present a partial answer as a whole one.
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(&database, &[("session-1", "bundle-1")]);
     for index in 0..50 {
         record_prompt_to(
             &database,
@@ -51,32 +52,92 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
         .unwrap();
     }
 
-    let found = search_prompts_bounded_from(
+    let found = search_prompt_page_from(
         &database,
         "session-1",
         "bundle-1",
         HistoryScope::Session,
         "ship",
+        None,
         10,
     )
     .unwrap();
     assert_eq!(found.entries.len(), 10);
     assert!(
-        found.truncated,
+        found.next.is_some(),
         "a search that stopped early reported a complete answer"
     );
 
-    let all = search_prompts_bounded_from(
+    let all = search_prompt_page_from(
         &database,
         "session-1",
         "bundle-1",
         HistoryScope::Session,
         "ship",
+        None,
         100,
     )
     .unwrap();
     assert_eq!(all.entries.len(), 50);
-    assert!(!all.truncated, "a complete answer reported itself partial");
+    assert!(
+        all.next.is_none(),
+        "a complete answer reported itself partial"
+    );
+
+    // Ten distinct prompts, each sent twice: the older copies add no match.
+    for round in 0..2 {
+        for index in 0..10 {
+            record_prompt_to(
+                &database,
+                "session-1",
+                "bundle-1",
+                100 + round * 10 + index,
+                Some("2026-01-01T00:00:00Z"),
+                &format!("repeat {index}"),
+            )
+            .unwrap();
+        }
+    }
+    // Hard-won: a58ad7eb8: a full page followed only by repeats claimed more matches existed
+    let repeats = search_prompt_page_from(
+        &database,
+        "session-1",
+        "bundle-1",
+        HistoryScope::Session,
+        "repeat",
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(repeats.entries.len(), 10);
+    assert!(repeats.next.is_none(), "repeated text is not another match");
+
+    // However often each is repeated, the ten texts fill one page exactly.
+    for round in 2..5 {
+        for index in 0..10 {
+            record_prompt_to(
+                &database,
+                "session-1",
+                "bundle-1",
+                100 + round * 10 + index,
+                Some("2026-01-01T00:00:00Z"),
+                &format!("repeat {index}"),
+            )
+            .unwrap();
+        }
+    }
+    let repeated = search_prompt_page_from(
+        &database,
+        "session-1",
+        "bundle-1",
+        HistoryScope::Session,
+        "repeat",
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(repeated.entries.len(), 10);
+    assert!(repeated.next.is_none());
 }
 
 /// The eviction the daemon performs depends on the typed cause reaching the
@@ -461,8 +522,19 @@ fn event_digest(value: u64) -> String {
     format!("{value:064x}")
 }
 
+/// Prompt history keeps only sessions that exist, so a test that records
+/// prompts saves its sessions first.
+fn live_sessions(database: &Path, sessions: &[(&str, &str)]) {
+    for (id, bundle) in sessions {
+        save_session_to(database, &session(id, bundle)).unwrap();
+    }
+}
+
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -475,8 +547,6 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         create_managed_worktree: None,
         workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: id.into(),
         title: "test session".into(),
         harness_kind: HarnessKind::Codex,
@@ -487,6 +557,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "local".into(),
         resource_allocation: Some(SessionResourceAllocation::Container {
             cpus: 8,
@@ -498,11 +569,11 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
             access: crate::targets::MountAccess::Cow,
         }],
         state: SessionState::Stopped,
-        target: Some(TargetLocator::LocalPodman {
+        target: Some(Box::new(TargetLocator::LocalPodman {
             borrowed_from: None,
             container_id: "container-1".into(),
             workspace_storage: Default::default(),
-        }),
+        })),
         native_session_id: Some("native-1".into()),
         acp_session_title: Some("Agent title".into()),
         session_title_override: None,
@@ -511,13 +582,15 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         viewed_through_event_ordinal: 7,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: Some("temporary recovery failure".into()),
-        checkpoint: Some(CheckpointMetadata {
+        checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/test.hel.zip"),
             sha256: "a".repeat(64),
             created_at: "2026-08-12T01:00:00Z".into(),
             event_frontier: 6,
-        }),
+        })),
     }
 }
 
@@ -576,7 +649,7 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
                 created_at_ms: 1_200,
                 last_changed_at_ms: 1_400,
                 body: TranscriptBody::Tool {
-                    call: serde_json::json!({
+                    call: (serde_json::json!({
                         "toolCallId": "call-1",
                         "title": "Edit files",
                         "kind": "edit",
@@ -589,7 +662,8 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
                         "rawInput": {"path": "src/main.rs"},
                         "rawOutput": {"changed": true},
                         "_meta": {"provider": "test"}
-                    }),
+                    }))
+                    .into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,
@@ -639,7 +713,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
     let mut state = State::default();
     let mut record = session("session-1", "project-1");
     record.project_directory = Some(PathBuf::from("/srv/project-1/.mj/worktrees/session-1"));
-    record.managed_worktree = Some(ManagedWorktree {
+    record.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: PathBuf::from("/srv/project-1"),
         source_repository: PathBuf::from("/srv/project-1"),
@@ -650,18 +724,18 @@ fn normalized_state_round_trip_preserves_children_and_order() {
             ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
         },
         base_commit: None,
-    });
+    }));
     record.resource_allocation = None;
     record.launch_base = Some("origin/main".into());
-    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+    record.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
         repository_id: "project".into(),
         commit: "a".repeat(40),
         branch: Some("town/run-123".into()),
         no_later_history: false,
-    });
-    record.target = Some(TargetLocator::LocalBare {
+    }));
+    record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
-    });
+    }));
     state.sessions.insert(record.id.clone(), record);
     state.mount_history.insert(
         "local".into(),
@@ -735,7 +809,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
         DROP TABLE project_seed_failures;
         DELETE FROM schema_migrations WHERE version >= 66;
         UPDATE schema_compatibility SET minimum_compatible_version = 65;
-        DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 65;",
+        DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 65;",
         )
         .unwrap();
     connection
@@ -795,7 +869,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic;
         DELETE FROM schema_migrations WHERE version >= 54;
         UPDATE schema_compatibility SET minimum_compatible_version = 53;
-        DROP TABLE IF EXISTS subagent_accounting;
+        DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting;
         DROP TABLE IF EXISTS session_turn_selections;
         DROP TABLE IF EXISTS github_seen_items;
         DROP TABLE IF EXISTS github_watch_cursors;
@@ -857,12 +931,12 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         load_state_from(&path).unwrap().sessions["old-session"],
         record
     );
-    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+    record.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
         repository_id: "project".into(),
         commit: "a".repeat(40),
         branch: Some("town/run-123".into()),
         no_later_history: false,
-    });
+    }));
     save_session_to(&path, &record).unwrap();
     let mut connection = open(&path).unwrap();
     let tx = connection.transaction().unwrap();
@@ -894,7 +968,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
          ALTER TABLE sessions DROP COLUMN launch_branch;
          DELETE FROM schema_migrations WHERE version >= 47;
          UPDATE schema_compatibility SET minimum_compatible_version = 46;
-         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 46;",
+         DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 46;",
         )
         .unwrap();
     drop(connection);
@@ -909,7 +983,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
     let root = PathBuf::from("/srv/project/.mj/clones/clone-session");
     clone.project_directory = Some(root.clone());
     clone.target = None;
-    clone.managed_worktree = Some(ManagedWorktree {
+    clone.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: ManagedCheckoutKind::Clone,
         source_project_directory: PathBuf::from("/srv/project"),
         source_repository: PathBuf::from("/srv/project"),
@@ -917,8 +991,8 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
         branch: "main".into(),
         target: ManagedWorktreeTarget::Local,
         base_commit: Some("1".repeat(40)),
-    });
-    clone.publication = Some(PublicationAssessment {
+    }));
+    clone.publication = Some(Box::new(PublicationAssessment {
         checkpoint_sha256: "a".repeat(64),
         state: PublicationState::Published,
         dirty: false,
@@ -927,7 +1001,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
         destinations: vec!["https://example.test/repository.git".into()],
         checked_at: "2026-08-12T01:00:00Z".into(),
         reason: None,
-    });
+    }));
     save_session_to(&database, &clone).unwrap();
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
@@ -946,10 +1020,10 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.target_template_id = "docker".into();
-    record.target = Some(TargetLocator::LocalDocker {
+    record.target = Some(Box::new(TargetLocator::LocalDocker {
         borrowed_from: None,
         container_id: "hel-session-1".into(),
-    });
+    }));
 
     save_session_to(&database, &record).unwrap();
 
@@ -966,6 +1040,33 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
             .unwrap(),
         "local-docker"
     );
+
+    // A sandbox keeps its host and resource in the same normalized columns,
+    // and its borrowing child keeps its owner.
+    for (id, borrowed_from) in [
+        ("sandbox", None),
+        ("sandbox-child", Some("sandbox".to_owned())),
+    ] {
+        let mut record = session(id, "project-1");
+        record.target_template_id = "nitro".into();
+        record.target = Some(Box::new(TargetLocator::SshNitro {
+            borrowed_from,
+            host: "ec2.example.test".into(),
+            container_id: "mj-sandbox".into(),
+        }));
+        save_session_to(&database, &record).unwrap();
+        assert_eq!(load_state_from(&database).unwrap().sessions[id], record);
+    }
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT kind FROM session_targets WHERE session_id = 'sandbox'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "ssh-nitro"
+    );
 }
 
 #[test]
@@ -974,11 +1075,11 @@ fn a_borrowed_container_target_round_trips_and_a_null_column_means_owned() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.target_template_id = "podman".into();
-    record.target = Some(TargetLocator::LocalPodman {
+    record.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: Some("parent-session".into()),
         container_id: "hel-parent-session".into(),
         workspace_storage: Default::default(),
-    });
+    }));
 
     save_session_to(&database, &record).unwrap();
     assert_eq!(
@@ -1000,6 +1101,7 @@ fn a_borrowed_container_target_round_trips_and_a_null_column_means_owned() {
         load_state_from(&database).unwrap().sessions["session-1"]
             .target
             .clone()
+            .map(|v| *v)
     else {
         panic!("Podman locator changed kind")
     };
@@ -1011,13 +1113,13 @@ fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_la
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.target = Some(TargetLocator::LocalPodman {
+    record.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: "hel-session-1".into(),
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
             name: "hel-session-1-workspace".into(),
         },
-    });
+    }));
 
     save_session_to(&database, &record).unwrap();
     assert_eq!(
@@ -1036,7 +1138,7 @@ fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_la
     let loaded = load_state_from(&database).unwrap();
     let Some(TargetLocator::LocalPodman {
         workspace_storage, ..
-    }) = loaded.sessions["session-1"].target.as_ref()
+    }) = loaded.sessions["session-1"].target.as_deref()
     else {
         panic!("Podman locator changed kind")
     };
@@ -1122,8 +1224,10 @@ fn container_settings_write_overrides_mounts_and_remembered_sources() {
     set_session_container_settings_to(
         &database,
         "session-1",
-        Some("6"),
-        Some("12g"),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }),
         &[AdditionalMount {
             source: PathBuf::from("/host/models"),
             destination: PathBuf::from("/mnt/models"),
@@ -1136,8 +1240,13 @@ fn container_settings_write_overrides_mounts_and_remembered_sources() {
 
     let loaded = load_state_from(&database).unwrap();
     let session = &loaded.sessions["session-1"];
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
+    assert_eq!(
+        session.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30
+        })
+    );
     assert_eq!(
         session.additional_mounts,
         vec![AdditionalMount {
@@ -1255,8 +1364,10 @@ fn lifecycle_save_preserves_container_settings_and_mounts() {
     set_session_container_settings_to(
         &database,
         "session-1",
-        Some("6"),
-        Some("12g"),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }),
         std::slice::from_ref(&attached),
         "2026-08-15T00:00:00Z",
     )
@@ -1272,8 +1383,13 @@ fn lifecycle_save_preserves_container_settings_and_mounts() {
     let session = &loaded.sessions["session-1"];
     assert_eq!(session.state, SessionState::Destroying);
     assert_eq!(session.additional_mounts, vec![attached]);
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
+    assert_eq!(
+        session.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30
+        })
+    );
 }
 
 #[test]
@@ -1281,12 +1397,12 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.review = Some(mj_core::config::SessionReview::Turn {
-        count: None,
-        model: Some("gpt-6-astra".into()),
-        effort: Some("high".into()),
-        tier: Some("extended".into()),
-    });
+    record.review = Some(Box::new(mj_core::config::SessionReview::Push {
+        reviewers: Some(vec![mj_core::config::SubagentChoice {
+            model: "gpt-6-astra".into(),
+            effort: Some("high".into()),
+        }]),
+    }));
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
@@ -1294,14 +1410,61 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
         loaded.sessions["session-1"].review,
-        Some(mj_core::config::SessionReview::Turn {
-            count: None,
-            model: Some("gpt-6-astra".into()),
-            effort: Some("high".into()),
-            tier: None,
-        }),
+        Some(Box::new(mj_core::config::SessionReview::Push {
+            reviewers: Some(vec![mj_core::config::SubagentChoice {
+                model: "gpt-6-astra".into(),
+                effort: Some("high".into())
+            }]),
+        })),
         "writes omit the legacy tier while preserving the review choice"
     );
+}
+
+/// Per-turn review was removed. A session stored with the `turn` mode (or the
+/// older `on`) by an earlier build loads as before-push review with the same
+/// reviewers, and the next write stores `push`.
+#[test]
+fn a_session_stored_with_turn_review_loads_as_push_and_is_rewritten_as_push() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let reviewers = r#"[{"model":"gpt-6-astra","effort":"high"}]"#;
+    let stored = [
+        format!(r#"{{"mode":"turn","reviewers":{reviewers}}}"#),
+        format!(r#"{{"mode":"on","reviewers":{reviewers}}}"#),
+    ];
+    let expected = mj_core::config::SessionReview::Push {
+        reviewers: Some(vec![mj_core::config::SubagentChoice {
+            model: "gpt-6-astra".into(),
+            effort: Some("high".into()),
+        }]),
+    };
+    for json in stored {
+        let mut record = session("session-1", "project-1");
+        record.review = Some(Box::new(expected.clone()));
+        save_session_to(&database, &record).unwrap();
+        Connection::open(&database)
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET review_json = ?1 WHERE session_id = 'session-1'",
+                [&json],
+            )
+            .unwrap();
+        let loaded = load_state_from(&database).unwrap();
+        assert_eq!(
+            loaded.sessions["session-1"].review.as_deref(),
+            Some(&expected)
+        );
+        save_session_to(&database, &loaded.sessions["session-1"]).unwrap();
+        let rewritten: String = Connection::open(&database)
+            .unwrap()
+            .query_row(
+                "SELECT review_json FROM sessions WHERE session_id = 'session-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(rewritten.contains(r#""mode":"push""#), "{rewritten}");
+    }
 }
 
 // Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
@@ -1310,39 +1473,51 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.review = Some(mj_core::config::SessionReview::Inherit {
-        count: std::num::NonZeroUsize::new(3),
-        model: Some("gpt-6-astra".into()),
-        effort: Some("high".into()),
-        tier: None,
-    });
+    record.review = Some(Box::new(mj_core::config::SessionReview::Inherit {
+        reviewers: Some(vec![
+            mj_core::config::SubagentChoice {
+                model: "gpt-6-astra".into(),
+                effort: Some("high".into())
+            };
+            3
+        ]),
+    }));
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
-    let review = loaded.sessions["session-1"].review.as_ref().unwrap();
+    let review = loaded.sessions["session-1"].review.as_deref().unwrap();
     assert_eq!(
         review,
         &mj_core::config::SessionReview::Inherit {
-            count: std::num::NonZeroUsize::new(3),
-            model: Some("gpt-6-astra".into()),
-            effort: Some("high".into()),
-            tier: None,
+            reviewers: Some(vec![
+                mj_core::config::SubagentChoice {
+                    model: "gpt-6-astra".into(),
+                    effort: Some("high".into())
+                };
+                3
+            ]),
         }
     );
-    for trigger in [
-        mj_core::config::ReviewTrigger::Off,
-        mj_core::config::ReviewTrigger::Turn,
-        mj_core::config::ReviewTrigger::Push,
+    // The session reviewer choice enables review with either global list.
+    for (global_reviewers, trigger) in [
+        (Vec::new(), mj_core::config::ReviewTrigger::Push),
+        (
+            vec![mj_core::config::SubagentChoice {
+                model: "gpt-6-sol".into(),
+                effort: None,
+            }],
+            mj_core::config::ReviewTrigger::Push,
+        ),
     ] {
         let global = mj_core::config::ReviewConfig {
-            trigger,
+            reviewers: global_reviewers,
             ..mj_core::config::ReviewConfig::default()
         };
         let effective = global.for_session(Some(review));
-        assert_eq!(effective.trigger, trigger);
-        assert_eq!(effective.count.get(), 3);
+        assert_eq!(effective.trigger(), trigger);
+        assert_eq!(effective.reviewers.len(), 3);
     }
 }
 
@@ -1554,8 +1729,10 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
     set_session_container_settings_to(
         &database,
         "session-1",
-        Some("6"),
-        Some("12g"),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }),
         std::slice::from_ref(&attached),
         "2026-08-15T00:00:00Z",
     )
@@ -1570,19 +1747,24 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
     stale.state = SessionState::Running;
     stale.updated_at = "2026-08-15T00:02:00Z".into();
     stale.native_session_id = Some("native-checkpointed".into());
-    stale.checkpoint = Some(verified.clone());
+    stale.checkpoint = Some(Box::new(verified.clone()));
     save_checkpointed_session_to(&database, &stale).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
     let session = &loaded.sessions["session-1"];
-    assert_eq!(session.checkpoint.as_ref(), Some(&verified));
+    assert_eq!(session.checkpoint.as_deref(), Some(&verified));
     assert_eq!(
         session.native_session_id.as_deref(),
         Some("native-checkpointed")
     );
     assert_eq!(session.additional_mounts, vec![attached]);
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
+    assert_eq!(
+        session.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30
+        })
+    );
 }
 
 #[test]
@@ -1686,7 +1868,7 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
 
     let loaded = load_state_from(&database).unwrap();
     let session = &loaded.sessions["session-1"];
-    assert_eq!(session.checkpoint.as_ref(), Some(&recovered));
+    assert_eq!(session.checkpoint.as_deref(), Some(&recovered));
     assert_eq!(
         session.native_session_id.as_deref(),
         Some("native-recovered")
@@ -1741,12 +1923,12 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
     stale.native_session_id = Some("native-old".into());
     stale.acp_session_title = Some("Old harness title".into());
     stale.session_title_override = Some("Old user title".into());
-    stale.checkpoint = Some(CheckpointMetadata {
+    stale.checkpoint = Some(Box::new(CheckpointMetadata {
         archive_path: PathBuf::from("sessions/old.hel.zip"),
         sha256: "a".repeat(64),
         created_at: "2026-08-14T11:00:00Z".into(),
         event_frontier: 10,
-    });
+    }));
     save_session_to(&database, &stale).unwrap();
     let recovered = CheckpointMetadata {
         archive_path: PathBuf::from("sessions/recovered.hel.zip"),
@@ -1774,7 +1956,7 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
         session.native_session_id.as_deref(),
         Some("native-recovered")
     );
-    assert_eq!(session.checkpoint.as_ref(), Some(&recovered));
+    assert_eq!(session.checkpoint.as_deref(), Some(&recovered));
     assert_eq!(
         session.session_title_override.as_deref(),
         Some("Current user title")
@@ -1806,6 +1988,29 @@ fn the_archived_flag_round_trips_without_touching_other_session_fields() {
     set_session_archived_to(&database, "session-1", false).unwrap();
     assert!(!load_state_from(&database).unwrap().sessions["session-1"].archived);
     assert!(set_session_archived_to(&database, "missing", true).is_err());
+}
+
+/// Ignoring notifications is a display choice with its own writer: it must not
+/// disturb the lifecycle state, checkpoint, or titles other writers own.
+#[test]
+fn the_notifications_ignored_flag_round_trips_without_touching_other_session_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut session = session("session-1", "project-1");
+    save_session_to(&database, &session).unwrap();
+    assert!(!load_state_from(&database).unwrap().sessions["session-1"].notifications_ignored);
+
+    set_session_notifications_ignored_to(&database, "session-1", true).unwrap();
+    let reloaded = load_state_from(&database).unwrap().sessions["session-1"].clone();
+    assert!(reloaded.notifications_ignored);
+    session.notifications_ignored = true;
+    assert_eq!(reloaded.state, session.state);
+    assert_eq!(reloaded.checkpoint, session.checkpoint);
+    assert_eq!(reloaded.acp_session_title, session.acp_session_title);
+
+    set_session_notifications_ignored_to(&database, "session-1", false).unwrap();
+    assert!(!load_state_from(&database).unwrap().sessions["session-1"].notifications_ignored);
+    assert!(set_session_notifications_ignored_to(&database, "missing", true).is_err());
 }
 
 /// Hel never writes a harness home, so the hidden set for native sessions
@@ -2062,11 +2267,68 @@ fn materialized_session_round_trip_preserves_typed_projection() {
         }));
     }
 
+    let large = "terminal output supports Unicode λ\n".repeat(4096);
+    for item in &mut materialized.transcript {
+        if let TranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            presentation,
+            ..
+        } = &mut Arc::make_mut(item).body
+        {
+            call.edit(|value| value["rawInput"] = serde_json::json!({"command": large}));
+            terminal_outputs.push(mj_core::transcript::TerminalOutputRecord {
+                terminal_id: "large-terminal".into(),
+                output: large.clone().into(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            });
+            *presentation = Some(Box::new(mj_core::transcript::ToolCallPresentation {
+                summary: "large command".into(),
+                source: large.clone().into(),
+                source_kind: mj_core::transcript::ToolSummarySourceKind::RawInput,
+                tool_kind: agent_client_protocol::v1::schema::ToolKind::Execute,
+                summary_version: 0,
+            }));
+        }
+    }
+
     save_materialized_session_to(&database, &materialized).unwrap();
 
     let loaded = load_materialized_session_from(&database, "session-1")
         .unwrap()
         .unwrap();
+    // Both durable rows and buffered wire envelopes must keep ACP JSON bytes.
+    for (before, after) in materialized.transcript.iter().zip(&loaded.transcript) {
+        if let TranscriptBody::Tool { call, .. } = &before.body {
+            let expected = serde_json::to_string(&call.value()).unwrap();
+            let TranscriptBody::Tool {
+                call: loaded_call, ..
+            } = &after.body
+            else {
+                panic!("tool body changed during store round trip");
+            };
+            assert_eq!(serde_json::to_string(loaded_call).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_string(&before.body).unwrap(),
+                serde_json::to_string(&after.body).unwrap()
+            );
+            let wire = mj_client::runtime_feed::TranscriptChange::Items(
+                mj_client::runtime_feed::TranscriptItems {
+                    header: None,
+                    window: None,
+                    upserts: vec![Arc::clone(after)],
+                    removes: vec![],
+                },
+            );
+            let bytes = serde_json::to_string(&wire).unwrap();
+            let decoded: mj_client::runtime_feed::TranscriptChange =
+                serde_json::from_str(&bytes).unwrap();
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), bytes);
+            assert!(bytes.contains(&format!("\"call\":{expected}")));
+        }
+    }
     assert_eq!(loaded, materialized);
     assert_eq!(loaded.last_activity_at_ms(), Some(1_500));
 }
@@ -2224,7 +2486,7 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
         created_at_ms: 1_000,
         last_changed_at_ms: 1_000,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": format!("call-{position}"),
                 "title": "Edit files",
                 "kind": "edit",
@@ -2242,7 +2504,8 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
                 ],
                 "rawInput": {"file_text": "y".repeat(64 * 1024)},
                 "rawOutput": {"formatted_output": "z".repeat(64 * 1024)},
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -2272,7 +2535,7 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
         created_at_ms: 1_000,
         last_changed_at_ms: 1_000,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "call-10",
                 "title": "Edit files",
                 "kind": "edit",
@@ -2284,7 +2547,8 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
                     "oldText": old_text,
                     "newText": new_text,
                 }],
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -2385,6 +2649,7 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
     let TranscriptBody::Tool { call, .. } = &after.transcript[1].body else {
         panic!("expected a tool call");
     };
+    let call = call.value();
     assert!(call.get("rawInput").is_none());
     assert!(call.get("rawOutput").is_none());
     assert_eq!(
@@ -2404,6 +2669,79 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
         compact_materialized_transcript_in(&database, "session-1", 15).unwrap(),
         TranscriptRetention::default()
     );
+}
+
+/// GitHub classification renders a session's last turns from a window that
+/// starts at a user message. A reply stored at that message's position but
+/// ordered before it belongs to the previous turn and must stay outside, or
+/// the window would open mid-turn and render differently from the history.
+#[test]
+fn recent_turns_render_from_their_window_as_from_the_whole_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let item = |stable_id: String, position: u64, body: TranscriptBody| {
+        Arc::new(TranscriptItem {
+            latest_content_event_ordinal: matches!(body, TranscriptBody::Agent { .. })
+                .then_some(position),
+            stable_id,
+            position,
+            created_at_ms: 1_000,
+            last_changed_at_ms: 1_000,
+            body,
+        })
+    };
+    let mut materialized = materialized_session("session-1");
+    materialized.applied_event_ordinal = 100;
+    materialized.applied_event_digest = event_digest(100);
+    materialized.transcript = (1..=6)
+        .flat_map(|turn| {
+            [
+                item(
+                    format!("user:{turn}"),
+                    turn * 10,
+                    TranscriptBody::User {
+                        content: vec![
+                            serde_json::json!({"type": "text", "text": format!("ask {turn}")}),
+                        ],
+                    },
+                ),
+                item(
+                    // Same position as the next user message, sorted before it.
+                    format!("agent:{turn}"),
+                    (turn + 1) * 10,
+                    TranscriptBody::Agent {
+                        chunks: vec![serde_json::json!({
+                            "content": {"type": "text", "text": format!("answer {turn}")}
+                        })],
+                        streaming: false,
+                    },
+                ),
+            ]
+        })
+        .collect();
+    save_materialized_session_to(&database, &materialized).unwrap();
+    let render = |materialized: &MaterializedSession| {
+        let canonical =
+            mj_transcript::projection::canonical_session_from_materialized(materialized).unwrap();
+        crate::compaction::render_recent_turns(&canonical, 3)
+    };
+    let whole = load_materialized_session_from(&database, "session-1")
+        .unwrap()
+        .unwrap();
+
+    let recent = load_materialized_recent_turns_from(&database, "session-1", 3)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(recent.transcript.len(), 6, "three turns, not the history");
+    assert_eq!(recent.transcript[0].stable_id, "user:4");
+    assert!(render(&whole).contains("ask 4"));
+    assert_eq!(render(&recent), render(&whole));
+    let short = load_materialized_recent_turns_from(&database, "session-1", 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(short.transcript, whole.transcript, "fewer turns load whole");
 }
 
 /// The steady-state poll loads this on every change, so it must cost the
@@ -2839,6 +3177,21 @@ fn detach_receipt_is_monotonic_and_cannot_pass_projection() {
         .unwrap(),
         2
     );
+    assert_eq!(
+        persist_read_receipt_with(
+            &mut connection,
+            "notification-dismissal",
+            DEFAULT_WORKSPACE_ID,
+            "session-1",
+            1
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"].viewed_through_event_ordinal,
+        2
+    );
     assert!(
         persist_read_receipt_with(
             &mut connection,
@@ -2901,6 +3254,8 @@ fn interruption_summary_matches_full_projection_and_legacy_outcomes() {
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
     let mut materialized = materialized_session("session-1");
     materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "prompt".into(),
@@ -3273,7 +3628,7 @@ fn projection_page_apply_outruns_per_event_apply() {
 }
 
 #[test]
-fn deleting_operational_session_retains_relational_history_context() {
+fn deleting_an_operational_session_removes_its_prompts_and_keeps_its_context() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut state = State::default();
@@ -3289,17 +3644,20 @@ fn deleting_operational_session_retains_relational_history_context() {
         )
         .unwrap();
 
+    super::sessions::delete_session_from(&database, "session-1").unwrap();
     state.sessions.clear();
     save_state_to(&database, &state).unwrap();
 
-    let retained: String = connection
-        .query_row(
-            "SELECT text FROM prompt_history WHERE session_id = 'session-1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(retained, "remember this");
+    let count = |sql: &str| -> i64 { connection.query_row(sql, [], |row| row.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT count(*) FROM prompt_history WHERE session_id = 'session-1'"),
+        0,
+        "a destroyed session's prompts leave the history"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM session_contexts WHERE session_id = 'session-1'"),
+        1
+    );
 }
 
 #[test]
@@ -3325,6 +3683,14 @@ fn context_rejects_reassigning_a_session_to_another_project() {
 fn history_search_scopes_by_project_session_and_all_projects() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[
+            ("session-1", "project-1"),
+            ("session-2", "project-1"),
+            ("session-3", "project-2"),
+        ],
+    );
     for (session, bundle, sequence, text) in [
         ("session-1", "project-1", 1, "fix parser"),
         ("session-2", "project-1", 1, "fix renderer"),
@@ -3378,10 +3744,130 @@ fn history_search_scopes_by_project_session_and_all_projects() {
 }
 
 #[test]
+fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[
+            ("session-1", "project-1"),
+            ("session-2", "project-1"),
+            ("session-3", "project-2"),
+        ],
+    );
+    // Oldest to newest. Date order alone would put "alpha elsewhere" and
+    // "alpha project" ahead of this session's older prompt.
+    for (ordinal, (session, bundle, text)) in [
+        ("session-1", "project-1", "alpha session old"),
+        ("session-2", "project-1", "alpha project"),
+        ("session-3", "project-2", "alpha elsewhere"),
+        ("session-2", "project-1", "alpha session old"),
+        ("session-1", "project-1", "alpha session new"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        record_prompt_to(
+            &database,
+            session,
+            bundle,
+            ordinal as u64,
+            Some("2026-08-12T00:00:00Z"),
+            text,
+        )
+        .unwrap();
+    }
+    let search = |scope, query: &str| {
+        search_prompts_from(&database, "session-1", "project-1", scope, query)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect::<Vec<_>>()
+    };
+    let texts = |scope| search(scope, "alpha");
+    let texts_for = |query: &str| search(HistoryScope::All, query);
+
+    assert_eq!(
+        texts(HistoryScope::All),
+        [
+            "alpha session new",
+            "alpha session old",
+            "alpha project",
+            "alpha elsewhere"
+        ]
+    );
+    assert_eq!(
+        texts(HistoryScope::Project),
+        ["alpha session new", "alpha session old", "alpha project"]
+    );
+    assert_eq!(
+        texts(HistoryScope::Session),
+        ["alpha session new", "alpha session old"]
+    );
+
+    // Paging two at a time from each `next` cursor yields the same sequence,
+    // with no gaps and no repeats, including across tier boundaries, even
+    // when an unseen prompt is sent again while the search is open.
+    let expected = texts(HistoryScope::All);
+    let mut paged = Vec::new();
+    let mut after = None;
+    let mut resent = false;
+    loop {
+        let page = search_prompt_page_from(
+            &database,
+            "session-1",
+            "project-1",
+            HistoryScope::All,
+            "alpha",
+            after,
+            2,
+        )
+        .unwrap();
+        assert!(page.entries.len() <= 2);
+        paged.extend(page.entries.into_iter().map(|entry| entry.text));
+        if !resent {
+            // Hard-won: 8e9b542d5: a text resent between pages moved past the cursor and was never listed
+            record_prompt_to(
+                &database,
+                "session-1",
+                "project-1",
+                50,
+                Some("2026-08-12T00:00:00Z"),
+                "alpha elsewhere",
+            )
+            .unwrap();
+            resent = true;
+        }
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(paged, expected);
+
+    assert!(
+        texts_for("al").is_empty(),
+        "too short for the trigram index"
+    );
+    assert!(texts_for("say \"alpha\"").is_empty());
+}
+
+#[test]
 fn abandoned_prompts_are_searchable_in_session_and_project_history() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    live_sessions(
+        &database,
+        &[("session-1", "project-1"), ("session-2", "project-1")],
+    );
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "unfinished draft",
+    )
+    .unwrap();
     record_prompt_to(
         &database,
         "session-2",
@@ -3444,6 +3930,27 @@ fn abandoned_prompts_are_searchable_in_session_and_project_history() {
 fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[
+            ("session-1", "project-1"),
+            ("session-2", "project-1"),
+            ("session-3", "project-1"),
+        ],
+    );
+    // Hard-won: 9d9cc05e2: a retried command recorded its prompt again and moved it to the front
+    for (command_id, text) in [("cmd-1", "first"), ("cmd-2", "second"), ("cmd-1", "first")] {
+        record_user_prompt_to(&database, "session-3", command_id, text).unwrap();
+    }
+    assert_eq!(
+        session_prompts_from(&database, "session-3")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect::<Vec<_>>(),
+        ["second", "first"],
+        "the retry is the same prompt, not a newer one"
+    );
     record_prompt_to(
         &database,
         "session-1",
@@ -3453,9 +3960,30 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
         "submitted prompt",
     )
     .unwrap();
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "submitted prompt").unwrap();
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "submitted prompt",
+    )
+    .unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "unfinished draft",
+    )
+    .unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "unfinished draft",
+    )
+    .unwrap();
     // The delivered prompt's ordinal remains its idempotency key after the
     // nullable-ordinal migration.
     record_prompt_to(
@@ -3487,17 +4015,11 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
         ]
     );
 
-    record_abandoned_prompt_to(&database, "session-2", "project-1", " \n\t ").unwrap();
+    record_prompt_text_to(&database, "session-2", "project-1", None, " \n\t ").unwrap();
     assert!(
-        search_prompts_from(
-            &database,
-            "session-2",
-            "project-1",
-            HistoryScope::Session,
-            "",
-        )
-        .unwrap()
-        .is_empty()
+        session_prompts_from(&database, "session-2")
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -3505,6 +4027,7 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
 fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(&database, &[("session-1", "project-1")]);
     record_prompt_to(
         &database,
         "session-1",
@@ -3564,28 +4087,6 @@ fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
         "fix renderer",
     )
     .unwrap();
-}
-
-#[test]
-fn prompt_recording_is_idempotent_by_session_event_ordinal() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    for _ in 0..2 {
-        record_prompt_to(
-            &database,
-            "session-1",
-            "project-1",
-            7,
-            Some("2026-08-12T00:00:00Z"),
-            "ship it",
-        )
-        .unwrap();
-    }
-    let connection = open(&database).unwrap();
-    let count: i64 = connection
-        .query_row("SELECT count(*) FROM prompt_history", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(count, 1);
 }
 
 #[test]
@@ -4119,11 +4620,34 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
     let mut stopped = session("session-stopped", "project-1");
     stopped.workspace_id = source.id.clone();
     save_session_to(&database, &stopped).unwrap();
+    save_terminal_draft_in(
+        &mut open(&database).unwrap(),
+        &stopped.id,
+        "terminal-a",
+        1234,
+        1,
+        &DetachedSessionDraft {
+            text: "kept across resume placement".into(),
+            inherited_input: None,
+        },
+    )
+    .unwrap();
+    let draft_id = list_detached_drafts_at(&database, &source.id).unwrap()[0]
+        .id
+        .clone();
 
     reassign_resumable_session_workspace_at(&database, &stopped.id, &destination.id).unwrap();
     assert_eq!(
         workspace_for_session_at(&database, &stopped.id).unwrap(),
         Some(destination.id.clone())
+    );
+    let moved_drafts = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(moved_drafts.len(), 1);
+    assert_eq!(moved_drafts[0].id, draft_id);
+    assert!(
+        list_detached_drafts_at(&database, &source.id)
+            .unwrap()
+            .is_empty()
     );
     reassign_resumable_session_workspace_at(&database, &stopped.id, &destination.id).unwrap();
 
@@ -4137,6 +4661,41 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
     assert!(
         reassign_resumable_session_workspace_at(&database, &stopped.id, "missing-workspace")
             .is_err()
+    );
+}
+
+#[test]
+fn assigning_new_session_workspace_moves_managed_terminal_draft() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let destination = create_workspace_at(&database, "Assigned").unwrap();
+    let record = session("session-assigned", "project-1");
+    save_session_to(&database, &record).unwrap();
+    save_terminal_draft_in(
+        &mut open(&database).unwrap(),
+        &record.id,
+        "terminal-a",
+        1234,
+        1,
+        &DetachedSessionDraft {
+            text: "keep across initial placement".into(),
+            inherited_input: None,
+        },
+    )
+    .unwrap();
+    let draft_id = list_detached_drafts_at(&database, DEFAULT_WORKSPACE_ID).unwrap()[0]
+        .id
+        .clone();
+
+    assign_new_session_workspace_at(&database, &record.id, &destination.id).unwrap();
+
+    let drafts = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].id, draft_id);
+    assert!(
+        list_detached_drafts_at(&database, DEFAULT_WORKSPACE_ID)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -4233,12 +4792,12 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
         save_session_to(&database, &record).unwrap();
         set_session_draft_input_at(&database, &record.id, &record.draft_input).unwrap();
 
-        let saved = save_detached_session_draft_in(
+        save_terminal_draft_in(
             &mut open(&database).unwrap(),
-            &workspace.id,
             &record.id,
             "tui-client-a",
             1234,
+            1,
             &DetachedSessionDraft {
                 text: current.into(),
                 inherited_input: Some(record.draft_input.clone()),
@@ -4250,7 +4809,6 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
         assert!(reloaded.sessions[&record.id].draft_input.is_empty());
         let drafts = list_detached_drafts_at(&database, &workspace.id).unwrap();
         if current.is_empty() {
-            assert!(saved.is_none());
             assert!(drafts.is_empty());
         } else {
             assert_eq!(drafts.len(), 1);
@@ -4258,7 +4816,7 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
             assert_eq!(drafts[0].source, "tui-client-a");
             assert_eq!(drafts[0].owner_pid, Some(1234));
             // Explicit recovery is still supported after retiring the seed.
-            recover_detached_draft_at(&database, &saved.unwrap()).unwrap();
+            recover_detached_draft_at(&database, &drafts[0].id).unwrap();
             assert_eq!(
                 load_state_from(&database).unwrap().sessions[&record.id].draft_input,
                 current
@@ -4279,12 +4837,12 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
     set_session_draft_input_at(&database, &record.id, &record.draft_input).unwrap();
     let mut connection = open(&database).unwrap();
 
-    save_detached_session_draft_in(
+    save_terminal_draft_in(
         &mut connection,
-        &workspace.id,
         &record.id,
         "tui-client-a",
         1234,
+        1,
         &DetachedSessionDraft {
             text: String::new(),
             inherited_input: Some("older inherited input".into()),
@@ -4296,12 +4854,12 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
         record.draft_input
     );
 
-    let result = save_detached_session_draft_in(
+    let result = save_terminal_draft_in(
         &mut connection,
-        &workspace.id,
         &record.id,
-        "",
-        1234,
+        "failing-client",
+        0,
+        1,
         &DetachedSessionDraft {
             text: "must survive the failed save".into(),
             inherited_input: Some(record.draft_input.clone()),
@@ -4319,8 +4877,9 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
     );
 }
 
+// Hard-won: #1486: a moved composer must retire its inherited seed without a client workspace snapshot.
 #[test]
-fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
+fn a_moved_session_retires_its_inherited_seed_on_first_terminal_save() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let owner = create_workspace_at(&database, "Owner").unwrap();
@@ -4329,14 +4888,15 @@ fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
     record.workspace_id = owner.id.clone();
     save_session_to(&database, &record).unwrap();
     set_session_draft_input_at(&database, &record.id, "inherited input").unwrap();
+    set_sessions_workspace_at(&database, std::slice::from_ref(&record.id), &previous.id).unwrap();
 
-    for text in ["", "unsent in the previous workspace"] {
-        save_detached_session_draft_in(
+    for (revision, text) in [(1, ""), (2, "unsent after moving")] {
+        save_terminal_draft_in(
             &mut open(&database).unwrap(),
-            &previous.id,
             &record.id,
             "old-client",
             1234,
+            revision,
             &DetachedSessionDraft {
                 text: text.into(),
                 inherited_input: Some("inherited input".into()),
@@ -4345,13 +4905,203 @@ fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
         .unwrap();
         assert_eq!(
             load_state_from(&database).unwrap().sessions[&record.id].draft_input,
-            "inherited input"
+            ""
         );
     }
-    // Draft durability stays independent of stale workspace/read receipts.
     let drafts = list_detached_drafts_at(&database, &previous.id).unwrap();
     assert_eq!(drafts.len(), 1);
-    assert_eq!(drafts[0].text, "unsent in the previous workspace");
+    assert_eq!(drafts[0].text, "unsent after moving");
+    assert!(
+        list_detached_drafts_at(&database, &owner.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// Hard-won: #1486: workspace snapshots could block inherited-seed retirement after a move.
+#[test]
+fn moving_session_keeps_terminal_draft_canonical_across_workspace_close_and_late_saves() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let source = create_workspace_at(&database, "Source").unwrap();
+    let destination = create_workspace_at(&database, "Destination").unwrap();
+    let mut record = session("session-moved", "project-1");
+    record.workspace_id = source.id.clone();
+    save_session_to(&database, &record).unwrap();
+
+    let save = |revision, text: &str| {
+        save_terminal_draft_in(
+            &mut open(&database).unwrap(),
+            &record.id,
+            "terminal-a",
+            1234,
+            revision,
+            &DetachedSessionDraft {
+                text: text.into(),
+                inherited_input: None,
+            },
+        )
+    };
+    save(1, "unchanged composer").unwrap();
+    let draft_id = list_detached_drafts_at(&database, &source.id).unwrap()[0]
+        .id
+        .clone();
+
+    set_sessions_workspace_at(&database, std::slice::from_ref(&record.id), &destination.id)
+        .unwrap();
+    let moved = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].id, draft_id);
+    assert_eq!(moved[0].text, "unchanged composer");
+    close_workspace_at(&database, &source.id).unwrap();
+
+    // A delayed old-workspace edit follows the session's canonical placement.
+    save(2, "newer edit").unwrap();
+    // A stale lower revision cannot restore the removed source placement.
+    save(1, "old text").unwrap();
+    save(3, "latest edit").unwrap();
+
+    assert!(
+        list_detached_drafts_at(&database, &source.id)
+            .unwrap()
+            .is_empty()
+    );
+    let latest = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].id, draft_id);
+    assert_eq!(latest[0].text, "latest edit");
+    let connection = open(&database).unwrap();
+    let (revision, workspace_id): (i64, String) = connection
+        .query_row(
+            "SELECT revision, workspace_id FROM detached_drafts WHERE draft_id = ?1",
+            [&draft_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(revision, 3);
+    assert_eq!(workspace_id, destination.id);
+}
+
+#[test]
+fn terminal_draft_revisions_keep_one_row_and_ignore_late_cleared_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Drafts").unwrap();
+    let mut record = session("session-1", "project-1");
+    record.workspace_id = workspace.id.clone();
+    record.draft_input = "adopt me".into();
+    save_session_to(&database, &record).unwrap();
+
+    let save = |revision, text: &str| {
+        save_terminal_draft_in(
+            &mut open(&database).unwrap(),
+            &record.id,
+            "terminal-a",
+            1234,
+            revision,
+            &DetachedSessionDraft {
+                text: text.into(),
+                inherited_input: (revision == 1).then(|| "adopt me".into()),
+            },
+        )
+    };
+    save(1, "first draft").unwrap();
+    let row_id = list_detached_drafts_at(&database, &workspace.id).unwrap()[0]
+        .id
+        .clone();
+    save(2, "newer draft").unwrap();
+    save(3, "").unwrap();
+    save(2, "late nonempty draft").unwrap();
+
+    assert!(
+        list_detached_drafts_at(&database, &workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    let connection = open(&database).unwrap();
+    let (id, revision, text): (String, i64, String) = connection
+        .query_row(
+            "SELECT draft_id, revision, text FROM detached_drafts
+              WHERE source='terminal-a' AND workspace_id=?1 AND session_id=?2",
+            params![workspace.id, record.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(id, row_id);
+    assert_eq!(revision, 3);
+    assert!(text.is_empty());
+    assert!(
+        load_state_from(&database).unwrap().sessions[&record.id]
+            .draft_input
+            .is_empty()
+    );
+
+    save(4, "terminal-a restored").unwrap();
+    save_terminal_draft_in(
+        &mut open(&database).unwrap(),
+        &record.id,
+        "terminal-b",
+        5678,
+        1,
+        &DetachedSessionDraft {
+            text: "independent client".into(),
+            inherited_input: None,
+        },
+    )
+    .unwrap();
+    let visible = list_detached_drafts_at(&database, &workspace.id).unwrap();
+    assert_eq!(visible.len(), 2);
+}
+
+#[test]
+fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Drafts").unwrap();
+    let mut record = session("session-1", "project-1");
+    record.workspace_id = workspace.id.clone();
+    record.draft_input = "seed".into();
+    save_session_to(&database, &record).unwrap();
+    let save = |revision, text: &str| {
+        save_terminal_draft_in(
+            &mut open(&database).unwrap(),
+            &record.id,
+            "terminal-a",
+            1234,
+            revision,
+            &DetachedSessionDraft {
+                text: text.into(),
+                inherited_input: Some("seed".into()),
+            },
+        )
+    };
+    save(1, "seed").unwrap();
+    let draft_id = list_detached_drafts_at(&database, &workspace.id).unwrap()[0]
+        .id
+        .clone();
+    recover_detached_draft_at(&database, &draft_id).unwrap();
+
+    // Lost ACK retry after recovery must not compare-clear the recovered seed.
+    save(1, "seed").unwrap();
+    save(2, "seed").unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].draft_input,
+        "seed"
+    );
+    assert!(
+        list_detached_drafts_at(&database, &workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    save(3, "new unsent edit").unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].draft_input,
+        "seed"
+    );
+    let visible = list_detached_drafts_at(&database, &workspace.id).unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, draft_id);
+    assert_eq!(visible[0].text, "new unsent edit");
 }
 
 #[test]
@@ -4397,66 +5147,6 @@ fn detached_drafts_keep_source_pid_and_workspace_without_overwriting_each_other(
 }
 
 #[test]
-fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
-    use mj_core::review::driver::PendingForward;
-    use mj_core::review::lanes::PriorReviewContext;
-
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-
-    assert_eq!(
-        turn_review_state_in(&database, "session-1").unwrap(),
-        TurnReviewState::default(),
-        "an unreviewed session starts with no baseline"
-    );
-
-    let state = TurnReviewState {
-        child_session_id: Some("reviewer-child".into()),
-        baselines: std::collections::BTreeMap::from([(
-            std::path::PathBuf::from("/workspace/app"),
-            "1234abcd".to_string(),
-        )]),
-        reviewed_through_ordinal: 42,
-        prior_review: Some(PriorReviewContext {
-            synthesis: "[P1] src/a.rs:1 -- broken".to_string(),
-            evidence: Default::default(),
-        }),
-        active: Some("{\"phase\":\"running\"}".to_string()),
-        pending_forward: Some(PendingForward {
-            synthesis: "[P1] src/a.rs:1 -- broken".to_string(),
-            evidence: Default::default(),
-            command_id: "turn-review-forward-1".to_string(),
-            trees: std::collections::BTreeMap::from([(
-                std::path::PathBuf::from("/workspace/app"),
-                "5678efgh".to_string(),
-            )]),
-            reviewed_through_ordinal: 43,
-            // Stored and read back: a quick review's handoff must retry with
-            // the same "unverified" note after a restart.
-            provenance: mj_core::review::driver::FindingsProvenance::SingleReviewer,
-        }),
-        push_findings: None,
-        active_group: None,
-    };
-    save_turn_review_state_in(&database, "session-1", &state).unwrap();
-    assert_eq!(turn_review_state_in(&database, "session-1").unwrap(), state);
-
-    // On recovery the in-flight review is dropped without advancing the
-    // baseline, so the next review still covers the same changes.
-    let recovered = TurnReviewState {
-        active: None,
-        ..state.clone()
-    };
-    save_turn_review_state_in(&database, "session-1", &recovered).unwrap();
-    let restored = turn_review_state_in(&database, "session-1").unwrap();
-    assert_eq!(restored.active, None);
-    assert_eq!(restored.baselines, state.baselines);
-    assert_eq!(restored.reviewed_through_ordinal, 42);
-    assert_eq!(restored.pending_forward, state.pending_forward);
-}
-
-#[test]
 fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
@@ -4488,73 +5178,122 @@ fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
     assert!(restored.active.is_none());
 }
 
-/// A review interrupted by a daemon restart is cancelled, not resumed, and the
-/// baseline it never advanced stays where it was.
 #[test]
-fn clearing_interrupted_reviews_keeps_every_baseline() {
-    use mj_core::review::driver::PendingForward;
+fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-    save_session_to(&database, &session("session-2", "project-1")).unwrap();
-
-    let baselines = std::collections::BTreeMap::from([(
-        std::path::PathBuf::from("/workspace/app"),
-        "1234abcd".to_string(),
-    )]);
-    save_turn_review_state_in(
-        &database,
-        "session-1",
-        &TurnReviewState {
-            child_session_id: Some("reviewer-child".into()),
-            baselines: baselines.clone(),
-            reviewed_through_ordinal: 42,
-            prior_review: None,
-            active: Some("{\"opened_at_ordinal\":42}".to_string()),
-            pending_forward: Some(PendingForward {
-                synthesis: "[P1] broken".to_string(),
-                evidence: Default::default(),
-                command_id: "forward-1".to_string(),
-                trees: baselines.clone(),
-                reviewed_through_ordinal: 42,
-                provenance: Default::default(),
-            }),
-            push_findings: None,
-            active_group: None,
+    let database = directory.path().join("review.sqlite3");
+    let owner = "async-review-owner";
+    save_session_to(&database, &session(owner, "project-1")).unwrap();
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
         },
-    )
-    .unwrap();
-    save_turn_review_state_in(
-        &database,
-        "session-2",
-        &TurnReviewState {
-            child_session_id: Some("reviewer-child".into()),
-            baselines: baselines.clone(),
-            reviewed_through_ordinal: 7,
-            prior_review: None,
-            active: None,
-            pending_forward: None,
-            push_findings: None,
-            active_group: None,
-        },
-    )
-    .unwrap();
-
-    let interrupted = clear_interrupted_turn_reviews_in(&database).unwrap();
-    assert_eq!(interrupted, vec!["session-1".to_string()]);
-
-    let restored = turn_review_state_in(&database, "session-1").unwrap();
-    assert_eq!(restored.active, None);
-    assert_eq!(
-        restored.baselines, baselines,
-        "the baseline is left alone, so the next review covers the same change"
+        "async-review".into(),
+        std::num::NonZeroUsize::new(3).unwrap(),
     );
-    assert_eq!(restored.reviewed_through_ordinal, 42);
-    assert!(restored.pending_forward.is_some());
+    driver.delta_captured(
+        ["/workspace/app", "/workspace/other"]
+            .into_iter()
+            .map(|root| mj_core::relay::RepoDelta {
+                root: root.into(),
+                base_commit: Some("basecommit".into()),
+                head_commit: Some("headcommit".into()),
+                baseline_tree: Some("before".into()),
+                current_tree: "after".into(),
+                patch: "+one".into(),
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let mut state = TurnReviewState {
+        active: Some("async-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            brief_writer: None,
+            driver: driver.snapshot(),
+            reviewers: vec![Default::default(); 3],
+            registrations: (1..=3)
+                .map(|index| ReviewerRegistration {
+                    role: format!("reviewer-{index}"),
+                    request_key: format!("review-key-{index}"),
+                    child_session_id: Some(format!("review-child-{index}")),
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    let command = driver.snapshot().roles[0].command_id.clone();
+    driver.role_turn_completed(&command, "review-child-1", "No findings.");
+    state.active_group.as_mut().unwrap().driver = driver.snapshot();
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    let before_findings = state.clone();
+    let connection = open(&database).unwrap();
+    let outbox = || {
+        connection
+            .prepare("SELECT event_json FROM mailbox_outbox ORDER BY event_key")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| {
+                serde_json::from_str::<mj_core::mailbox::MailboxEvent>(&row.unwrap()).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(outbox().is_empty(), "clean outcomes do not send partials");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_second_review_partial BEFORE INSERT ON mailbox_outbox
+             WHEN (SELECT COUNT(*) FROM mailbox_outbox) > 0
+             BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END;",
+        )
+        .unwrap();
+    let command = driver.snapshot().roles[1].command_id.clone();
+    driver.role_turn_completed(&command, "review-child-2", "The parser drops queued input.");
+    state.active_group.as_mut().unwrap().driver = driver.snapshot();
+    let error = save_turn_review_state_in(&database, owner, &state).unwrap_err();
+    assert!(error.to_string().contains("outbox unavailable"));
     assert_eq!(
-        clear_interrupted_turn_reviews_in(&database).unwrap(),
-        vec!["session-1".to_string()],
-        "a pending handoff remains recoverable until its command is accepted"
+        turn_review_state_in(&database, owner).unwrap(),
+        before_findings
+    );
+    assert!(
+        outbox().is_empty(),
+        "the first repository's message rolls back too"
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_second_review_partial")
+        .unwrap();
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    let messages = outbox();
+    assert_eq!(messages.len(), 2, "one partial per reviewed repository");
+    for message in &messages {
+        let text = mj_core::mailbox::render_mailbox_event(message);
+        assert!(text.starts_with("Review 2/3 — partial result"));
+        assert!(text.contains("The parser drops queued input."));
+        assert!(text.contains("basecommit..headcommit"));
+    }
+    let mut restored = turn_review_state_in(&database, owner).unwrap();
+    save_turn_review_state_in(&database, owner, &restored).unwrap();
+    assert_eq!(
+        outbox(),
+        messages,
+        "reloading and saving sends no duplicates"
+    );
+    let mut driver = mj_review::driver::TurnReviewDriver::restore(
+        restored.active_group.as_ref().unwrap().driver.clone(),
+    )
+    .unwrap();
+    let command = driver.snapshot().roles[2].command_id.clone();
+    driver.role_turn_completed(&command, "review-child-3", "No findings.");
+    restored.active_group.as_mut().unwrap().driver = driver.snapshot();
+    save_turn_review_state_in(&database, owner, &restored).unwrap();
+    assert_eq!(
+        outbox(),
+        messages,
+        "the final result uses the existing final delivery"
     );
 }
 
@@ -4566,9 +5305,8 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
     let seed = mj_core::review::driver::TurnReviewSeed {
         task: "inspect the parser".into(),
         user_messages: Vec::new(),
-        baselines: Default::default(),
-        through_ordinal: 17,
-        prior_review: None,
+        declined: Vec::new(),
+        brief: None,
     };
     let (driver, _) = mj_review::driver::TurnReviewDriver::start(
         seed,
@@ -4576,9 +5314,9 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         std::num::NonZeroUsize::new(2).unwrap(),
     );
     let group = mj_core::storage::ActiveReviewGroup {
+        brief_writer: None,
         driver: driver.snapshot(),
-        reviewer: Default::default(),
-        scope: mj_core::relay::CaptureScope::TurnDelta,
+        reviewers: vec![Default::default(); 2],
         registrations: vec![
             mj_core::storage::ReviewerRegistration {
                 role: "reviewer-1".into(),
@@ -4597,6 +5335,14 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         active_group: Some(group),
         ..Default::default()
     };
+    save_turn_review_state_in(
+        &database,
+        "session-group",
+        &TurnReviewState {
+            ..Default::default()
+        },
+    )
+    .unwrap();
     save_turn_review_state_in(&database, "session-group", &state).unwrap();
     assert_eq!(
         active_review_groups_in(&database).unwrap(),
@@ -4612,6 +5358,406 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         state
     );
 }
+
+// Hard-won: ee65b804b: a follow-up for a never-reviewed session had no row to mark and was never durable.
+
+/// A finished review keeps each reviewer's model, effort, profile, handback and
+/// verdict after its child session is destroyed and its report pruned.
+#[test]
+fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("review-reports.sqlite3");
+    let owner = "review-owner";
+    save_session_to(&database, &session(owner, "project-1")).unwrap();
+    let children = ["review-child-1", "review-child-2"];
+    for child in children {
+        save_session_to(&database, &session(child, "project-1")).unwrap();
+    }
+    let seed = mj_core::review::driver::TurnReviewSeed {
+        task: "inspect the parser".into(),
+        user_messages: Vec::new(),
+        declined: Vec::new(),
+        brief: None,
+    };
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        seed,
+        "finished-review".into(),
+        std::num::NonZeroUsize::new(2).unwrap(),
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    let commands = driver
+        .snapshot()
+        .roles
+        .iter()
+        .map(|slot| slot.command_id.clone())
+        .collect::<Vec<_>>();
+    for (index, (child, message)) in children
+        .iter()
+        .zip(["The parser drops queued input.", "No findings."])
+        .enumerate()
+    {
+        record_subagent_handback_to(
+            &database,
+            child,
+            &mj_core::subagent::SubagentHandback {
+                command_id: format!("prompt-{index}"),
+                message: message.into(),
+                recorded_at_ms: 100 + index as i64,
+            },
+        )
+        .unwrap();
+    }
+    driver.role_turn_completed(&commands[0], children[0], "The parser drops queued input.");
+    driver.role_turn_completed(&commands[1], children[1], "No findings.");
+    let reviewers = vec![
+        mj_core::review::settings::ResolvedReviewSettings {
+            profile: "codex".into(),
+            main: mj_core::review::settings::ReviewModelSettings {
+                model: Some("gpt-6-terra".into()),
+                effort: Some("high".into()),
+                fast_mode: false,
+            },
+            autoconfigured: false,
+        },
+        mj_core::review::settings::ResolvedReviewSettings {
+            profile: "claude".into(),
+            main: mj_core::review::settings::ReviewModelSettings {
+                model: Some("claude-sonnet".into()),
+                effort: Some("medium".into()),
+                fast_mode: false,
+            },
+            autoconfigured: true,
+        },
+    ];
+    let state = TurnReviewState {
+        active: Some("finished-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers,
+            registrations: children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| ReviewerRegistration {
+                    role: format!("reviewer-{}", index + 1),
+                    request_key: format!("review-key-{index}"),
+                    child_session_id: Some((*child).to_owned()),
+                })
+                .collect(),
+            brief_writer: None,
+        }),
+        ..Default::default()
+    };
+    save_reviewer_outcome_in(
+        &database,
+        owner,
+        &state,
+        vec![
+            super::AcceptedReport {
+                role: "reviewer-1".into(),
+                text: "The parser drops queued input.".into(),
+            },
+            super::AcceptedReport {
+                role: "reviewer-2".into(),
+                text: "No findings.".into(),
+            },
+        ],
+    )
+    .unwrap();
+    let turn = MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
+        diagnostic: None,
+        usage: Some(mj_core::usage::TokenUsage {
+            provider_details: None,
+            scope: mj_core::usage::UsageScope::Turn,
+            total_tokens: 120,
+            input_tokens: 100,
+            output_tokens: 20,
+            thought_tokens: None,
+            cached_read_tokens: None,
+            cached_write_tokens: None,
+        }),
+        command_id: "prompt-0".into(),
+        accepted_ordinal: Some(1),
+        turn_start_position: Some(1),
+        completed_ordinal: 1,
+        completed_at_ms: 200,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        },
+    };
+    open(&database)
+        .unwrap()
+        .execute(
+            "INSERT INTO session_turn_usage(
+                 session_id, command_id, completed_ordinal, turn_start_position, body
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                children[0],
+                turn.command_id,
+                turn.completed_ordinal,
+                turn.turn_start_position,
+                super::serialize_turn_outcome(&turn).unwrap()
+            ],
+        )
+        .unwrap();
+    let closed = TurnReviewState {
+        active: None,
+        active_group: None,
+        ..state.clone()
+    };
+    // A reviewer's child can record another command's handback afterwards. The
+    // text the review settled from is the authority and must not be replaced.
+    record_subagent_handback_to(
+        &database,
+        children[0],
+        &mj_core::subagent::SubagentHandback {
+            command_id: "a-later-command".into(),
+            message: "Findings from a later task.".into(),
+            recorded_at_ms: 300,
+        },
+    )
+    .unwrap();
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    save_reviewer_outcome_in(&database, owner, &state, Vec::new()).unwrap();
+    close_turn_review_state_in(
+        &database,
+        owner,
+        &closed,
+        FinishedReviewResolution::Completed,
+    )
+    .unwrap();
+    // The reviewer sessions and their reports are gone, as they are after the
+    // review host's destroy path.
+    for child in children {
+        delete_session_from(&database, child).unwrap();
+    }
+    let connection = open(&database).unwrap();
+    connection
+        .execute("DELETE FROM subagent_sessions", [])
+        .unwrap();
+    connection
+        .execute("DELETE FROM subagent_handbacks", [])
+        .unwrap();
+
+    let finished = finished_review_in(&database, owner, None)
+        .unwrap()
+        .expect("the finished review survives its reviewer sessions");
+    assert_eq!(finished.review_id, "finished-review");
+    assert_eq!(finished.resolution, FinishedReviewResolution::Completed);
+    assert_eq!(finished.roles.len(), 2);
+    let first = &finished.roles[0];
+    assert_eq!(first.role, "reviewer-1");
+    assert_eq!(first.label, "Reviewer 1");
+    assert_eq!(first.child_session_id.as_deref(), Some(children[0]));
+    assert_eq!(first.profile, "codex");
+    assert_eq!(first.model.as_deref(), Some("gpt-6-terra"));
+    assert_eq!(first.effort.as_deref(), Some("high"));
+    assert_eq!(
+        first.handback.as_deref(),
+        Some("The parser drops queued input."),
+        "a later handback for another command never replaces the accepted one"
+    );
+    assert!(matches!(
+        first.verdict.as_ref(),
+        Some(mj_core::review::verdict::ReviewVerdict::Findings { .. })
+    ));
+    assert_eq!(
+        first
+            .turn
+            .as_ref()
+            .and_then(|turn| turn.usage.as_ref())
+            .map(|usage| usage.total_tokens),
+        Some(120)
+    );
+    let second = &finished.roles[1];
+    assert_eq!(second.profile, "claude");
+    assert_eq!(second.model.as_deref(), Some("claude-sonnet"));
+    assert_eq!(second.handback.as_deref(), Some("No findings."));
+    assert_eq!(
+        second.verdict,
+        Some(mj_core::review::verdict::ReviewVerdict::Clean)
+    );
+    assert!(second.turn.is_none());
+    assert!(
+        finished_review_in(&database, owner, Some("finished-review"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        finished_review_in(&database, owner, Some("missing"))
+            .unwrap()
+            .is_none()
+    );
+    // Destroying the requesting session removes its reports with it, so a
+    // destroyed session cannot leave unreachable handbacks behind.
+    delete_session_from(&database, owner).unwrap();
+    let remaining: i64 = open(&database)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM review_reports", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+/// A reviewer that ended without handing back fails its role. Its child may
+/// still hold a handback from an earlier command, which the review host
+/// rejected as this role's outcome; the finished report must not present that
+/// text as this review's findings.
+#[test]
+fn a_failed_reviewer_keeps_no_handback_from_another_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("failed-reviewer.sqlite3");
+    let owner = "failed-review-owner";
+    let child = "failed-review-child";
+    for id in [owner, child] {
+        save_session_to(&database, &session(id, "project-1")).unwrap();
+    }
+    record_subagent_handback_to(
+        &database,
+        child,
+        &mj_core::subagent::SubagentHandback {
+            command_id: "another-command".into(),
+            message: "Findings from an earlier task.".into(),
+            recorded_at_ms: 100,
+        },
+    )
+    .unwrap();
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
+        },
+        "failed-review".into(),
+        std::num::NonZeroUsize::MIN,
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    driver.role_failed(
+        "reviewer-1",
+        Some(child),
+        "the reviewer's session ended before it handed back",
+    );
+    let state = TurnReviewState {
+        active: Some("failed-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![Default::default()],
+            registrations: vec![ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "review-key".into(),
+                child_session_id: Some(child.into()),
+            }],
+            brief_writer: None,
+        }),
+        ..Default::default()
+    };
+    close_turn_review_state_in(&database, owner, &state, FinishedReviewResolution::Failed).unwrap();
+    let finished = finished_review_in(&database, owner, None)
+        .unwrap()
+        .expect("the failed review is recorded");
+    assert_eq!(finished.resolution, FinishedReviewResolution::Failed);
+    assert_eq!(finished.roles.len(), 1);
+    assert!(matches!(
+        finished.roles[0].verdict,
+        Some(mj_core::review::verdict::ReviewVerdict::Failed { .. })
+    ));
+    assert!(
+        finished.roles[0].handback.is_none(),
+        "a rejected handback is not this review's output"
+    );
+}
+
+/// A review cancelled after its reviewer reached a verdict must be reported as
+/// cancelled. The host clears the active group and passes its own decision,
+/// while the stored group still carries the verdict it never delivered.
+#[test]
+fn a_cancelled_review_keeps_the_host_decision_over_its_stored_verdict() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("cancelled-review.sqlite3");
+    let owner = "cancelled-review-owner";
+    let child = "cancelled-review-child";
+    for id in [owner, child] {
+        save_session_to(&database, &session(id, "project-1")).unwrap();
+    }
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
+        },
+        "cancelled-review".into(),
+        std::num::NonZeroUsize::MIN,
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    let command = driver.snapshot().roles[0].command_id.clone();
+    driver.role_turn_completed(&command, child, "No findings.");
+    let state = TurnReviewState {
+        active: Some("cancelled-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![Default::default()],
+            registrations: vec![ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "review-key".into(),
+                child_session_id: Some(child.into()),
+            }],
+            brief_writer: None,
+        }),
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    // The verdict is in the stored driver; the host decides to cancel it.
+    let cleared = TurnReviewState {
+        active: None,
+        active_group: None,
+        ..state.clone()
+    };
+    close_turn_review_state_in(
+        &database,
+        owner,
+        &cleared,
+        FinishedReviewResolution::Cancelled,
+    )
+    .unwrap();
+    let finished = finished_review_in(&database, owner, None)
+        .unwrap()
+        .expect("the cancelled review is recorded");
+    assert_eq!(finished.resolution, FinishedReviewResolution::Cancelled);
+    assert_eq!(finished.roles.len(), 1);
+    assert_eq!(
+        finished.roles[0].verdict,
+        Some(mj_core::review::verdict::ReviewVerdict::Clean),
+        "the reviewer's own outcome is still recorded"
+    );
+}
+
+// Hard-won: ee65b804b: a follow-up for a never-reviewed session had no row to mark and was never durable.
 
 /// A projection page must carry the whole turn record, not just the transcript
 /// rows: the wait endpoint reads the outcome back from these columns long after
@@ -4674,6 +5820,8 @@ fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal(
         execution: Some(MaterializedExecutionState::Idle),
         active_turn: Some(None),
         last_turn_outcome: Some(MaterializedTurnOutcome {
+            work_facts: None,
+            answered_through: None,
             diagnostic: None,
             usage: None,
             command_id: "prompt-1".into(),
@@ -4826,7 +5974,9 @@ fn a_turn_summary_counts_the_tool_calls_the_turn_made() {
         item(
             position,
             TranscriptBody::Tool {
-                call: serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}),
+                call:
+                    (serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}))
+                        .into(),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
                 presentation: None,
@@ -4943,6 +6093,8 @@ fn a_finished_turn_reports_its_own_answer_and_not_a_later_harness_notice() {
             execution: Some(MaterializedExecutionState::Idle),
             active_turn: Some(None),
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                work_facts: None,
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "prompt-1".into(),
@@ -5195,7 +6347,7 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
     item.stable_id = "tool:call-7".into();
     item.latest_content_event_ordinal = None;
     item.body = TranscriptBody::Tool {
-        call: serde_json::json!({"toolCallId": "call-7", "status": "completed"}),
+        call: serde_json::json!({"toolCallId": "call-7", "status": "completed"}).into(),
         terminal_outputs: Vec::new(),
         terminal_refs: Vec::new(),
         presentation: None,
@@ -5359,7 +6511,7 @@ pub(super) fn register_test_subagent(
 ) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction()?;
-    insert_session(&tx, session)?;
+    super::state_io::insert_session_with_parent(&tx, session, Some(&relation.parent_session_id))?;
     super::usage::record_child_accounting(&tx, relation)?;
     tx.execute(
         "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,?2,?3,?4)",
@@ -5375,7 +6527,6 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     child.title = "child session".into();
     let mut state = State::default();
     state.sessions.insert(parent.id.clone(), parent.clone());
-    state.sessions.insert(child.id.clone(), child.clone());
     let relation = mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
@@ -5395,6 +6546,7 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     };
     save_state_to(path, &state).unwrap();
     register_test_subagent(path, &child, &relation).unwrap();
+    state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation.into());
     save_state_to(path, &state).unwrap();
     (parent, child)
@@ -5417,6 +6569,7 @@ fn metadata_state_saves_preserve_complete_subagent_launch_intent() {
     launch.kind = mj_core::subagent::SubagentKind::Reviewer;
     launch.initial_prompt = "private durable launch 🙂\n".repeat(10_000);
     launch.reviewer_launch = Some(mj_core::worker_launch::ReviewerLaunchConfig {
+        role: mj_core::worker_launch::ReviewChildRole::Reviewer,
         profile_id: "reviewer".into(),
         harness: mj_core::config::HarnessKind::Codex,
         bridge_command: "review-bridge".into(),
@@ -5503,6 +6656,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
         } else {
             (with_child, without_child)
         };
+        if creating_child {
+            super::sessions::delete_session_from(&path, &child.id).unwrap();
+        }
         save_state_to(&path, &before).unwrap();
         let writer_path = path.clone();
         let committed = after.clone();
@@ -5512,6 +6668,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
                 // WAL permits this while a read transaction remains open.
                 if creating_child {
                     register_test_subagent(&writer_path, &child, &launch).unwrap();
+                }
+                if !creating_child {
+                    super::sessions::delete_session_from(&writer_path, &child.id).unwrap();
                 }
                 save_state_to(&writer_path, &committed).unwrap();
                 let writer = open(&writer_path).unwrap();
@@ -5817,7 +6976,7 @@ fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontie
         .unwrap()
         .unwrap();
     assert!(metadata.omitted_items > 0);
-    assert!(crate::continuation::evidence(&window).is_err());
+    assert!(mj_transcript::authorization::evidence(&window).is_err());
     let collected = load_continuation_evidence_from(
         &database,
         "session-1",
@@ -5827,7 +6986,7 @@ fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontie
     .unwrap();
     assert_eq!(
         collected,
-        crate::continuation::evidence(&materialized).unwrap()
+        mj_transcript::authorization::evidence(&materialized).unwrap()
     );
     assert_eq!(
         collected.messages[0].text,
@@ -5867,7 +7026,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
         UPDATE schema_compatibility SET minimum_compatible_version = 43;
-        DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 43;",
+        DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 43;",
     )
     .unwrap();
     drop(raw);
@@ -5990,17 +7149,39 @@ fn long_conversation() -> MaterializedSession {
     projection
 }
 
+// Hard-won: 312cdbd23: stale pending content made the live window load nearly all history.
+// Hard-won: f7df24176: store queries split turns at elicitation replies and missed native prompts.
+// Hard-won: 8c2f98de2: unread output outside the transcript window lost its mark.
 #[test]
-fn actor_history_window_matches_live_trimming_and_preserves_pending_turns() {
+fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("history.sqlite3");
     let mut full = long_conversation();
+    // An elicitation reply inside the old turn is not a turn start, and the
+    // newest turn begins with a native prompt; store and trim must agree.
+    full.transcript[50] = Arc::new(TranscriptItem {
+        stable_id: format!("{}0051", mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX),
+        body: TranscriptBody::User {
+            content: vec![serde_json::json!({"type":"text", "text":"approve"})],
+        },
+        latest_content_event_ordinal: None,
+        ..(*full.transcript[50]).clone()
+    });
+    Arc::make_mut(&mut full.transcript[2400]).stable_id = "native-user:2401".into();
     save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
-    for pending in [false, true] {
+    for pending in ["none", "tool", "stream"] {
+        let mut full = full.clone();
         if let TranscriptBody::Agent { streaming, .. } =
             &mut Arc::make_mut(&mut full.transcript[1]).body
         {
-            *streaming = pending;
+            *streaming = pending == "stream";
+        }
+        if pending == "tool" {
+            let mut tool = materialized_session(&full.session_id).transcript[2].clone();
+            if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut tool).body {
+                call.edit(|value| value["status"] = "in_progress".into());
+            }
+            full.transcript[2] = tool;
         }
         save_materialized_session_to(&path, &full).unwrap();
         let (loaded, window) = load_materialized_actor_projection_from(&path, &full.session_id)
@@ -6011,8 +7192,16 @@ fn actor_history_window_matches_live_trimming_and_preserves_pending_turns() {
         expected.trim(&mut trimmed, PROJECTION_TAIL_ITEMS);
         assert_eq!(loaded, trimmed);
         assert_eq!(window, expected);
-        assert_eq!(loaded.transcript.len(), if pending { 2500 } else { 1100 });
+        assert_eq!(
+            loaded.transcript.len(),
+            if pending == "none" { 600 } else { 700 }
+        );
+        if pending != "none" {
+            assert_eq!(&loaded.transcript[..100], &full.transcript[..100]);
+            assert_eq!(loaded.transcript[100], full.transcript[1900]);
+        }
         assert_eq!(window.provisional_title.as_deref(), Some("request 1"));
+        assert_eq!(window.latest_turn_start_position, Some(2401));
         assert_eq!(
             load_materialized_session_from(&path, &full.session_id)
                 .unwrap()
@@ -6020,6 +7209,58 @@ fn actor_history_window_matches_live_trimming_and_preserves_pending_turns() {
             full,
             "the durable source for checkpoints must stay complete"
         );
+    }
+    // Completed tool rows can push every unread item outside the actor window.
+    for interrupted in [false, true] {
+        let mut history = long_conversation();
+        let mut tool_body = materialized_session(&history.session_id).transcript[2]
+            .body
+            .clone();
+        if let TranscriptBody::Tool { call, .. } = &mut tool_body {
+            call.edit(|value| value["status"] = "completed".into());
+        } else {
+            panic!("tool fixture");
+        }
+        for item in &mut history.transcript {
+            let item = Arc::make_mut(item);
+            if !item.is_turn_start() && item.position != 2 {
+                item.body = tool_body.clone();
+                item.stable_id = format!("tool:{}", item.position);
+                item.latest_content_event_ordinal = None;
+            }
+            if interrupted && item.position == 3 {
+                item.body = TranscriptBody::System {
+                    text: "Work interrupted".into(),
+                };
+                item.stable_id = format!("{}3", mj_core::transcript::WORK_INTERRUPTED_ITEM_PREFIX);
+            }
+        }
+        let expected = if interrupted { 3 } else { 2 };
+        save_materialized_session_to(&path, &history).unwrap();
+        let mut live = history.clone();
+        let mut live_window = ProjectionWindow::of(&history);
+        live_window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.is_nonempty_agent_message() || item.is_work_interruption())
+        );
+        assert_eq!(live_window.latest_unread_event_ordinal, Some(expected));
+        // This valid JSON is not a TranscriptBody. Loading all history would fail.
+        open(&path).unwrap().execute("UPDATE materialized_transcript_items SET body_json = ?2 WHERE session_id = ?1 AND stable_id = 'tool:50'", params![&history.session_id, r#"{"kind":"unknown-old-row"}"#]).unwrap();
+        for _restart in 0..2 {
+            let (reloaded, window) =
+                load_materialized_actor_projection_from(&path, &history.session_id)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(window.latest_unread_event_ordinal, Some(expected));
+            assert_eq!(window, live_window);
+            assert_eq!(reloaded.transcript, live.transcript);
+            let tail = mj_client::runtime_feed::SessionTail::of(&reloaded, &window, 0);
+            assert_eq!(tail.window.latest_unread_event_ordinal, Some(expected));
+        }
+        assert!(load_materialized_session_from(&path, &history.session_id).is_err());
     }
 }
 
@@ -6237,89 +7478,276 @@ fn history_window_deduplicates_deliveries_after_their_row_leaves_the_live_tail()
     }
 }
 
+// Hard-won: 312cdbd23: late completion must preserve evicted tools and uniquely claim parked output.
 #[test]
 fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
     use agent_client_protocol::v1::schema::{
         SessionUpdate, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
     };
     use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("history.sqlite3");
-    let mut full = long_conversation();
-    let old_tool = materialized_session(&full.session_id).transcript[2].clone();
-    full.transcript[2] = old_tool.clone();
-    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
-    save_materialized_session_to(&path, &full).unwrap();
-    let (mut live, mut window) = load_materialized_actor_projection_from(&path, &full.session_id)
-        .unwrap()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.sqlite3");
+        let mut full = long_conversation();
+        let mut old_tool = materialized_session(&full.session_id).transcript[2].clone();
+        let output = "old output ".repeat(10_000);
+        let raw_output = serde_json::json!({"partial": output});
+        if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut old_tool).body {
+            call.edit(|value| {
+                value["status"] = "completed".into();
+                value["rawOutput"] = raw_output.clone();
+            });
+        }
+        full.transcript[2] = old_tool.clone();
+        save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+        save_materialized_session_to(&path, &full).unwrap();
+        let (mut live, mut window) =
+            load_materialized_actor_projection_from(&path, &full.session_id)
+                .unwrap()
+                .unwrap();
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == old_tool.stable_id)
+        );
+        let fields = ToolCallUpdateFields::new()
+            .status(ToolCallStatus::Completed)
+            .title("Late result");
+        let mut event = RelayEvent {
+            format: RELAY_EVENT_FORMAT_V1,
+            ordinal: 2501,
+            previous_digest: full.applied_event_digest.clone(),
+            digest: String::new(),
+            recorded_at_ms: 5000,
+            command_id: None,
+            observation: RelayObservation::SessionUpdate {
+                update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    "call-1", fields,
+                ))),
+            },
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let restored =
+            load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(restored.contains(&old_tool));
+        window.omitted_items -= restored.len();
+        live.transcript.splice(0..0, restored);
+        assert!(
+            load_projection_references_from(&path, &live, std::slice::from_ref(&event))
+                .unwrap()
+                .is_empty()
+        );
+        let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+            .unwrap()
+            .mutation;
+        apply_projection_page_to(&path, &full.session_id, |page| {
+            page.apply(
+                event.ordinal,
+                &event.previous_digest,
+                &event.digest,
+                &mutation,
+            )
+        })
         .unwrap();
-    assert!(
-        !live
+        mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
+            .unwrap();
+        window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+        let saved = load_materialized_session_from(&path, &full.session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.transcript.len(), 2500);
+        let tool = saved
             .transcript
             .iter()
-            .any(|item| item.stable_id == old_tool.stable_id)
-    );
-    let mut event = RelayEvent {
-        format: RELAY_EVENT_FORMAT_V1,
-        ordinal: 2501,
-        previous_digest: full.applied_event_digest.clone(),
-        digest: String::new(),
-        recorded_at_ms: 5000,
-        command_id: None,
-        observation: RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                "call-1",
-                ToolCallUpdateFields::new()
-                    .status(ToolCallStatus::Completed)
-                    .title("Late result"),
-            ))),
-        },
+            .find(|item| item.stable_id == old_tool.stable_id)
+            .unwrap();
+        assert_eq!(tool.position, old_tool.position);
+        assert_eq!(tool.created_at_ms, old_tool.created_at_ms);
+        let TranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            terminal_refs,
+            ..
+        } = &tool.body
+        else {
+            panic!("tool remains a tool")
+        };
+        let call = call.value();
+        assert_eq!(call["title"], "Late result");
+        assert_eq!(call["rawOutput"], raw_output);
+        assert!(terminal_refs.is_empty());
+        assert!(terminal_outputs.is_empty());
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == old_tool.stable_id)
+        );
+        assert_eq!(
+            live.transcript.len() + window.omitted_items,
+            saved.transcript.len()
+        );
+    }
+}
+
+// Hard-won: 83536df64: evicting an unfinished tool's turn separated it from its parked terminal output
+#[test]
+fn history_window_keeps_pending_turn_for_late_completion() {
+    use agent_client_protocol::v1::schema::{
+        SessionUpdate, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
     };
-    event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
-    let restored =
-        load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
-    assert_eq!(restored, vec![old_tool.clone()]);
-    window.omitted_items -= restored.len();
-    live.transcript.splice(0..0, restored);
-    assert!(
-        load_projection_references_from(&path, &live, std::slice::from_ref(&event))
-            .unwrap()
-            .is_empty()
-    );
-    let mutation = mj_transcript::projection::project_relay_event(&live, &event)
-        .unwrap()
-        .mutation;
-    apply_projection_page_to(&path, &full.session_id, |page| {
-        page.apply(
-            event.ordinal,
-            &event.previous_digest,
-            &event.digest,
-            &mutation,
-        )
-    })
-    .unwrap();
-    mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
-        .unwrap();
-    window.trim(&mut live, PROJECTION_TAIL_ITEMS);
-    let saved = load_materialized_session_from(&path, &full.session_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(saved.transcript.len(), 2500);
-    let tool = saved
-        .transcript
-        .iter()
-        .find(|item| item.stable_id == old_tool.stable_id)
-        .unwrap();
-    assert_eq!(tool.position, old_tool.position);
-    assert_eq!(tool.created_at_ms, old_tool.created_at_ms);
-    let TranscriptBody::Tool { call, .. } = &tool.body else {
-        panic!("tool remains a tool")
-    };
-    assert_eq!(call["title"], "Late result");
-    assert_eq!(
-        live.transcript.len() + window.omitted_items,
-        saved.transcript.len()
-    );
+    use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
+    for raw_earlier in [false, true] {
+        for standalone in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("history.sqlite3");
+            let mut full = long_conversation();
+            let mut tool = materialized_session(&full.session_id).transcript[2].clone();
+            let output = "late output ".repeat(10_000);
+            let raw = serde_json::json!({"exit_code":0,"output":output.as_bytes()});
+            if let TranscriptBody::Tool {
+                call,
+                terminal_refs,
+                ..
+            } = &mut Arc::make_mut(&mut tool).body
+            {
+                call.edit(|value| {
+                    value["status"] = "pending".into();
+                    value["rawOutput"] = if raw_earlier {
+                        raw.clone()
+                    } else {
+                        serde_json::Value::Null
+                    };
+                });
+                assert!(terminal_refs.is_empty());
+            }
+            full.transcript[2] = tool.clone();
+            let record = mj_core::state::TerminalOutputRecord {
+                terminal_id: "late-terminal".into(),
+                output: output.clone().into(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            };
+            let fallback =
+                mj_core::acp::fallback_terminal_tool_call("late-terminal", "cargo test".into())
+                    .status(ToolCallStatus::Completed);
+            let (parked_id, body) = if standalone {
+                (
+                    "terminal:late-terminal".to_owned(),
+                    TranscriptBody::TerminalOutput { record },
+                )
+            } else {
+                (
+                    format!("tool:{}", fallback.tool_call_id),
+                    TranscriptBody::Tool {
+                        call: serde_json::to_value(fallback).unwrap().into(),
+                        terminal_outputs: vec![record],
+                        terminal_refs: vec!["late-terminal".into()],
+                        presentation: None,
+                    },
+                )
+            };
+            full.transcript[3] = Arc::new(TranscriptItem {
+                stable_id: parked_id.clone(),
+                position: 4,
+                latest_content_event_ordinal: None,
+                created_at_ms: 1200,
+                last_changed_at_ms: 1400,
+                body,
+            });
+            save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+            save_materialized_session_to(&path, &full).unwrap();
+            let (mut live, mut window) =
+                load_materialized_actor_projection_from(&path, &full.session_id)
+                    .unwrap()
+                    .unwrap();
+            assert!(live.transcript.contains(&tool));
+            assert!(
+                live.transcript
+                    .iter()
+                    .any(|item| item.stable_id == parked_id)
+            );
+            let mut fields = ToolCallUpdateFields::new().status(ToolCallStatus::Completed);
+            if !raw_earlier {
+                fields = fields.raw_output(raw);
+            }
+            let mut event = RelayEvent {
+                format: RELAY_EVENT_FORMAT_V1,
+                ordinal: 2501,
+                previous_digest: full.applied_event_digest.clone(),
+                digest: String::new(),
+                recorded_at_ms: 5000,
+                command_id: None,
+                observation: RelayObservation::SessionUpdate {
+                    update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        "call-1", fields,
+                    ))),
+                },
+            };
+            event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+            assert!(
+                load_projection_references_from(&path, &live, std::slice::from_ref(&event))
+                    .unwrap()
+                    .is_empty()
+            );
+            let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+                .unwrap()
+                .mutation;
+            apply_projection_page_to(&path, &full.session_id, |page| {
+                page.apply(
+                    event.ordinal,
+                    &event.previous_digest,
+                    &event.digest,
+                    &mutation,
+                )
+            })
+            .unwrap();
+            mj_transcript::projection::apply_committed_projection_event(
+                &mut live, &event, mutation,
+            )
+            .unwrap();
+            let saved = load_materialized_session_from(&path, &full.session_id)
+                .unwrap()
+                .unwrap();
+            for projection in [&live, &saved] {
+                let owner = projection
+                    .transcript
+                    .iter()
+                    .find(|item| item.stable_id == tool.stable_id)
+                    .unwrap();
+                let TranscriptBody::Tool {
+                    terminal_outputs,
+                    terminal_refs,
+                    ..
+                } = &owner.body
+                else {
+                    panic!("owner remains tool")
+                };
+                assert_eq!(terminal_refs, &["late-terminal"]);
+                assert_eq!(terminal_outputs[0].output.text(), output);
+                assert!(
+                    !projection
+                        .transcript
+                        .iter()
+                        .any(|item| item.stable_id == parked_id)
+                );
+            }
+            window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+            let (loaded, loaded_window) =
+                load_materialized_actor_projection_from(&path, &full.session_id)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(live, loaded);
+            assert_eq!(window, loaded_window);
+            assert_eq!(
+                live.transcript.len() + window.omitted_items,
+                saved.transcript.len()
+            );
+        }
+    }
 }
 
 #[test]
@@ -6331,28 +7759,89 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
         r#"{"kind":"ssh-podman","host":"original.test","user":"builder","identity_file":"/keys/id","extra_args":["-p","2222"],"image":"test"}"#
     ).unwrap();
     record.target_runtime = Some((&template).into());
-    record.target_runtime.as_mut().unwrap().tool_cache = Some(mj_core::state::ToolCachePlacement {
-        host: "ssh:builder@original.test".into(),
-        directory: "/fast/shared native caches".into(),
-        nx_home: "/home/hel/.nx".into(),
-    });
-    record.target = Some(TargetLocator::SshPodman {
+    std::sync::Arc::make_mut(record.target_runtime.as_mut().unwrap()).tool_cache =
+        Some(mj_core::state::ToolCachePlacement {
+            host: "ssh:builder@original.test".into(),
+            directory: "/fast/shared native caches".into(),
+            nx_home: "/home/hel/.nx".into(),
+        });
+    record.target = Some(Box::new(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: "original-container".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
+    record.project = Some(std::sync::Arc::new(
+        mj_core::repository::ProjectBundleSnapshot {
+            bundle: mj_core::config::ProjectBundle {
+                primary_repo: "source".into(),
+                repositories: vec![mj_core::config::ProjectRepository {
+                    id: "source".into(),
+                    github: Some("acme/source".into()),
+                    local: None,
+                    destination: "source".into(),
+                    git_ref: None,
+                }],
+            },
+            identities: BTreeMap::from([(
+                "source".into(),
+                mj_core::repository::RepositoryIdentity::Github("acme".into(), "source".into()),
+            )]),
+            network_sources: Default::default(),
+            plain_directories: Default::default(),
+        },
+    ));
+    let project_json = serde_json::to_string(record.project.as_deref().unwrap()).unwrap();
+    let runtime_json = serde_json::to_string(record.target_runtime.as_deref().unwrap()).unwrap();
     save_session_to(&database, &record).unwrap();
+    let stored: (String, String) = open_reader(&database)
+        .unwrap()
+        .query_row(
+            "SELECT project_json, target_runtime_json FROM sessions WHERE session_id=?1",
+            [&record.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, (project_json.clone(), runtime_json.clone()));
+    let loaded = load_state_from(&database).unwrap();
+    let loaded_record = &loaded.sessions[&record.id];
+    assert_eq!(
+        serde_json::to_string(&loaded_record.project).unwrap(),
+        project_json
+    );
+    assert_eq!(
+        serde_json::to_string(&loaded_record.target_runtime).unwrap(),
+        runtime_json
+    );
+    let mut interns = state_io::SessionInterns::from_state(&loaded).unwrap();
+    let refreshed = state_io::load_session_interned_with(
+        &open_reader(&database).unwrap(),
+        &record.id,
+        &mut interns,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        loaded_record.project.as_ref().unwrap(),
+        refreshed.project.as_ref().unwrap(),
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        loaded_record.target_runtime.as_ref().unwrap(),
+        refreshed.target_runtime.as_ref().unwrap(),
+    ));
+
     record.state = SessionState::Error;
     save_lifecycle_session_to(&database, &record).unwrap();
+    // The database's failure trigger advances the generation on the state change.
+    record.failure_generation += 1;
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id],
         record
     );
     record.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
-    record.target = Some(TargetLocator::LocalBare {
+    record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/new").join(&record.id),
-    });
+    }));
     save_lifecycle_session_to(&database, &record).unwrap();
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id],
@@ -6392,6 +7881,7 @@ fn a_subagent_report_is_kept_once_per_turn_and_leaves_with_its_child() {
     let mut state = load_state_from(&path).unwrap();
     state.subagents.remove(&child.id);
     state.sessions.remove(&child.id);
+    super::sessions::delete_session_from(&path, &child.id).unwrap();
     save_state_to(&path, &state).unwrap();
     assert_eq!(
         load_subagent_report_from(&path, &child.id).unwrap(),
@@ -6439,6 +7929,7 @@ fn a_parents_stopped_sub_agents_are_listed_once_and_leave_with_the_parent() {
     let mut state = load_state_from(&path).unwrap();
     state.subagents.remove(&child.id);
     state.sessions.remove(&child.id);
+    super::sessions::delete_session_from(&path, &child.id).unwrap();
     save_state_to(&path, &state).unwrap();
     assert_eq!(
         load_stopped_subagents_from(&path, &parent.id)
@@ -6551,7 +8042,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
          PRAGMA writable_schema = OFF;
          DELETE FROM schema_migrations WHERE version >= 53;
          UPDATE schema_compatibility SET minimum_compatible_version = 49;
-         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 52;",
+         DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 52;",
     )
     .unwrap();
     drop(raw);
@@ -6620,6 +8111,37 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     assert_eq!(
         load_state_from(&database).unwrap().sessions["old-session"].state,
         SessionState::Parked
+    );
+}
+
+#[test]
+fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("oracle-choice.sqlite3");
+    let mut record = session("advisor-parent", "project");
+    record.oracle = false;
+    record.oracle_choice = Some(Box::new(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: Some("high".into()),
+    }));
+    save_new_session_to(&path, &record, None, true, false).unwrap();
+    let state = load_state_from(&path).unwrap();
+    assert_eq!(
+        state.last_oracle_choices.get(&record.last_profile),
+        Some(&false)
+    );
+    assert!(!state.sessions[&record.id].oracle);
+    assert_eq!(
+        state.sessions[&record.id].oracle_choice,
+        record.oracle_choice
+    );
+    rename_profile_references_at(&path, &record.last_profile, "renamed").unwrap();
+    let renamed = load_state_from(&path).unwrap();
+    assert_eq!(renamed.last_oracle_choices.get("renamed"), Some(&false));
+    assert!(
+        !renamed
+            .last_oracle_choices
+            .contains_key(&record.last_profile)
     );
 }
 
@@ -7067,4 +8589,314 @@ fn rebinding_to_an_aliased_bundle_reports_the_canonical_project() {
         )
         .unwrap();
     assert_eq!(context, "project-2");
+}
+
+#[test]
+fn obsolete_turn_review_rows_are_retired_before_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    for id in ["turn", "forward", "push"] {
+        save_session_to(&database, &session(id, "project-1")).unwrap();
+    }
+    let connection = open(&database).unwrap();
+    for (id, group, forward) in [
+        (
+            "turn",
+            r#"{"scope":"turn_delta","driver":{"obsolete":"shape"}}"#,
+            None,
+        ),
+        (
+            "forward",
+            r#"{"scope":"pushable_commits"}"#,
+            Some("obsolete handoff"),
+        ),
+        ("push", r#"{"scope":"pushable_commits"}"#, None),
+    ] {
+        connection.execute(
+            "INSERT INTO turn_review_state(session_id, baselines, reviewed_through_ordinal, active_group, pending_forward, pending_followup) VALUES (?1, '{}', 0, ?2, ?3, 1)",
+            params![id, group, forward],
+        ).unwrap();
+    }
+    schema::drop_environment_schema(&connection);
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions DROP COLUMN no_github_credentials;
+             DELETE FROM schema_migrations WHERE version >= 115;
+             UPDATE schema_compatibility SET minimum_compatible_version = 114;
+             PRAGMA user_version = 114;",
+        )
+        .unwrap();
+    drop(connection);
+    schema::forget_verified_schema(&database);
+    let connection = open(&database).unwrap();
+    let groups: Vec<(String, bool, bool, bool)> = connection.prepare(
+        "SELECT session_id, active_group IS NOT NULL, pending_forward IS NOT NULL, pending_followup FROM turn_review_state ORDER BY session_id"
+    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(
+        groups,
+        vec![
+            ("forward".into(), false, false, false),
+            ("push".into(), true, false, false),
+            ("turn".into(), false, false, false)
+        ]
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "turn")
+            .unwrap()
+            .active_group,
+        None
+    );
+}
+
+// Hard-won: e13ed5c7c: page joins duplicated parked output across page boundaries
+#[test]
+fn history_pages_join_parked_terminal_output_without_changing_page_boundaries() {
+    use mj_core::state::TerminalOutputRecord;
+    for output_first in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.sqlite3");
+        let mut full = materialized_session("joined-history");
+        let mut owner = full.transcript[2].clone();
+        let record = TerminalOutputRecord {
+            terminal_id: "parked".into(),
+            output: "authoritative terminal output".into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+        };
+        if let TranscriptBody::Tool {
+            terminal_outputs,
+            terminal_refs,
+            ..
+        } = &mut Arc::make_mut(&mut owner).body
+        {
+            terminal_refs.push(record.terminal_id.clone());
+            terminal_outputs.push(TerminalOutputRecord {
+                output: "older streamed output".into(),
+                ..record.clone()
+            });
+            terminal_outputs.push(TerminalOutputRecord {
+                terminal_id: "embedded-only".into(),
+                output: "embedded terminal output".into(),
+                ..record.clone()
+            });
+        }
+        let parked = Arc::new(TranscriptItem {
+            stable_id: "terminal:parked".into(),
+            position: if output_first { 1 } else { 4 },
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: TranscriptBody::TerminalOutput { record },
+        });
+        full.transcript = if output_first {
+            vec![parked, owner.clone()]
+        } else {
+            vec![owner.clone(), parked]
+        };
+        save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+        save_materialized_session_to(&path, &full).unwrap();
+        let filtered = load_materialized_transcript_filtered_from(
+            &path,
+            &full.session_id,
+            0,
+            1,
+            vec![mj_core::transcript::TranscriptRole::Tool],
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0].stable_id, owner.stable_id);
+        let text = mj_transcript::transcript::transcript_item_text(&filtered.items[0]);
+        assert!(text.contains("authoritative terminal output"));
+        assert!(text.contains("embedded terminal output"));
+        assert!(!text.contains("older streamed output"));
+        let before = if output_first {
+            None
+        } else {
+            Some(mj_core::storage::TranscriptCursor::of(&full.transcript[1]))
+        };
+        let page = load_transcript_history_from(&path, &full.session_id, before.as_ref(), 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.items[0].stable_id, owner.stable_id);
+        assert!(
+            !mj_client::transcript::history_entries(&page)[0]
+                .text
+                .contains("authoritative terminal output")
+        );
+        // Convert single-item pages independently, as dispatch_earlier_history does.
+        let newest = load_transcript_history_from(&path, &full.session_id, None, 1)
+            .unwrap()
+            .unwrap();
+        let older =
+            load_transcript_history_from(&path, &full.session_id, newest.before.as_ref(), 1)
+                .unwrap()
+                .unwrap();
+        let rendered = [newest, older]
+            .iter()
+            .flat_map(mj_client::transcript::history_entries)
+            .map(|e| e.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(rendered.matches("authoritative terminal output").count(), 1);
+        let unfiltered = load_materialized_transcript_filtered_from(
+            &path,
+            &full.session_id,
+            0,
+            10,
+            vec![],
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let rendered = unfiltered
+            .items
+            .iter()
+            .map(|i| mj_transcript::transcript::transcript_item_text(i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(rendered.matches("authoritative terminal output").count(), 1);
+        let stored = load_materialized_session_from(&path, &full.session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.transcript, full.transcript,
+            "presentation joins never write to storage"
+        );
+    }
+}
+
+// Hard-won: e13ed5c7c: history hydration duplicated output for evicted owners
+#[test]
+fn terminal_output_for_evicted_owner_parks_and_joins_history_pages() {
+    use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("history.sqlite3");
+    let mut full = long_conversation();
+    let mut owner = materialized_session(&full.session_id).transcript[2].clone();
+    if let TranscriptBody::Tool { terminal_refs, .. } = &mut Arc::make_mut(&mut owner).body {
+        terminal_refs.push("evicted-terminal".into());
+    }
+    full.transcript[2] = owner.clone();
+    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+    save_materialized_session_to(&path, &full).unwrap();
+    let (mut live, _) = load_materialized_actor_projection_from(&path, &full.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !live
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == owner.stable_id)
+    );
+    let output = "output from an evicted terminal owner";
+    let mut event = RelayEvent {
+        format: RELAY_EVENT_FORMAT_V1,
+        ordinal: 2501,
+        previous_digest: full.applied_event_digest.clone(),
+        digest: String::new(),
+        recorded_at_ms: 5000,
+        command_id: None,
+        observation: RelayObservation::TerminalOutput {
+            terminal_id: "evicted-terminal".into(),
+            output: output.into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+        },
+    };
+    event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+    let references =
+        load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
+    assert!(
+        references.is_empty(),
+        "terminal output must not scan history for its owner"
+    );
+    let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+        .unwrap()
+        .mutation;
+    apply_projection_page_to(&path, &full.session_id, |page| {
+        page.apply(
+            event.ordinal,
+            &event.previous_digest,
+            &event.digest,
+            &mutation,
+        )
+    })
+    .unwrap();
+    mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
+        .unwrap();
+    let stored = load_materialized_session_from(&path, &full.session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        &**stored
+            .transcript
+            .iter()
+            .find(|item| item.stable_id == owner.stable_id)
+            .unwrap(),
+        &*owner
+    );
+    assert!(
+        stored
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "terminal:evicted-terminal")
+    );
+    for roles in [vec![], vec![mj_core::transcript::TranscriptRole::Tool]] {
+        let page = load_materialized_transcript_filtered_from(
+            &path,
+            &full.session_id,
+            2,
+            1,
+            roles.clone(),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].stable_id, owner.stable_id);
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of(page.items.iter().map(AsRef::as_ref));
+        let text =
+            mj_transcript::transcript::transcript_item_text_with_outputs(&page.items[0], &outputs);
+        assert_eq!(text.matches(output).count(), usize::from(!roles.is_empty()));
+    }
+    let before = mj_core::storage::TranscriptCursor::of(&full.transcript[3]);
+    let page = load_transcript_history_from(&path, &full.session_id, Some(&before), 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mj_client::transcript::history_entries(&page)[0]
+            .text
+            .matches(output)
+            .count(),
+        0
+    );
+    let all = mj_core::storage::TranscriptHistoryPage {
+        items: stored.transcript.clone(),
+        before: None,
+        frontier: stored.applied_event_ordinal,
+    };
+    assert_eq!(
+        mj_client::transcript::history_entries(&all)
+            .iter()
+            .map(|entry| entry.text.matches(output).count())
+            .sum::<usize>(),
+        1
+    );
+    let summary =
+        mj_transcript::summary::TranscriptSummary::from_materialized_keeping(&stored, usize::MAX)
+            .render(usize::MAX);
+    assert_eq!(summary.matches(output).count(), 1);
+    let entries = mj_client::transcript::materialized_chat_entries(&stored);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.text.matches(output).count())
+            .sum::<usize>(),
+        1
+    );
 }

@@ -1,0 +1,123 @@
+{
+  "id": "L2401",
+  "title": "jdk pack fixes",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "90f9ae8cacfb371e50f593a601141cc4",
+    "session_title": "eval44 3444 dsfcc500",
+    "reply_position": 73971,
+    "captured_at": "2026-10-20T23:58:04.927Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3444: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 0722dea6bcb52ef5335695a701631d157c31cbf4\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the reposi\n[... 4669 bytes omitted from the middle of this message ...]\navax/swing/JList<TE;>;I)V`. A non-static inner class's constructor receives the enclosing instance, so its JVM signature names a type variable its own class file does not declare, while the semantic model scopes a type parameter to the declaration that declares it. The branch adds an iterative `type_variables_in_scope` walk and falls back to the erased descriptor for a signature naming a type variable outside the declaration's scope, the same fallback an undecodable signature already takes.\n\n## Expected\n\nAll three fixed together, with `GENERATED_PRODUCTION_CACHE_VERSION` bumped (the pack changes: 42 to 44 shards, 34,574 to 58,861 records, completeness `partial` to `complete`, producer diagnostics 802 to 0 on JDK 25). The branch's five tests cover each defect (`module_opened_to_a_named_module_keeps_its_exported_declarations`, `module_resources_beside_class_files_are_not_rejects`, `class_outside_an_exported_package_is_never_read`, `inner_class_signature_naming_an_enclosing_type_variable_compiles_erased`). Note the trade recorded on the branch: the corrected pack is 1.7x larger, so shard installation and activation decode (both linear in pack size) make the first zero-configuration session slower at `BIFROST_PARALLELISM=1` (61.6 s to 86.1 s on the measuring box) unless those stages are made cheaper too; the branch names installation re-validation and activation shard selection as the next levers.\n\n## Also found on the same branch\n\nThe `issue_3006_release_zero_config` scheduled test spends about 80 percent of its 449 s (as CI runs it) on the release-bundle acquisition: a cold machine pays 209 to 263 s (`verify_download` 87 to 102 s, `decode_and_install` 112 to 149 s) to install a bundle whose only generated production is a JDK 21 pack, then misses the JDK 25 key in 0.2 ms and produces locally anyway. Consulting the bundle's 2 KB `index.json` before verifying and installing, or setting `BIFROST_SEMANTIC_PACK_DOWNLOAD=off` in that test (449 s to 91 s on the same box), would make the `num-cpus` reservation reviewable.\n\n"
+        },
+        {
+          "id": "agent:28373",
+          "role": "assistant",
+          "text": "Now I have the full picture. Let me add the regression tests first (so I can demonstrate them failing against the base implementation), then implement the fixes. Starting with the test fixtures and tests in `jmod_artifact.rs`."
+        },
+        {
+          "id": "agent:47722",
+          "role": "assistant",
+          "text": "The fixed census matches the issue's expected numbers exactly. Now I'll measure the same harness against the base implementation by temporarily restoring the three production files (saving the fixed copies first), then restore the fixes."
+        },
+        {
+          "id": "agent:56604",
+          "role": "assistant",
+          "text": "The full suite hit the background time limit at 3,802/5,148 tests (no failures beyond one unrelated Go test). Restarting it with the maximum background timeout."
+        },
+        {
+          "id": "agent:59115",
+          "role": "assistant",
+          "text": "The full suite finished: 5,145 passed, 2 failed, 1 timed out. I'll rerun the three affected tests individually to separate environment/flake from real regressions."
+        },
+        {
+          "id": "agent:62042",
+          "role": "assistant",
+          "text": "The base run reproduces the Go and permission failures identically; the 900-OID planner test passed at 465s on base but timed out at 600s on the fixed run, so I'll rerun it on the restored fixed tree to distinguish environmental variance from a regression."
+        },
+        {
+          "id": "agent:66023",
+          "role": "assistant",
+          "text": "The planner test passed on a third fixed-tree run (568s), confirming load-dependent flakiness rather than a regression. Now I'll run the final clippy on the exact final tree."
+        },
+        {
+          "id": "agent:68269",
+          "role": "assistant",
+          "text": "Now I'll capture defect 3's production-shaped failure: keep the `opens`/resource fixes but revert only the signature-scope fix, then run the real JDK 25 census."
+        },
+        {
+          "id": "agent:70049",
+          "role": "assistant",
+          "text": "Defect 3's production-shaped failure is confirmed at the exact witness. Restoring the final tree and committing."
+        },
+        {
+          "id": "agent:73971",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\n**1. Confirmed cause with structured evidence**\n\nThree independent defects in the JMOD producer, all reproduced on OpenJDK 25.0.4.1 before the fix:\n\n- `parse_module_exports` read the `Module` attribute's `opens` table with `skip_table(6)`. An opens entry is variable-width (package index, flags, variable-length target-module list), exactly like exports. `java.desktop` opens `javax/swing/plaf/basic` to one module, so the reader misaligned and failed the attribute's exact-length check, rejecting the entire module. `javap -v` on `javax.swing.JList$AccessibleJList$AccessibleJListChild` confirms the real shape (`(Ljavax/swing/JList<TE;>;I)V` constructor signature).\n- `jmod_class_entry` reported every non-`.class` entry under `classes/` as `jdk.jmod.path`. The real JDK set has exactly 800 such resources (`java/util/currency.data`, ICU tables, service registrations, properties, PNG/GIF icons), exhausting the 256-diagnostic budget (546 suppressed) and forcing `Partial`.\n- With `java.desktop` restored, `compile_pack` failed on the non-static inner class constructor: its class file declares no type variable, but `javac` writes the enclosing `JList<E>` variable into the constructor signature. `type.unknown_parameter: unknown type parameter 'E'` was reproduced at the exact declaration when only this fix was reverted (see section 4).\n\nBase census on JDK 25.0.4.1: 42 shards, 3,285 types + 31,289 members = 34,574 records, `Partial`, 256 retained + 546 suppressed = 802 producer diagnostics. The entire AWT/Swing/beans/imageio/print/sound and JGSS surface was absent.\n\n**2. Changes and reasons**\n\nBase commit: `0722dea6bcb52ef5335695a701631d157c31cbf4` (detached HEAD, clean, verified before work).\nFinal commit: `1f55b803d2ff44d31df052504e992a3b235ec83e`.\n\n- `crates/bifrost-analysis/src/analyzer/jvm/jmod_artifact.rs`\n  - `skip_package_table` replaces the fixed-width opens skip and walks each entry's variable-length target list.\n  - `jmod_class_entry` now strips `classes/`, silently skips non-class resources, and still rejects backslashes and empty/`.`/`..` components; a nested `module-info.class` is still skipped.\n  - Added the module-info test fixture with opens targets, a minimal class-file builder with a constructor `Signature` attribute, and three end-to-end tests: `module_opened_to_a_named_module_keeps_its_exported_declarations`, `module_resources_beside_class_files_are_not_rejects`, `inner_class_signature_naming_an_enclosing_type_variable_compiles_erased`.\n- `crates/bifrost-analysis/src/analyzer/jvm/java_artifact.rs`\n  - Added iterative `signature_type_variables_in_scope`, used by both field and method decoding. A decoded generic signature whose type variables are not declared by the owning class or the member itself falls back to the erased descriptor, the same fallback an undecodable signature already takes. No regex or source-text parsing involved.\n- `crates/bifrost-analysis/src/analyzer/semantic_model/catalog/mod.rs`\n  - `GENERATED_PRODUCTION_CACHE_VERSION` 38 -> 39, because the produced pack bytes and meaning change.\n- `CHANGELOG.md` - Unreleased Fixed entry describing the restored JDK surface.\n\n**3. Exact validation commands and results**\n\n- `env -u JAVA_HOME BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib`\n  → `5148 tests run: 5145 passed (69 slow, 1 leaky), 2 failed, 1 timed out, 138 skipped`. The three non-passes are environment/pre-existing, checked against the same base:\n  - `go_native_point_binds_standard_package_and_external_member_identity`: fails identically at base; this container has no `go` binary, so full Go dependency production cannot bind the standard package.\n  - `unwritable_workspace_root_reports_the_ways_out`: fails identically at base; the suite runs as root, so a chmod-unwritable root still opens a store.\n  - `canonical_generic_import_batches_seek_900_oids_before_and_after_statistics`: host load average was 200-400 on 96 CPUs; base passed at 465.7 s, the fixed tree timed out twice at the 600 s nextest limit and passed at 568.6 s on a th\n[... 3059 bytes omitted from the middle of this message ...]\ns larger; first-session activation is slower as reported above. This is an accepted consequence of restoring correctness, not a regression in the fix itself.\n- The 900-OID planner test is marginal under host load on this container; other lanes may see the same timeout unrelated to this change.\n- Doctests and Python-feature tests were not run; this change is Rust-only JVM artifact production.\n\n**6. Draft GitHub approach comment**\n\nWe found three independent defects in the JMOD producer, each able to hide exported JDK surface. The module descriptor's opens table is variable-width just like exports, but the producer read it as six fixed bytes per entry, so any module that opens a package to a named module failed the descriptor's exact-length check and was dropped; java.desktop on JDK 25 does precisely that. Separately, every non-class file under classes/ was reported as a malformed class path, and a JDK ships about 800 of them, which exhausted the diagnostic budget and forced every pack to partial. Once java.desktop was restored, pack compilation failed because an inner class constructor's generic signature names a type variable declared by its enclosing class, which the semantic model correctly will not scope to the inner class. The producer now skips opens entries at their real width, skips resources silently while still rejecting malformed paths, and erases a member signature that names an out-of-scope type variable using the same descriptor fallback already used for undecodable signatures. On OpenJDK 25.0.4.1 the generated pack changes from 42 shards, 34,574 records, partial and 802 diagnostics to 44 shards, 58,861 records, complete and zero diagnostics, restoring 1,708 types and 22,579 members including javax.swing.JFrame, java.awt.Component and org.ietf.jgss.GSSContext. Because the produced pack changes, GENERATED_PRODUCTION_CACHE_VERSION moves from 38 to 39. The larger pack makes the first zero-configuration session slower, so installation re-validation and activation shard selection are the next cost levers."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "the trade recorded on the branch: the corrected pack is 1.7x larger, so shard installation and activation decode (both linear in pack size) make the first zero-configuration session slower at `BIFROST_PARALLELISM=1` (61.6 s to 86.1 s on the measuring box) unless those stages are made cheaper too; the branch names installation re-validation and activation shard selection as the next levers.\n\n## Also found on the same branch\n\nThe `issue_3006_release_zero_config` scheduled test spends about 80 percent of its 449 s (as CI runs it) on the release-bundle acquisition: a cold machine pays 209 to 263 s (`verify_download` 87 to 102 s, `decode_and_install` 112 to 149 s) to install a bundle whose only generated production is a JDK 21 pack, then misses the JDK 25 key in 0.2 ms and produces locally anyway. Consulting the bundle's 2 KB `index.json` before verifying and installing, or setting `BIFROST_SEMANTIC_PACK_DOWNLOAD=off` in that test (449 s to 91 s on the same box), would make the `num-cpus` reservation reviewable.\n\n",
+    "assistant_text_tail": "s larger; first-session activation is slower as reported above. This is an accepted consequence of restoring correctness, not a regression in the fix itself.\n- The 900-OID planner test is marginal under host load on this container; other lanes may see the same timeout unrelated to this change.\n- Doctests and Python-feature tests were not run; this change is Rust-only JVM artifact production.\n\n**6. Draft GitHub approach comment**\n\nWe found three independent defects in the JMOD producer, each able to hide exported JDK surface. The module descriptor's opens table is variable-width just like exports, but the producer read it as six fixed bytes per entry, so any module that opens a package to a named module failed the descriptor's exact-length check and was dropped; java.desktop on JDK 25 does precisely that. Separately, every non-class file under classes/ was reported as a malformed class path, and a JDK ships about 800 of them, which exhausted the diagnostic budget and forced every pack to partial. Once java.desktop was restored, pack compilation failed because an inner class constructor's generic signature names a type variable declared by its enclosing class, which the semantic model correctly will not scope to the inner class. The producer now skips opens entries at their real width, skips resources silently while still rejecting malformed paths, and erases a member signature that names an out-of-scope type variable using the same descriptor fallback already used for undecodable signatures. On OpenJDK 25.0.4.1 the generated pack changes from 42 shards, 34,574 records, partial and 802 diagnostics to 44 shards, 58,861 records, complete and zero diagnostics, restoring 1,708 types and 22,579 members including javax.swing.JFrame, java.awt.Component and org.ietf.jgss.GSSContext. Because the produced pack changes, GENERATED_PRODUCTION_CACHE_VERSION moves from 38 to 39. The larger pack makes the first zero-configuration session slower, so installation re-validation and activation shard selection are the next cost levers.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Eval final report with the fix committed and validated; the phrase is part of an explanation of a baseline test failure. Limitations are informational and ask nothing of the judge.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

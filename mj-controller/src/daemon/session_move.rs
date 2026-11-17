@@ -3,33 +3,69 @@
 use super::*;
 use mj_core::state::MoveOperation;
 
-pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Result<Controller> {
-    let mut controller = Controller::load()?;
-    if let Some(operation) = crate::database::load_move_operation(&request.session_id)?
-        && matches!(
-            operation.phase,
-            mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
-        )
-        && !operation.queue_admission_started
-        && operation.source_profile_id == request.profile_id
-        && operation.source_target_template_id == request.target_template_id
-    {
-        // None in ordinary Resume means inheritance. Restore that inheritance
-        // baseline first so a partial conversion cannot change source sizing.
-        let record = controller
-            .state
-            .sessions
-            .get_mut(&request.session_id)
-            .context("Move recovery session is missing")?;
-        record.resource_allocation = operation.source_resource_allocation;
-        record.additional_mounts = operation.source_additional_mounts;
-        if let Some(previous) = operation.recovery_session {
-            record.container_cpus = previous.container_cpus;
-            record.container_memory = previous.container_memory;
+pub(super) struct MoveRecoveryOwners {
+    pub(super) moves: BTreeSet<String>,
+    pub(super) closes: BTreeSet<String>,
+}
+
+pub(super) fn public_quota_failure(error: &anyhow::Error, reference: &str) -> String {
+    // General configuration refusals can contain parser source lines. Only
+    // the Move safety check's explicit code certifies journal-safe text.
+    Refusal::of(error)
+        .filter(|refusal| {
+            refusal.code() == Some(crate::controller::move_session::QUOTA_MOVE_SAFETY_REFUSAL)
+        })
+        .map(|refusal| refusal.message().to_owned())
+        .unwrap_or_else(|| format!("details are in the daemon log under reference {reference}"))
+}
+
+pub(super) fn quota_move_failure_notice(
+    result: &Result<MoveOutcome>,
+    session: &str,
+    reference: &str,
+    destination: &str,
+) -> Option<String> {
+    let (detail, recovery) = match result {
+        Ok(outcome) if outcome.outcome == "completed" => return None,
+        Ok(outcome) => {
+            tracing::warn!(session, reference, outcome=%outcome.outcome, error=?outcome.error,
+                "quota profile Move did not complete");
+            let error = anyhow::Error::msg(
+                outcome
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| format!("Move {}", outcome.outcome)),
+            );
+            (
+                public_quota_failure(&error, reference),
+                outcome.recovery.as_deref(),
+            )
         }
-        crate::database::save_resumed_session(record, None)?;
-    }
-    Ok(controller)
+        Err(error) => {
+            tracing::warn!(session, reference, error=%format!("{error:#}"), "quota profile Move failed");
+            (public_quota_failure(error, reference), None)
+        }
+    };
+    Some(format!(
+        "The automatic switch to profile {destination} after the quota stop failed: {detail}.{}",
+        recovery.map(|text| format!(" {text}")).unwrap_or_default()
+    ))
+}
+
+pub(super) async fn record_quota_move_failure(
+    control: &SessionManagerControl,
+    session: &str,
+    operation: &str,
+    text: String,
+) -> Result<()> {
+    let handle = control.session(session.to_owned()).await?;
+    handle
+        .submit(
+            format!("quota-move-failure-{operation}"),
+            RelayCommand::RecordNotice { text },
+        )
+        .await?;
+    Ok(())
 }
 
 fn validate_prepared_move_environment(prepared: bool, durable: bool) -> Result<()> {
@@ -68,7 +104,8 @@ impl RuntimeState {
                 &controller.config.targets,
                 controller.state.subagents.contains_key(&source.id),
                 previous,
-            );
+            )
+            .map_err(|error| anyhow::Error::new(Refusal::precondition(error.to_string())))?;
             let allocation = if selection.clear_resource_allocation {
                 None
             } else {
@@ -83,7 +120,7 @@ impl RuntimeState {
                     .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
                     .map(|target| capacity::ContainerCapacityCommitment {
                         target_ids: target.target_ids,
-                        allocation: source.resource_allocation.clone(),
+                        allocation: mj_core::state::counted_container_allocation(source).cloned(),
                     })
             } else {
                 None
@@ -112,7 +149,16 @@ impl RuntimeState {
         self: &Arc<Self>,
         selection: MoveSelection,
     ) -> Result<MovePreparation> {
-        let (source_harness, source_active, source_has_parent_role) = {
+        self.prepare_move_session_for(selection, mj_core::activity::MovePurpose::Manual)
+            .await
+    }
+
+    async fn prepare_move_session_for(
+        self: &Arc<Self>,
+        selection: MoveSelection,
+        purpose: mj_core::activity::MovePurpose,
+    ) -> Result<MovePreparation> {
+        let (source_harness, source_active, source_has_request_queue) = {
             let controller_owner = self.owner();
             let controller = controller_owner.controller();
             let source = controller
@@ -126,10 +172,7 @@ impl RuntimeState {
                     source.state,
                     SessionState::Running | SessionState::Disconnected
                 ),
-                crate::controller::move_session::parent_tools_enabled(
-                    &source.subagents.clone().unwrap_or_default(),
-                    source.harness_kind,
-                ),
+                controller.source_has_request_queue(&source.id),
             )
         };
         let snapshot = if source_active {
@@ -141,11 +184,18 @@ impl RuntimeState {
         } else {
             None
         };
+        let catalog = self
+            .profile_catalog
+            .get()
+            .expect("catalog installed before serving")
+            .clone();
         let mut preparation = blocking(move || {
             let controller = Controller::load()?;
-            mj_core::runtime::block_on(
-                controller.prepare_move_session_controlled(selection, &ProcessExecutor),
-            )?
+            mj_core::runtime::block_on(controller.prepare_move_session_controlled(
+                &catalog,
+                selection,
+                &ProcessExecutor,
+            ))?
         })
         .await?;
         preparation.source_unavailable = source_active
@@ -154,10 +204,9 @@ impl RuntimeState {
                 .is_none_or(|snapshot| !snapshot.operational.native_session_is_ready());
         preparation.active |= preparation.source_unavailable;
         if let Some(snapshot) = snapshot {
-            // An in-place Move stops the children itself when the source
-            // worker is too old to drain their requests.
-            preparation.stops_subagents |= preparation.in_place
-                && source_has_parent_role
+            // Old workers cannot freeze the child set, so their stop hook
+            // requires a warning even when no child is recorded yet.
+            preparation.stops_subagents |= source_has_request_queue
                 && snapshot
                     .operational
                     .relay_protocol_version
@@ -167,7 +216,18 @@ impl RuntimeState {
             let mut operational = snapshot.operational;
             operational.queued_prompts.clear();
             operational.checkpoint_barrier = None;
-            preparation.active |= !operational.safe_to_replace(source_harness);
+            let purpose = if preparation.in_place && !preparation.cross_harness {
+                purpose
+            } else {
+                mj_core::activity::MovePurpose::Manual
+            };
+            preparation.active |= !operational.safe_to_move(source_harness, purpose);
+            if purpose == mj_core::activity::MovePurpose::QuotaRetry {
+                preparation.fingerprint = crate::controller::move_session::quota_move_fingerprint(
+                    &preparation.fingerprint,
+                    &operational,
+                )?;
+            }
         }
         Ok(preparation)
     }
@@ -178,25 +238,52 @@ impl RuntimeState {
         profile_id: &str,
     ) -> Result<MoveSessionRequest> {
         let preparation = self
-            .prepare_move_session(MoveSelection {
-                session_id: session_id.to_owned(),
-                profile_id: Some(profile_id.to_owned()),
-                target_template_id: None,
-                workspace: Default::default(),
-                clear_resource_allocation: false,
-                additional_mounts: None,
-                resource_allocation: None,
-                subagents: None,
-            })
+            .prepare_move_session_for(
+                MoveSelection {
+                    oracle: None,
+                    oracle_choice: None,
+                    session_id: session_id.to_owned(),
+                    profile_id: Some(profile_id.to_owned()),
+                    target_template_id: None,
+                    workspace: Default::default(),
+                    clear_resource_allocation: false,
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    subagents: None,
+                },
+                mj_core::activity::MovePurpose::QuotaRetry,
+            )
             .await?;
-        ensure!(
-            preparation.in_place
-                && !preparation.cross_harness
-                && !preparation.active
-                && !preparation.stops_subagents
-                && preparation.conversion.is_none(),
-            "Cannot switch profiles automatically: the Move must keep the environment and native conversation, interrupt no active work, stop no sub-agents, and require no conversion"
-        );
+        let blockers: Vec<_> = [
+            (!preparation.in_place, "the environment would change"),
+            (
+                preparation.cross_harness,
+                "the native conversation cannot be kept",
+            ),
+            (
+                preparation.active,
+                "the session has active work or its worker is unavailable",
+            ),
+            (
+                preparation.stops_subagents,
+                "the Move cannot guarantee that sub-agents stay running",
+            ),
+            (
+                preparation.conversion.is_some(),
+                "the workspace requires conversion",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(blocked, reason)| blocked.then_some(reason))
+        .collect();
+        if !blockers.is_empty() {
+            return Err(Refusal::precondition(format!(
+                "Cannot switch profiles automatically: {}",
+                blockers.join("; ")
+            ))
+            .with_code(crate::controller::move_session::QUOTA_MOVE_SAFETY_REFUSAL)
+            .into());
+        }
         Ok(MoveSessionRequest {
             preparation,
             queue: Some(mj_core::state::ResumeQueueDisposition::Start),
@@ -212,53 +299,20 @@ impl RuntimeState {
     ) -> Result<()> {
         let session_id = request.preparation.selection.session_id.clone();
         let operation_id = request.preparation.operation_id.clone();
-        let source_profile = request.preparation.source_profile_id.clone();
-        let destination_profile = request
-            .preparation
-            .selection
-            .profile_id
-            .clone()
-            .unwrap_or_default();
-        let capacity = self.reserve_container_capacity_for_move(&request).await?;
-        let result =
-            self.admit_move_session(request, capacity, None, Some((reason, continuation)))?;
+        let result = self
+            .admit_move_session(request, None, Some((reason, continuation)))
+            .await?;
         let state = self.clone();
         tokio::spawn(async move {
-            let channel = result.clone();
-            let failure = match Self::wait_lifecycle_result(result).await {
-                Ok(DaemonLifecycleResult::Move(outcome)) if outcome.outcome == "completed" => None,
-                Ok(DaemonLifecycleResult::Move(outcome)) => {
-                    tracing::warn!(%session_id, %operation_id, outcome = %outcome.outcome,
-                        error = ?outcome.error, "quota profile Move did not complete");
-                    Some(
-                        outcome
-                            .error
-                            .unwrap_or_else(|| format!("Move {}", outcome.outcome)),
-                    )
-                }
-                Ok(_) => {
-                    tracing::error!(%session_id, %operation_id,
-                        "quota profile Move returned an unrelated lifecycle result");
-                    Some("Move returned an unrelated lifecycle result".into())
-                }
+            let channel = result.result.clone();
+            match Self::wait_lifecycle_result(result.result).await {
+                Ok(DaemonLifecycleResult::Move(_)) => {}
+                Ok(_) => tracing::error!(%session_id, %operation_id,
+                    "quota Move returned an unrelated lifecycle result"),
                 Err(error) => {
-                    tracing::warn!(%session_id, %operation_id, error = %format!("{error:#}"),
-                    "quota profile Move failed");
-                    Some(format!("{error:#}"))
+                    tracing::warn!(%session_id, %operation_id, error=%format!("{error:#}"),
+                    "quota Move lifecycle failed")
                 }
-            };
-            if let Some(error) = failure {
-                let current_profile = state
-                    .owner()
-                    .controller()
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .map(|session| session.last_profile.clone())
-                    .unwrap_or(source_profile);
-                state.push_notice(&session_id, format!(
-                    "The automatic switch to profile {destination_profile} after the quota stop failed: {error}. The session is on profile {current_profile}."
-                ));
             }
             state.remove_completed_lifecycle(&channel);
         });
@@ -270,19 +324,16 @@ impl RuntimeState {
         self: &Arc<Self>,
         request: MoveSessionRequest,
         control: LifecycleControl,
-    ) -> Result<()> {
-        let capacity = self.reserve_container_capacity_for_move(&request).await?;
-        self.admit_move_session(request, capacity, Some(control), None)
-            .map(|_| ())
+    ) -> Result<StartedLifecycle> {
+        self.admit_move_session(request, Some(control), None).await
     }
 
-    fn admit_move_session(
+    async fn admit_move_session(
         self: &Arc<Self>,
         request: MoveSessionRequest,
-        capacity_lease: Option<capacity::ContainerCapacityLease>,
         control: Option<LifecycleControl>,
         quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
-    ) -> Result<LifecycleWatch> {
+    ) -> Result<StartedLifecycle> {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         // Preparation resolves inherited settings. Compare those settings,
@@ -294,42 +345,69 @@ impl RuntimeState {
             &quota_move,
         ))?;
         let session_id = selection.session_id.clone();
-        let result = self.admit_lifecycle(
+        let quota_failure = quota_move.as_ref().map(|_| {
+            (
+                operation_id.clone(),
+                selection.profile_id.clone().unwrap_or_default(),
+            )
+        });
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let result = self.admit_prepared_lifecycle(
             session_id.clone(),
             LifecycleKind::Move,
             super::lifecycle::LifecycleStart {
+                origin: if quota_move.is_some() { super::lifecycle::LifecycleOrigin::Automatic } else { super::lifecycle::LifecycleOrigin::Person },
                 resume_workspace_id: None,
                 request_key: Some(key),
                 control,
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some(operation_id.clone()),
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
-            move |state, session_id, cancelled| async move {
-                let _capacity_lease = capacity_lease;
-                let result = state
+            Some(acceptance),
+            move |state, session_id, cancelled, session_admission| async move {
+                let result = async {
+                    let _capacity_lease = state.reserve_container_capacity_for_move(&request).await?;
+                let catalog = state.profile_catalog.get().expect("catalog installed before serving").clone();
+                state
                     .clone()
                     .run_move_controller_work(
                         session_id.clone(),
                         cancelled,
                         |mut controller, executor, manager| async move {
                             controller
-                                .move_session_managed_controlled(
+                                .move_session_managed_controlled_with_admission(&session_admission,
+                                    &catalog,
                                     request, quota_move, &executor, &manager,
+                                    move || { accepted.send_replace(Some(Ok(()))); },
                                 )
                                 .await
                         },
                     )
                     .await
-                    .map(DaemonLifecycleResult::Move);
+                }.await;
+                // Report before completing the admitted lifecycle, including
+                // refusals that happen before any Move record can be saved.
+                if let Some((operation, destination)) = quota_failure
+                    && let Some(text) = quota_move_failure_notice(&result, &session_id, &operation, &destination)
+                {
+                    state.push_notice(&session_id, text.clone());
+                    if let Err(error) = record_quota_move_failure(
+                        &state.session_manager, &session_id, &operation, text,
+                    ).await {
+                        tracing::warn!(%session_id, %operation, error=%format!("{error:#}"),
+                            "could not record quota Move failure in the conversation; the daemon log retains its reference");
+                    }
+                }
                 if result.is_err() {
                     state
                         .tell_live_parent_about_stopped_subagents(&session_id)
                         .await;
                 }
-                result
+                result.map(DaemonLifecycleResult::Move)
             },
-        )?;
+        ).await?;
         self.set_lifecycle_resume_destination(
             &session_id,
             selection.profile_id.clone().unwrap_or_default(),
@@ -345,10 +423,15 @@ impl RuntimeState {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         let session_id = selection.session_id.clone();
-        let capacity = self.reserve_container_capacity_for_move(&request).await?;
-        let result = self.admit_move_session(request, capacity, None, None)?;
-        let channel = result.clone();
-        let result = Self::wait_lifecycle_result(result).await;
+        let mut result = self.admit_move_session(request, None, None).await?;
+        let channel = result.result.clone();
+        // Resource/preparation refusals still precede acceptance on the
+        // legacy wait-for-outcome surface, just as on the receipt API.
+        if let Err(error) = result.confirm_acceptance().await {
+            self.remove_completed_lifecycle(&channel);
+            return Err(error);
+        }
+        let result = Self::wait_lifecycle_result(result.result).await;
         self.remove_completed_lifecycle(&channel);
         match result {
             Ok(DaemonLifecycleResult::Move(outcome)) => Ok(outcome),
@@ -361,29 +444,41 @@ impl RuntimeState {
         }
     }
 
-    pub(super) fn recover_moves(
+    pub(super) async fn recover_moves(
         self: &Arc<Self>,
         operations: Vec<MoveOperation>,
-    ) -> Result<BTreeSet<String>> {
+        close_operations: &BTreeSet<String>,
+    ) -> Result<MoveRecoveryOwners> {
         let mut owned = BTreeSet::new();
+        let mut closes = BTreeSet::new();
         for operation in &operations {
             crate::controller::move_session::restore_move_queue_hold(operation);
         }
-        for operation in operations.into_iter().filter(|op| {
-            op.is_active()
-                || self
-                    .owner()
-                    .controller()
-                    .state
-                    .sessions
-                    .get(&op.selection.session_id)
-                    .is_some_and(|session| {
-                        matches!(
-                            session.state,
-                            SessionState::Closing | SessionState::Destroying
-                        )
-                    })
-        }) {
+        for operation in operations {
+            // Historical records cannot own a later lifecycle or revive an
+            // intent preserved by an older daemon after terminal publication.
+            if operation.is_resolved() {
+                continue;
+            }
+            let state = self
+                .owner()
+                .controller()
+                .state
+                .sessions
+                .get(&operation.selection.session_id)
+                .map(|session| session.state);
+            let owner = crate::database::move_recovery_owner(
+                state,
+                close_operations.contains(&operation.operation_id),
+            );
+            // Cancellation alone grants no teardown authority.
+            if owner == Some(crate::database::MoveRecoveryOwner::Close) {
+                closes.insert(operation.selection.session_id.clone());
+                continue;
+            }
+            if !operation.is_active() && owner.is_none() {
+                continue;
+            }
             let id = operation.selection.session_id.clone();
             let key = format!("recovery:{}", operation.operation_id);
             let phase = if operation.recovery_session.is_some() {
@@ -391,32 +486,41 @@ impl RuntimeState {
             } else {
                 LifecyclePhase::Executing
             };
-            let result = self.admit_lifecycle(
-                id.clone(),
-                LifecycleKind::Move,
-                super::lifecycle::LifecycleStart {
-                    resume_workspace_id: None,
-                    request_key: Some(key),
-                    control: None,
-                    phase,
-                    move_operation_id: Some(operation.operation_id.clone()),
-                    deferrable_admission: None,
-                },
-                move |state, session_id, cancelled| async move {
-                    state
-                        .run_move_controller_work(
-                            session_id,
-                            cancelled,
-                            |mut controller, executor, manager| async move {
-                                controller
-                                    .recover_move_managed_controlled(operation, &executor, &manager)
-                                    .await
-                            },
-                        )
-                        .await
-                        .map(DaemonLifecycleResult::Move)
-                },
-            )?;
+            let result = self
+                .admit_lifecycle(
+                    id.clone(),
+                    LifecycleKind::Move,
+                    super::lifecycle::LifecycleStart {
+                        origin: super::lifecycle::LifecycleOrigin::Automatic,
+                        resume_workspace_id: None,
+                        request_key: Some(key),
+                        control: None,
+                        phase,
+                        move_operation_id: Some(operation.operation_id.clone()),
+                        deferrable_admission: None,
+                        holds_through_drain: false,
+                    },
+                    move |state, session_id, cancelled, session_admission| async move {
+                        state
+                            .run_move_controller_work(
+                                session_id,
+                                cancelled,
+                                |mut controller, executor, manager| async move {
+                                    controller
+                                        .recover_move_managed_controlled(
+                                            &session_admission,
+                                            operation,
+                                            &executor,
+                                            &manager,
+                                        )
+                                        .await
+                                },
+                            )
+                            .await
+                            .map(DaemonLifecycleResult::Move)
+                    },
+                )
+                .await?;
             owned.insert(id.clone());
             let state = self.clone();
             tokio::spawn(async move {
@@ -440,10 +544,13 @@ impl RuntimeState {
                 state.remove_completed_lifecycle(&channel);
             });
         }
-        Ok(owned)
+        Ok(MoveRecoveryOwners {
+            moves: owned,
+            closes,
+        })
     }
 
-    pub(super) fn resume_move_destination_cleanups(self: &Arc<Self>, immediately: bool) {
+    pub(super) async fn resume_move_destination_cleanups(self: &Arc<Self>, immediately: bool) {
         let ids = {
             let owner = self.owner();
             owner
@@ -477,11 +584,12 @@ impl RuntimeState {
                 .collect::<Vec<_>>()
         };
         for id in ids {
-            let result = self.start_or_join_lifecycle(
-                id.clone(),
-                LifecycleKind::Cleanup,
-                |state, id, cancelled| async move {
-                    state
+            let result = self
+                .start_automatic_lifecycle(
+                    id.clone(),
+                    LifecycleKind::Cleanup,
+                    |state, id, cancelled, _session_admission| async move {
+                        state
                         .run_move_controller_work(
                             id.clone(),
                             cancelled,
@@ -518,8 +626,9 @@ impl RuntimeState {
                         )
                         .await
                         .map(DaemonLifecycleResult::Move)
-                },
-            );
+                    },
+                )
+                .await;
             match result {
                 Ok(result) => {
                     let state = self.clone();
@@ -551,8 +660,8 @@ impl RuntimeState {
     /// releases the lifecycle's hold around each resumable workspace copy
     /// (`begin_resumable_work`), so a handoff does not wait for a copy,
     /// the closing daemon cancels it, and the next daemon resumes the Move
-    /// from its durable phase. An in-place Move copies nothing and never
-    /// releases the hold, so a handoff waits for it to finish.
+    /// from its durable phase. An in-place Move also releases the hold while
+    /// draining durable delegation requests before sealing the source.
     ///
     /// The Move's controller future holds a standard mutex guard across an
     /// await, so it is not `Send` and cannot be the lifecycle future itself.
@@ -574,15 +683,6 @@ impl RuntimeState {
         Fut: std::future::Future<Output = Result<MoveOutcome>>,
     {
         tokio::task::spawn_blocking(move || {
-            let reserving = std::time::Instant::now();
-            let _reservation =
-                reserve_recovery_or_cancel(&self.recovery_observer, &session_id, &cancelled)?;
-            tracing::info!(
-                %session_id,
-                phase = "recovery reservation",
-                elapsed_ms = reserving.elapsed().as_millis() as u64,
-                "move phase finished"
-            );
             let loading = std::time::Instant::now();
             let controller = (self.controller_loader)()?;
             tracing::info!(
@@ -705,28 +805,34 @@ mod admission_tests {
     /// does for a Move with a workspace transfer.
     // Hard-won: 571e8aa0: a handoff waited through a resumable Move copy because duplicate admission stayed held.
     // Hard-won: 5ca468627: reading the pid before its write finished hung panic cleanup.
+    // Hard-won: #1562: finishing resumable work during draining was recorded as failure.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_handoff_does_not_wait_for_a_slow_path_move_copy() {
         const NAME: &str = "a_handoff_does_not_wait_for_a_slow_path_move_copy";
         const CHILD: &str = "MJ_TEST_SLOW_MOVE_HANDOFF";
         if std::env::var_os(CHILD).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            IsolatedTest::new(test_name(module_path!(), NAME))
-                .env(CHILD, "1")
-                .env("MJ_INSTANCE", "slow-move-handoff")
-                .isolated_store(root.path())
-                .run();
+            for mode in ["copy", "draining-lapse", "draining-close"] {
+                let root = tempfile::tempdir().unwrap();
+                IsolatedTest::new(test_name(module_path!(), NAME))
+                    .env(CHILD, mode)
+                    .env("MJ_INSTANCE", "slow-move-handoff")
+                    .isolated_store(root.path())
+                    .run();
+            }
             return;
         }
+        let mode = std::env::var(CHILD).unwrap();
+        let copy_finished = Arc::new(tokio::sync::Notify::new());
+        let finished = copy_finished.clone();
         let directory = tempfile::tempdir().unwrap();
         let _release = ReleaseOnDrop(directory.path().join("release"));
         let copy = held_command(directory.path(), "copy Move workspace");
         let state = super::super::tests::test_runtime_state();
         let result = state
-            .start_or_join_lifecycle(
+            .start_automatic_lifecycle(
                 "moving-session".into(),
                 LifecycleKind::Move,
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, _session_admission| async move {
                     state
                         .run_move_controller_work(
                             session_id,
@@ -734,6 +840,7 @@ mod admission_tests {
                             |_, executor, _| async move {
                                 executor.begin_resumable_work()?;
                                 let copied = executor.execute(&copy);
+                                finished.notify_one();
                                 let resumed =
                                     executor.end_resumable_work("Move control transition");
                                 if copied.is_ok() && resumed.is_ok() {
@@ -750,6 +857,7 @@ mod admission_tests {
                         .map(DaemonLifecycleResult::Move)
                 },
             )
+            .await
             .unwrap();
         wait_for_file(&directory.path().join("pid")).await;
         let pid: i32 = std::fs::read_to_string(directory.path().join("pid"))
@@ -765,6 +873,62 @@ mod admission_tests {
                 .any(|label| label == "session lifecycle" || label == "database operation"),
             "the copy holds handoff admission: {labels:?}"
         );
+        if mode != "copy" {
+            let other = crate::upgrade::activity("other bounded control").unwrap();
+            assert!(matches!(handoff(&state).await, DaemonReply::UpgradePending));
+            assert!(crate::upgrade::gate().is_open());
+            std::fs::write(directory.path().join("release"), b"").unwrap();
+            tokio::time::timeout(BOUND, copy_finished.notified())
+                .await
+                .unwrap();
+            tokio::time::timeout(
+                BOUND,
+                crate::upgrade::gate().wait_for_resumable_waiter_for_test(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                result.borrow().is_none(),
+                "drain refusal must not complete the Move as failure"
+            );
+            assert_eq!(
+                crate::upgrade::active_labels(),
+                vec!["other bounded control"]
+            );
+            if mode == "draining-lapse" {
+                crate::upgrade::gate().expire_drain_for_test();
+                drop(other);
+                match tokio::time::timeout(BOUND, RuntimeState::wait_lifecycle_result(result))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    DaemonLifecycleResult::Move(outcome) => {
+                        assert_eq!(outcome.outcome, "completed")
+                    }
+                    _ => panic!("Move must finish normally after drain lapse"),
+                }
+                assert!(crate::upgrade::gate().is_open());
+            } else {
+                drop(other);
+                assert!(matches!(handoff(&state).await, DaemonReply::Done));
+                match tokio::time::timeout(BOUND, RuntimeState::wait_lifecycle_result(result))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    DaemonLifecycleResult::Move(outcome) => {
+                        assert_eq!(outcome.outcome, "interrupted")
+                    }
+                    _ => panic!("closed gate must hand the durable Move to the next daemon"),
+                }
+            }
+            assert!(
+                !process_is_running(pid),
+                "the completed copy cannot outlive the test"
+            );
+            return;
+        }
         let deadline = std::time::Instant::now() + BOUND;
         while !matches!(handoff(&state).await, DaemonReply::Done) {
             assert!(
@@ -818,10 +982,10 @@ mod admission_tests {
         let swap = held_command(directory.path(), "swap the harness in place");
         let state = super::super::tests::test_runtime_state();
         let result = state
-            .start_or_join_lifecycle(
+            .start_automatic_lifecycle(
                 "moving-session".into(),
                 LifecycleKind::Move,
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, _session_admission| async move {
                     state
                         .run_move_controller_work(
                             session_id,
@@ -835,6 +999,7 @@ mod admission_tests {
                         .map(DaemonLifecycleResult::Move)
                 },
             )
+            .await
             .unwrap();
         wait_for_file(&directory.path().join("pid")).await;
         assert!(
@@ -859,5 +1024,33 @@ mod admission_tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl RuntimeState {
+    pub(crate) fn move_test_runtime(
+        controller: Controller,
+        manager: SessionManagerControl,
+    ) -> Arc<RuntimeState> {
+        let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.clone());
+        let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+            manager.clone(),
+            &recovery.observer(),
+        );
+        let state = Arc::new(RuntimeState::new_with_controller_loader(
+            manager,
+            controller,
+            recovery.observer(),
+            upgrades.observer(),
+            Vec::new(),
+            Controller::load,
+        ));
+        state.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
+        state
     }
 }

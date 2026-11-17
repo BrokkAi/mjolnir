@@ -3,7 +3,94 @@ use crate::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessProfile, ProjectBundle, ProjectRepository,
     TargetTemplate,
 };
+use crate::remote_git::Shorthand;
 use crate::targets::MountAccess;
+
+// Hard-won: e569a20c5: unanswered input must follow the latest outcome and user response.
+#[test]
+fn unanswered_input_outcome_tracks_answers_and_current_completion() {
+    use crate::assessment::{Action, Status, TurnAssessment};
+    let mut session = MaterializedSession::empty("input");
+    session.last_turn_outcome = Some(MaterializedTurnOutcome {
+        command_id: "turn".into(),
+        accepted_ordinal: None,
+        turn_start_position: None,
+        completed_ordinal: 10,
+        completed_at_ms: 10,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "AwaitingInput".into(),
+        },
+        answered_through: None,
+        diagnostic: None,
+        usage: None,
+        work_facts: None,
+    });
+    assert!(session.unanswered_input_outcome(None, None).is_some());
+    let mut assessment = TurnAssessment::pending(
+        "turn".into(),
+        10,
+        10,
+        crate::activity::verdict::CompletionEvidence {
+            stop_reason: "EndTurn".into(),
+            diagnostic: None,
+        },
+    );
+    assessment.status = Status::Assessed;
+    assessment.action = Some(Action::AwaitInput);
+    session.last_turn_outcome.as_mut().unwrap().outcome = TurnOutcomeKind::Completed {
+        stop_reason: "EndTurn".into(),
+    };
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_some()
+    );
+    assessment.completed_ordinal = 9;
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+    assessment.completed_ordinal = 10;
+    session.transcript.push(user_item(11, ""));
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+    let watermark = session.latest_user_position();
+    session.transcript.clear();
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), watermark)
+            .is_none()
+    );
+    session.queued_prompts.push(MaterializedQueuedPrompt {
+        accepted_ordinal: None,
+        command_id: "queued".into(),
+        kind: QueuedCommandKind::Prompt,
+        content: vec![],
+        queued_at_ms: 11,
+    });
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+    session.queued_prompts.clear();
+    session.active_turn = Some(MaterializedTurn {
+        command_id: "active".into(),
+        accepted_ordinal: None,
+        turn_start_position: 11,
+        started_at_ms: 11,
+        steered_into: None,
+    });
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+}
 
 #[test]
 fn session_build_cache_defaults_optional_legacy_fields() {
@@ -104,7 +191,7 @@ fn projection_window_keeps_whole_turns_and_unsettled_content() {
     pending_window.trim(&mut pending, 1024);
     assert_eq!(
         pending.transcript.len(),
-        2500,
+        1200,
         "late streaming data keeps its original turn"
     );
 }
@@ -114,8 +201,8 @@ fn snapshot(session: MaterializedSession, window: ProjectionWindow) -> ManagedSe
         materialized: session,
         window,
         worker_build: None,
-        subagent_requests: Vec::new(),
-        subagent_completions: Vec::new(),
+        subagent_requests: Default::default(),
+        subagent_completions: Default::default(),
         subagent_queue_error: None,
         operational: serde_json::from_value(serde_json::json!({
             "session_id": "session-1",
@@ -193,6 +280,9 @@ fn a_running_session_reports_no_completed_turn() {
 
 fn sample_state() -> State {
     let session = SessionRecord {
+        oracle_choice: None,
+        oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -204,8 +294,6 @@ fn sample_state() -> State {
         create_managed_worktree: None,
         workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         container_workspace: None,
         id: "0123456789abcdef".into(),
         title: "Build Hel".into(),
@@ -217,6 +305,7 @@ fn sample_state() -> State {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: vec![AdditionalMount {
@@ -225,11 +314,11 @@ fn sample_state() -> State {
             access: MountAccess::Cow,
         }],
         state: SessionState::Running,
-        target: Some(TargetLocator::LocalPodman {
+        target: Some(Box::new(TargetLocator::LocalPodman {
             borrowed_from: None,
             container_id: "afb67d".into(),
             workspace_storage: Default::default(),
-        }),
+        })),
         native_session_id: Some("native-1".into()),
         acp_session_title: Some("Build Hel".into()),
         session_title_override: None,
@@ -238,15 +327,18 @@ fn sample_state() -> State {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
-        checkpoint: Some(CheckpointMetadata {
+        checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/0123456789abcdef.hel.zip"),
             sha256: "a".repeat(64),
             created_at: "2026-08-09T12:01:00Z".into(),
             event_frontier: 42,
-        }),
+        })),
     };
     State {
+        last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         version: STATE_VERSION,
@@ -266,13 +358,24 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         memory_bytes: 8 << 30,
     });
 
+    let mut runtime = parent
+        .target_runtime
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| (&sample_config().targets["podman"]).into());
+    runtime.container_settings = Some(ContainerSettings::requested(&parent));
+    parent.target_runtime = Some(std::sync::Arc::new(runtime));
+    parent.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 8,
+        memory_bytes: 16 << 30,
+    });
     let mut child = parent.clone();
     child.id = "fedcba9876543210".into();
-    child.target = Some(TargetLocator::LocalPodman {
+    child.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: Some(parent.id.clone()),
         container_id: "afb67d".into(),
         workspace_storage: Default::default(),
-    });
+    }));
 
     let mut provisioning = parent.clone();
     provisioning.id = "0011223344556677".into();
@@ -282,14 +385,44 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         cpus: 2,
         memory_bytes: 4 << 30,
     });
+    // A removed locator during upgrade recovery does not erase its applied snapshot.
+    assert_eq!(
+        applied_container_settings(&provisioning).resource_allocation,
+        parent
+            .target_runtime
+            .as_ref()
+            .unwrap()
+            .container_settings
+            .as_ref()
+            .unwrap()
+            .resource_allocation
+            .as_ref()
+    );
 
     let capacity = host_container_capacity(
         HostContainerSize {
             cpus: 10,
             memory_bytes: 20 << 30,
         },
+        false,
         &["podman".into()],
         [&parent, &child, &provisioning],
+    );
+    // A boot-time pool is already net of the host's own needs: the same
+    // commitments leave exactly the reserve more.
+    let pool = host_container_capacity(
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 20 << 30,
+        },
+        true,
+        &["podman".into()],
+        [&parent, &child, &provisioning],
+    );
+    assert_eq!(pool.reserved.memory_bytes, 0);
+    assert_eq!(
+        pool.remaining.memory_bytes,
+        capacity.remaining.memory_bytes + capacity.reserved.memory_bytes
     );
 
     assert_eq!(
@@ -334,6 +467,27 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
     assert!(warning.contains("more CPUs"));
     assert!(warning.contains("more RAM"));
     assert!(warning.contains("still start"));
+
+    // Hard-won: #1538: a container created at the target's defaults was
+    // counted at a later, smaller Container settings request.
+    let mut defaults = parent.clone();
+    let mut runtime = defaults.target_runtime.as_deref().cloned().unwrap();
+    runtime
+        .container_settings
+        .as_mut()
+        .expect("the parent records its applied settings")
+        .resource_allocation = None;
+    defaults.target_runtime = Some(std::sync::Arc::new(runtime));
+    let unknown = host_container_capacity(
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 20 << 30,
+        },
+        false,
+        &["podman".into()],
+        [&defaults],
+    );
+    assert!(!unknown.complete);
 }
 
 #[test]
@@ -344,6 +498,7 @@ fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
             cpus: 10,
             memory_bytes: 20 << 30,
         },
+        false,
         &["podman".into()],
         state.sessions.values(),
     );
@@ -367,30 +522,6 @@ fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
 }
 
 #[test]
-fn aws_default_stays_at_eight_vcpus_when_container_default_is_smaller() {
-    let options = [
-        SessionResourceAllocation::AwsEc2 {
-            instance_type: "small".into(),
-            vcpus: 2,
-            memory_bytes: 4 << 30,
-        },
-        SessionResourceAllocation::AwsEc2 {
-            instance_type: "default".into(),
-            vcpus: 8,
-            memory_bytes: 32 << 30,
-        },
-    ];
-
-    let selected = preferred_aws_allocation(&options, None).expect("an AWS option");
-
-    assert!(matches!(
-        selected,
-        SessionResourceAllocation::AwsEc2 { instance_type, .. }
-            if instance_type == "default"
-    ));
-}
-
-#[test]
 fn capacity_gib_text_never_rounds_a_limit_up() {
     assert_eq!(floor_gib_tenths((8 << 30) - 1), "7.9");
     assert_eq!(floor_gib_tenths(64 << 30), "64");
@@ -398,6 +529,7 @@ fn capacity_gib_text_never_rounds_a_limit_up() {
 
 fn sample_config() -> Config {
     Config {
+        images: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
         keys: Default::default(),
@@ -411,7 +543,6 @@ fn sample_config() -> Config {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         subagents: Default::default(),
@@ -422,15 +553,7 @@ fn sample_config() -> Config {
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/home/test/.codex"),
-                environment: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/home/test/.codex"))
             },
         )]),
         bundles: BTreeMap::from([(
@@ -483,13 +606,9 @@ fn session_records_written_before_container_overrides_still_load() {
     assert!(object.remove("container_memory").is_none());
 
     let loaded: SessionRecord = serde_json::from_value(json).expect("load older session");
-    assert_eq!(loaded.container_cpus, None);
-    assert_eq!(loaded.container_memory, None);
     assert_eq!(loaded, session);
 
-    let mut edited = session.clone();
-    edited.container_cpus = Some("4".into());
-    edited.container_memory = Some("8g".into());
+    let edited = session.clone();
     let round_tripped: SessionRecord =
         serde_json::from_str(&serde_json::to_string(&edited).expect("serialize"))
             .expect("reload edited session");
@@ -501,7 +620,7 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
     let config = sample_config();
     let mut parent = sample_session();
     parent.id = "parent-session".into();
-    parent.managed_worktree = Some(ManagedWorktree {
+    parent.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
@@ -509,7 +628,7 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
         branch: "mj/parent-session".into(),
         target: ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     parent.project_directory = Some(PathBuf::from("/worktrees/parent-session"));
     // A child is launched into the parent's worktree checkout, which is named
     // after the parent session, and owns no worktree of its own.
@@ -592,6 +711,53 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
     assert!(!state.is_subagent_session(&parent.id), "the owner");
 }
 
+#[test]
+fn only_a_sub_agent_without_a_live_worker_is_stopped() {
+    let mut parent = sample_session();
+    parent.id = "0123456789abcdef0123456789abcdef".into();
+    parent.state = SessionState::Stopped;
+    let mut child = sample_session();
+    child.id = "fedcba9876543210fedcba9876543210".into();
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(
+        child.id.clone(),
+        crate::subagent::SubagentMetadata {
+            kind: crate::subagent::SubagentKind::Reviewer,
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Review".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            request_key: "request-1".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: false,
+        },
+    );
+
+    for (session_state, stopped) in [
+        (SessionState::Running, false),
+        (SessionState::Closing, false),
+        (SessionState::Parked, true),
+        (SessionState::Stopped, true),
+        (SessionState::Error, true),
+    ] {
+        state.sessions.get_mut(&child.id).unwrap().state = session_state;
+        assert_eq!(
+            state.is_stopped_subagent(&child.id),
+            stopped,
+            "{session_state:?}"
+        );
+    }
+    assert!(!state.is_stopped_subagent(&parent.id), "a stopped owner");
+    assert!(!state.is_stopped_subagent("missing"));
+}
+
 fn checkout_session(id: &str) -> SessionRecord {
     let mut session = sample_session();
     session.id = id.to_owned();
@@ -614,7 +780,7 @@ fn managed_checkout_record(
         })
         .join(id);
     session.project_directory = project_directory;
-    session.managed_worktree = Some(ManagedWorktree {
+    session.managed_worktree = Some(Box::new(ManagedWorktree {
         kind,
         source_project_directory: repository.join("packages/app"),
         source_repository: repository,
@@ -625,7 +791,7 @@ fn managed_checkout_record(
         },
         target,
         base_commit: None,
-    });
+    }));
     session
 }
 
@@ -636,20 +802,20 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
     let mut local_non_git = checkout_session("local-non-git");
     local_non_git.project_directory = Some(PathBuf::from("/work/plain-directory"));
     local_non_git.create_managed_worktree = Some(true);
-    local_non_git.target = Some(TargetLocator::LocalBare {
+    local_non_git.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/mj/workers/local-non-git"),
-    });
+    }));
     state
         .sessions
         .insert(local_non_git.id.clone(), local_non_git.clone());
 
     let mut ssh_raw = checkout_session("ssh-raw");
     ssh_raw.project_directory = Some(PathBuf::from("/home/dev/project"));
-    ssh_raw.target = Some(TargetLocator::SshBare {
+    ssh_raw.target = Some(Box::new(TargetLocator::SshBare {
         host: "dev.example.test".into(),
         workspace: PathBuf::from("/home/dev"),
         worker_id: None,
-    });
+    }));
     state.sessions.insert(ssh_raw.id.clone(), ssh_raw.clone());
 
     let raw_worktree_path =
@@ -684,18 +850,21 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         .insert(bundle_workspace.id.clone(), bundle_workspace.clone());
     let mut saved_project_workspace = checkout_session("saved-project-workspace");
     let bundle = sample_config().bundles["hel"].clone();
-    saved_project_workspace.project = Some(crate::repository::ProjectBundleSnapshot {
-        identities: BTreeMap::from([(
-            "hel".into(),
-            crate::repository::RepositoryIdentity::from_remote(
-                "https://github.com/BrokkAi/hel.git",
-            )
-            .expect("valid repository identity"),
-        )]),
-        bundle,
-        network_sources: Default::default(),
-        plain_directories: Default::default(),
-    });
+    saved_project_workspace.project = Some(
+        crate::repository::ProjectBundleSnapshot {
+            identities: BTreeMap::from([(
+                "hel".into(),
+                crate::repository::RepositoryIdentity::from_remote(
+                    "https://github.com/BrokkAi/hel.git",
+                )
+                .expect("valid repository identity"),
+            )]),
+            bundle,
+            network_sources: Default::default(),
+            plain_directories: Default::default(),
+        }
+        .into(),
+    );
     state.sessions.insert(
         saved_project_workspace.id.clone(),
         saved_project_workspace.clone(),
@@ -866,18 +1035,24 @@ fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinatio
     assert_eq!(source.short, "hel");
     assert_eq!(source.full, "BrokkAi/hel");
     assert_eq!(
-        ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git"),
-        ProjectSourceIdentity::git_remote("https://github.com/BrokkAi/bifrost-dev.git")
+        ProjectSourceIdentity::git_remote(
+            "git@github.com:BrokkAi/bifrost-dev.git",
+            Shorthand::Allowed
+        ),
+        ProjectSourceIdentity::git_remote(
+            "https://github.com/BrokkAi/bifrost-dev.git",
+            Shorthand::Allowed
+        )
     );
     assert_ne!(
-        ProjectSourceIdentity::git_remote("BrokkAi/bifrost-dev"),
-        ProjectSourceIdentity::git_remote("OtherOrg/bifrost-dev")
+        ProjectSourceIdentity::git_remote("BrokkAi/bifrost-dev", Shorthand::Allowed),
+        ProjectSourceIdentity::git_remote("OtherOrg/bifrost-dev", Shorthand::Allowed)
     );
 
     session.project_directory = Some(PathBuf::from(
         "/home/test/Projects/source/.mj/worktrees/0123456789abcdef",
     ));
-    session.managed_worktree = Some(ManagedWorktree {
+    session.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source/crate"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
@@ -885,7 +1060,7 @@ fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinatio
         branch: "mj/0123456789abcdef".into(),
         target: ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     let source = session.project_source(&config);
     assert_eq!(source.short, "source");
     assert_eq!(source.full, "/home/test/Projects/source");
@@ -976,6 +1151,179 @@ fn multi_repository_bundle_identity_ignores_repository_order_and_primary_selecti
     );
 }
 
+/// Stored identities (`RepositoryIdentity` in sessions, project locations and
+/// project-memory directory names) come from these functions, so each remote
+/// spelling must keep mapping to the identity recorded before the shared GitHub
+/// parser. The expected values were captured from the parsers it replaced. The
+/// last four rows are the defects it fixed.
+#[test]
+fn git_remote_keeps_the_identities_stored_for_each_remote_spelling() {
+    use crate::repository::RepositoryIdentity;
+    // (input, key, short, full); `None` is not a network remote.
+    type Expected = Option<(&'static str, &'static str, &'static str)>;
+    let table: &[(&str, Expected)] = &[
+        (
+            "owner/repo",
+            Some(("github:owner/repo", "repo", "owner/repo")),
+        ),
+        (
+            "owner/repo.git",
+            Some(("github:owner/repo", "repo", "owner/repo")),
+        ),
+        (
+            "mirror/repo.git",
+            Some(("github:mirror/repo", "repo", "mirror/repo")),
+        ),
+        ("https://github.com/o/r", Some(("github:o/r", "r", "o/r"))),
+        (
+            "https://github.com/o/r.git",
+            Some(("github:o/r", "r", "o/r")),
+        ),
+        ("https://github.com/o/r/", Some(("github:o/r", "r", "o/r"))),
+        (
+            "https://github.com/o/r/extra",
+            Some((
+                "git:https://github.com/o/r/extra",
+                "extra",
+                "https://github.com/o/r/extra",
+            )),
+        ),
+        ("http://github.com/o/r", Some(("github:o/r", "r", "o/r"))),
+        (
+            "https://user:pass@github.com/o/r.git",
+            Some(("github:o/r", "r", "o/r")),
+        ),
+        (
+            "https://github.com:443/o/r",
+            Some(("github:o/r", "r", "o/r")),
+        ),
+        (
+            "https://github.com:444/o/r",
+            Some((
+                "git:https://github.com:444/o/r",
+                "r",
+                "https://github.com:444/o/r",
+            )),
+        ),
+        ("git@github.com:o/r.git", Some(("github:o/r", "r", "o/r"))),
+        ("github.com:o/r.git", Some(("github:o/r", "r", "o/r"))),
+        (
+            "ssh://git@github.com/o/r.git",
+            Some(("github:o/r", "r", "o/r")),
+        ),
+        ("ssh://github.com/o/r.git", Some(("github:o/r", "r", "o/r"))),
+        ("foo@github.com:o/r", Some(("github:o/r", "r", "o/r"))),
+        (
+            "ssh://git@github.com:22/o/r.git",
+            Some((
+                "git:ssh://github.com:22/o/r",
+                "r",
+                "ssh://github.com:22/o/r",
+            )),
+        ),
+        (
+            "ssh://git@ssh.github.com:443/o/r.git",
+            Some((
+                "git:ssh://ssh.github.com:443/o/r",
+                "r",
+                "ssh://ssh.github.com:443/o/r",
+            )),
+        ),
+        (
+            "ssh://ssh.github.com:443/o/r.git",
+            Some((
+                "git:ssh://ssh.github.com:443/o/r",
+                "r",
+                "ssh://ssh.github.com:443/o/r",
+            )),
+        ),
+        // `git://` is a GitHub spelling to the parser, never a GitHub identity.
+        (
+            "git://github.com/o/r.git",
+            Some(("git:git://github.com/o/r", "r", "git://github.com/o/r")),
+        ),
+        // An owner/repo parse must not turn this route into the GitHub
+        // identity: identities are stored, and it was a network remote.
+        (
+            "git@ssh.github.com:o/r.git",
+            Some(("git:ssh.github.com:o/r", "r", "ssh.github.com:o/r")),
+        ),
+        ("https://GITHUB.com/O/R", Some(("github:o/r", "R", "O/R"))),
+        ("./o/r", None),
+        ("/o/r", None),
+        (
+            "https://gist.github.com/o/r",
+            Some((
+                "git:https://gist.github.com/o/r",
+                "r",
+                "https://gist.github.com/o/r",
+            )),
+        ),
+        (
+            "https://github.example.com/o/r",
+            Some((
+                "git:https://github.example.com/o/r",
+                "r",
+                "https://github.example.com/o/r",
+            )),
+        ),
+        (
+            "https://notgithub.com/o/r",
+            Some((
+                "git:https://notgithub.com/o/r",
+                "r",
+                "https://notgithub.com/o/r",
+            )),
+        ),
+        // Fixed: the host's letter case defeated the GitHub match, which stored
+        // `Network("github.com:O/R")` and no label.
+        ("git@GitHub.com:O/R.git", Some(("github:o/r", "R", "O/R"))),
+        // Fixed: a query was taken for part of the repository name.
+        (
+            "https://github.com/o/r?x=1",
+            Some((
+                "git:https://github.com/o/r?x=1",
+                "r?x=1",
+                "https://github.com/o/r?x=1",
+            )),
+        ),
+        // Fixed: a name GitHub cannot have was a GitHub identity.
+        (
+            "https://github.com/o/r$",
+            Some((
+                "git:https://github.com/o/r$",
+                "r$",
+                "https://github.com/o/r$",
+            )),
+        ),
+    ];
+    for (input, expected) in table {
+        let actual = ProjectSourceIdentity::git_remote(input, Shorthand::Allowed)
+            .map(|source| (source.key, source.short, source.full));
+        let expected =
+            expected.map(|(key, short, full)| (key.to_owned(), short.to_owned(), full.to_owned()));
+        assert_eq!(actual, expected, "{input:?}");
+
+        // A remote read from `git config` cannot be shorthand.
+        let rejected = ProjectSourceIdentity::git_remote(input, Shorthand::Rejected)
+            .map(|source| (source.key, source.short, source.full));
+        let shorthand = ["owner/repo", "owner/repo.git", "mirror/repo.git"].contains(input);
+        assert_eq!(rejected, if shorthand { None } else { actual }, "{input:?}");
+    }
+    assert_eq!(
+        serde_json::to_string(&RepositoryIdentity::from_remote("git@github.com:O/R.git").unwrap())
+            .unwrap(),
+        r#"{"github":["o","r"]}"#
+    );
+    assert_eq!(
+        serde_json::to_string(
+            &RepositoryIdentity::from_remote("ssh://git@ssh.github.com:443/o/r.git").unwrap()
+        )
+        .unwrap(),
+        r#"{"network":"ssh://ssh.github.com:443/o/r"}"#
+    );
+}
+
 #[test]
 fn duplicate_repository_sources_collapse_to_the_single_repository_identity() {
     let mut config = sample_config();
@@ -1000,7 +1348,7 @@ fn duplicate_repository_sources_collapse_to_the_single_repository_identity() {
     let source = session.project_source(&config);
     assert_eq!(
         source,
-        ProjectSourceIdentity::git_remote("BrokkAi/hel").unwrap()
+        ProjectSourceIdentity::git_remote("BrokkAi/hel", Shorthand::Allowed).unwrap()
     );
 }
 
@@ -1597,11 +1945,11 @@ fn harness_titles_are_normalized_to_one_complete_line() {
 #[test]
 fn locator_rejects_parent_traversal() {
     let mut state = sample_state();
-    state.sessions.first_value_mut().unwrap().target = Some(TargetLocator::SshBare {
+    state.sessions.first_value_mut().unwrap().target = Some(Box::new(TargetLocator::SshBare {
         host: "builder".into(),
         workspace: PathBuf::from("~/hel/../other"),
         worker_id: None,
-    });
+    }));
     assert!(
         state
             .validate()
@@ -1626,17 +1974,17 @@ fn borrowed_ssh_bare_locator_validates_by_its_worker_identity() {
         worker_id: Some(worker_id.into()),
     };
 
-    session.target = Some(borrowed(
+    session.target = Some(Box::new(borrowed(
         &child_id,
         ".local/share/hel/workspaces/parent-session",
-    ));
+    )));
     state.validate().unwrap();
 
     let session = state.sessions.first_value_mut().unwrap();
-    session.target = Some(borrowed(
+    session.target = Some(Box::new(borrowed(
         "someone-else",
         ".local/share/hel/workspaces/parent-session",
-    ));
+    )));
     assert!(
         state
             .validate()
@@ -1646,7 +1994,10 @@ fn borrowed_ssh_bare_locator_validates_by_its_worker_identity() {
     );
 
     let session = state.sessions.first_value_mut().unwrap();
-    session.target = Some(borrowed(&child_id, ".local/share/hel/../parent-session"));
+    session.target = Some(Box::new(borrowed(
+        &child_id,
+        ".local/share/hel/../parent-session",
+    )));
     assert!(state.validate().is_err());
 }
 
@@ -1705,6 +2056,65 @@ fn a_session_nobody_named_is_listed_by_the_title_it_was_created_with() {
     // A name that happens to equal the id is still a name.
     session.session_title_override = Some(session.id.clone());
     assert_eq!(session.listed_title(), session.id);
+}
+
+/// A name a person typed beats one the harness generated, and neither is
+/// needed for the columns-only helper to agree with the record.
+#[test]
+fn a_typed_name_beats_a_harness_name_and_the_column_helper_agrees() {
+    let mut session = sample_session();
+    session.title = "created with".into();
+    session.session_title_override = None;
+    session.acp_session_title = None;
+    assert!(!session.has_given_name());
+    assert_eq!(session.given_name(), None);
+
+    session.acp_session_title = Some("Harness name".into());
+    assert!(session.has_given_name());
+    assert_eq!(session.given_name(), Some("Harness name"));
+
+    session.session_title_override = Some("Typed name".into());
+    assert_eq!(session.given_name(), Some("Typed name"));
+    assert_eq!(session.listed_title(), "Typed name");
+
+    for (title_override, acp) in [
+        (None, None),
+        (None, Some("Harness name")),
+        (Some("Typed name"), None),
+        (Some("Typed name"), Some("Harness name")),
+    ] {
+        session.session_title_override = title_override.map(str::to_owned);
+        session.acp_session_title = acp.map(str::to_owned);
+        assert_eq!(
+            listed_session_title(&session.id, &session.title, title_override, acp),
+            session.listed_title()
+        );
+    }
+    assert_eq!(listed_session_title("the-id", "  ", None, None), "the-id");
+}
+
+#[test]
+fn a_message_names_a_session_on_one_bounded_line() {
+    let mut session = sample_session();
+    session.session_title_override = None;
+    session.acp_session_title = None;
+    session.title = "Fix the parser\n\nThen the long tail of the prompt follows here, in paragraphs, until it runs well past the limit for a name in a message header.".into();
+    let name = session.message_name();
+    assert!(!name.contains('\n'));
+    assert!(name.starts_with("Fix the parser Then the long tail"));
+    assert!(name.ends_with('…'));
+    assert!(name.chars().count() <= MESSAGE_NAME_CHARS);
+
+    session.session_title_override = Some("Renamed".into());
+    assert_eq!(session.message_name(), "Renamed");
+
+    // The creation title is stored as typed, so a terminal control in it
+    // must not reach a message header.
+    session.session_title_override = None;
+    session.title = "Copy \u{1b}]52;c;QQ==\u{7}this".into();
+    let name = session.message_name();
+    assert!(!name.chars().any(char::is_control), "{name:?}");
+    assert!(name.starts_with("Copy "));
 }
 
 #[test]
@@ -1819,6 +2229,18 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
             Default::default()
         );
     }
+}
+
+#[test]
+fn oracle_state_reads_old_sessions_enabled_and_omits_empty_preferences() {
+    let mut session = serde_json::to_value(sample_session()).unwrap();
+    session.as_object_mut().unwrap().remove("oracle");
+    session.as_object_mut().unwrap().remove("oracle_choice");
+    let restored: SessionRecord = serde_json::from_value(session).unwrap();
+    assert!(restored.oracle);
+    assert!(restored.oracle_choice.is_none());
+    let state = serde_json::to_value(State::default()).unwrap();
+    assert!(state.get("last_oracle_choices").is_none());
 }
 
 #[test]

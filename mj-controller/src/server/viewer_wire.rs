@@ -15,9 +15,11 @@ const INTERNED_FIELDS: [&str; 5] = [
     "incompatible_resume_targets",
 ];
 
-pub(super) const METADATA_FIELDS: [&str; 16] = [
+pub(super) const METADATA_FIELDS: [&str; 19] = [
     "profile_capabilities",
     "last_subagent_policies",
+    "last_oracle_choices",
+    "oracle_configured",
     "operator_away",
     "auto_afk_minutes",
     "subagents_configured",
@@ -32,6 +34,7 @@ pub(super) const METADATA_FIELDS: [&str; 16] = [
     "review_config",
     "capacity",
     "launch_failures",
+    "notices",
 ];
 
 /// Fixed-size digests avoid retaining serialized metadata for each history
@@ -40,30 +43,38 @@ pub(super) const METADATA_FIELDS: [&str; 16] = [
 pub(super) struct MetadataDigests(pub(super) [Option<[u8; 32]>; METADATA_FIELDS.len()]);
 
 /// Summary rows retain exactly these serialized session fields: `id`,
-/// `workspace_id`, `bundle_id`, `title`, `subagent_parent_id`,
-/// `subagent_session_ids`, `publication_state`, `profile_id`, `target_id`,
-/// `state`, `container_upgrade_supported`, `created_at`, `updated_at`, `has_error`, `configuration_issue`,
+/// `workspace_id`, `bundle_id`, `title`, `given_title`, `subagent_parent_id`,
+/// `subagent_session_ids`, `reviewer_session_ids`, `publication_state`,
+/// `profile_id`, `target_id`, `state`, `container_upgrade_supported`,
+/// `created_at`, `updated_at`, `has_error`, `configuration_issue`,
 /// `launch_error`, `storage_problem`, `project_label`, `display_location`,
 /// `lifecycle`, `transitioning`, `last_activity_at_ms`, `last_message_at_ms`,
 /// `capacity_retry`, `retry_assessment_pending`, `quota_recovery`, `operation`,
-/// `move_recovery`, `chat_phase`, `is_idle`, `activity_details`, `activity`,
+/// `move_recovery`, `chat_phase`, `is_idle`, `active`, `activity_details`, `activity`,
 /// and `capabilities`. Prompt and elicitation bodies become
 /// `queued_prompt_count` and `pending_elicitation_count`. These are the
 /// dashboard, resume-list, session-index, and sub-agent workspace/count fields
 /// read by viewer.js; resume detail, Move, and conversation fields are fetched
 /// from the row route.
 const SUMMARY_FIELDS: &[&str] = &[
+    "attention",
+    "notification_dismissal",
+    "form_holder",
+    "unread_frontier",
     "id",
     "workspace_id",
     "bundle_id",
     "title",
+    "given_title",
     "subagent_parent_id",
     "subagent_session_ids",
+    "reviewer_session_ids",
     "publication_state",
     "profile_id",
     "target_id",
     "state",
     "container_upgrade_supported",
+    "resource_allocation",
     "created_at",
     "updated_at",
     "has_error",
@@ -78,11 +89,13 @@ const SUMMARY_FIELDS: &[&str] = &[
     "last_message_at_ms",
     "capacity_retry",
     "retry_assessment_pending",
+    "question_message",
     "quota_recovery",
     "operation",
     "move_recovery",
     "chat_phase",
     "is_idle",
+    "active",
     "activity_details",
     "activity",
     "capabilities",
@@ -101,6 +114,8 @@ struct SnapshotMetadata<'a> {
     profile_capabilities: &'a mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     last_subagent_policies:
         &'a std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
+    last_oracle_choices: &'a std::collections::BTreeMap<String, bool>,
+    oracle_configured: bool,
     subagents_configured: bool,
     revision: u64,
     generated_at: &'a str,
@@ -117,6 +132,8 @@ struct SnapshotMetadata<'a> {
     capacity: &'a [super::ViewerTargetCapacity],
     #[serde(skip_serializing_if = "slice_is_empty")]
     launch_failures: &'a [super::ViewerLaunchFailure],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    notices: &'a [mj_client::daemon::RuntimeNotice],
 }
 
 fn slice_is_empty<T>(values: &&[T]) -> bool {
@@ -151,6 +168,8 @@ pub(super) fn metadata(
         auto_afk_minutes: snapshot.auto_afk_minutes,
         profile_capabilities: &snapshot.profile_capabilities,
         last_subagent_policies: &snapshot.last_subagent_policies,
+        last_oracle_choices: &snapshot.last_oracle_choices,
+        oracle_configured: snapshot.oracle_configured,
         subagents_configured: snapshot.subagents_configured,
         revision: snapshot.revision,
         generated_at: &snapshot.generated_at,
@@ -163,6 +182,7 @@ pub(super) fn metadata(
         review_config: &snapshot.review_config,
         capacity: &snapshot.capacity,
         launch_failures: &snapshot.launch_failures,
+        notices: &snapshot.notices,
     };
     serde_json::to_value(metadata)?
         .as_object()

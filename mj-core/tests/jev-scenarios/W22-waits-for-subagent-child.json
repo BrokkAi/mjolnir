@@ -1,0 +1,259 @@
+{
+  "id": "W22",
+  "title": "Waits for subagent child",
+  "category": "waiting-on-automation",
+  "harness": "claude",
+  "source": {
+    "kind": "worker-decision",
+    "session": "c27f713e5f7177bc869217987b7c5f79",
+    "session_title": "mjolnir via claude2",
+    "decision": "assessment-c27f713e5f7177bc869217987b7c5f79-1821",
+    "contract": "turn-verdict-v7",
+    "captured_at": "2026-11-05T17:21:51.964Z",
+    "assessed_at": "2026-11-05T17:28:50.069Z",
+    "recorded_action": "uncertain",
+    "recorded_status": "consumed",
+    "recorded_reason": "automatic_action_admitted"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:prompt-44b7ed43b728aa34c4a70e4eca83b42f",
+          "role": "user",
+          "text": "add a scrollable, 5-line-viewport history of recently attached directories to the new/move session dialogs; should be target-specific. Doubleclick or enter to add from the \"add directory\" subdialog."
+        },
+        {
+          "id": "user:prompt-b373ecaf31f7721ae957518640d6c956",
+          "role": "user",
+          "text": "the \"folder\" option for adding a bundle is a fucking mess, do i understand correclty that the URL option allows me to paste a local path? if so let's just change that to \"URL or Path\" and remove Folder tab"
+        },
+        {
+          "id": "msg_011Cgk5JZJQURZxYbDg4YWQB",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The daemon decides what a source is by checking the disk first: if the path exists, it is a local repository. Only then does it try to parse GitHub. So `owner/repo` is read as GitHub only when no folder by that relative name exists on the daemon's machine. That is a small risk, and the Folders tab does not change it either way.\n- The Folders tab sent its own daemon request (`ProjectDiscoveryRequest::Directory`). I asked the child to remove that request too if nothing else uses it. If removing it would break an older client talking to a newer daemon, or the reverse, the child will stop and report first.\n`─────────────────────────────────────────────────`\n\nA child agent is removing the Folders tab and renaming \"Paste URL\" to \"URL or Path\". It will also update the tests, goldens and docs. The mount-history change from earlier is still uncommitted in the same tree, and the child knows to leave it alone. I'll review the diff when it reports back."
+        },
+        {
+          "id": "msg_011Cgk5WiXc96dUv7LLNRie4",
+          "role": "assistant",
+          "text": "Meanwhile I'll review the code part of the change."
+        },
+        {
+          "id": "msg_011Cgk5XAr91T1eUk9us3D5e",
+          "role": "assistant",
+          "text": "The docs mention a browser picker too. I'll check whether the web viewer still uses folder browsing, since that changes what the docs edit should say."
+        },
+        {
+          "id": "msg_011Cgk5ak4VhciNfKCmBiE9X",
+          "role": "assistant",
+          "text": "Keeping the web picker. I'll fix the docs myself; the child is only working on tests and goldens now, so we won't both edit the same file."
+        },
+        {
+          "id": "msg_011Cgk5biARuayFC7YSfx47g",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The terminal UI and the web viewer each have their own copy of the project picker: Rust in `mj-tui`, and JavaScript in `mj-controller/src/web/viewer.js`. Both use the same daemon requests. That is why the folder request has to stay: the web picker still uses it, which the child's handback missed.\n- A shared docs page has to state which interface each option belongs to once the two pickers differ. Otherwise a browser user reads that Folders is gone when it is still on their screen.\n`─────────────────────────────────────────────────`\n\nI've asked the child to finish its incomplete work: delete the folder-only test, fix the stale golden assertion, add a test for pasting a local path, regenerate the goldens, and run the tests and clippy. I also corrected the docs (`docs/src/content/docs/workspaces-bundles.md:162`). They now say the terminal has \"URL or Path\" and no Folders tab, while the browser still has Folders. Waiting for the child's report."
+        },
+        {
+          "id": "msg_011Cgk5fQpkbLYYMQxMTB3nn",
+          "role": "assistant",
+          "text": "The terminal project picker no longer has a Folders tab, and its \"Paste URL\" tab is now \"URL or Path\". The change is uncommitted. It sits alongside the mount-history change, which is also uncommitted. `TZ=UTC cargo test -p brokk-mj-tui` passes (573 passed, 2 ignored), as do clippy with `-D warnings` and `cargo fmt`.\n\n**What changed:**\n- **Tabs:** the tab row now reads `Recent     GitHub     URL or Path` (`mj-tui/tests/golden/wizard-target-step.txt`).\n- **Removed code:** the folder-browsing state, the Home and Up controls, and the folder filter (`mj-tui/src/wizards/projects.rs`, −173 lines).\n- **New test:** `project_picker_url_or_path_submits_a_local_repository_path` types `/work/visible` into the \"URL or Path\" tab and checks that the bundle request contains that path.\n- **Hint text:** the Recent tab hint now says \"…or find another on GitHub or by URL or path.\"\n- **Web viewer and daemon:** unchanged, as you chose. The web viewer still has its Browse folders mode, so the daemon's folder request (`ProjectDiscoveryRequest::Directory`) stays.\n- **Docs:** I rewrote `docs/src/content/docs/workspaces-bundles.md:162` so it lists \"URL or Path\" for the terminal and Folders as browser-only. The child's version had said Folders was gone everywhere.\n\n**One wording issue:** the empty-Recent message now reads \"Choose GitHub or URL or path above to get started.\" The two \"or\"s make it ambiguous. \"Choose the GitHub or URL or Path tab above\" would be clearer. Fixing it means regenerating two golden files. I have not done it; say if you want it.\n\n`★ Insight ─────────────────────────────────────`\n- The child's first handback said the terminal UI was the only user of the folder request. A search of `viewer.js` showed the web picker uses it too, so it would not have been dead code after the TUI change. When two interfaces share one daemon API, search both before calling anything unused.\n- Golden files record the whole screen, so a wording change in one tab shows up in every frame of every golden that renders that picker. That is why two golden files changed for a three-word rename.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:prompt-6c8c456277ca3a3a7cc1a36322ebbda9",
+          "role": "user",
+          "text": "perform a new minor-version (2.xx.0) release pls (make sure CI is green first)"
+        },
+        {
+          "id": "msg_011Cgk6dCxBPx1sFaNQKhKGa",
+          "role": "assistant",
+          "text": "Status:\n- Master CI is green at `326537551`.\n- I committed this session's work as `788f4a249` and rebased it onto origin/master.\n- The pre-push review is running.\n- The `mj-tui` tests are running again, because the three upstream commits touched `mj-tui/src/wizards/tests.rs`.\n\nOnce both pass, I'll push and wait for master CI on the new commit. Then I'll run `cargo release minor` to prepare 2.67.0, push it, and tag `v2.67.0`. Waiting for the review verdict and the test run."
+        },
+        {
+          "id": "user:prompt-a218f9bdf0e6823f811123a6c8510d9c",
+          "role": "user",
+          "text": "1. doesn't AGENTS.md call for pushing by default? if so why didn't you?\n\n2. before release, also remove the forward/cancel shit from the review flow, i want conversation prompt to be available normally, if i want to check on the reviewers that's what the virtual workspace is for"
+        },
+        {
+          "id": "msg_011Cgk6kZD3HM9ghedpEK3ki",
+          "role": "assistant",
+          "text": "I've read `AGENTS.md` now. Next I need to see how the turn-review flow works before deciding what happens to findings once the buttons are gone."
+        },
+        {
+          "id": "user:prompt-5933ded73c14a6d4452ddbed8ccbb173",
+          "role": "user",
+          "text": "(no memory note pls, that's the harness's job, i'll fix it there)"
+        },
+        {
+          "id": "msg_011Cgk6oTw7xZtWNMjXhwhqZ",
+          "role": "assistant",
+          "text": "Removed the memory note and its index line.\n\n`★ Insight ─────────────────────────────────────`\n- The turn-review driver already forwards findings on its own: the test `a_findings_verdict_is_forwarded_without_a_manual_resolve` in `mj-controller/src/review_host/tests.rs` covers this. So the buttons are not the only way findings reach the agent. What is still unknown is which verdicts wait for a person to choose, and where the prompt gets blocked.\n- `Resolution::Cancelled` has a side effect besides closing the card: the review baseline does not move forward, so the next review covers the cancelled turn as well. If Cancel goes away, we need to decide what a new prompt sent during a review does to that coverage.\n`─────────────────────────────────────────────────`\n\nStatus:\n- **Commit `788f4a249`:** its pre-push review is still running. Once the verdict is clean I'll push it.\n- **Turn-review buttons:** a child is mapping how the flow works today. It covers which phases block the prompt, which verdicts wait for a person, what a prompt sent mid-review does, and which wire and database forms mention forward/dismiss/cancel. I'll choose the design from that map, and ask you if it raises a real choice, such as what a new prompt should do to a review that is still running.\n- **Release:** waits for both of the above, then master CI, then 2.67.0."
+        },
+        {
+          "id": "msg_011Cgk72sPcXjRJ584r8f96N",
+          "role": "assistant",
+          "text": "The map settles most of the design. These defaults are routine enough that I'll go ahead with them, not ask:\n\n- **Prompts:** no review blocks the prompt any more. Reviewers keep running while you chat.\n- **Findings:** they still go to the agent automatically. If the agent is busy with your turn, they queue behind it.\n- **Overlapping reviews:** if a turn ends while a review is still open, one follow-up review is remembered and starts after the open one finishes. It covers everything since the last baseline.\n- **Failed reviews:** a failed reviewer, or a findings delivery the agent rejects, now closes on its own with a notice. The baseline stays where it was, so the next review covers that turn again.\n- **Controls removed:** the Forward / Dismiss / Cancel / Read details controls go from the TUI, the web viewer, the CLI and the HTTP API. Stored resolution values stay readable for old records."
+        },
+        {
+          "id": "msg_011Cgk76zkEwzqNgeQctUgXW",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The prompt was blocked in five separate places: the review host, the session actor, HTTP validation, the TUI composer and the web composer. They don't all agree, either: a failed review blocks in the TUI and HTTP API but not in the actor. `AGENTS.md` calls duplicate predicates for one question a bug. So I asked for every blocking check to be deleted, not for one new owner to be added.\n- Making the prompt available creates a real overlap case: a turn can end while the previous review is still running. The host refuses to start a second review today, so without a remembered follow-up review, the changes from that turn would never be reviewed. Keeping at most one pending follow-up stops reviews from piling up, and its coverage still runs back to the last baseline, so no changes are skipped.\n`─────────────────────────────────────────────────`\n\nStatus:\n- **Non-blocking review:** a child is implementing it under the design above, starting with an ExecPlan as `AGENTS.md` requires.\n- **Commit `788f4a249`:** still waiting for its pre-push review verdict. Once it is clean I'll push.\n- **Release:** after the review change lands and master CI is green, I'll cut 2.67.0.\n\nWaiting for the child and the review verdict."
+        },
+        {
+          "id": "msg_011Cgk7v3HMq4o5Zz4oSQX7D",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The split follows file ownership, not features. The daemon child owns the review host, the database and `mj-core/src/review`. The surface child owns everything a person or client touches: TUI, web, CLI, HTTP, the native action and docs. Both share one checkout, so non-overlapping file sets are what stop their edits from colliding. The one file both needed (`server/validation.rs`) stays with the daemon child, which had already changed it.\n- I told the surface child to keep the daemon-internal resolve function if the daemon still calls it, and remove only the outside surfaces. Then a public command can go away without one child cutting a seam the other is still rewriting.\n`─────────────────────────────────────────────────`\n\nTwo children are working in parallel:\n- **Daemon side** (`8fa2bd94`): the durable follow-up review with a classified migration, bounded retry of findings delivery that closes itself with a notice when it gives up, and removal of the dead prompt-hold code.\n- **Surfaces** (`5b264bb5`): removing the review controls from the TUI, the web viewer, the CLI, the HTTP endpoint and the native action, then the docs and goldens.\n\nCommit `788f4a249` is still waiting for its pre-push review verdict. Once the review work is integrated and checked, I'll commit it, push both commits, wait for master CI and cut 2.67.0."
+        },
+        {
+          "id": "user:prompt-c200ed64bd471cd1a6f2307b8e7f40f2",
+          "role": "user",
+          "text": "pls fix #1449 if it's still a problem in current mj"
+        },
+        {
+          "id": "msg_011Cgk8Zv16zBZyniEoaRNmd",
+          "role": "assistant",
+          "text": "A child is checking whether #1449 is still a problem on current master, and will fix it if so.\n\n**Its brief:**\n- Find out which harness and cost path the `deepseek` profile uses.\n- Check each of the issue's three expectations against current code: a cost for every turn, cached reads at the cache-hit rate, and `mj usage` saying when a cost is missing or estimated.\n- If still broken, fix the root cause using DeepSeek's official published prices, with the source URL and date. If it can't find an official price, it stops and reports, so no rates get made up.\n\n**One step blocked:** `AGENTS.md` asks agents to assign themselves to the issue and add the `agent-in-progress` label. The permission system refused that GitHub change, so #1449 is not assigned or labelled. If you want that, apply it yourself or allow the action and I'll do it.\n\n**Other work in flight:**\n- Two children are on the non-blocking review change, one on the daemon side and one on the TUI, web, CLI and API surfaces.\n- Commit `788f4a249` is waiting for its pre-push review verdict.\n- The 2.67.0 release follows once the review change is integrated, pushed and green on master CI.\n\nI'll keep the #1449 fix as its own commit."
+        },
+        {
+          "id": "msg_011CgkAJGAqrNoHS6qVrfNff",
+          "role": "assistant",
+          "text": "The surface part is finished. Reported results:\n- **TUI:** keeps the ordinary composer and shows one passive status line above it.\n- **Web viewer:** the Send button stays enabled during a review.\n- **Removed:** the CLI `mj review forward|dismiss|cancel` commands, the HTTP resolve route, the native action and `allowed`.\n- **Docs and tests:** docs updated. The TUI golden passes, and the Playwright compact-cards spec passes 20/20.\n\nOn compatibility, it kept the serialized `ResolveTurnReview` variant, so an older terminal can still send it during an upgrade handoff. The daemon now rejects it for turn reviews, except the old before-push Cancel. That matches the `AGENTS.md` handoff rule.\n\n**Still to rerun:** three CLI upgrade tests in `mj-cli/tests/daemon_startup.rs`. They failed because their old-store fixture still had the new columns. The child fixed the fixture, but its rerun got stuck waiting on a shared Cargo lock. I'll rerun those three after the daemon-side child finishes, since it owns the migration they exercise.\n\nWaiting for the daemon-side child (`8fa2bd94`), the #1449 child, and the pre-push review verdict for `788f4a249`."
+        },
+        {
+          "id": "msg_011CgkAdyhDLprGNcFx7DRiQ",
+          "role": "assistant",
+          "text": "That was the same report again; nothing new. I tried to close that child, but another lifecycle operation is already running on it (it is probably being parked), so it is still open. I'll retry once the operation finishes. Still waiting for:\n- the daemon-side review child\n- the #1449 child\n- the pre-push review verdict for `788f4a249`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "den.log, playwright-full.log, crate-tests.log, server-tests.log, api-tests.log, clippy2.log.\n  > \n  > Three CLI daemon_startup upgrade tests initially failed because old_store() rewound the schema without removing new review columns. I updated owned `mj-cli/tests/daemon_startup.rs` to drop pending_followup and forward_attempts before revision 43. Targeted rerun waited several minutes on unrelated Cargo build lock, then was stopped; parent should rerun. Failed names: ordinary_startup_migrates_an_old_store_without_a_daemon, concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner, automatic_upgrade_waits_for_work_then_migrates_without_another_invocation. Failure log crate-tests.log; wait log upgrade-rerun.log.\n  > \n  > Changed groups: mj-chat/src/chat/** and golden; mj-cli API/commands/dashboard and daemon_startup fixture; mj-client daemon/review; mj-controller server (except validation.rs), server_runtime, web viewer JS/CSS; docs turn-review/CLI/API references; tests/e2e/web/compact-cards.spec.js.",
+    "assistant_text_tail": "That was the same report again; nothing new. I tried to close that child, but another lifecycle operation is already running on it (it is probably being parked), so it is still open. I'll retry once the operation finishes. Still waiting for:\n- the daemon-side review child\n- the #1449 child\n- the pre-push review verdict for `788f4a249`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 0.9900000095367432,
+      "probabilities": {
+        "none": 0.99,
+        "other": 0.01,
+        "quota": 0.0,
+        "transient_provider": 0.0,
+        "unclear": 0.0
+      }
+    },
+    "input": {
+      "choice": "required",
+      "confidence": 0.4699999988079071,
+      "probabilities": {
+        "none": 0.38,
+        "redundant_request": 0.01,
+        "required": 0.6,
+        "unclear": 0.01
+      }
+    },
+    "work": {
+      "choice": "waiting",
+      "confidence": 0.949999988079071,
+      "probabilities": {
+        "authorized_unfinished": 0.04,
+        "finished": 0.0,
+        "unclear": 0.0,
+        "waiting": 0.96
+      }
+    },
+    "background": {
+      "choice": "unclear",
+      "confidence": 0.6600000262260437,
+      "probabilities": {
+        "needed": 0.1,
+        "unclear": 0.77,
+        "unneeded": 0.13
+      }
+    },
+    "reply": {
+      "choice": "continuing",
+      "confidence": 0.9800000190734863,
+      "probabilities": {
+        "closing": 0.01,
+        "continuing": 0.99,
+        "unclear": 0.0
+      }
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null,
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "worker Jev decision mining",
+    "judgment": "automated wait without operator request",
+    "next": "The wait named in the final reply is pending.",
+    "input_rationale": "The reply waits for subagent child; its current text and preceding request do not assign the user a decision, approval, fact, or action."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-05T17:28:50.068Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task turn-review-remove-controls finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/c27f713e5f7177bc869217987b7c5f79/.m"
+      },
+      {
+        "at": "2026-11-05T17:28:50.075Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-05T17:28:59.775Z",
+        "kind": "agent",
+        "text": "The surface child has no new work. It passed on one detail: the daemon-side child removed `review_host/prompts.rs`, kept the two types still in use by moving them to another file, and its controller t"
+      },
+      {
+        "at": "2026-11-05T17:29:36.176Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task turn-review-remove-controls finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/c27f713e5f7177bc869217987b7c5f79/.m"
+      },
+      {
+        "at": "2026-11-05T17:29:36.181Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-05T17:29:40.386Z",
+        "kind": "agent",
+        "text": "The two review children have agreed on one compatibility point between themselves: - `VerdictView.allowed` in `mj-client` stays as serialized data, so an older terminal can still read the review view "
+      }
+    ]
+  }
+}

@@ -1,0 +1,191 @@
+[
+  {
+    "id": "related",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "recent_turns": "<turn number=\"1\">\n<user>\nImplement mailbox delivery through tool hooks.\n</user>\n<assistant>\nI am implementing mailbox support.\n</assistant>\n</turn>\n"
+      }
+    },
+    "expected": {
+      "interested": true,
+      "created": false
+    }
+  },
+  {
+    "id": "unrelated",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "recent_turns": "<turn number=\"1\">\n<user>\nFix AWS capacity reporting.\n</user>\n<assistant>\nCorrected memory accounting in the EC2 picker.\n</assistant>\n</turn>\n"
+      }
+    },
+    "expected": {
+      "interested": false,
+      "created": false
+    }
+  },
+  {
+    "id": "created_pr",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "recent_turns": "<turn number=\"1\">\n<user>\nImplement mailbox delivery and open a PR.\n</user>\n<tool_event>\n{\"toolCallId\":\"call-1\",\"name\":\"gh pr create\",\"kind\":\"execute\",\"status\":\"completed\"}\n</tool_event>\n<assistant>\nOpened https://github.com/brokkai/mjolnir/pull/42: Add mailbox support.\n</assistant>\n</turn>\n"
+      }
+    },
+    "expected": {
+      "interested": true,
+      "created": true
+    }
+  },
+  {
+    "id": "read_existing",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "recent_turns": "<turn number=\"1\">\n<user>\nReview mailbox changes.\n</user>\n<tool_event>\n{\"toolCallId\":\"call-1\",\"name\":\"gh pr view\",\"kind\":\"execute\",\"status\":\"completed\"}\n</tool_event>\n<assistant>\nI read the existing PR #42; another agent opened it.\n</assistant>\n</turn>\n"
+      }
+    },
+    "expected": {
+      "interested": true,
+      "created": false
+    }
+  },
+  {
+    "id": "failed_create",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "recent_turns": "<turn number=\"1\">\n<user>\nImplement mailbox support.\n</user>\n<tool_event>\n{\"toolCallId\":\"call-1\",\"name\":\"gh pr create\",\"kind\":\"execute\",\"status\":\"failed\"}\n</tool_event>\n<assistant>\nOpening the PR failed with authentication denied.\n</assistant>\n</turn>\n"
+      }
+    },
+    "expected": {
+      "interested": true,
+      "created": false
+    }
+  },
+  {
+    "id": "future_create",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "recent_turns": "<turn number=\"1\">\n<user>\nImplement mailbox support.\n</user>\n<assistant>\nI will open a PR after validation.\n</assistant>\n</turn>\n"
+      }
+    },
+    "expected": {
+      "interested": true,
+      "created": false
+    }
+  },
+  {
+    "id": "other_number",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "recent_turns": "<turn number=\"1\">\n<user>\nImplement mailbox support.\n</user>\n<assistant>\nOpened https://github.com/brokkai/mjolnir/pull/43: Add mailbox support.\n</assistant>\n</turn>\n"
+      }
+    },
+    "expected": {
+      "interested": true,
+      "created": false
+    }
+  },
+  {
+    "id": "same_broad_topic",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "recent_turns": "<turn number=\"1\">\n<user>\nFix terminal keyboard event delivery.\n</user>\n<assistant>\nWorking on escape key parsing in the terminal input loop.\n</assistant>\n</turn>\n"
+      }
+    },
+    "expected": {
+      "interested": false,
+      "created": false
+    }
+  },
+  {
+    "id": "creation_without_identity",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "recent_turns": "<turn number=\"1\">\n<user>\nImplement mailbox support and open the PR.\n</user>\n<tool_event>\n{\"toolCallId\":\"call-1\",\"name\":\"gh pr create\",\"kind\":\"execute\",\"status\":\"completed\"}\n</tool_event>\n</turn>\n"
+      }
+    },
+    "expected": {
+      "interested": true,
+      "created": false
+    }
+  }
+]

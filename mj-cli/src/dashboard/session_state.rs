@@ -196,16 +196,12 @@ impl DashboardContext {
         self.sync_opening_session();
     }
 
-    /// Lets a pane go of a suspended session instead of attaching to it. A
-    /// pinned pane says so, as before; Browse just empties, since it shows
-    /// whatever is selected and the suspended row has left the list.
+    /// Lets a pane go of a suspended session instead of attaching to it. The
+    /// dashboard decides what the pane keeps; see
+    /// `DashboardState::release_suspended_pane`.
     pub(crate) fn release_suspended_pane(&mut self, pane: PaneId, session_id: &str) {
         self.cancel_chat_open_in(pane);
-        if pane == self.dashboard.browse_pane() {
-            self.dashboard.set_pane_session(pane, None);
-        } else {
-            self.dashboard.release_suspended_pane(pane, session_id);
-        }
+        self.dashboard.release_suspended_pane(pane, session_id);
         self.retire_chats_outside_the_layout();
         self.save_active_workspace_layout();
     }
@@ -343,7 +339,7 @@ impl DashboardContext {
     /// Reads the checkout of the visible sessions that are due, a couple per
     /// pass so a workspace full of sessions never floods a slow target.
     pub(crate) fn refresh_git_status(&mut self) {
-        if self.shutdown_requested {
+        if self.shutdown_requested_at.is_some() {
             return;
         }
         let due = self
@@ -491,8 +487,10 @@ impl DashboardContext {
             .collect::<Vec<_>>();
         for session_id in session_ids {
             self.project_sources_in_flight.insert(session_id.clone());
+            let session_name = self.session_notice_name(&session_id);
             spawn_project_source_resolution(
                 session_id,
+                &session_name,
                 self.dashboard_io_tx.clone(),
                 self.critical_operations.clone(),
             );

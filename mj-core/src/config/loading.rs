@@ -56,7 +56,7 @@ pub(super) fn is_removed_harness_profile(profile: &toml::Value) -> bool {
 }
 
 /// Take out every profile whose harness this build no longer supports, and a
-/// `[review]` profile choice naming one, returning the removed profile ids.
+/// legacy `[review]` profile pin naming one, returning the removed profile ids.
 /// Such a profile cannot start a session, so the file still loads without it
 /// and the next save leaves it out.
 pub(super) fn drop_removed_harness_profiles(document: &mut toml::Value) -> Vec<String> {
@@ -82,11 +82,9 @@ pub(super) fn drop_removed_harness_profiles(document: &mut toml::Value) -> Vec<S
             .and_then(toml::Value::as_str)
             .is_some_and(|profile| removed.iter().any(|id| id == profile))
     {
-        // Model and effort overrides belong to the named profile; Auto has
-        // none.
-        for key in ["profile", "model", "effort"] {
-            review.remove(key);
-        }
+        // Reviewers are load-balanced across enabled profiles, so an old
+        // model and effort stay usable without the profile pin.
+        review.remove("profile");
     }
     removed
 }
@@ -374,10 +372,23 @@ pub fn validate_relative_destination(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether a bundle repository's `github` value may load.
+///
+/// The shared GitHub parser is tried first. The looser rule after it keeps
+/// loading every value that loaded before the parser existed, because a
+/// rejected value here fails the whole configuration: anything with exactly
+/// one `/`, such as `git@gitlab.com:o/r`, which resolution uses as a plain
+/// Git URL, or a shorthand with a name GitHub would not allow, which
+/// resolution rejects when the repository is used.
 pub(super) fn is_github_source(source: &str) -> bool {
     let source = source.trim();
     if source.is_empty() || source.starts_with('-') || source.chars().any(char::is_whitespace) {
         return false;
+    }
+    if crate::remote_git::parse_github_remote(source, crate::remote_git::Shorthand::Allowed)
+        .is_some()
+    {
+        return true;
     }
     let repository_path = source
         .strip_prefix("https://github.com/")

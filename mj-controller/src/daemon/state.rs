@@ -69,23 +69,23 @@ impl RuntimeState {
             {
                 let installed = review_config.clone();
                 Arc::new(move |session_id: &str| {
-                    let session = committed_sessions.as_ref().and_then(|committed| {
-                        committed
-                            .borrow()
-                            .as_ref()
-                            .ok()
-                            .and_then(|committed| committed.state.sessions.get(session_id))
-                            .and_then(|session| session.review.clone())
-                    });
-                    installed
+                    // An ordinary sub-agent reviews under its parent's choice; a
+                    // parent chain that cannot be followed reviews as Off, the
+                    // same as its launch, which offered no review tools.
+                    let review = installed
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .for_session(session.as_ref())
+                        .clone();
+                    let committed = committed_sessions.as_ref().and_then(|committed| {
+                        committed.borrow().as_ref().ok().map(|committed| {
+                            committed.state.effective_review_config(&review, session_id)
+                        })
+                    });
+                    committed.unwrap_or(review)
                 })
             },
             revisions.notifier(),
             Some(recovery_observer.gate.clone()),
-            Some(profile_catalog.clone()),
             reviewer_runtime.clone(),
         );
         let inactivity = auto_afk::Inactivity::new(controller.config.advanced.auto_afk_minutes);
@@ -93,12 +93,18 @@ impl RuntimeState {
             attachments: Mutex::new(BTreeMap::new()),
             phone_status: Mutex::new(WebViewerStatus::Starting),
             web_viewer: crate::web_viewer::ViewerControl::new(),
+            api_credential: std::sync::OnceLock::new(),
             ever_attached: AtomicBool::new(false),
             revisions,
             workspaces_tx,
             workspace_refresh: tokio::sync::Mutex::new(()),
             session_manager,
-            owner: Mutex::new(RuntimeStateOwner::new(controller)),
+            owner: Mutex::new(RuntimeStateOwner::new(controller, {
+                let review_host = review_host.clone();
+                Arc::new(move |child: &str, reason| {
+                    review_host.child_ended(child.to_owned(), reason)
+                })
+            })),
             report_backend: std::sync::OnceLock::new(),
             credential_targets: Arc::new(tokio::sync::watch::channel(Vec::new()).0),
             recent_launch: tokio::sync::watch::channel(None).0,
@@ -107,13 +113,13 @@ impl RuntimeState {
             committed: None,
             workspace_closes: Mutex::new(BTreeMap::new()),
             workspace_resume_admission: Mutex::new(BTreeMap::new()),
-            harness_readiness: Mutex::new(HarnessReadinessWatch::default()),
             startup_prompts: Mutex::new(BTreeMap::new()),
             startup_enqueue: tokio::sync::Mutex::new(()),
             startup_delivery_gates: Mutex::new(BTreeMap::new()),
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(inactivity),
             inactivity_changed: tokio::sync::Notify::new(),
+            mbx_install_wake: crate::controller::mbx::service::InstallWake::default(),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
             profile_catalog,
             recovery_observer,
@@ -151,6 +157,70 @@ impl RuntimeState {
     /// The review host, for the surfaces that project and resolve reviews.
     pub fn review_host(&self) -> &TurnReviewHost {
         &self.review_host
+    }
+
+    /// Whether `child_id` can request review: an ordinary worker child that
+    /// launch offers the review tools, by the same rule launch uses.
+    pub(super) fn child_can_request_review(&self, child_id: &str) -> bool {
+        let owner = self.owner();
+        let controller = owner.controller();
+        let worker = controller
+            .state
+            .subagents
+            .get(child_id)
+            .is_some_and(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker);
+        let Some(session) = controller.state.sessions.get(child_id) else {
+            return false;
+        };
+        worker
+            && mj_core::worker_launch::offers_review_tools(
+                controller
+                    .state
+                    .effective_review_config(&controller.config.review, child_id)
+                    .trigger(),
+                session.harness_kind,
+            )
+    }
+
+    /// Whether `child_id` is still waiting for its review's verdict, so its
+    /// ended turn or recorded handback is not final. Delegation completion and
+    /// parent report reconciliation both ask here. The review host owns the
+    /// answer: a review the child already started stays open even if review
+    /// has since been turned off, so the current configuration is not asked.
+    ///
+    /// When the host cannot answer (its startup recovery failed and it did not
+    /// restore this session), the child counts as having no open review: a
+    /// review recovery did not restore cannot produce a verdict in this daemon
+    /// run, and waiting would only block the child forever. Restored reviews
+    /// still answer open.
+    pub(crate) async fn child_awaits_review(&self, child_id: &str) -> bool {
+        match self.review_host().has_open_review(child_id).await {
+            Ok(open) => open,
+            Err(crate::review_host::OpenReviewUnknown::RecoveryFailed(error)) => {
+                if self.child_can_request_review(child_id) {
+                    tracing::warn!(child_session_id = child_id, %error,
+                        "cannot tell whether the child's review is open; settling it as having none");
+                }
+                false
+            }
+            // A host that is still restoring, or has stopped, says nothing
+            // about the review. A child that can request review waits, so its
+            // completion and its report retry later; any other child cannot
+            // have a review and is not held.
+            Err(
+                unknown @ (crate::review_host::OpenReviewUnknown::NotReady
+                | crate::review_host::OpenReviewUnknown::HostStopped),
+            ) => {
+                let held = self.child_can_request_review(child_id);
+                if held && unknown == crate::review_host::OpenReviewUnknown::HostStopped {
+                    tracing::warn!(
+                        child_session_id = child_id,
+                        "the review host stopped; holding the child's completion"
+                    );
+                }
+                held
+            }
+        }
     }
 
     /// The SessionWiki indexer, for the surfaces and jobs that trigger a sync.
@@ -270,6 +340,8 @@ impl RuntimeState {
         let _startup_admission = self.startup_enqueue.lock().await;
         let registered = self
             .start_create_session(CreateSessionRequest {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: false,
                 remember_container_size: false,
                 at: None,
@@ -281,6 +353,7 @@ impl RuntimeState {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 initial_prompt: None,
                 workspace_id: request.workspace_id,
                 profile_id: request.profile_id,
@@ -312,6 +385,13 @@ impl RuntimeState {
         )
         .await?;
         Ok(Some(registered))
+    }
+
+    /// Every session record, shared with the owner rather than copied.
+    pub(crate) fn session_records(
+        &self,
+    ) -> mj_core::snapshot_map::SnapshotMap<String, SessionRecord> {
+        self.owner().controller().state.sessions.clone()
     }
 
     pub(super) fn live_session_ids(&self) -> BTreeSet<String> {
@@ -396,7 +476,7 @@ impl RuntimeState {
                     .sessions
                     .get(session_id)
                     .is_some_and(|record| {
-                        record.target == operation.destination_target
+                        record.target.as_deref() == operation.destination_target.as_ref()
                             && record.native_session_id == operation.destination_native_session_id
                     })
         });
@@ -583,8 +663,8 @@ impl RuntimeState {
     /// The sentence is written for the person, not copied from the error
     /// chain: `last_error` is published, and a close failure's chain names
     /// project paths and SSH hosts. A failure that said what the caller can do
-    /// about it supplies that sentence; every other one points at the daemon
-    /// log entry that carries the whole reason.
+    /// about it supplies that sentence; other failures use the trusted
+    /// lifecycle boundary's cause and next action, followed by a log reference.
     pub(super) async fn record_failed_close(
         self: &Arc<Self>,
         session_id: &str,
@@ -607,12 +687,7 @@ impl RuntimeState {
         failure: &LifecycleFailure,
         prefix: &str,
     ) {
-        let cause = match &failure.refusal {
-            Some(refusal) => format!("{prefix}: {refusal}"),
-            None => {
-                format!("{prefix}; the daemon log records the reason under reference {reference}")
-            }
-        };
+        let cause = failure.public_message(prefix, reference);
         let applied = blocking({
             let session_id = session_id.to_owned();
             let cause = cause.clone();
@@ -781,6 +856,16 @@ impl RuntimeState {
 
     pub fn revisions(&self) -> tokio::sync::watch::Receiver<u64> {
         self.revisions.subscribe()
+    }
+
+    pub(crate) fn mbx_install_wake(&self) -> &crate::controller::mbx::service::InstallWake {
+        &self.mbx_install_wake
+    }
+
+    pub(crate) fn notify_mbx_installed(&self, machine: &mj_core::config::Machine) {
+        if let Some(host_key) = crate::controller::mbx::machine_cache_host_key(machine) {
+            self.mbx_install_wake.wake_host(host_key);
+        }
     }
 
     /// Read the config the daemon serves right now. A task on a schedule reads
@@ -1140,9 +1225,14 @@ impl RuntimeState {
                     .subagents
                     .get(session_id)
                     .is_some_and(|child| {
-                        child.kind == mj_core::subagent::SubagentKind::Worker
+                        child.kind != mj_core::subagent::SubagentKind::Reviewer
                             && step.group_id.as_deref()
-                                == Some(format!("subagent-spawn-{}", child.request_key).as_str())
+                                == Some(
+                                    mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                                        &child.request_key,
+                                    )
+                                    .as_str(),
+                                )
                     });
             let ready = if !delivers || worker_initial {
                 None
@@ -1575,13 +1665,22 @@ impl RuntimeState {
         inherited_draft: Option<&str>,
         command_id: &str,
     ) -> Result<u64> {
-        let bundle_id = self
-            .owner()
-            .controller()
-            .state
-            .sessions
-            .get(session_id)
-            .map(|record| record.bundle_id.clone());
+        // History is written before the session sees the prompt; see
+        // `record_user_prompt`.
+        let history_id = session_id.to_owned();
+        let history_command = command_id.to_owned();
+        let history_text = text.to_owned();
+        if let Err(error) = blocking(move || {
+            crate::database::record_user_prompt(&history_id, &history_command, &history_text)
+        })
+        .await
+        {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "the queued prompt's history could not be stored"
+            );
+        }
         let ordinal = handle
             .submit(
                 command_id.to_owned(),
@@ -1611,27 +1710,6 @@ impl RuntimeState {
                 );
             }
             self.publish_revision();
-        }
-        if let Some(bundle_id) = bundle_id {
-            let history_id = session_id.to_owned();
-            let history_text = text.to_owned();
-            if let Err(error) = blocking(move || {
-                crate::database::record_prompt(
-                    &history_id,
-                    &bundle_id,
-                    ordinal,
-                    None,
-                    &history_text,
-                )
-            })
-            .await
-            {
-                tracing::warn!(
-                    session_id,
-                    error = format!("{error:#}"),
-                    "the queued prompt was accepted but its history could not be stored"
-                );
-            }
         }
         Ok(ordinal)
     }

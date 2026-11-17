@@ -1,21 +1,21 @@
 //! Reviewer work participates in the primary relay's atomic replacement gate.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use super::{DurableRelay, RelayExecutionState};
+use super::{RelayCell, RelayExecutionState};
 
 /// The primary relay owns admission. Holding this lease, rather than sampling
 /// a role's status later, excludes worker replacement throughout preparation,
 /// execution, and cleanup. No lease survives its worker process.
 pub(crate) struct ReviewerAdmission {
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     id: u64,
 }
 
 impl ReviewerAdmission {
-    pub(crate) fn acquire(relay: Arc<Mutex<DurableRelay>>, label: String) -> Result<Self> {
+    pub(crate) fn acquire(relay: Arc<RelayCell>, label: String) -> Result<Self> {
         let id = {
             let mut owner = relay.lock().expect("relay admission lock poisoned");
             anyhow::ensure!(

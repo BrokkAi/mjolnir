@@ -23,12 +23,11 @@ something new. Only `/api/v1/...` is documented and stable.
 mj api-info
 ```
 
-It prints the base URL, the file holding the bearer token, and the contract
-version:
+It prints the base URL and the contract version. `mj api-token` explicitly
+prints the bearer token for external clients:
 
 ```text
 base url   http://127.0.0.1:3765/api/v1
-token file /home/you/.local/share/mjolnir/api-token
 version    Mjolnir API 1
 ```
 
@@ -44,7 +43,7 @@ then says so, and `mj daemon status` reports the viewer's state.
 Send the token as a bearer token:
 
 ```console
-curl -sS -H "Authorization: Bearer $(cat ~/.local/share/mjolnir/api-token)" \
+curl -sS -H "Authorization: Bearer $(mj api-token)" \
   http://127.0.0.1:3765/api/v1/sessions
 ```
 
@@ -364,8 +363,11 @@ form) remember choices. `mj acp`, sub-agents and archive restores do not.
 When `model` is supplied without `profile_id`, Mjolnir checks every enabled,
 usable profile and chooses the one offering the exact model and, when named,
 the exact effort. It ranks by quota headroom paced against each window's reset,
-using the saved default profile to break ties. Usage-priced (API key) profiles
-come after every subscription profile that has or may have quota left. If no configured profile
+using the saved default profile to break ties. Profiles whose subscription
+carries a five-hour quota window come after profiles without one, regardless of
+how much the window has left, so the windowed allowance is preserved for work
+that cannot be billed; a subscription known to be out of quota for the model
+comes last. If no configured profile
 supports that selection, the request fails without changing the requested
 model or effort. Supplying both
 `profile_id` and `model` pins the profile and validates the model and effort on
@@ -467,7 +469,7 @@ ancestors. Directories you attach with `additional_mounts` are not checked.
 
 Choose `native` for harness delegation or `mjolnir` for Mjolnir-managed children.
 Omitted policy defaults to Native, or to `none` for a DSH profile, which refuses
-`native` because DSH has no sub-agents of its own. Mjolnir requires a Claude, Codex, or DSH parent and
+`native` because DSH has no sub-agents of its own. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and
 a straightforward choice, either global or a session override. A subtle choice
 is optional:
 
@@ -484,6 +486,14 @@ An unavailable choice answers `422` with code `subagent_choice_unavailable`.
 Move can explicitly change the policy; omission retains it. Legacy `none`
 policies and child sessions remain readable. Per-profile defaults are ignored.
 
+`oracle` (boolean) and `oracle_choice` (`{"model": "...", "effort": "..."}`) set
+the session's read-only oracle on Create and Move, independently of `subagents`.
+On Create an omitted `oracle` uses the choice last made for the profile, and an
+`oracle_choice` implies `true`. On Move, omission retains the session's values,
+and `oracle: false` keeps the override. An explicit request with no oracle model
+configured or given creates or moves the session with the oracle off and a
+notice.
+
 `POST /api/v1/sessions/{session_id}/subagents` starts a child with `task_name`
 and `instructions`. Optional `task_type` is `straightforward` or `subtle`;
 omission uses Straightforward for older callers. `subtle` fails with `409` when
@@ -493,20 +503,16 @@ selects an enabled profile by quota. Spawn no longer accepts `profile_id`, `mode
 `effort` overrides. Without a session override, if global choices become unconfigured, spawn fails
 with a message naming the missing configuration section and matching CLI flag.
 
-`review` sets the session's own turn review, overriding `[review]` for this
-session only:
+`review` sets the session's review mode, overriding `[review]` for this session:
 
 ```json
-{"review": {"mode": "turn", "model": "<model-id>", "effort": "high"}}
 {"review": {"mode": "push"}}
 {"review": {"mode": "off"}}
 ```
 
-`review.mode` accepts `off`, `turn`, or `push`; `on` is rejected. `turn` reviews
-completed turns, and `push` reviews commits before push. Optional `model` and
-`effort` replace those in `[review]`. `off` turns off automatic review; a
-manual review still runs. A blank or overlong `model` or `effort` answers `400`.
-When `review` is omitted, the session follows `[review]`. See
+`review.mode` accepts `off` or `push`; `turn` is refused. Optional `reviewers`
+sets reviewer choices. `off` disables review for the session. When `review` is
+omitted, the session follows global reviewer settings. See
 [per-session settings](/turn-review/#per-session-settings).
 
 `no_project_memory` (boolean, default `false`) starts the session with no
@@ -677,8 +683,7 @@ Both fields are optional. `timeout_secs` defaults to 600 and may not exceed
   retry, which answers for the turn when it ends), while Jev is still reading
   the reply, and while a sub-agent child still owes its report. It does not
   wait for anything that starts new work: a turn the agent starts on its own,
-  background work, an expected continuation, Mjolnir's automatic continuation,
-  a later prompt, or a goal. To learn when your prompt's turn ended, pass its
+  background work, an expected continuation, a later prompt, or a goal. To learn when your prompt's turn ended, pass its
   `turn_id`, or use `mj prompt`.
 - **Without `turn_id`, the wait answers when the session settles**: the
   worker's activity state is idle (the same state the dashboard shows as
@@ -880,58 +885,41 @@ For a session that is still starting, it withdraws the prompts held for it.
 There is no `/close` endpoint or `force` parameter. Destruction is available only
 through its dedicated authenticated endpoint, not the generic viewer actions.
 
-### Turn review
+### Push review
 
 ```text
 POST /api/v1/sessions/{session_id}/review
 GET  /api/v1/sessions/{session_id}/review
-POST /api/v1/sessions/{session_id}/review/{forward|dismiss|cancel}
 ```
 
-`POST` starts a one-off review of the turn the session just finished, with the
-session's reviewer, as `/review` does in Prompt. It answers `202` once the
-review has opened, which can take minutes while a reviewer is chosen and
-started:
+`POST` starts a review of the session's committed work. It answers `202` once
+the review has opened. Tracked changes must be committed first. A request that
+cannot start answers `409` with the reason in `error`.
 
-```json
-{ "session_id": "0123abcd…", "started": true }
+`GET` answers `200` with the open review, or `"review": null` when none is open.
+A verdict appears when available. An unknown session answers `404`.
+
+### Finished review
+
+```text
+GET /api/v1/sessions/{session_id}/reviews
+GET /api/v1/sessions/{session_id}/reviews?review=<review_id>
 ```
 
-A review that cannot start answers `409` with the reason in `error`: the
-session is still working, prompts are queued, it is a sub-agent, a review is
-already open, or no reviewer is usable.
+A finished review's per-reviewer output, kept after its reviewer sessions are
+destroyed. Without `review`, the newest finished review answers; with it, that
+review does. An unknown review id answers `404`, and an unknown session answers
+`404`.
 
-`GET` answers `200` with the review the session has open, as the viewer shows
-it, or `"review": null` when none is open:
-
-```json
-{
-  "trigger": "turn",
-  "session_id": "0123abcd…",
-  "review": {
-    "status": "sending findings to the primary agent…",
-    "roles": [{ "label": "reviewer", "state": "findings" }],
-    "verdict": {
-      "kind": "findings",
-      "text": "[P1] src/lib.rs:1 -- unbounded retry loop",
-      "allowed": ["forward", "dismiss", "cancel"]
-    }
-  }
-}
-```
-
-A role's `state` is `pending`, `running`, `done`, `findings`, or `failed`.
-`verdict` appears once the review has one; its `kind` is `clean`, `findings`,
-or `failed`, and `allowed` lists the resolutions it accepts. An unknown session
-answers `404`.
-
-`POST …/review/{resolution}` resolves the open review as the viewer's buttons
-do and answers `202` with `{ "session_id": "…", "resolution": "dismiss" }`.
-Findings are forwarded automatically, so `forward` only retries a forward the
-primary refused. `cancel` is always accepted while a review is open; `forward`
-and `dismiss` only when the verdict's `allowed` lists them. No open review, a
-resolution the verdict does not allow, or another word answers `400`; a review
-that closed before the daemon reached it answers `409` with the reason.
+`review` is null when no finished review is recorded. Otherwise it carries the
+review id, its finish time and resolution (`completed`, `failed`, or
+`cancelled`), and one row per reviewing role. Each row names the role, its
+label, its command id, the reviewer child session id, the reviewer's profile,
+model, and effort, the role's verdict, and the reviewer turn with its token
+usage. `handback` carries the text the role's outcome was settled from, so it is
+present only when that reviewer handed back and the review used its report; a
+failed, pending, or cancelled role has none. The child session may no longer
+exist; the turn is read from retained accounting.
 
 ### Resume a suspended session
 
@@ -1025,10 +1013,13 @@ cites, such as a sub-agent's report or a probe in `/tmp`.
 After symlinks are resolved, the path must lie in that boundary, in the
 directory holding the session's sub-agent report directories, or in the
 target's temporary directory. An empty path is `400`. A path outside those
-directories is `409`, as is a path that does not exist, a file over 16 MiB, a
-directory whose archive would pass 16 MiB or whose files hold more than
-128 MiB, a listing over 16 MiB, and a worker installed before directories
-could be fetched; resuming the session upgrades the worker.
+directories is `409`, as is a path that does not exist and a worker installed
+before directories could be fetched; resuming the session upgrades the worker.
+Files, directory archives, and listings have no fetch size limit. File and
+archive responses are streamed with a content length; daemon shutdown ends
+an active stream. Clients may retry this read after reconnecting to the
+replacement daemon. The CLI and MCP fetch tool retry interrupted transfers
+automatically after daemon replacement.
 
 `export` takes the form you want:
 
@@ -1089,7 +1080,7 @@ viewer does not act on these requests.
 
 | Command | Route |
 | --- | --- |
-| `mj api-info` | — (prints the base URL and token path) |
+| `mj api-info` | — (prints the base URL) |
 | `mj workspaces list` | `GET /workspaces` |
 | `mj workspaces create <name>` | `POST /workspaces` |
 | `mj sessions` | `GET /sessions` |
@@ -1108,7 +1099,7 @@ viewer does not act on these requests.
 | `mj interrupt-turn --session <id>` | `POST /sessions/{id}/interrupt-turn` |
 | `mj review start --session <id>` | `POST /sessions/{id}/review` |
 | `mj review status --session <id>` | `GET /sessions/{id}/review` |
-| `mj review forward\|dismiss\|cancel --session <id>` | `POST /sessions/{id}/review/{resolution}` |
+| `mj review show --session <id> [--review <id>]` | `GET /sessions/{id}/reviews[?review=<id>]` |
 | `mj stop-task --session <id> <task-id>` | `POST /sessions/{id}/background-tasks/stop` |
 | `mj ui pane\|show\|settings …` | `POST /ui/requests` |
 
@@ -1139,7 +1130,9 @@ resuming do, and [security boundaries](/security/) for what the token reaches.
 `GET /api/v1/profiles/{profile_id}/config` returns `model`, `models`, `efforts`,
 and `observed_at` (Unix seconds). Each choice contains its exact `value`, display
 `name`, and optional `description`. Add `?model=<value>` to discover effort
-choices for that model. An empty cache is populated automatically with a
+choices for that model. The list contains only what the profile's `models`
+allow-list lets through (its current model is always listed); add
+`?unrestricted=true` for everything the harness advertises. An empty cache is populated automatically with a
 prompt-free harness probe; no project session or container is created. The
 first lookup may install the managed harness on the controller and take several
 minutes. Discovery currently requires a Unix controller with the harness's
@@ -1208,7 +1201,7 @@ earlier initialization failed. Cleanup errors remain visible in session state. A
 close whose worker restart fails leaves the session in `error` with the failure
 recorded in its state. Retry suspension after resolving the error. Use `mj destroy` only when you intend to discard the environment and recovery copy.
 
-The CLI and `mj api-info` probe API support before reading the token file. A
+The CLI and `mj api-info` probe API support and obtain credentials over authenticated control. A
 daemon predating this API produces an explicit `mj daemon restart` instruction;
 no restart is performed automatically. Disabled viewers, connection failures,
 incompatible API versions, and missing tokens have separate diagnostics.

@@ -1,7 +1,57 @@
+use super::views::{CreateProgress, StalledCreate};
 use super::*;
 
 /// How long creating a parent's report root on its target may take.
 const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a reviewer child's Create may go with no provisioning stage
+/// starting or finishing before its start is failed. It bounds idleness, not
+/// the whole Create, so a slow Create that keeps progressing is never failed.
+///
+/// The longest single stage measured on 2026-11-06 under a load average of
+/// about 200 on morannon was about 190 s (a `mkdir`); ten minutes is about
+/// three times that worst case. The bound exists because the Create's
+/// executor and `CommandSpec` have no per-command timeout, so a remote command
+/// that hangs on a live connection would otherwise wait for ever (#1438).
+pub(super) const CREATE_STALL_BOUND: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Bounds one reviewer readiness wait that runs with no Create to end it.
+///
+/// The clock runs only while no Create is running, so it starts when the wait
+/// began or when the Create finished, whichever is later. A running Create is
+/// bounded by its own stall check instead, which lets a slow Create take as
+/// long as it keeps making progress.
+pub(super) struct PostCreateWait {
+    what: &'static str,
+    since: Option<tokio::time::Instant>,
+}
+
+impl PostCreateWait {
+    pub(super) fn new(what: &'static str) -> Self {
+        Self {
+            what,
+            since: Some(tokio::time::Instant::now()),
+        }
+    }
+
+    fn create_running(&mut self) {
+        self.since = None;
+    }
+
+    /// The harness startup bound the other readiness waits share, so a
+    /// reviewer is given as long as any other session to open.
+    fn check(&mut self, child: &str) -> Result<()> {
+        let since = *self.since.get_or_insert_with(tokio::time::Instant::now);
+        let bound = crate::controller::NATIVE_SESSION_STARTUP_TIMEOUT;
+        anyhow::ensure!(
+            since.elapsed() < bound,
+            "the reviewer child {child} did not {} within {} s of its Create finishing",
+            self.what,
+            bound.as_secs()
+        );
+        Ok(())
+    }
+}
 
 impl RuntimeState {
     pub(super) async fn start_create_session(
@@ -18,12 +68,18 @@ impl RuntimeState {
     }
 
     /// Register and start a child worker on its parent's existing target.
+    ///
+    /// Once the registration has committed, any failure before the worker's
+    /// own lifecycle takes over leaves a `Provisioning` child that nothing
+    /// owns. One match on that stretch moves such a child to `Error`, so the
+    /// parent sees a failed child and the oracle's one-live-oracle rule frees
+    /// its slot.
     pub async fn start_subagent_session(
         self: &Arc<Self>,
         request: crate::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
         let _upgrade_work = crate::upgrade::activity("subagent admission")?;
-        let (relation, needs_provisioning) = blocking(move || {
+        let (relation, needs_provisioning, registered_here) = blocking(move || {
             let mut controller = Controller::load()?;
             if let Some(existing) = crate::database::lookup_subagent_request(
                 &request.parent_session_id,
@@ -42,7 +98,7 @@ impl RuntimeState {
                         request.fast_mode,
                     )?;
                 }
-                return Ok((existing, needs_provisioning));
+                return Ok((existing, needs_provisioning, false));
             }
             let mut request = request;
             // The parent's report root is made before the child exists, so the
@@ -58,76 +114,24 @@ impl RuntimeState {
             }
             controller
                 .register_subagent(request)
-                .map(|relation| (relation, true))
+                .map(|relation| (relation, true, true))
         })
         .await?;
-        self.reload_controller().await?;
-        if relation.kind == mj_core::subagent::SubagentKind::Worker {
-            let id = relation.child_session_id.clone();
-            if let Some(delivery) =
-                blocking(move || crate::database::next_startup_delivery(&id)).await?
-            {
-                self.start_persisted_startup_delivery(delivery, &CancellationToken::new());
+        if let Err(error) = self
+            .start_registered_subagent(&relation, needs_provisioning)
+            .await
+        {
+            if registered_here {
+                self.fail_unstarted_subagent(&relation.child_session_id, &error)
+                    .await;
             }
-        }
-        if !needs_provisioning {
-            return Ok(relation);
-        }
-        let session_id = relation.child_session_id.clone();
-        let parent_session_id = relation.parent_session_id.clone();
-        let control = LifecycleControl::default();
-        let started = self.start_or_join_lifecycle_controlled(
-            session_id.clone(),
-            LifecycleKind::Create,
-            None,
-            Some(relation.request_key.clone()),
-            Some(control.clone()),
-            move |state, session_id, cancelled| async move {
-                let mut controller = tokio::task::spawn_blocking(Controller::load)
-                    .await
-                    .context("load controller for sub-agent startup")??;
-                // The lifecycle owner now excludes competing resume/close work.
-                // Recovery may already have settled this registration before
-                // admission; replay never reinstalls an existing worker.
-                if controller
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .is_none_or(|record| record.state != mj_core::state::SessionState::Provisioning)
-                {
-                    return Ok(DaemonLifecycleResult::Done);
-                }
-                let executor = DaemonStageReportingExecutor::new(
-                    CancellableProcessExecutor::new(cancelled),
-                    state.clone(),
-                    session_id.clone(),
+            if let Err(reload_error) = self.reload_controller().await {
+                tracing::warn!(
+                    child_session_id = %relation.child_session_id,
+                    error = format!("{reload_error:#}"),
+                    "could not reload the controller after a sub-agent failed to start"
                 );
-                if let Err(error) = controller
-                    .provision_subagent_session_controlled(&session_id, &executor, || {
-                        control.stopped_for_shutdown()
-                    })
-                    .await
-                {
-                    drop(controller);
-                    state.reload_controller().await?;
-                    if let Err(prompt_error) = state
-                        .reconcile_parent_reports(&parent_session_id)
-                        .await
-                    {
-                        tracing::warn!(
-                            child_session_id = %session_id,
-                            parent_session_id,
-                            error = format!("{prompt_error:#}"),
-                            "could not enqueue the parent's finished child reports after provisioning failure"
-                        );
-                    }
-                    return Err(error);
-                }
-                Ok(DaemonLifecycleResult::Done)
-            },
-        );
-        if let Err(error) = started {
-            self.reload_controller().await?;
+            }
             if let Err(prompt_error) = self
                 .reconcile_parent_reports(&relation.parent_session_id)
                 .await
@@ -145,6 +149,59 @@ impl RuntimeState {
         Ok(relation)
     }
 
+    /// Everything a registered child needs before its own lifecycle owns it:
+    /// publishing the registration, queueing its first delivery, and admitting
+    /// the lifecycle that provisions it. The lifecycle records its own
+    /// failures.
+    async fn start_registered_subagent(
+        self: &Arc<Self>,
+        relation: &mj_core::subagent::SubagentRecord,
+        needs_provisioning: bool,
+    ) -> Result<()> {
+        self.reload_controller().await?;
+        if relation.kind != mj_core::subagent::SubagentKind::Reviewer {
+            let id = relation.child_session_id.clone();
+            if let Some(delivery) =
+                blocking(move || crate::database::next_startup_delivery(&id)).await?
+            {
+                self.start_persisted_startup_delivery(delivery, &CancellationToken::new());
+            }
+        }
+        if !needs_provisioning {
+            return Ok(());
+        }
+        self.start_create_lifecycle(
+            relation.child_session_id.clone(),
+            LifecycleControl::default(),
+            CreateInputs::Subagent(Box::new(relation.clone())),
+            None,
+        )
+        .await
+    }
+
+    /// Record, through the ordinary lifecycle write, that a child registered by
+    /// this call failed before its lifecycle started. A child that has already
+    /// left `Provisioning` is not touched.
+    async fn fail_unstarted_subagent(
+        self: &Arc<Self>,
+        child_session_id: &str,
+        error: &anyhow::Error,
+    ) {
+        let cause = format!("sub-agent startup failed: {error:#}");
+        let written = blocking({
+            let child_session_id = child_session_id.to_owned();
+            move || Controller::load()?.fail_interrupted_lifecycle(&child_session_id, &cause)
+        })
+        .await;
+        if let Err(write_error) = written {
+            tracing::warn!(
+                child_session_id,
+                error = format!("{write_error:#}"),
+                "could not record a sub-agent that failed to start"
+            );
+        }
+    }
+
     pub(crate) async fn start_reviewer_child(self: &Arc<Self>, child: &str) -> Result<()> {
         let id = child.to_owned();
         let relation = blocking(move || crate::database::load_subagent(&id))
@@ -156,6 +213,7 @@ impl RuntimeState {
             .context("reviewer launch configuration is missing")?
             .clone();
         self.start_subagent_session(crate::controller::RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: relation.kind,
             reviewer_launch: relation.reviewer_launch.clone(),
             parent_session_id: relation.parent_session_id.clone(),
@@ -170,49 +228,40 @@ impl RuntimeState {
             report_root: None,
         })
         .await?;
-        let handle = self
-            .session_manager
-            .wait_for_session(child, Duration::from_secs(120))
-            .await?;
-        tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                let view = handle.view();
-                if view.connected
-                    && view
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|snapshot| snapshot.operational.agent_capabilities.is_some())
-                {
-                    return Ok::<_, anyhow::Error>(());
-                }
-                if let Some(error) = view.error {
-                    anyhow::bail!("{error:?}");
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+        // No total deadline here: one counted queue time and cancelled an
+        // accepted Create mid-provision, which left the child without a worker
+        // root (#1438). While the Create runs, each wait ends with its
+        // outcome: the child is ready, its record says the Create failed or
+        // it was closed, or the Create stalled for `CREATE_STALL_BOUND` and
+        // was cancelled. Once no Create is running (it finished, or the
+        // reviewer was restored without one) nothing else ends a wait, so
+        // `PostCreateWait` bounds it.
+        let mut waiting = PostCreateWait::new("open its session");
+        let handle = loop {
+            self.reviewer_child_can_still_start(child, &mut waiting)?;
+            // `None` is the normal wait for the actor; a stopped session
+            // manager is a real failure and ends the start now.
+            if let Some(handle) = self.session_manager.find_session(child.to_owned()).await? {
+                break handle;
             }
-        })
-        .await
-        .context("reviewer harness did not become ready")??;
-        if launch.harness != mj_core::config::HarnessKind::Muse {
-            let snapshot = handle
-                .view()
-                .snapshot
-                .context("reviewer snapshot is missing")?;
-            let mut surface = mj_core::acp::surface::AcpSessionSurface::default();
-            surface.set_harness_kind(launch.harness);
-            surface.set_config_options(&snapshot.operational.config_options);
-            surface.set_session_modes(snapshot.operational.modes.clone());
-            if let Ok(control) = surface.plan_control(true)
-                && let Err(error) = self
-                    .session_manager
-                    .client()
-                    .session(child)
-                    .await?
-                    .apply_plan_control(format!("{}-plan", relation.request_key), control)
-                    .await
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let mut waiting = PostCreateWait::new("report its capabilities");
+        loop {
+            let view = handle.view();
+            if view.connected
+                && view
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.operational.agent_capabilities.is_some())
             {
-                tracing::warn!(child, %error, "reviewer harness refused plan mode");
+                break;
             }
+            if let Some(error) = view.error {
+                anyhow::bail!("{error:?}");
+            }
+            self.reviewer_child_can_still_start(child, &mut waiting)?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         use crate::server_runtime::api::ExportRuntime;
         Arc::clone(self)
@@ -227,19 +276,97 @@ impl RuntimeState {
                 },
             )
             .await?;
-        tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                match self.startup_status(child.to_owned()).await? {
-                    Some(crate::server::api::StartStatus::Submitted { .. }) => return Ok(()),
-                    Some(crate::server::api::StartStatus::Failed { message }) => {
-                        anyhow::bail!("{message}")
-                    }
-                    _ => tokio::time::sleep(Duration::from_millis(100)).await,
+        // The startup delivery fails the step when the session reaches a state
+        // that cannot take it; `PostCreateWait` bounds a harness that never
+        // answers.
+        let mut waiting = PostCreateWait::new("take its first prompt");
+        loop {
+            match self.startup_status(child.to_owned()).await? {
+                Some(crate::server::api::StartStatus::Submitted { .. }) => return Ok(()),
+                Some(crate::server::api::StartStatus::Failed { message }) => {
+                    anyhow::bail!("{message}")
+                }
+                _ => {
+                    self.reviewer_child_can_still_start(child, &mut waiting)?;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
-        })
-        .await
-        .context("reviewer first prompt did not start")?
+        }
+    }
+
+    /// Fail unless the reviewer child's record is still one a Create can
+    /// finish: missing, closed, failed or destroyed children never become
+    /// ready, so waiting for them would never end. Also fail, and cancel, a
+    /// Create that has stalled (see [`CREATE_STALL_BOUND`]), and a readiness
+    /// wait that has gone on too long with no Create running.
+    fn reviewer_child_can_still_start(
+        &self,
+        child: &str,
+        waiting: &mut PostCreateWait,
+    ) -> Result<()> {
+        self.check_create_progress(child, CREATE_STALL_BOUND, waiting)?;
+        let Some(record) = self.session_record(child) else {
+            anyhow::bail!("reviewer child {child} no longer exists");
+        };
+        match record.state {
+            // `StartupCleanup` is provisioning retrying a worker start that
+            // failed before publishing its socket; the retry can still end
+            // in `Running`.
+            mj_core::state::SessionState::Provisioning
+            | mj_core::state::SessionState::StartupCleanup
+            | mj_core::state::SessionState::Running
+            | mj_core::state::SessionState::Disconnected
+            | mj_core::state::SessionState::Checkpointing => Ok(()),
+            state => match record.last_error {
+                Some(cause) => anyhow::bail!("reviewer child {child} is {state:?}: {cause}"),
+                None => anyhow::bail!("reviewer child {child} is {state:?}"),
+            },
+        }
+    }
+
+    /// Fail when the child's running Create has gone `bound` without a
+    /// provisioning stage starting or finishing, and cancel that Create in
+    /// the same decision, through the cancellation close and destroy use, so
+    /// it stops holding its lifecycle admission. The stage signal is the one
+    /// the lifecycle already keeps for its progress display. Waiting for a
+    /// slot is a stage of its own and is never a stall; admission ends it and
+    /// so restarts the clock.
+    ///
+    /// With no Create running, `waiting` bounds the readiness wait instead.
+    pub(super) fn check_create_progress(
+        &self,
+        child: &str,
+        bound: Duration,
+        waiting: &mut PostCreateWait,
+    ) -> Result<()> {
+        match self.cancel_stalled_create(child, bound) {
+            CreateProgress::NotRunning => waiting.check(child),
+            CreateProgress::Running => {
+                waiting.create_running();
+                Ok(())
+            }
+            CreateProgress::Stalled {
+                idle,
+                stages,
+                phase,
+            } => {
+                let stage = if stages.is_empty() {
+                    "between stages".to_owned()
+                } else {
+                    stages.join(" + ")
+                };
+                let outcome = match phase {
+                    StalledCreate::Cancelled => "its Create was cancelled",
+                    StalledCreate::AlreadyCancelling => "its Create was already being cancelled",
+                    StalledCreate::Committed => "its Create had committed and was left running",
+                };
+                tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?phase, "reviewer child Create stalled");
+                anyhow::bail!(
+                    "the reviewer child {child} stalled while provisioning: no stage started or finished for {} s (stalled in: {stage}); {outcome}",
+                    idle.as_secs()
+                )
+            }
+        }
     }
 
     pub async fn start_create_session_controlled(
@@ -247,7 +374,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
-    ) -> Result<(RegisteredSession, bool, Option<String>)> {
+    ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
         self.start_create_session_inner(request, control, Some(publication))
             .await
     }
@@ -257,27 +384,35 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
-    ) -> Result<(RegisteredSession, bool, Option<String>)> {
+    ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
+        let mut admission_timing =
+            crate::launch_timing::LaunchPhaseTimer::new("", "admit and register session");
+        tracing::info!(profile_id = %request.profile_id, target_id = %request.target_template_id,
+            "session launch admission started");
         let mut request = request;
         let parent = request.profile_id.clone();
         let supplied = request.subagents.clone();
         let (config, policy) = blocking(move || {
             let controller = Controller::load()?;
-            let profile = controller
-                .config
-                .enabled_profile(&parent)
-                .context("parent profile unavailable")?;
+            let profile = controller.config.named_profile(&parent)?;
             let policy = supplied
                 .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind));
             Ok((controller.config, policy))
         })
         .await?;
+        let validation_timing =
+            crate::launch_timing::LaunchPhaseTimer::new("", "validate subagent choices");
         crate::controller::profile_config::validate_session_subagent_policy(
+            self.profile_catalog
+                .get()
+                .expect("catalog installed before serving"),
             &config,
             &request.profile_id,
             &policy,
+            &request.target_template_id,
         )
         .await?;
+        drop(validation_timing);
         if let Some(allocation) = request.resource_allocation.as_ref() {
             validate_minimum_container_allocation(allocation)?;
         }
@@ -302,7 +437,7 @@ impl RuntimeState {
         let path_cancelled = control.cancelled.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
-        let (registered, review_turned_off) = blocking(move || {
+        let (registered, review_notice, oracle_notice) = blocking(move || {
             let mut controller = Controller::load()?;
             let path_executor = crate::targets::CancellableProcessExecutor::new(path_cancelled)
                 .with_deadline(Duration::from_secs(30));
@@ -331,9 +466,12 @@ impl RuntimeState {
                     base: request.base,
                     no_later_history: request.no_later_history,
                     subagents: request.subagents,
+                    oracle: request.oracle,
+                    oracle_choice: request.oracle_choice,
                     review: request.review,
                     no_project_memory: request.no_project_memory,
                     no_github_events: request.no_github_events,
+                    no_github_credentials: request.no_github_credentials,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
@@ -400,23 +538,115 @@ impl RuntimeState {
                     session,
                     remembered_container_size,
                 },
-                registration.review_turned_off,
+                registration.review_notice,
+                registration.oracle_notice,
             ))
         })
         .await?;
-        let capacity_warning = _container_admission.warning.clone();
+        admission_timing.set_session_id(&registered.session.id);
+        drop(admission_timing);
+        let capacity_warning = [oracle_notice, _container_admission.warning.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let capacity_warning = (!capacity_warning.is_empty()).then_some(capacity_warning);
         drop(_container_admission);
         let session_id = registered.session.id.clone();
-        self.start_or_join_lifecycle_controlled(
+        self.start_create_lifecycle(
             session_id,
-            LifecycleKind::Create,
+            control,
+            CreateInputs::TopLevel {
+                publication,
+                remember_launch_choices,
+            },
             None,
-            None,
-            Some(control.clone()),
-            move |state, session_id, cancelled| async move {
+        )
+        .await?;
+        let publishing = crate::launch_timing::LaunchPhaseTimer::new(
+            &registered.session.id,
+            "publish registered session view",
+        );
+        self.reload_controller().await?;
+        drop(publishing);
+        Ok((registered, review_notice, capacity_warning))
+    }
+
+    /// Admit the Create lifecycle of a registered session, top-level or
+    /// sub-agent: the one create body. A create is resumable: shutdown
+    /// interrupts it before it commits instead of cancelling it, it holds no
+    /// handoff admission while it provisions, and the next daemon finishes it
+    /// from the durable create intent.
+    ///
+    /// `recovery_operation` is the intent's operation id when a restarted
+    /// daemon re-admits an interrupted create; that run first retires what
+    /// the interrupted attempt built. A sub-agent create is always admitted
+    /// under its own request key, so a replayed spawn joins it instead of
+    /// starting a second one.
+    pub(super) async fn start_create_lifecycle(
+        self: &Arc<Self>,
+        session_id: String,
+        control: LifecycleControl,
+        inputs: CreateInputs,
+        recovery_operation: Option<String>,
+    ) -> Result<()> {
+        let recovering = recovery_operation.is_some();
+        let scheduled_at = std::time::Instant::now();
+        let request_key = match &inputs {
+            CreateInputs::Subagent(relation) => Some(relation.request_key.clone()),
+            CreateInputs::TopLevel { .. } => {
+                recovery_operation.map(|operation| format!("recovery:{operation}"))
+            }
+        };
+        let automatic = recovering || matches!(&inputs, CreateInputs::Subagent(_));
+        let mut start =
+            super::lifecycle::LifecycleStart::request(String::new(), None, Some(control.clone()));
+        start.request_key = request_key;
+        if automatic {
+            start = start.automatic();
+        }
+        self.admit_lifecycle(
+            session_id, LifecycleKind::Create, start,
+            move |state, session_id, cancelled, _session_admission| async move {
+                tracing::info!(%session_id, elapsed_ms = scheduled_at.elapsed().as_millis(),
+                    "session launch lifecycle scheduled");
+                let _total =
+                    crate::launch_timing::LaunchPhaseTimer::new(&session_id, "create lifecycle");
+                let loading =
+                    crate::launch_timing::LaunchPhaseTimer::new(&session_id, "load controller");
                 let mut controller = tokio::task::spawn_blocking(Controller::load)
                     .await
                     .context("load controller for daemon create task")??;
+                drop(loading);
+                // Recovery may already have settled this registration before
+                // admission; replay never provisions a finished session. A
+                // recovering create is checked by its reset instead.
+                if !recovering
+                    && controller.state.sessions.get(&session_id).is_none_or(|record| {
+                        record.state != mj_core::state::SessionState::Provisioning
+                    })
+                {
+                    return Ok(DaemonLifecycleResult::Done);
+                }
+                let (kind, publication, parent): (_, Option<Publication>, Option<String>) = match inputs {
+                    CreateInputs::TopLevel {
+                        publication,
+                        remember_launch_choices,
+                    } => (
+                        crate::controller::CreateKind::TopLevel {
+                            remember_launch_choices,
+                        },
+                        publication,
+                        None,
+                    ),
+                    CreateInputs::Subagent(relation) => (
+                        crate::controller::CreateKind::Subagent,
+                        None,
+                        Some(relation.parent_session_id),
+                    ),
+                };
+                let publication_timing =
+                    crate::launch_timing::LaunchPhaseTimer::new(&session_id, "await publication");
                 let publication_error = if let Some(publication) = publication {
                     let published = tokio::select! {
                         result = publication => result.context("session publication owner stopped")
@@ -431,28 +661,61 @@ impl RuntimeState {
                 } else {
                     None
                 };
+                drop(publication_timing);
                 if publication_error.is_some() {
-                    control.request_cancel();
+                    control.request_cancel("session publication failed");
                 }
                 let executor = DaemonStageReportingExecutor::new(
                     CancellableProcessExecutor::new(cancelled),
-                    state,
+                    state.clone(),
                     session_id.clone(),
                 );
+                // The commit and the write that marks the session running
+                // are the one stretch a handoff waits for: a daemon replaced
+                // between them would redo a create that had just succeeded.
+                let commit_admission = Mutex::new(None);
+                let commit = || {
+                    let admission = match crate::upgrade::activity("session create commit") {
+                        Ok(admission) => admission,
+                        Err(error) => {
+                            // The daemon is being replaced: the next one owns
+                            // this create, which has not committed.
+                            control.cancel_for_shutdown();
+                            return Err(error);
+                        }
+                    };
+                    ensure!(
+                        control.grant_commit(),
+                        "session creation cancelled before commit"
+                    );
+                    *commit_admission
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some(admission);
+                    Ok(())
+                };
+                // A create stopped before the phone was told it exists is
+                // discarded by the ordinary rollback, not left for the next
+                // daemon to provision for a client that was never answered.
+                let published = publication_error.is_none();
+                let interrupted = || published && control.stopped_for_shutdown();
                 let provision = controller
-                    .provision_session_controlled_with_commit(
-                        &session_id,
-                        &executor,
-                        || {
-                            ensure!(
-                                control.grant_commit(),
-                                "session creation cancelled before commit"
-                            );
-                            Ok(())
-                        },
-                        remember_launch_choices,
-                    )
+                    .run_create(&session_id, &executor, kind, recovering, commit, &interrupted)
                     .await;
+                drop(commit_admission);
+                if let Some(parent) = parent
+                    && provision.is_err()
+                {
+                    drop(controller);
+                    state.reload_controller().await?;
+                    if let Err(prompt_error) = state.reconcile_parent_reports(&parent).await {
+                        tracing::warn!(
+                            child_session_id = %session_id,
+                            parent_session_id = parent,
+                            error = format!("{prompt_error:#}"),
+                            "could not enqueue the parent's finished child reports after provisioning failure"
+                        );
+                    }
+                }
                 if let Some(error) = publication_error {
                     return match provision {
                         Ok(()) => Err(error),
@@ -464,37 +727,107 @@ impl RuntimeState {
                 provision?;
                 Ok(DaemonLifecycleResult::Done)
             },
-        )?;
-        self.reload_controller().await?;
-        Ok((registered, review_turned_off, capacity_warning))
+        ).await?;
+        Ok(())
     }
 
-    pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
-        let result = {
-            let lifecycle_owner = self.owner();
-            let lifecycle = &lifecycle_owner.lifecycle;
-            let active = lifecycle
-                .get(session_id)
-                .with_context(|| format!("no create operation exists for session {session_id}"))?;
-            ensure!(
-                active.kind == LifecycleKind::Create,
-                "session {session_id} is no longer being created"
-            );
-            active.result.clone()
-        };
-        let channel = result.clone();
-        let outcome = Self::wait_lifecycle_result(result).await;
-        self.remove_completed_lifecycle(&channel);
-        match outcome? {
-            DaemonLifecycleResult::Done => Ok(()),
-            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
-                unreachable!("cleanup cannot return a move outcome")
+    /// Re-admit the creates a previous daemon's shutdown interrupted. Runs at
+    /// startup before clients are served, so a client that reconnects to wait
+    /// for its session finds the create in the lifecycle registry. Returns the
+    /// sessions it owns, which the unowned-lifecycle reconciliation must skip.
+    ///
+    /// An intent whose session is no longer creating (finished or failed by
+    /// something that did not settle the intent, such as an older daemon) is
+    /// discarded. Capacity is not admitted again: the original create passed
+    /// that gate, and refusing here would strand a session the person already
+    /// has.
+    pub(super) async fn recover_creates(
+        self: &Arc<Self>,
+        intents: Vec<crate::database::SessionCreateIntent>,
+    ) -> Result<BTreeSet<String>> {
+        let mut owned = BTreeSet::new();
+        for intent in intents {
+            let creating = self
+                .owner()
+                .controller()
+                .state
+                .sessions
+                .get(&intent.session_id)
+                .is_some_and(|record| !crate::database::create_intent_is_stale(record));
+            if !creating {
+                crate::database::discard_session_create_intent(
+                    &intent.session_id,
+                    &intent.operation_id,
+                )?;
+                tracing::info!(session_id = %intent.session_id, "discarded a create intent whose session is no longer creating");
+                continue;
             }
-            DaemonLifecycleResult::DeferredCleanup => {
-                unreachable!("session creation cannot schedule target cleanup")
+            tracing::info!(session_id = %intent.session_id, "resuming a session creation interrupted by a daemon restart");
+            let inputs = match crate::database::load_subagent(&intent.session_id)? {
+                Some(relation) => CreateInputs::Subagent(Box::new(relation)),
+                None => CreateInputs::TopLevel {
+                    publication: None,
+                    remember_launch_choices: intent.remember_launch_choices,
+                },
+            };
+            self.start_create_lifecycle(
+                intent.session_id.clone(),
+                LifecycleControl::default(),
+                inputs,
+                Some(intent.operation_id),
+            )
+            .await?;
+            owned.insert(intent.session_id);
+        }
+        Ok(owned)
+    }
+
+    /// How a wait for a session's creation ends, answered from durable state
+    /// alone (the create intent row and the session record), so every daemon
+    /// gives the same answer and a client that loses its daemon only asks
+    /// again. While the intent row exists the create is unfinished and the
+    /// wait sleeps until the daemon publishes a change to session records.
+    pub(crate) async fn wait_create_outcome(&self, session_id: &str) -> CreateWait {
+        // Subscribed before the first read, so a change between the read and
+        // the sleep still wakes it.
+        let mut changes = self.revisions.subscribe();
+        loop {
+            let id = session_id.to_owned();
+            match blocking(move || crate::database::session_create_end(&id)).await {
+                Ok(crate::database::CreateEnd::Finished) => return CreateWait::Finished,
+                Ok(crate::database::CreateEnd::Failed(reason)) => {
+                    return CreateWait::Failed(anyhow::anyhow!(reason));
+                }
+                Ok(crate::database::CreateEnd::Unfinished) => {}
+                Err(error) => return CreateWait::Failed(error),
+            }
+            if changes.changed().await.is_err() {
+                return CreateWait::Failed(anyhow::anyhow!("the daemon is shutting down"));
             }
         }
     }
+}
+
+/// The inputs only one kind of create has.
+pub(super) enum CreateInputs {
+    /// A session with its own environment. A phone create supplies the
+    /// publication that tells it the session exists.
+    TopLevel {
+        publication: Option<Publication>,
+        remember_launch_choices: bool,
+    },
+    /// A child worker on its parent's target.
+    Subagent(Box<mj_core::subagent::SubagentRecord>),
+}
+
+/// Tells a create that its phone was told the session exists.
+pub(super) type Publication = tokio::sync::oneshot::Receiver<std::result::Result<(), String>>;
+
+/// How a wait for a session's creation ended.
+#[derive(Debug)]
+pub(crate) enum CreateWait {
+    Finished,
+    Failed(anyhow::Error),
 }
 
 fn validate_minimum_container_allocation(
@@ -560,15 +893,11 @@ mod delegation_replay_tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: mj_core::config::data_dir().join("unused-profile-home"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::config::data_dir().join("unused-profile-home"),
+                )
             },
         );
         config.targets.insert(
@@ -578,6 +907,11 @@ mod delegation_replay_tests {
         config.save().unwrap();
         let workspace = crate::database::create_workspace("launch choices").unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
+        runtime.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
         let path = GoPreferences::path();
         for remember in [false, true, false] {
             let before = std::fs::read(&path).ok();
@@ -590,6 +924,8 @@ mod delegation_replay_tests {
                 .unwrap()
                 .last_subagent_policy_for("codex");
             let request = mj_client::daemon::CreateSessionRequest {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: remember,
                 remember_container_size: false,
                 create_managed_worktree: Some(false),
@@ -601,6 +937,7 @@ mod delegation_replay_tests {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 initial_prompt: None,
                 workspace_id: workspace.id.clone(),
                 profile_id: "codex".into(),
@@ -667,14 +1004,12 @@ mod delegation_replay_tests {
                     policy_before
                 );
             }
-            control.request_cancel();
+            control.request_cancel("create test cancelled");
             drop(publish);
-            assert!(
-                runtime
-                    .wait_create_session(&registered.session.id)
-                    .await
-                    .is_err()
-            );
+            assert!(matches!(
+                runtime.wait_create_outcome(&registered.session.id).await,
+                super::CreateWait::Failed(_)
+            ));
         }
     }
 
@@ -698,15 +1033,11 @@ mod delegation_replay_tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: mj_core::config::data_dir().join("missing-profile-home"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::config::data_dir().join("missing-profile-home"),
+                )
             },
         );
         config.save().unwrap();
@@ -722,7 +1053,14 @@ mod delegation_replay_tests {
         });
         crate::database::save_session(&legacy).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
+        runtime.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
         let request = mj_client::daemon::CreateSessionRequest {
+            oracle: None,
+            oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: false,
             create_managed_worktree: None,
@@ -737,6 +1075,7 @@ mod delegation_replay_tests {
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             initial_prompt: None,
             workspace_id: workspace.id,
             profile_id: "codex".into(),
@@ -802,8 +1141,14 @@ mod delegation_replay_tests {
             let relation = crate::daemon::tests::runtime_test_subagent(&child_id, "parent");
             crate::database::save_subagent_session(&child, &relation).unwrap();
             let runtime = crate::daemon::tests::test_runtime_state();
+            runtime.profile_catalog.get_or_init(|| {
+                crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                )
+            });
             let replayed = runtime
                 .start_subagent_session(crate::controller::RegisterSubagentRequest {
+                    no_github_credentials: false,
                     kind: mj_core::subagent::SubagentKind::Worker,
                     reviewer_launch: None,
                     parent_session_id: "parent".into(),

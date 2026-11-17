@@ -24,6 +24,28 @@ use std::process::{Command, ExitStatus, Output, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 
+tokio::task_local! {
+    static CANCELLATION: tokio_util::sync::CancellationToken;
+}
+
+/// Give all preparation commands in this future the same owner. Blocking
+/// work receives `preparation_cancellation()` explicitly before being spawned.
+pub async fn with_preparation_cancellation<F: std::future::Future>(
+    token: tokio_util::sync::CancellationToken,
+    future: F,
+) -> F::Output {
+    let _cancel_on_drop = token.clone().drop_guard();
+    CANCELLATION.scope(token, future).await
+}
+
+pub(crate) fn scoped_preparation_cancellation() -> Option<tokio_util::sync::CancellationToken> {
+    CANCELLATION.try_with(Clone::clone).ok()
+}
+
+pub fn preparation_cancellation() -> tokio_util::sync::CancellationToken {
+    scoped_preparation_cancellation().unwrap_or_default()
+}
+
 /// Own a child-created process group through all of its I/O and cleanup.
 /// The group can outlive its leader, so reaping the child does not disarm it.
 pub struct ProcessGroupGuard {
@@ -52,6 +74,171 @@ impl ProcessGroupGuard {
 impl Drop for ProcessGroupGuard {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+#[cfg(windows)]
+struct ChildJob(usize);
+
+#[cfg(windows)]
+impl ChildJob {
+    fn attach(child: &tokio::process::Child) -> Result<Self> {
+        use windows_sys::Win32::System::JobObjects::*;
+        // SAFETY: all structures are initialized and handles stay owned here.
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            anyhow::ensure!(
+                !handle.is_null(),
+                "create child job: {}",
+                std::io::Error::last_os_error()
+            );
+            let job = Self(handle as usize);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            anyhow::ensure!(
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const _,
+                    std::mem::size_of_val(&limits) as u32
+                ) != 0,
+                "configure child job: {}",
+                std::io::Error::last_os_error()
+            );
+            let process = child.raw_handle().context("missing child process handle")?;
+            anyhow::ensure!(
+                AssignProcessToJobObject(handle, process as _) != 0,
+                "assign child job: {}",
+                std::io::Error::last_os_error()
+            );
+            Ok(job)
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ChildJob {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper exclusively owns the job handle.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0 as _);
+        }
+    }
+}
+
+/// A long-lived child whose supervisor owns termination and reaping. Dropping
+/// this handle requests cleanup; `terminate` also waits for cleanup to finish.
+/// Keep the Tokio runtime alive until cleanup completes.
+pub struct SupervisedChild {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    done: tokio::sync::watch::Receiver<Option<std::result::Result<ExitStatus, String>>>,
+    stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl SupervisedChild {
+    /// Spawn with null stdin/stdout and concurrently captured stderr.
+    pub fn spawn(command: &mut tokio::process::Command) -> Result<Self> {
+        use tokio::io::AsyncReadExt;
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+        let mut child = command.spawn().context("start supervised subprocess")?;
+        #[cfg(windows)]
+        let mut job = Some(ChildJob::attach(&child)?);
+        let group = ProcessGroupGuard::new(child.id());
+        let mut pipe = child.stderr.take().context("missing supervised stderr")?;
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = stderr.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let (finished, done) = tokio::sync::watch::channel(None);
+        tokio::spawn(async move {
+            let reader = tokio::spawn(async move {
+                let mut bytes = [0; 8192];
+                loop {
+                    let count = pipe.read(&mut bytes).await?;
+                    if count == 0 {
+                        return Ok::<_, std::io::Error>(());
+                    }
+                    captured
+                        .lock()
+                        .expect("stderr mutex poisoned")
+                        .extend_from_slice(&bytes[..count]);
+                }
+            });
+            let outcome = tokio::select! {
+                status = child.wait() => status.context("wait for supervised subprocess"),
+                _ = stopped => {
+                    group.kill();
+                    #[cfg(windows)]
+                    drop(job.take());
+                    if let Err(error) = child.start_kill() {
+                        tracing::debug!(%error, "supervised subprocess already exited during termination");
+                    }
+                    child.wait().await.context("reap supervised subprocess")
+                }
+            };
+            drop(group);
+            #[cfg(windows)]
+            drop(job.take());
+            let outcome = async {
+                reader
+                    .await
+                    .context("join supervised stderr reader")?
+                    .context("read supervised stderr")?;
+                outcome
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            if let Err(error) = &outcome {
+                tracing::warn!(%error, "supervised subprocess failed");
+            }
+            finished.send_replace(Some(outcome));
+        });
+        Ok(Self {
+            stop: Some(stop),
+            done,
+            stderr,
+        })
+    }
+
+    /// Captured diagnostics so far, including output received before exit.
+    pub fn stderr(&self) -> Vec<u8> {
+        self.stderr.lock().expect("stderr mutex poisoned").clone()
+    }
+
+    /// Observe exit without cancelling the child if this wait is cancelled.
+    pub async fn wait(&mut self) -> Result<ExitStatus> {
+        loop {
+            if let Some(outcome) = self.done.borrow().clone() {
+                return outcome.map_err(anyhow::Error::msg);
+            }
+            self.done
+                .changed()
+                .await
+                .context("subprocess supervisor stopped")?;
+        }
+    }
+
+    /// Kill and reap the child before returning.
+    pub async fn terminate(&mut self) -> Result<ExitStatus> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        self.wait().await
+    }
+}
+
+impl Drop for SupervisedChild {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
     }
 }
 
@@ -97,13 +284,9 @@ pub fn process_birth_identity(pid: u32) -> Result<String> {
 /// Codex's `IO_DRAIN_TIMEOUT_MS`. The owned process group is terminated after.
 const IO_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Capture a process with byte/time bounds, draining both pipes concurrently.
-/// Kill its process group before returning on overflow, timeout, or cancellation.
-pub async fn run_bounded(
-    command: &mut tokio::process::Command,
-    max_bytes: usize,
-    timeout: std::time::Duration,
-) -> Result<Output> {
+/// Capture a finite command without an application-imposed deadline or size
+/// limit. Cancellation kills its process group; output pipes drain concurrently.
+pub async fn capture(command: &mut tokio::process::Command) -> Result<Output> {
     use tokio::io::AsyncReadExt;
     command
         .stdin(Stdio::null())
@@ -112,7 +295,87 @@ pub async fn run_bounded(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    let mut child = command.spawn().context("start captured subprocess")?;
+    #[cfg(windows)]
+    let _job = ChildJob::attach(&child)?;
+    let _group = ProcessGroupGuard::new(child.id());
+    let mut stdout = child.stdout.take().context("missing captured stdout")?;
+    let mut stderr = child.stderr.take().context("missing captured stderr")?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let (status, _, _) = tokio::try_join!(
+        child.wait(),
+        stdout.read_to_end(&mut out),
+        stderr.read_to_end(&mut err)
+    )
+    .context("capture subprocess output")?;
+    Ok(Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
+}
+
+/// Stream combined output straight to a log without a deadline or pipe buffers.
+/// Dropping the future kills the process group, including package-manager children.
+pub async fn run_to_file_async(
+    command: &mut tokio::process::Command,
+    output: std::fs::File,
+) -> Result<ExitStatus> {
+    command
+        .stdin(Stdio::null())
+        .stderr(Stdio::from(
+            output.try_clone().context("clone subprocess log")?,
+        ))
+        .stdout(Stdio::from(output))
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    let mut child = command.spawn().context("start logged subprocess")?;
+    #[cfg(windows)]
+    let _job = ChildJob::attach(&child)?;
+    let _group = ProcessGroupGuard::new(child.id());
+    child.wait().await.context("wait for logged subprocess")
+}
+
+/// Capture a process with byte/time bounds, draining both pipes concurrently.
+/// Kill its process group before returning on overflow, timeout, or cancellation.
+pub async fn run_bounded(
+    command: &mut tokio::process::Command,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Result<Output> {
+    run_bounded_observed(command, max_bytes, timeout, |_| {}).await
+}
+
+/// [`run_bounded`] that tells `spawned` the child's process ID as soon as it
+/// exists, before anything is read from it. A caller that must know which
+/// processes it started (to tell them from the work it observes) records the ID
+/// there.
+pub async fn run_bounded_observed(
+    command: &mut tokio::process::Command,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+    spawned: impl FnOnce(Option<u32>),
+) -> Result<Output> {
+    use tokio::io::AsyncReadExt;
+    let cancellation = preparation_cancellation();
+    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command.spawn().context("start bounded subprocess")?;
+    spawned(child.id());
+    #[cfg(windows)]
+    let job = ChildJob::attach(&child)?;
     let group = ProcessGroupGuard::new(child.id());
     // Bytes go to buffers owned here, so output read while draining survives
     // the reader being dropped at the drain deadline.
@@ -134,7 +397,7 @@ pub async fn run_bounded(
     let stdout = child.stdout.take().context("missing subprocess stdout")?;
     let stderr = child.stderr.take().context("missing subprocess stderr")?;
     let (mut stdout_bytes, mut stderr_bytes) = (Vec::new(), Vec::new());
-    let result = tokio::time::timeout(timeout, async {
+    let work = tokio::time::timeout(timeout, async {
         // Owning the pipes here closes our ends when the readers are dropped.
         let mut readers = std::pin::pin!(async {
             tokio::try_join!(
@@ -159,8 +422,11 @@ pub async fn run_bounded(
             }
         };
         Ok::<_, anyhow::Error>(status)
-    })
-    .await;
+    });
+    let result = tokio::select! {
+        result = work => result,
+        _ = cancellation.cancelled() => Ok(Err(anyhow!("preparation cancelled"))),
+    };
     let result = result.map(|status| {
         status.map(|status| Output {
             status,
@@ -177,6 +443,8 @@ pub async fn run_bounded(
         }
         outcome => {
             drop(group);
+            #[cfg(windows)]
+            drop(job);
             if let Err(error) = child.start_kill() {
                 tracing::debug!(%error, "bounded subprocess already exited during termination");
             }
@@ -470,8 +738,8 @@ fn spawn_detached_unix(command: &mut Command) -> Result<u32> {
     Ok(u32::from_ne_bytes(pid_bytes))
 }
 
-/// One past the highest descriptor this process can hold, for the per-fd
-/// loop in [`mark_inherited_descriptors_cloexec`].
+/// One past the highest descriptor this process can hold, for the last-resort
+/// per-fd loop in [`mark_inherited_descriptors_cloexec`].
 #[cfg(unix)]
 fn inherited_descriptor_limit() -> libc::c_int {
     let mut limit = libc::rlimit {
@@ -492,26 +760,19 @@ fn inherited_descriptor_limit() -> libc::c_int {
 
 /// Set `FD_CLOEXEC` on every descriptor from 3 upward. Runs between fork and
 /// exec, so it uses only async-signal-safe calls.
+///
+/// The cost must follow the descriptors actually open, not the soft limit:
+/// [`raise_open_file_limit`] lifts that limit to a million or more. The kernel
+/// shortcut and the descriptor listing both qualify. Only a platform with
+/// neither pays for the per-descriptor loop up to `limit`.
 #[cfg(unix)]
 fn mark_inherited_descriptors_cloexec(limit: libc::c_int) {
-    // Linux 5.11+ marks the whole range in one call. It is invoked as a raw
-    // syscall so the glibc 2.28 build does not need the newer libc wrapper;
-    // older kernels reject it and take the per-descriptor loop.
     #[cfg(target_os = "linux")]
-    {
-        // SAFETY: close_range with CLOSE_RANGE_CLOEXEC only changes
-        // descriptor flags.
-        let marked = unsafe {
-            libc::syscall(
-                libc::SYS_close_range,
-                3 as libc::c_uint,
-                libc::c_uint::MAX,
-                libc::CLOSE_RANGE_CLOEXEC,
-            )
-        };
-        if marked == 0 {
-            return;
-        }
+    if mark_range_cloexec() {
+        return;
+    }
+    if mark_listed_descriptors_cloexec() {
+        return;
     }
     for fd in 3..limit {
         // SAFETY: F_SETFD on a closed descriptor fails with EBADF and changes
@@ -520,6 +781,253 @@ fn mark_inherited_descriptors_cloexec(limit: libc::c_int) {
             libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         }
     }
+}
+
+/// Linux 5.11+ marks the whole range in one call. It is invoked as a raw
+/// syscall so the glibc 2.28 build does not need the newer libc wrapper;
+/// older kernels reject it.
+#[cfg(target_os = "linux")]
+fn mark_range_cloexec() -> bool {
+    // SAFETY: close_range with CLOSE_RANGE_CLOEXEC only changes descriptor
+    // flags.
+    let marked = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3 as libc::c_uint,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    marked == 0
+}
+
+/// Mark the descriptors the kernel lists for this process, and only those.
+/// Returns false when the listing was unavailable or incomplete, so the caller
+/// must scan by number instead.
+///
+/// The listing is read from the forked child, which has one thread, so it is
+/// the exact table the child inherited: a descriptor another thread of the
+/// launcher opened before the fork is in it, and nothing can be opened
+/// concurrently. Setting `FD_CLOEXEC` does not add or remove entries, so the
+/// walk is stable. CPython's `_posixsubprocess` reads `/proc/self/fd` the same
+/// way.
+#[cfg(target_os = "linux")]
+fn mark_listed_descriptors_cloexec() -> bool {
+    // Room for many entries per call; the kernel returns what fits and the
+    // loop asks again, so the size only sets the number of syscalls.
+    #[repr(C, align(8))]
+    struct DirentBuffer([u8; 4096]);
+    // linux_dirent64: u64 d_ino, i64 d_off, u16 d_reclen, u8 d_type, name.
+    const RECLEN_OFFSET: usize = 16;
+    const NAME_OFFSET: usize = 19;
+
+    // SAFETY: the path is a NUL-terminated literal; open has no other
+    // requirement.
+    let directory = unsafe {
+        libc::open(
+            c"/proc/self/fd".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if directory < 0 {
+        return false;
+    }
+    let mut buffer = DirentBuffer([0; 4096]);
+    let mut complete = true;
+    loop {
+        // SAFETY: the buffer is writable for its whole length.
+        let filled = unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                directory,
+                buffer.0.as_mut_ptr(),
+                buffer.0.len(),
+            )
+        };
+        if filled < 0 {
+            complete = false;
+            break;
+        }
+        if filled == 0 {
+            break;
+        }
+        let filled = filled as usize;
+        let mut offset = 0;
+        while offset + NAME_OFFSET < filled {
+            let reclen = usize::from(u16::from_ne_bytes([
+                buffer.0[offset + RECLEN_OFFSET],
+                buffer.0[offset + RECLEN_OFFSET + 1],
+            ]));
+            if reclen == 0 || offset + reclen > filled {
+                complete = false;
+                break;
+            }
+            // The name is a decimal descriptor number, or "." and "..".
+            let mut fd: libc::c_int = 0;
+            let mut digits = 0;
+            let mut index = offset + NAME_OFFSET;
+            while index < offset + reclen && buffer.0[index] != 0 {
+                let byte = buffer.0[index];
+                if !byte.is_ascii_digit() {
+                    digits = 0;
+                    break;
+                }
+                fd = fd
+                    .saturating_mul(10)
+                    .saturating_add(libc::c_int::from(byte - b'0'));
+                digits += 1;
+                index += 1;
+            }
+            if digits > 0 && fd >= 3 {
+                // SAFETY: only sets close-on-exec on a descriptor this
+                // process holds. It also reaches `directory`, which is
+                // already close-on-exec.
+                unsafe {
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                }
+            }
+            offset += reclen;
+        }
+        if !complete {
+            break;
+        }
+    }
+    // SAFETY: `directory` is the descriptor opened above.
+    unsafe {
+        libc::close(directory);
+    }
+    complete
+}
+
+/// macOS has no listing in the filesystem that is safe to read after a fork:
+/// `/dev/fd` needs `opendir`, which allocates. `proc_pidinfo(PROC_PIDLISTFDS)`
+/// is a plain system call wrapper that fills a caller-supplied buffer, so it
+/// is async-signal-safe in practice, and the kernel lists only open
+/// descriptors. A table larger than the buffer returns a full buffer; that
+/// cannot be told from an exact fit, so it reports incomplete and the caller
+/// falls back to the bounded scan.
+#[cfg(target_os = "macos")]
+fn mark_listed_descriptors_cloexec() -> bool {
+    const ENTRIES: usize = 4096;
+    let mut entries = [libc::proc_fdinfo {
+        proc_fd: 0,
+        proc_fdtype: 0,
+    }; ENTRIES];
+    let capacity = std::mem::size_of_val(&entries) as libc::c_int;
+    // SAFETY: `entries` is writable for `capacity` bytes; getpid is
+    // async-signal-safe and names the forked child itself.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDLISTFDS,
+            0,
+            entries.as_mut_ptr().cast(),
+            capacity,
+        )
+    };
+    if written <= 0 || written >= capacity {
+        return false;
+    }
+    let count = written as usize / std::mem::size_of::<libc::proc_fdinfo>();
+    for entry in &entries[..count] {
+        if entry.proc_fd >= 3 {
+            // SAFETY: only sets close-on-exec on a descriptor this process
+            // holds.
+            unsafe {
+                libc::fcntl(entry.proc_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+    }
+    true
+}
+
+/// Other Unixes take the bounded scan.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn mark_listed_descriptors_cloexec() -> bool {
+    false
+}
+
+/// Raise this process's soft open-file limit as far as the system allows, so
+/// it and every child it starts (children inherit the limit) can hold many
+/// descriptors. A launcher's soft limit is often 1024, which a process holding
+/// a few descriptors per child exhausts at a few hundred children.
+///
+/// Call this first in every binary's `main`. A failure is reported on stderr
+/// and otherwise ignored: the limit stays what it was and startup continues.
+/// Logging is not up yet at the call sites, so this does not use `tracing`.
+pub fn raise_open_file_limit() {
+    if let Err(error) = raise_open_file_limit_impl() {
+        eprintln!("warning: could not raise the open file limit: {error}");
+    }
+}
+
+#[cfg(unix)]
+fn raise_open_file_limit_impl() -> std::io::Result<()> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a valid, writable rlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let target = open_file_limit_target(limit.rlim_max)?;
+    if limit.rlim_cur >= target {
+        return Ok(());
+    }
+    limit.rlim_cur = target;
+    // SAFETY: `limit` is a valid rlimit; the hard limit is left unchanged.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The soft limit to ask for given the hard limit. macOS reports an unlimited
+/// hard limit but refuses a soft limit above `kern.maxfilesperproc`; Go's
+/// runtime applies the same ceiling. Linux refuses anything above
+/// `fs.nr_open`, which is what an unlimited hard limit really means there.
+#[cfg(unix)]
+fn open_file_limit_target(hard: libc::rlim_t) -> std::io::Result<libc::rlim_t> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut per_process: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        // SAFETY: the name is NUL-terminated and the output is a c_int of the
+        // size passed.
+        let read = unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&mut per_process as *mut libc::c_int).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(hard.min(libc::rlim_t::try_from(per_process).unwrap_or(hard)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if hard != libc::RLIM_INFINITY {
+            Ok(hard)
+        } else if cfg!(target_os = "linux") {
+            std::fs::read_to_string("/proc/sys/fs/nr_open")?
+                .trim()
+                .parse()
+                .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))
+        } else {
+            Ok(hard)
+        }
+    }
+}
+
+/// Windows has no descriptor limit to raise.
+#[cfg(not(unix))]
+fn raise_open_file_limit_impl() -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Run `command` with `input` written to its stdin, returning the captured
@@ -570,6 +1078,119 @@ pub fn run_with_input(command: &mut Command, input: &[u8]) -> Result<Output> {
     }
 
     Ok(output)
+}
+
+#[cfg(unix)]
+pub(crate) struct ForegroundGroup {
+    tty: std::fs::File,
+    previous: libc::pid_t,
+}
+
+#[cfg(unix)]
+fn foreground_group(fd: std::os::fd::RawFd, group: libc::pid_t) -> std::io::Result<()> {
+    // The root is temporarily behind the interactive helper. Block SIGTTOU
+    // only around this ioctl, restoring this thread's mask before returning.
+    unsafe {
+        let mut blocked = std::mem::zeroed();
+        let mut previous = std::mem::zeroed();
+        libc::sigemptyset(&mut blocked);
+        libc::sigaddset(&mut blocked, libc::SIGTTOU);
+        let error = libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous);
+        if error != 0 {
+            return Err(std::io::Error::from_raw_os_error(error));
+        }
+        let result = libc::tcsetpgrp(fd, group);
+        let error = std::io::Error::last_os_error();
+        libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
+        if result == 0 { Ok(()) } else { Err(error) }
+    }
+}
+
+#[cfg(unix)]
+impl ForegroundGroup {
+    pub(crate) fn prepare(command: &mut std::process::Command) -> Result<Option<Self>> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let tty = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+        {
+            Ok(tty) => tty,
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ENXIO | libc::ENODEV)) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error).context("open login terminal"),
+        };
+        let fd = tty.as_raw_fd();
+        let previous = unsafe { libc::tcgetpgrp(fd) };
+        anyhow::ensure!(
+            previous >= 0,
+            "read login terminal foreground group: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: fd remains owned through spawn; the child only changes its
+        // terminal group using async-signal-safe syscalls before exec.
+        unsafe {
+            command.pre_exec(move || foreground_group(fd, libc::getpgrp()));
+        }
+        Ok(Some(Self { tty, previous }))
+    }
+}
+#[cfg(unix)]
+impl Drop for ForegroundGroup {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        if let Err(error) = foreground_group(self.tty.as_raw_fd(), self.previous) {
+            tracing::debug!(%error, "restore login terminal foreground group");
+        }
+    }
+}
+
+/// Capture an interactive answer while retaining cancellation ownership of
+/// the command's group. Cancellation finishes cleanup before the caller returns.
+pub async fn run_capturing_stdout_cancellable(
+    command: &mut tokio::process::Command,
+) -> Result<Output> {
+    use tokio::io::AsyncReadExt;
+    let cancellation = preparation_cancellation();
+    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(unix)]
+    let _foreground = ForegroundGroup::prepare(command.as_std_mut())?;
+    let mut child = command.spawn().context("spawn interactive command")?;
+    #[cfg(windows)]
+    let job = ChildJob::attach(&child)?;
+    let group = ProcessGroupGuard::new(child.id());
+    let mut stdout = child.stdout.take().context("interactive stdout missing")?;
+    let mut bytes = Vec::new();
+    let result = tokio::select! {
+        result = async {
+            let (status, _) = tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))?;
+            Ok::<_, anyhow::Error>(status)
+        } => result,
+        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+    };
+    drop(group);
+    #[cfg(windows)]
+    drop(job);
+    if result.is_err() {
+        child
+            .start_kill()
+            .context("terminate interactive command")?;
+        child.wait().await.context("reap interactive command")?;
+    }
+    Ok(Output {
+        status: result?,
+        stdout: bytes,
+        stderr: Vec::new(),
+    })
 }
 
 /// Run a foreground child that talks to the terminal but whose stdout the
@@ -675,6 +1296,102 @@ fn group_signal_error_is_ignorable(error: &std::io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_drains_both_pipes_beyond_pipe_capacity() {
+        let mut command = tokio::process::Command::new("python3");
+        command.args([
+            "-c",
+            "import os; os.write(1, b'o'*262144); os.write(2, b'e'*262144)",
+        ]);
+        let output = super::capture(&mut command).await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, vec![b'o'; 262144]);
+        assert_eq!(output.stderr, vec![b'e'; 262144]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_child_drains_large_stderr_and_reaps_on_cancel() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "head -c 131072 /dev/zero >&2; sleep 60 & wait"]);
+        let mut child = super::SupervisedChild::spawn(&mut command).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while child.stderr().len() < 131072 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!child.terminate().await.unwrap().success());
+            assert_eq!(child.stderr().len(), 131072);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn logged_command_cancellation_kills_its_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let log_path = temp.path().join("log");
+        let output = std::fs::File::create(&log_path).unwrap();
+        let child_pid_file = pid_file.clone();
+        let command = tokio::spawn(async move {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", "head -c 131072 /dev/zero; echo diagnostics >&2; echo $$ > \"$1\"; sleep 60 & wait", "logged-fixture"])
+                .arg(child_pid_file);
+            super::run_to_file_async(&mut command, output).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let pid: i32 = loop {
+                if let Ok(body) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = body.trim().parse()
+                {
+                    break pid;
+                }
+                tokio::task::yield_now().await;
+            };
+            command.abort();
+            assert!(command.await.unwrap_err().is_cancelled());
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::task::yield_now().await;
+            }
+            let log = std::fs::read(&log_path).unwrap();
+            assert!(log.len() > 131072);
+            assert!(log.ends_with(b"diagnostics\n"));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_child_drop_reaps_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; sleep 60 & wait", "fixture"])
+            .arg(&pid_file);
+        let child = super::SupervisedChild::spawn(&mut command).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !pid_file.exists() {
+                tokio::task::yield_now().await;
+            }
+            let pid: i32 = loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file).unwrap().trim().parse() {
+                    break pid;
+                }
+                tokio::task::yield_now().await;
+            };
+            drop(child);
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn bounded_timeout_reaps_the_child_before_returning() {
@@ -797,6 +1514,122 @@ mod tests {
     }
     #[cfg(unix)]
     use super::*;
+
+    // The capture helper moves its child into a separate group without
+    // losing interactive terminal input to SIGTTIN.
+    #[cfg(unix)]
+    #[test]
+    fn interactive_capture_keeps_terminal_input_in_its_owned_group() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::process::CommandExt;
+        const CHILD: &str = "MJ_TEST_INTERACTIVE_CAPTURE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let mut command = tokio::process::Command::new("/bin/sh");
+                command.args([
+                    "-c",
+                    r#"read -r answer; head -c 131072 /dev/zero; printf '%s' "$answer""#,
+                ]);
+                let result = super::run_capturing_stdout_cancellable(&mut command)
+                    .await
+                    .unwrap();
+                assert!(result.status.success());
+                assert_eq!(result.stdout.len(), 131072 + b"terminal-answer".len());
+                assert!(result.stdout[..131072].iter().all(|byte| *byte == 0));
+                assert!(result.stdout.ends_with(b"terminal-answer"));
+            });
+            return;
+        }
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: writable descriptors, default terminal mode and size.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    // macOS declares these `*mut`, Linux `*const`; a null
+                    // `*mut` coerces to either.
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let master_fd = master.as_raw_fd();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "subprocess::tests::interactive_capture_keeps_terminal_input_in_its_owned_group",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdin(slave)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        // SAFETY: only session/terminal syscalls between fork and exec. Close
+        // the inherited master so only this parent controls terminal hangup.
+        unsafe {
+            command.pre_exec(move || {
+                libc::close(master_fd);
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        master.write_all(b"terminal-answer\n").unwrap();
+        // Read the terminal's output (the echoed answer) as a real terminal
+        // does. macOS makes an exiting session leader wait until its
+        // terminal's output drains, so an unread master never lets the child
+        // exit; the wait below would then hang.
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let terminal = {
+            let exited = exited.clone();
+            let mut terminal = master.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut buffer = [0_u8; 1024];
+                while !exited.load(std::sync::atomic::Ordering::Acquire) {
+                    let mut poll = libc::pollfd {
+                        fd: terminal.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one valid pollfd for a descriptor this thread owns.
+                    match unsafe { libc::poll(&mut poll, 1, 50) } {
+                        0 => continue,
+                        ready if ready < 0 => {
+                            let error = std::io::Error::last_os_error();
+                            assert_eq!(
+                                error.kind(),
+                                std::io::ErrorKind::Interrupted,
+                                "poll the terminal: {error}"
+                            );
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    match std::io::Read::read(&mut terminal, &mut buffer) {
+                        Ok(0) => return,
+                        Ok(_) => {}
+                        // Linux reports a terminal whose slave side closed as EIO.
+                        Err(error) if error.raw_os_error() == Some(libc::EIO) => return,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => panic!("read the terminal: {error}"),
+                    }
+                }
+            })
+        };
+        let status = child.wait().unwrap();
+        exited.store(true, std::sync::atomic::Ordering::Release);
+        terminal.join().unwrap();
+        assert!(status.success());
+    }
 
     // Hard-won: 6dec78fe: A real large-repository resume deadlocked while stdin and stdout pipes were both full.
     #[cfg(unix)]
@@ -998,6 +1831,55 @@ mod tests {
         outcome
             .expect("the pipe must reach EOF while the detached child is still running")
             .expect("read the pipe to EOF");
+    }
+
+    // The descriptor listing is the cloexec path on a kernel without
+    // close_range, and on macOS. Exercise a descriptor far above 1024 when
+    // the hard limit permits it, and an ordinary descriptor otherwise. Run
+    // in the pre-exec child, as it is for `spawn_detached`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn descriptor_listing_marks_an_inherited_descriptor_cloexec() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::process::CommandExt as _;
+
+        raise_open_file_limit();
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a valid, writable rlimit.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        let minimum = if limit.rlim_cur > 5000 { 5000 } else { 3 };
+
+        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+        // SAFETY: F_DUPFD chooses an unused descriptor without FD_CLOEXEC,
+        // so exec would keep it. It cannot overwrite another test's fd.
+        let inherited = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, minimum) };
+        assert!(inherited >= minimum, "{}", std::io::Error::last_os_error());
+        // SAFETY: this test owns the new descriptor returned above.
+        let inherited = unsafe { OwnedFd::from_raw_fd(inherited) };
+        let high = inherited.as_raw_fd();
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!("! [ -e /dev/fd/{high} ]"));
+        // SAFETY: the closure only calls async-signal-safe functions.
+        unsafe {
+            command.pre_exec(|| {
+                if mark_listed_descriptors_cloexec() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("descriptor listing unavailable"))
+                }
+            });
+        }
+        let status = command.status();
+        assert!(
+            status.expect("spawn sh").success(),
+            "descriptor {high} leaked into the child"
+        );
     }
 
     #[cfg(unix)]

@@ -1,0 +1,75 @@
+{
+  "recorded_at": "2026-11-17T06:33:04.357842+00:00",
+  "diagnostic_only": true,
+  "primary_reading_unchanged": true,
+  "contains_counts": {
+    "no": 10,
+    "partial": 4,
+    "yes": 3
+  },
+  "yes_rate": 0.17647058823529413,
+  "yes_or_partial_rate": 0.4117647058823529,
+  "negative_diffs": 4,
+  "negative_contains_counts": {
+    "no": 3,
+    "partial": 1
+  },
+  "contains_by_catch_descriptive": {
+    "yes": {
+      "diffs": 3,
+      "A_caught": 3,
+      "BT_caught": 3
+    },
+    "partial": {
+      "diffs": 4,
+      "A_caught": 2,
+      "BT_caught": 0
+    },
+    "no": {
+      "diffs": 10,
+      "A_caught": 4,
+      "BT_caught": 1
+    }
+  },
+  "assessor": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "profile": "codex4",
+    "sessions": 1,
+    "sid": "b43336972ec8cd6c2a3ec7906921d5bb",
+    "lifecycle": "suspended",
+    "estimated_api_cost_usd": 0.183344,
+    "complete_priced_usage_reports": 1
+  },
+  "length_size": {
+    "scope": "registered17relationdiffs; artifact-only exploratorydiagnostic, no newmodelcalls/no primarybar changes",
+    "n": 17,
+    "negative_diffs": 4,
+    "zero_diffs": 13,
+    "positive_diffs": 0,
+    "all30_bug_diff_median": 827.0,
+    "primary17_diff_median": 675,
+    "brief_characters_median": 5766,
+    "brief_items_median": 15,
+    "brief_characters_range": [
+      4652,
+      6262
+    ],
+    "brief_items_range": [
+      13,
+      17
+    ],
+    "exact25item_briefs": 0,
+    "negative_diff_size_median": 305.0,
+    "zero_diff_size_median": 688,
+    "token_limit_note": "25items and about1500tokens are registered; script uses7000characters with slack. Characters/4 is only a rough proxy, NOT exact tokenization or whole-writer usage.",
+    "interpretation_limit": "Descriptive17case table only; no causal size/budget inference or posthoccase selection."
+  },
+  "limits": [
+    "Exploratory follow-up after observing primary result; no rescore, case removal, rewriting, or changed pass bar.",
+    "Single contains assessor, same rule as StageA/V1, no replication; not engine reach.",
+    "Other reviewer findings were not verified by this diagnostic; reported topic overlap does not establish distraction, deference, stopping, or relation-to-finding conversion.",
+    "Reviewer tool transcripts unavailable after normal role destruction; final handbacks alone cannot establish search behavior.",
+    "No brief reached hard 25-item/7000-character guards. Soft brevity/selection effects and causal size effects remain unmeasured."
+  ]
+}

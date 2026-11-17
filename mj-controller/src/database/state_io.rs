@@ -1,5 +1,98 @@
 use super::*;
 
+/// Scoped to a load/publication: no cache retains deleted sessions.
+#[derive(Default)]
+pub(super) struct SessionInterns {
+    projects: std::collections::HashMap<
+        String,
+        std::sync::Arc<mj_core::repository::ProjectBundleSnapshot>,
+    >,
+    runtimes:
+        std::collections::HashMap<String, std::sync::Arc<mj_core::state::TargetRuntimeSettings>>,
+}
+
+impl SessionInterns {
+    pub(super) fn from_state(state: &State) -> Result<Self> {
+        let mut pool = Self::default();
+        let mut projects = std::collections::HashSet::new();
+        let mut runtimes = std::collections::HashSet::new();
+        for record in state.sessions.values() {
+            if let Some(value) = &record.project
+                && projects.insert(std::sync::Arc::as_ptr(value))
+            {
+                pool.projects
+                    .entry(serde_json::to_string(value)?)
+                    .or_insert_with(|| value.clone());
+            }
+            if let Some(value) = &record.target_runtime
+                && runtimes.insert(std::sync::Arc::as_ptr(value))
+            {
+                pool.runtimes
+                    .entry(serde_json::to_string(value)?)
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        Ok(pool)
+    }
+
+    /// A pool holding only one record's values. A refresh that leaves a
+    /// session's project and runtime unchanged reuses that record's
+    /// allocations without visiting any other session.
+    pub(super) fn from_record(record: Option<&SessionRecord>) -> Result<Self> {
+        let mut pool = Self::default();
+        if let Some(record) = record {
+            if let Some(value) = &record.project {
+                pool.projects
+                    .insert(serde_json::to_string(value)?, value.clone());
+            }
+            if let Some(value) = &record.target_runtime {
+                pool.runtimes
+                    .insert(serde_json::to_string(value)?, value.clone());
+            }
+        }
+        Ok(pool)
+    }
+
+    /// Replace a record's values with equal ones already in this pool.
+    pub(super) fn share(&mut self, record: &mut SessionRecord) -> Result<()> {
+        if let Some(value) = &record.project {
+            let shared = self
+                .projects
+                .entry(serde_json::to_string(value)?)
+                .or_insert_with(|| value.clone())
+                .clone();
+            record.project = Some(shared);
+        }
+        if let Some(value) = &record.target_runtime {
+            let shared = self
+                .runtimes
+                .entry(serde_json::to_string(value)?)
+                .or_insert_with(|| value.clone())
+                .clone();
+            record.target_runtime = Some(shared);
+        }
+        Ok(())
+    }
+}
+
+fn decode_shared<T: serde::de::DeserializeOwned>(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+    pool: &mut std::collections::HashMap<String, std::sync::Arc<T>>,
+) -> rusqlite::Result<Option<std::sync::Arc<T>>> {
+    let Some(json) = row.get::<_, Option<String>>(column)? else {
+        return Ok(None);
+    };
+    if let Some(value) = pool.get(&json) {
+        return Ok(Some(value.clone()));
+    }
+    let value = std::sync::Arc::new(serde_json::from_str::<T>(&json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
+    })?);
+    pool.insert(json, value.clone());
+    Ok(Some(value))
+}
+
 pub fn load_state() -> Result<State> {
     if let Some(committed) = committed_state()? {
         return Ok(committed.state.clone());
@@ -43,8 +136,18 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         let (profile_id, policy) = row?;
         state.last_subagent_policies.insert(profile_id, policy);
     }
+    let mut statement = connection
+        .prepare("SELECT profile_id, enabled FROM oracle_preference ORDER BY profile_id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+    })?;
+    for row in rows {
+        let (profile_id, enabled) = row?;
+        state.last_oracle_choices.insert(profile_id, enabled);
+    }
     let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
-    let rows = statement.query_map([], decode_session)?;
+    let mut interns = SessionInterns::default();
+    let rows = statement.query_map([], |row| decode_session(row, &mut interns))?;
     for row in rows {
         if let Some(session) = row? {
             state.sessions.insert(session.id.clone(), session);
@@ -71,8 +174,8 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         // sub-agent spawn came to be refused with "sub-agent ... has no child
         // session" long after the child in question was gone (#1065). The load
         // already skips a session whose harness it cannot parse; a relation
-        // that pointed at such a session is the same kind of residue, and
-        // `save_state_to` deletes these rows on the next save.
+        // that points at such a session is also omitted from memory.
+        // Snapshot saves preserve relations whose endpoints were not loaded.
         let missing = if !state.sessions.contains_key(&child_id) {
             Some("child")
         } else if !state.sessions.contains_key(&record.parent_session_id) {
@@ -160,12 +263,6 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let existing_contexts = existing_contexts(&tx)?;
-    let existing_sessions = {
-        let mut statement = tx.prepare("SELECT session_id FROM sessions")?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
     tx.execute(
         "DELETE FROM subagent_sessions
          WHERE child_session_id NOT IN (SELECT session_id FROM sessions)
@@ -182,9 +279,9 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (child_id, parent_id) in existing_subagents {
-        if !state.subagents.contains_key(&child_id)
-            || !state.sessions.contains_key(&child_id)
-            || !state.sessions.contains_key(&parent_id)
+        if state.sessions.contains_key(&child_id)
+            && state.sessions.contains_key(&parent_id)
+            && !state.subagents.contains_key(&child_id)
         {
             tx.execute(
                 "DELETE FROM subagent_sessions WHERE child_session_id = ?1",
@@ -198,11 +295,9 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
          WHERE child_session_id NOT IN (SELECT child_session_id FROM subagent_sessions)",
         [],
     )?;
-    for session_id in existing_sessions {
-        if !state.sessions.contains_key(&session_id) {
-            tx.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
-        }
-    }
+    // A snapshot owns only the records it contains. Absence is not a deletion
+    // request: unsupported or concurrently inserted sessions were never loaded.
+    // Operational deletion goes through delete_session_from instead.
     tx.execute("DELETE FROM mount_history", [])?;
     tx.execute("DELETE FROM host_container_sizes", [])?;
     for session in state.sessions.values() {
@@ -504,6 +599,14 @@ pub(super) fn parse_materialized_execution(
 /// Only a flow that authors the whole record — creation, import, resume, or
 /// orphan adoption — may use this.
 pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    insert_session_with_parent(tx, session, None)
+}
+
+pub(super) fn insert_session_with_parent(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    parent: Option<&str>,
+) -> Result<()> {
     let previous_error = super::events::previous_session_error(tx, &session.id)?;
     let canonical_bundle =
         super::projects::session_project_id(tx, &session.id, &session.bundle_id)?;
@@ -543,11 +646,12 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              native_session_id, acp_session_title, session_title_override, updated_at,
              viewed_through_event_ordinal, last_error, resource_allocation,
              last_checkpoint_error, project_directory, managed_worktree,
-             container_cpus, container_memory, archived, draft_input, create_managed_worktree,
+             archived, draft_input, create_managed_worktree,
              subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
-             review_json, no_project_memory, no_mailbox
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)
+             review_json, no_project_memory, no_mailbox, oracle, oracle_choice, no_github_credentials,
+             notifications_ignored
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -567,8 +671,6 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              last_checkpoint_error = excluded.last_checkpoint_error,
              project_directory = excluded.project_directory,
              managed_worktree = excluded.managed_worktree,
-             container_cpus = excluded.container_cpus,
-             container_memory = excluded.container_memory,
              archived = excluded.archived,
              create_managed_worktree = excluded.create_managed_worktree,
              subagents = excluded.subagents,
@@ -582,7 +684,11 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              project_json = coalesce(excluded.project_json, sessions.project_json),
              review_json = excluded.review_json,
              no_project_memory = excluded.no_project_memory,
-             no_mailbox = excluded.no_mailbox",
+             no_mailbox = excluded.no_mailbox,
+             oracle = excluded.oracle,
+             oracle_choice = excluded.oracle_choice,
+             no_github_credentials = excluded.no_github_credentials,
+             notifications_ignored = excluded.notifications_ignored",
         params![
             session.id,
             session.title,
@@ -611,8 +717,6 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
-            session.container_cpus,
-            session.container_memory,
             session.archived,
             session.draft_input,
             session.create_managed_worktree,
@@ -635,6 +739,10 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.review.as_ref().map(serde_json::to_string).transpose()?,
             session.no_project_memory,
             session.no_github_events,
+            session.oracle,
+            session.oracle_choice.as_ref().map(serde_json::to_string).transpose()?,
+            session.no_github_credentials,
+            session.notifications_ignored,
         ],
     )?;
     tx.execute(
@@ -642,10 +750,11 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
          ON CONFLICT(session_id) DO NOTHING",
         [session.id.as_str()],
     )?;
-    replace_targets(tx, session)?;
+    replace_targets_with_parent(tx, session, parent)?;
     replace_mounts(tx, &session.id, &session.additional_mounts)?;
     replace_checkpoint(tx, session)?;
     super::events::record_session_fault_transition(tx, session, previous_error)?;
+    super::session_create::settle_create_intent(tx, session)?;
     Ok(())
 }
 
@@ -659,8 +768,9 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
     // that is set in memory, read back as its default, and never missed until
     // somebody inspects the database. A new field breaks this binding, and
     // whoever adds it decides then whether a lifecycle transition owns it.
-    // Everything bound to `_` is owned by `upsert_session` instead.
+    // Fields bound to `_` have explicit writers, such as container settings.
     let SessionRecord {
+        oracle_choice,
         target_runtime,
         id,
         title,
@@ -671,7 +781,9 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         updated_at,
         viewed_through_event_ordinal,
         last_error,
-        resource_allocation,
+        dismissed_failure: _,
+        failure_generation: _,
+        resource_allocation: _,
         last_checkpoint_error,
         project_directory,
         managed_worktree,
@@ -688,11 +800,12 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         review: _,
         no_project_memory: _,
         no_github_events: _,
+        no_github_credentials: _,
+        notifications_ignored: _,
         // A Move can change it along with the profile the session runs on.
         subagents,
+        oracle,
         additional_mounts: _,
-        container_cpus: _,
-        container_memory: _,
         container_workspace: _,
         archived: _,
         // Written by `replace_targets` below rather than by this statement.
@@ -717,14 +830,15 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              updated_at = ?7,
              viewed_through_event_ordinal = max(viewed_through_event_ordinal, ?8),
              last_error = ?9,
-             resource_allocation = ?10,
-             last_checkpoint_error = ?11,
-             project_directory = ?12,
-             managed_worktree = ?13,
-             build_cache_json = ?14,
-             target_runtime_json = ?15,
-             subagents = ?16,
-             project_json = coalesce(?17,project_json)
+             last_checkpoint_error = ?10,
+             project_directory = ?11,
+             managed_worktree = ?12,
+             build_cache_json = ?13,
+             target_runtime_json = ?14,
+             subagents = ?15,
+             project_json = coalesce(?16,project_json),
+             oracle = ?17,
+             oracle_choice = ?18
          WHERE session_id = ?1",
         params![
             id,
@@ -736,10 +850,6 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
             updated_at,
             viewed_through_event_ordinal,
             last_error,
-            resource_allocation
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?,
             last_checkpoint_error,
             project_directory.as_ref().map(|path| path_to_blob(path)),
             managed_worktree
@@ -758,16 +868,31 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
                 .transpose()?,
             subagents.as_ref().map(serde_json::to_string).transpose()?,
             project.as_ref().map(serde_json::to_string).transpose()?,
+            oracle,
+            oracle_choice
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     if changed != 1 {
         bail!("unknown session {id}");
     }
     super::events::record_session_fault_transition(tx, session, previous_error)?;
+    super::session_create::settle_create_intent(tx, session)?;
     replace_targets(tx, session)
 }
 
 pub(super) fn replace_targets(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    replace_targets_with_parent(tx, session, None)
+}
+
+fn replace_targets_with_parent(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    parent: Option<&str>,
+) -> Result<()> {
+    super::environments::capture_session_environment(tx, session, parent)?;
     tx.execute(
         "DELETE FROM session_targets WHERE session_id = ?1",
         [session.id.as_str()],
@@ -799,11 +924,18 @@ pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) 
     Ok(())
 }
 
-pub(super) fn insert_target(
-    tx: &Transaction<'_>,
-    session_id: &str,
-    target: &TargetLocator,
-) -> Result<()> {
+pub(super) struct StoredTargetValues<'a> {
+    pub kind: &'static str,
+    pub host: Option<&'a str>,
+    pub resource: Option<&'a str>,
+    pub address: Option<&'a str>,
+    pub workspace: Option<Vec<u8>>,
+    pub worker_id: Option<&'a str>,
+    pub workspace_storage: Option<String>,
+    pub borrowed_from: Option<&'a str>,
+}
+
+pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTargetValues<'_>> {
     let (kind, host, resource, address, workspace, worker_id, workspace_storage, borrowed_from) =
         match target {
             TargetLocator::LocalBare { worker_root } => (
@@ -849,6 +981,20 @@ pub(super) fn insert_target(
                 borrowed_from,
             } => (
                 "ssh-apple-container",
+                Some(host.as_str()),
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::SshNitro {
+                host,
+                container_id,
+                borrowed_from,
+            } => (
+                "ssh-nitro",
                 Some(host.as_str()),
                 Some(container_id.as_str()),
                 None,
@@ -927,6 +1073,33 @@ pub(super) fn insert_target(
                 borrowed_from.as_deref(),
             ),
         };
+    Ok(StoredTargetValues {
+        kind,
+        host,
+        resource,
+        address,
+        workspace,
+        worker_id,
+        workspace_storage,
+        borrowed_from,
+    })
+}
+
+pub(super) fn insert_target(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    target: &TargetLocator,
+) -> Result<()> {
+    let StoredTargetValues {
+        kind,
+        host,
+        resource,
+        address,
+        workspace,
+        worker_id,
+        workspace_storage,
+        borrowed_from,
+    } = stored_target_values(target)?;
     tx.execute(
         "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -954,6 +1127,18 @@ fn load_targets_selected(
     state: &mut State,
     id: Option<&str>,
 ) -> Result<()> {
+    for (session_id, target) in read_targets(connection, id)? {
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.target = Some(Box::new(target));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn read_targets(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<BTreeMap<String, TargetLocator>> {
     let predicate = if id.is_some() {
         " WHERE session_id=?1"
     } else {
@@ -966,78 +1151,81 @@ fn load_targets_selected(
         .map(|id| vec![id as &dyn rusqlite::ToSql])
         .unwrap_or_default();
     let rows = statement.query_map(arguments.as_slice(), |row| {
-        let session_id: String = row.get(0)?;
-        let kind: String = row.get(1)?;
-        let host: Option<String> = row.get(2)?;
-        let resource: Option<String> = row.get(3)?;
-        let address: Option<String> = row.get(4)?;
-        let workspace = row.get_ref(5)?.blob_or_null()?.map(blob_to_path);
-        let worker_id: Option<String> = row.get(6)?;
-        let workspace_storage = row
-            .get::<_, Option<String>>(7)?
-            .map(|serialized| {
-                serde_json::from_str(&serialized).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let borrowed_from: Option<String> = row.get(8)?;
-        let target = match kind.as_str() {
-            "local-bare" => TargetLocator::LocalBare {
-                worker_root: workspace.unwrap(),
-            },
-            "local-podman" => TargetLocator::LocalPodman {
-                borrowed_from,
-                container_id: resource.unwrap(),
-                workspace_storage,
-            },
-            "local-docker" => TargetLocator::LocalDocker {
-                borrowed_from,
-                container_id: resource.unwrap(),
-            },
-            "apple-container" => TargetLocator::AppleContainer {
-                borrowed_from,
-                container_id: resource.unwrap(),
-            },
-            "aws-ec2" => TargetLocator::AwsEc2 {
-                instance_id: resource.unwrap(),
-                address,
-            },
-            "ssh-bare" => TargetLocator::SshBare {
-                host: host.unwrap(),
-                workspace: workspace.unwrap(),
-                worker_id,
-            },
-            "ssh-docker" => TargetLocator::SshDocker {
-                borrowed_from,
-                host: host.unwrap(),
-                container_id: resource.unwrap(),
-            },
-            "ssh-apple-container" => TargetLocator::SshAppleContainer {
-                borrowed_from,
-                host: host.unwrap(),
-                container_id: resource.unwrap(),
-            },
-            "ssh-podman" => TargetLocator::SshPodman {
-                borrowed_from,
-                host: host.unwrap(),
-                container_id: resource.unwrap(),
-                workspace_storage,
-            },
-            _ => unreachable!("target kind constrained by schema"),
-        };
-        Ok((session_id, target))
+        Ok((row.get(0)?, decode_target(row, 1)?))
     })?;
-    for row in rows {
-        let (session_id, target) = row?;
-        // A session skipped for an unsupported harness has no entry to attach
-        // its target, mounts, or checkpoint to.
-        if let Some(session) = state.sessions.get_mut(&session_id) {
-            session.target = Some(target);
-        }
-    }
-    Ok(())
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+pub(super) fn decode_target(
+    row: &rusqlite::Row<'_>,
+    start: usize,
+) -> rusqlite::Result<TargetLocator> {
+    let kind: String = row.get(start)?;
+    let host: Option<String> = row.get(start + 1)?;
+    let resource: Option<String> = row.get(start + 2)?;
+    let address: Option<String> = row.get(start + 3)?;
+    let workspace = row.get_ref(start + 4)?.blob_or_null()?.map(blob_to_path);
+    let worker_id: Option<String> = row.get(start + 5)?;
+    let workspace_storage = row
+        .get::<_, Option<String>>(start + 6)?
+        .map(|serialized| {
+            serde_json::from_str(&serialized).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(start + 6, Type::Text, Box::new(error))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let borrowed_from: Option<String> = row.get(start + 7)?;
+    let target = match kind.as_str() {
+        "local-bare" => TargetLocator::LocalBare {
+            worker_root: workspace.unwrap(),
+        },
+        "local-podman" => TargetLocator::LocalPodman {
+            borrowed_from,
+            container_id: resource.unwrap(),
+            workspace_storage,
+        },
+        "local-docker" => TargetLocator::LocalDocker {
+            borrowed_from,
+            container_id: resource.unwrap(),
+        },
+        "apple-container" => TargetLocator::AppleContainer {
+            borrowed_from,
+            container_id: resource.unwrap(),
+        },
+        "aws-ec2" => TargetLocator::AwsEc2 {
+            instance_id: resource.unwrap(),
+            address,
+        },
+        "ssh-bare" => TargetLocator::SshBare {
+            host: host.unwrap(),
+            workspace: workspace.unwrap(),
+            worker_id,
+        },
+        "ssh-docker" => TargetLocator::SshDocker {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-apple-container" => TargetLocator::SshAppleContainer {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-nitro" => TargetLocator::SshNitro {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-podman" => TargetLocator::SshPodman {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+            workspace_storage,
+        },
+        _ => unreachable!("target kind constrained by schema"),
+    };
+    Ok(target)
 }
 
 /// Rewrite a session's attached directories.
@@ -1172,7 +1360,7 @@ fn load_checkpoints_selected(
     for row in rows {
         let (session_id, checkpoint) = row?;
         if let Some(session) = state.sessions.get_mut(&session_id) {
-            session.checkpoint = Some(checkpoint);
+            session.checkpoint = Some(Box::new(checkpoint));
         }
     }
     Ok(())
@@ -1185,7 +1373,7 @@ pub fn backfill_target_runtime(
     session_id: &str,
     target_template_id: &str,
     runtime: &mj_core::state::TargetRuntimeSettings,
-) -> Result<Option<mj_core::state::TargetRuntimeSettings>> {
+) -> Result<Option<std::sync::Arc<mj_core::state::TargetRuntimeSettings>>> {
     let session_id = session_id.to_owned();
     let target_template_id = target_template_id.to_owned();
     let runtime = serde_json::to_string(runtime)?;
@@ -1209,14 +1397,18 @@ const SESSION_QUERY: &str =
                 s.session_title_override, c.created_at, s.updated_at,
                 s.viewed_through_event_ordinal, s.last_error, s.resource_allocation,
                 s.last_checkpoint_error, s.project_directory, s.managed_worktree,
-                s.draft_input, s.container_cpus, s.container_memory, s.archived
+                s.draft_input, s.archived
                 , c.workspace_id, s.create_managed_worktree, s.subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
-                s.review_json, s.no_project_memory, s.no_mailbox
+                s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice,
+                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
-fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
+fn decode_session(
+    row: &rusqlite::Row<'_>,
+    interns: &mut SessionInterns,
+) -> rusqlite::Result<Option<SessionRecord>> {
     // A harness Mjolnir no longer supports can still own rows an earlier
     // release wrote. Skip such a session with a warning rather than
     // failing the whole listing and hiding every other session with it.
@@ -1231,15 +1423,30 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
         return Ok(None);
     };
     Ok(Some(SessionRecord {
-        project: row
-            .get::<_, Option<String>>(32)?
+        oracle_choice: row
+            .get::<_, Option<String>>(35)?
             .map(|json| {
                 serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(32, Type::Text, Box::new(error))
+                    rusqlite::Error::FromSqlConversionFailure(35, Type::Text, Box::new(error))
                 })
             })
             .transpose()?,
-        target_runtime: row
+        oracle: row.get(34)?,
+        project: decode_shared(row, 30, &mut interns.projects)?,
+        target_runtime: decode_shared(row, 26, &mut interns.runtimes)?,
+        harness_kind,
+        create_managed_worktree: row.get(21)?,
+        launch_base: row.get(25)?,
+        launch_branch: row.get(27)?,
+        checkout: row
+            .get::<_, Option<String>>(29)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(29, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        publication: row
             .get::<_, Option<String>>(28)?
             .map(|json| {
                 serde_json::from_str(&json).map_err(|error| {
@@ -1247,37 +1454,17 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
                 })
             })
             .transpose()?,
-        harness_kind,
-        create_managed_worktree: row.get(23)?,
-        launch_base: row.get(27)?,
-        launch_branch: row.get(29)?,
-        checkout: row
-            .get::<_, Option<String>>(31)?
-            .map(|json| {
-                serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(31, Type::Text, Box::new(error))
-                })
-            })
-            .transpose()?,
-        publication: row
-            .get::<_, Option<String>>(30)?
-            .map(|json| {
-                serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(30, Type::Text, Box::new(error))
-                })
-            })
-            .transpose()?,
         subagents: row
-            .get::<_, Option<String>>(24)?
+            .get::<_, Option<String>>(22)?
             .map(|json| {
                 mj_core::subagent::parse_stored_policy(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(24, Type::Text, Box::new(error))
+                    rusqlite::Error::FromSqlConversionFailure(22, Type::Text, Box::new(error))
                 })
             })
             .transpose()?,
-        container_workspace: row.get::<_, Option<String>>(25)?.map(PathBuf::from),
+        container_workspace: row.get::<_, Option<String>>(23)?.map(PathBuf::from),
         build_cache: row
-            .get::<_, Option<String>>(26)?
+            .get::<_, Option<String>>(24)?
             .as_deref()
             .and_then(|text| match serde_json::from_str(text) {
                 Ok(build_cache) => Some(build_cache),
@@ -1286,10 +1473,8 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
                     None
                 }
             }),
-        workspace_id: row.get(22)?,
-        archived: row.get(21)?,
-        container_cpus: row.get(19)?,
-        container_memory: row.get(20)?,
+        workspace_id: row.get(20)?,
+        archived: row.get(19)?,
         id: row.get(0)?,
         title: row.get(1)?,
         last_profile: row.get(3)?,
@@ -1305,11 +1490,12 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
-            })?,
+            })?
+            .map(Box::new),
         // An unreadable choice, such as a mode a newer release wrote, falls
         // back to `[review]` rather than hiding the session.
         review: row
-            .get::<_, Option<String>>(33)?
+            .get::<_, Option<String>>(31)?
             .as_deref()
             .and_then(|text| match serde_json::from_str(text) {
                 Ok(review) => Some(review),
@@ -1318,9 +1504,11 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
                     None
                 }
             }),
-        no_project_memory: row.get(34)?,
+        no_project_memory: row.get(32)?,
         // Keep the shipped no_mailbox column for the GitHub target opt-out.
-        no_github_events: row.get(35)?,
+        no_github_events: row.get(33)?,
+        no_github_credentials: row.get(36)?,
+        notifications_ignored: row.get(37)?,
         target_template_id: row.get(5)?,
         resource_allocation: row
             .get::<_, Option<String>>(14)?
@@ -1347,6 +1535,18 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
         viewed_through_event_ordinal: row.get::<_, u64>(12)?,
         draft_input: row.get(18)?,
         last_error: row.get(13)?,
+        failure_generation: row.get(39)?,
+        dismissed_failure: row
+            .get::<_, Option<String>>(38)?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    38,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
         last_checkpoint_error: row.get(15)?,
         checkpoint: None,
     }))
@@ -1372,11 +1572,19 @@ pub(super) fn load_session_with(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<SessionRecord>> {
+    load_session_interned_with(connection, id, &mut SessionInterns::default())
+}
+
+pub(super) fn load_session_interned_with(
+    connection: &Connection,
+    id: &str,
+    interns: &mut SessionInterns,
+) -> Result<Option<SessionRecord>> {
     let record = connection
         .query_row(
             &format!("{SESSION_QUERY} WHERE s.session_id=?1"),
             [id],
-            decode_session,
+            |row| decode_session(row, interns),
         )
         .optional()?
         .flatten();
@@ -1412,9 +1620,9 @@ pub fn load_operator_presence() -> Result<OperatorPresence> {
 }
 
 /// The shared database writer owns transition and no-op decisions.
-pub fn set_operator_away(away: bool) -> Result<bool> {
+pub fn set_operator_away(away: bool, auto_afk_window: std::time::Duration) -> Result<bool> {
     let changed = submit_database_write("operator away setting", move |connection| {
-        super::operator_away::set_with(connection, away)
+        super::operator_away::set_with(connection, away, auto_afk_window)
     })?;
     if changed {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
@@ -1429,6 +1637,28 @@ pub fn record_operator_away_worker_protocol(session: String, protocol: u32) -> R
         connection.execute("INSERT INTO operator_away_workers(session_id,protocol) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET protocol=excluded.protocol WHERE protocol != excluded.protocol", params![session,protocol])?;
         Ok(())
     })
+}
+
+/// Only explicit dialog choices change next-creation requests.
+pub(super) fn update_container_requests(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    allocation: Option<Option<&SessionResourceAllocation>>,
+    mounts: Option<&[AdditionalMount]>,
+) -> Result<()> {
+    if let Some(allocation) = allocation {
+        tx.execute(
+            "UPDATE sessions SET resource_allocation=?2 WHERE session_id=?1",
+            params![
+                session_id,
+                allocation.map(serde_json::to_string).transpose()?
+            ],
+        )?;
+    }
+    if let Some(mounts) = mounts {
+        replace_mounts(tx, session_id, mounts)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

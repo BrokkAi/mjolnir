@@ -18,9 +18,10 @@ on:
         default: false
         type: boolean
 
+# Only the publish job may mint an OIDC token: the package job checks out a
+# caller-chosen ref and runs its scripts, which must not publish to npm.
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   package:
@@ -41,11 +42,6 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-
-      - name: Install Linux WebKitGTK runtime for smoke test
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libwebkit2gtk-4.1-0
 
       - name: Confirm the tag owns the Cargo release version
         run: |
@@ -105,7 +101,6 @@ jobs:
             "npm/dist/brokkai-mjolnir-$version.tgz" \
             "npm/dist/brokkai-mjolnir-linux-x64-gnu-$version.tgz"
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj
-          test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj-desktop
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj-voice-worker
           npm-smoke/node_modules/.bin/mj --version
 
@@ -121,6 +116,11 @@ jobs:
     if: github.event_name == 'release' || github.event_name == 'workflow_run' || inputs.publish
     runs-on: ubuntu-latest
     environment: npm-publish
+    # Trusted publishing and provenance need the OIDC token. Job permissions
+    # replace the workflow's, so contents: read is restated.
+    permissions:
+      contents: read
+      id-token: write
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.event.workflow_run.head_branch }}
     steps:

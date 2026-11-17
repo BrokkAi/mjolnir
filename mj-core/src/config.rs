@@ -16,6 +16,7 @@
 //! * `loading` -- instance names, directories, and atomic file writes.
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
+mod aws;
 mod daemon;
 mod document;
 mod dsh_credentials;
@@ -28,6 +29,7 @@ mod secrets;
 mod targets;
 mod ui;
 
+pub use aws::*;
 pub use daemon::*;
 pub use github::*;
 pub use harness::*;
@@ -44,7 +46,7 @@ use std::fs::{self, OpenOptions};
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
@@ -90,7 +92,6 @@ const fn is_true(value: &bool) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PhoneConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
@@ -132,59 +133,120 @@ impl PhoneConfig {
     }
 }
 
-/// Automatic cross-harness review and its trigger.
-///
-/// Review is armed here, in the one file that belongs to the machine rather
-/// than to any surface: a session driven from a phone is reviewed on the same
-/// terms as one driven from the terminal, and the person who set it can see
-/// what they set. `profile` names a harness profile defined in this same file
-/// -- or Auto when absent. A reviewer always has its own conversation, even
-/// when it uses the primary session's profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "ReviewConfigInput")]
+/// Ordered reviewer choices. Review runs before push exactly when reviewers
+/// are configured; there is no separate switch. See [`ReviewConfig::trigger`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ReviewConfigInput", into = "ReviewConfigOutput")]
 pub struct ReviewConfig {
+    /// A configuration written before reviewer lists that asked for review
+    /// but named no model. Its reviewers are chosen automatically once, after
+    /// which this is cleared. It counts as configured while it is set.
+    pub legacy: Option<LegacyReview>,
+    pub reviewers: Vec<SubagentChoice>,
+    /// Set only by [`ReviewConfig::for_session`] for a session that chose
+    /// Off. Never read from or written to a file.
+    pub disabled: bool,
+    /// An optional session that writes a relation brief before the reviewers
+    /// start. Global only: a session's own review choice does not change it.
+    pub brief_writer: Option<BriefWriterConfig>,
+}
+
+/// The `[review] brief_writer` table: a writer session reads the change and
+/// hands back relations between it and the rest of the repository, which every
+/// reviewer's prompt then carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BriefWriterConfig {
     #[serde(default)]
-    pub trigger: ReviewTrigger,
-    /// Number of independent reviewers to launch for each review.
-    #[serde(default = "default_review_count")]
-    pub count: std::num::NonZeroUsize,
-    /// Deprecated review tier. Accepted for old configurations and ignored.
-    #[serde(default, skip_serializing)]
-    pub tier: Option<String>,
-    /// The harness profile the reviewing agents run under.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    /// Main reviewer overrides for a named profile. Auto uses its fixed policy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub enabled: bool,
+    /// Required while `enabled`. Resolved to a profile like a reviewer's.
+    #[serde(default)]
+    pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
 }
 
-/// Independent review sessions assigned when a configuration omits the count.
-pub fn default_review_count() -> std::num::NonZeroUsize {
-    std::num::NonZeroUsize::new(2).expect("two is nonzero")
+impl BriefWriterConfig {
+    /// The writer's model choice when the table turns the stage on.
+    #[must_use]
+    pub fn choice(&self) -> Option<SubagentChoice> {
+        self.enabled.then(|| SubagentChoice {
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        })
+    }
 }
 
-impl Default for ReviewConfig {
-    fn default() -> Self {
+pub const MAX_REVIEWERS: usize = 3;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyReview {
+    pub count: Option<std::num::NonZeroUsize>,
+    pub profile: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl ReviewConfig {
+    pub fn is_legacy(&self) -> bool {
+        self.legacy.is_some()
+    }
+
+    pub fn clear_legacy(&mut self) {
+        self.legacy = None;
+    }
+
+    /// Review as an older configuration that asked for it without naming a
+    /// model loads: reviewers still to be chosen automatically.
+    pub fn legacy_default() -> Self {
         Self {
-            trigger: ReviewTrigger::Off,
-            count: default_review_count(),
-            tier: None,
-            profile: None,
-            model: None,
-            effort: None,
+            legacy: Some(LegacyReview::default()),
+            ..Self::default()
         }
     }
 }
 
+/// What a save writes. The removed `trigger` key appears only while reviewers
+/// still have to be chosen automatically, so a restart before that finishes
+/// does not forget that review was wanted. Once reviewers are configured the
+/// next save drops it.
+#[derive(Serialize)]
+struct ReviewConfigOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger: Option<ReviewTrigger>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reviewers: Option<Vec<SubagentChoice>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<std::num::NonZeroUsize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brief_writer: Option<BriefWriterConfig>,
+}
+
+impl From<ReviewConfig> for ReviewConfigOutput {
+    fn from(value: ReviewConfig) -> Self {
+        let legacy = value.legacy;
+        Self {
+            trigger: legacy.is_some().then_some(ReviewTrigger::Push),
+            reviewers: legacy.is_none().then_some(value.reviewers),
+            count: legacy.as_ref().and_then(|old| old.count),
+            profile: legacy.as_ref().and_then(|old| old.profile.clone()),
+            effort: legacy.and_then(|old| old.effort),
+            brief_writer: value.brief_writer,
+        }
+    }
+}
+
+/// Whether review runs before push for a session. It is derived, never
+/// chosen globally: see [`ReviewConfig::trigger`]. Per-turn review was
+/// removed; a stored `turn` reads as `push`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewTrigger {
     #[default]
     Off,
-    Turn,
+    #[serde(alias = "turn")]
     Push,
 }
 
@@ -192,22 +254,38 @@ impl std::fmt::Display for ReviewTrigger {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Off => "off",
-            Self::Turn => "turn",
             Self::Push => "push",
         })
     }
 }
 
+/// The value of the removed `[review] trigger` key. Any value loads: only
+/// `push` and `turn` mean the user wanted review.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(untagged)]
+enum RemovedTrigger {
+    Name(String),
+    Other(serde::de::IgnoredAny),
+}
+
+impl RemovedTrigger {
+    fn wanted_review(&self) -> bool {
+        matches!(self, Self::Name(name) if matches!(name.as_str(), "push" | "turn"))
+    }
+}
+
+#[derive(Deserialize)]
 struct ReviewConfigInput {
     #[serde(default)]
-    trigger: Option<ReviewTrigger>,
-    #[serde(default = "default_review_count")]
-    count: std::num::NonZeroUsize,
+    trigger: Option<RemovedTrigger>,
+    #[serde(default)]
+    reviewers: Option<Vec<SubagentChoice>>,
+    #[serde(default)]
+    count: Option<std::num::NonZeroUsize>,
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
+    #[expect(dead_code, reason = "accepted only so that old files still load")]
     tier: Option<String>,
     #[serde(default)]
     profile: Option<String>,
@@ -215,139 +293,334 @@ struct ReviewConfigInput {
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
+    #[serde(default)]
+    brief_writer: Option<BriefWriterConfig>,
 }
 
 impl From<ReviewConfigInput> for ReviewConfig {
     fn from(input: ReviewConfigInput) -> Self {
+        // The old profile pin and tier are dropped: reviewers are
+        // load-balanced across enabled profiles.
+        let ReviewConfigInput {
+            trigger,
+            reviewers,
+            count,
+            enabled,
+            tier: _,
+            profile,
+            model,
+            effort,
+            brief_writer,
+        } = input;
+        // Review is on exactly when reviewers are configured. A table that
+        // names none but asked for review (the removed `trigger` or `enabled`
+        // keys) keeps asking for automatic reviewers; one that did not has
+        // nothing to configure and review stays off.
+        let wanted = trigger.map_or(enabled == Some(true), |trigger| trigger.wanted_review());
+        let legacy = (reviewers.is_none() && model.is_none() && wanted).then_some(LegacyReview {
+            count,
+            profile,
+            effort: effort.clone(),
+        });
         Self {
-            trigger: input.trigger.unwrap_or(if input.enabled == Some(true) {
-                ReviewTrigger::Turn
-            } else {
-                ReviewTrigger::Off
-            }),
-            count: input.count,
-            tier: input.tier,
-            profile: input.profile,
-            model: input.model,
-            effort: input.effort,
+            legacy,
+            reviewers: legacy_reviewers(reviewers, count, model, effort).unwrap_or_default(),
+            disabled: false,
+            brief_writer,
         }
     }
 }
 
 /// One session's review choice, made when the session is created. It
 /// overrides `[review]` for that session only; a session without one follows
-/// `[review]`.
+/// `[review]`. A stored `turn` (or `on`) reads as `push`, with the same
+/// reviewers, and is never written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(from = "SessionReviewInput", into = "SessionReviewOutput")]
 pub enum SessionReview {
-    /// Follow the current `[review]` trigger, with optional session settings.
+    Legacy {
+        trigger: Option<ReviewTrigger>,
+        count: Option<std::num::NonZeroUsize>,
+        model: Option<String>,
+        effort: Option<String>,
+    },
     Inherit {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        count: Option<std::num::NonZeroUsize>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        effort: Option<String>,
-        /// Deprecated review tier. Accepted in old session records and API
-        /// requests, ignored, and omitted from newly serialized values.
-        #[serde(default, skip_serializing)]
-        tier: Option<String>,
+        reviewers: Option<Vec<SubagentChoice>>,
     },
-    /// Never review this session automatically. A manual `/review` still runs.
     Off,
-    /// Review every turn. A field left empty keeps the `[review]` value; a
-    /// model without a `[review]` profile makes Auto pick a profile that
-    /// offers it.
-    #[serde(alias = "on")]
-    Turn {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+    Push {
+        reviewers: Option<Vec<SubagentChoice>>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+enum SessionReviewInput {
+    Inherit {
+        reviewers: Option<Vec<SubagentChoice>>,
         count: Option<std::num::NonZeroUsize>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
-        /// Deprecated review tier. Accepted in old session records and API
-        /// requests, ignored, and omitted from newly serialized values.
-        #[serde(default, skip_serializing)]
+        #[expect(dead_code, reason = "accepted only so that old files still load")]
         tier: Option<String>,
     },
+    Off,
+    #[serde(alias = "turn", alias = "on")]
     Push {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewers: Option<Vec<SubagentChoice>>,
         count: Option<std::num::NonZeroUsize>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
-        /// Deprecated review tier. Accepted in old session records and API
-        /// requests, ignored, and omitted from newly serialized values.
-        #[serde(default, skip_serializing)]
+        #[expect(dead_code, reason = "accepted only so that old files still load")]
         tier: Option<String>,
     },
 }
 
+#[derive(Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+enum SessionReviewOutput {
+    #[serde(rename = "inherit")]
+    LegacyInherit {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+    #[serde(rename = "push")]
+    LegacyPush {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+    Inherit {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reviewers: Option<Vec<SubagentChoice>>,
+    },
+    Off,
+    Push {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reviewers: Option<Vec<SubagentChoice>>,
+    },
+}
+
+/// The reviewer list, or the one a configuration written before reviewer
+/// lists implies: `count` copies of its model (two when `count` is absent,
+/// the old default), and none when it named no model (old Auto).
+fn legacy_reviewers(
+    reviewers: Option<Vec<SubagentChoice>>,
+    count: Option<std::num::NonZeroUsize>,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Option<Vec<SubagentChoice>> {
+    reviewers.or_else(|| {
+        model.map(|model| {
+            vec![SubagentChoice { model, effort }; count.map_or(2, |c| c.get()).min(MAX_REVIEWERS)]
+        })
+    })
+}
+
+impl From<SessionReviewInput> for SessionReview {
+    fn from(input: SessionReviewInput) -> Self {
+        match input {
+            SessionReviewInput::Inherit {
+                reviewers,
+                count,
+                model,
+                effort,
+                tier: _,
+            } => {
+                if reviewers.is_none() && (count.is_some() || model.is_some() || effort.is_some()) {
+                    Self::Legacy {
+                        trigger: None,
+                        count,
+                        model,
+                        effort,
+                    }
+                } else {
+                    Self::Inherit { reviewers }
+                }
+            }
+            SessionReviewInput::Off => Self::Off,
+            SessionReviewInput::Push {
+                reviewers,
+                count,
+                model,
+                effort,
+                tier: _,
+            } => {
+                if reviewers.is_none() && (count.is_some() || model.is_some() || effort.is_some()) {
+                    Self::Legacy {
+                        trigger: Some(ReviewTrigger::Push),
+                        count,
+                        model,
+                        effort,
+                    }
+                } else {
+                    Self::Push { reviewers }
+                }
+            }
+        }
+    }
+}
+impl From<SessionReview> for SessionReviewOutput {
+    fn from(input: SessionReview) -> Self {
+        match input {
+            SessionReview::Legacy {
+                trigger,
+                count,
+                model,
+                effort,
+            } => match trigger {
+                None | Some(ReviewTrigger::Off) => Self::LegacyInherit {
+                    count,
+                    model,
+                    effort,
+                },
+                Some(ReviewTrigger::Push) => Self::LegacyPush {
+                    count,
+                    model,
+                    effort,
+                },
+            },
+            SessionReview::Inherit { reviewers } => Self::Inherit { reviewers },
+            SessionReview::Off => Self::Off,
+            SessionReview::Push { reviewers } => Self::Push { reviewers },
+        }
+    }
+}
 impl SessionReview {
     pub fn trigger(&self) -> Option<ReviewTrigger> {
         match self {
+            Self::Legacy { trigger, .. } => *trigger,
             Self::Inherit { .. } => None,
             Self::Off => Some(ReviewTrigger::Off),
-            Self::Turn { .. } => Some(ReviewTrigger::Turn),
             Self::Push { .. } => Some(ReviewTrigger::Push),
         }
     }
 }
 
 impl ReviewConfig {
-    pub fn arms_turn_review(&self) -> bool {
-        self.trigger == ReviewTrigger::Turn
+    /// Whether review runs before push. This is the only answer: review is on
+    /// exactly when reviewers are configured (or still to be chosen
+    /// automatically), unless the session chose Off.
+    pub fn trigger(&self) -> ReviewTrigger {
+        if !self.disabled && (self.legacy.is_some() || !self.reviewers.is_empty()) {
+            ReviewTrigger::Push
+        } else {
+            ReviewTrigger::Off
+        }
     }
 
     pub fn is_push(&self) -> bool {
-        self.trigger == ReviewTrigger::Push
+        self.trigger() == ReviewTrigger::Push
     }
 
     /// This configuration as it applies to a session with `session`'s choice.
+    /// The effective reviewer list enables review unless the session chose Off.
     #[must_use]
     pub fn for_session(&self, session: Option<&SessionReview>) -> Self {
         let mut config = self.clone();
         match session {
             None => {}
-            Some(SessionReview::Off) => config.trigger = ReviewTrigger::Off,
-            Some(
-                choice @ (SessionReview::Inherit {
+            Some(SessionReview::Off) => config.disabled = true,
+            Some(choice) => {
+                config.disabled = false;
+                if let SessionReview::Legacy {
+                    count,
                     model,
                     effort,
-                    count,
                     ..
+                } = choice
+                {
+                    if let Some(model) = model {
+                        config.reviewers = apply_legacy_override(
+                            &config.reviewers,
+                            *count,
+                            Some(model),
+                            effort.as_ref(),
+                            self,
+                        );
+                        config.clear_legacy();
+                        return config;
+                    }
+                    config.reviewers = apply_legacy_override(
+                        &config.reviewers,
+                        *count,
+                        None,
+                        effort.as_ref(),
+                        self,
+                    );
+                    return config;
                 }
-                | SessionReview::Turn {
-                    model,
-                    effort,
-                    count,
-                    ..
-                }
-                | SessionReview::Push {
-                    model,
-                    effort,
-                    count,
-                    ..
-                }),
-            ) => {
-                if let Some(trigger) = choice.trigger() {
-                    config.trigger = trigger;
-                }
-                if model.is_some() {
-                    config.model.clone_from(model);
-                }
-                if effort.is_some() {
-                    config.effort.clone_from(effort);
-                }
-                if let Some(count) = count {
-                    config.count = *count;
+                let reviewers = match choice {
+                    SessionReview::Legacy { .. } => unreachable!(),
+                    SessionReview::Inherit { reviewers } | SessionReview::Push { reviewers } => {
+                        reviewers
+                    }
+                    SessionReview::Off => unreachable!(),
+                };
+                if let Some(reviewers) = reviewers {
+                    config.reviewers.clone_from(reviewers);
+                    config.clear_legacy();
                 }
             }
         }
         config
     }
+}
+
+pub fn apply_legacy_override(
+    list: &[SubagentChoice],
+    count: Option<std::num::NonZeroUsize>,
+    model: Option<&String>,
+    effort: Option<&String>,
+    global: &ReviewConfig,
+) -> Vec<SubagentChoice> {
+    if let Some(model) = model {
+        let uniform = global
+            .reviewers
+            .first()
+            .filter(|first| global.reviewers.iter().all(|slot| slot == *first));
+        let n = count
+            .map(|n| n.get())
+            .or_else(|| uniform.map(|_| global.reviewers.len()))
+            .or_else(|| {
+                global
+                    .legacy
+                    .as_ref()
+                    .and_then(|old| old.count.map(|n| n.get()))
+            })
+            .unwrap_or(2)
+            .clamp(1, MAX_REVIEWERS);
+        let inherited_effort = effort
+            .cloned()
+            .or_else(|| uniform.and_then(|slot| slot.effort.clone()))
+            .or_else(|| global.legacy.as_ref().and_then(|old| old.effort.clone()));
+        return vec![
+            SubagentChoice {
+                model: model.clone(),
+                effort: inherited_effort
+            };
+            n
+        ];
+    }
+    let mut result = list.to_vec();
+    if let Some(effort) = effort {
+        for slot in &mut result {
+            slot.effort = Some(effort.clone());
+        }
+    }
+    if let Some(count) = count
+        && let Some(last) = result.last().cloned()
+    {
+        result.resize(count.get().clamp(1, MAX_REVIEWERS), last);
+    }
+    result
 }
 
 /// Indexing every session into the user's SessionWiki index.
@@ -358,7 +631,6 @@ impl ReviewConfig {
 /// covers every harness. Only archiving is a setting, because only archiving
 /// deletes data.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionWikiConfig {
     /// Deprecated switch retained for read compatibility with configurations
     /// written while indexing was optional. It is ignored and omitted from
@@ -395,37 +667,24 @@ const fn is_false(value: &bool) -> bool {
 }
 
 impl ReviewConfig {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
-    }
-
-    /// Rejects a configuration that cannot review.
-    ///
-    /// Auto needs no profile; explicit selections must remain usable.
-    fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
-        if let Some(profile_id) = self.profile.as_ref()
-            && let Some(profile) = profiles.get(profile_id)
-            && !profile.enabled
-        {
-            bail!("[review] profile {profile_id:?} is disabled");
+    fn validate(&self, _profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
+        if self.reviewers.len() > MAX_REVIEWERS {
+            bail!("[review] supports at most {MAX_REVIEWERS} reviewers");
         }
-        if self.profile.is_none() && (self.model.is_some() || self.effort.is_some()) {
-            bail!(
-                "[review] Auto uses fixed model and effort settings; name a profile to override model or effort"
-            );
-        }
-        if let Some(profile) = &self.profile
-            && !profiles.contains_key(profile)
+        if self
+            .reviewers
+            .iter()
+            .any(|reviewer| reviewer.model.trim().is_empty())
         {
-            bail!("[review] profile {profile:?} is not a profile defined in this config");
+            bail!("[review] reviewer model must not be empty");
+        }
+        if let Some(writer) = &self.brief_writer
+            && writer.enabled
+            && writer.model.trim().is_empty()
+        {
+            bail!("[review] brief_writer needs a model while it is enabled");
         }
         Ok(())
-    }
-
-    /// Explicit reviewer profile, or None for Auto.
-    #[must_use]
-    pub fn reviewer_profile(&self) -> Option<&str> {
-        self.profile.as_deref()
     }
 }
 
@@ -439,14 +698,19 @@ fn is_default_subagent_limit(value: &usize) -> bool {
 
 /// Global policy for Mjolnir-managed child agents.
 ///
-/// Sessions choose Native or Mjolnir; task model and effort choices are global.
+/// Sessions choose Native or Mjolnir; task model and effort choices are global,
+/// except that a target with `permissions = "yolo"` can have its own choices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct SubagentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub straightforward: Option<SubagentChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtle: Option<SubagentChoice>,
+    /// The read-only advisor behind `ask_oracle`. Optional, and independent
+    /// of the other two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<SubagentChoice>,
     /// Deprecated global switch retained for read compatibility with
     /// configurations written before the per-session choice existed. It is
     /// ignored and omitted from newly written configurations.
@@ -461,8 +725,83 @@ pub struct SubagentConfig {
     #[serde(default, rename = "eligible_profiles", skip_serializing)]
     #[doc(hidden)]
     pub legacy_eligible_profiles: BTreeMap<String, bool>,
+    /// Choices for targets whose permissions are `yolo`. Ignored while
+    /// `use_same_on_all_targets` is true, but retained so re-checking and
+    /// unchecking the box restores them.
+    #[serde(default, skip_serializing_if = "SubagentChoices::is_default")]
+    pub yolo: SubagentChoices,
+    /// Whether every target uses the choices above. `max_concurrent` is
+    /// always shared, whichever set a target uses.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_same_on_all_targets: bool,
 }
 
+/// The task choices one target mode uses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubagentChoices {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub straightforward: Option<SubagentChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtle: Option<SubagentChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<SubagentChoice>,
+}
+
+impl SubagentChoices {
+    pub fn choice(&self, task_type: crate::subagent::SubagentTaskType) -> Option<&SubagentChoice> {
+        match task_type {
+            crate::subagent::SubagentTaskType::Straightforward => self.straightforward.as_ref(),
+            crate::subagent::SubagentTaskType::Subtle => self.subtle.as_ref(),
+            crate::subagent::SubagentTaskType::Oracle => self.oracle.as_ref(),
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        self.straightforward.is_none() && self.subtle.is_none() && self.oracle.is_none()
+    }
+
+    fn validate(&self, section: &str) -> Result<()> {
+        validate_subagent_choices(
+            section,
+            self.straightforward.as_ref(),
+            self.subtle.as_ref(),
+            self.oracle.as_ref(),
+        )
+    }
+}
+
+fn validate_subagent_choices(
+    section: &str,
+    straightforward: Option<&SubagentChoice>,
+    subtle: Option<&SubagentChoice>,
+    oracle: Option<&SubagentChoice>,
+) -> Result<()> {
+    for (task, choice) in [
+        ("straightforward", straightforward),
+        ("subtle", subtle),
+        ("oracle", oracle),
+    ] {
+        if let Some(choice) = choice {
+            anyhow::ensure!(
+                choice.effort.as_deref() != Some("adaptive"),
+                "[{section}.{task}] adaptive effort is no longer supported"
+            );
+        }
+    }
+    anyhow::ensure!(
+        subtle.is_none() || straightforward.is_some(),
+        "[{section}.subtle] requires [{section}.straightforward]; configure straightforward alone or both"
+    );
+    Ok(())
+}
+
+/// One model choice. Unlike the other configuration types it refuses a key it
+/// does not read, wherever it is read: API requests carry it inside tagged
+/// policies (`SubagentPolicy`, `SessionReview`) that serde reads from a
+/// buffered copy, where only the type itself can refuse a misspelled
+/// `effort` rather than run at the default. A field added here therefore
+/// needs a daemon socket protocol version, as before #1557.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubagentChoice {
@@ -476,40 +815,64 @@ impl Default for SubagentConfig {
         Self {
             straightforward: None,
             subtle: None,
+            oracle: None,
             enabled: false,
             max_concurrent: default_subagent_limit(),
             legacy_eligible_profiles: BTreeMap::new(),
+            yolo: SubagentChoices::default(),
+            use_same_on_all_targets: true,
         }
     }
 }
 
 impl SubagentConfig {
+    /// The shared task choices, ignoring the YOLO split.
     pub fn choice(&self, task_type: crate::subagent::SubagentTaskType) -> Option<&SubagentChoice> {
         match task_type {
             crate::subagent::SubagentTaskType::Straightforward => self.straightforward.as_ref(),
             crate::subagent::SubagentTaskType::Subtle => self.subtle.as_ref(),
+            crate::subagent::SubagentTaskType::Oracle => self.oracle.as_ref(),
         }
     }
-    /// A session's choice for `task_type`: its own override, else the global one.
-    pub fn effective_choice<'a>(
+    /// The task choice a target with `yolo` permissions uses: its own set
+    /// when the split is enabled, else the shared set.
+    pub fn choice_for(
+        &self,
+        task_type: crate::subagent::SubagentTaskType,
+        yolo: bool,
+    ) -> Option<&SubagentChoice> {
+        if yolo && !self.use_same_on_all_targets {
+            self.yolo.choice(task_type)
+        } else {
+            self.choice(task_type)
+        }
+    }
+    /// A session's choice for `task_type`: its own override, else the choice
+    /// for this target mode.
+    pub fn effective_choice_for<'a>(
         &'a self,
         policy: &'a crate::subagent::SubagentPolicy,
         task_type: crate::subagent::SubagentTaskType,
+        yolo: bool,
     ) -> Option<&'a SubagentChoice> {
         policy
             .override_choice(task_type)
-            .or_else(|| self.choice(task_type))
+            .or_else(|| self.choice_for(task_type, yolo))
     }
     /// Whether a parent with `policy` may spawn subtle children. Without a
     /// subtle choice, every child uses the straightforward choice.
-    pub fn offers_subtle(&self, policy: &crate::subagent::SubagentPolicy) -> bool {
-        self.effective_choice(policy, crate::subagent::SubagentTaskType::Subtle)
+    pub fn offers_subtle_for(&self, policy: &crate::subagent::SubagentPolicy, yolo: bool) -> bool {
+        self.effective_choice_for(policy, crate::subagent::SubagentTaskType::Subtle, yolo)
             .is_some()
     }
+    /// Whether sessions on this target mode can be offered an oracle.
+    pub fn oracle_configured_for(&self, yolo: bool) -> bool {
+        self.choice_for(crate::subagent::SubagentTaskType::Oracle, yolo)
+            .is_some_and(|choice| !choice.model.trim().is_empty())
+    }
     /// Straightforward is required; subtle is optional.
-    pub fn is_configured(&self) -> bool {
-        self.straightforward
-            .as_ref()
+    pub fn is_configured_for(&self, yolo: bool) -> bool {
+        self.choice_for(crate::subagent::SubagentTaskType::Straightforward, yolo)
             .is_some_and(|choice| !choice.model.trim().is_empty())
     }
     /// The deprecated `enabled` key is never written, so a section holding
@@ -518,25 +881,23 @@ impl SubagentConfig {
         self.max_concurrent == default_subagent_limit()
             && self.straightforward.is_none()
             && self.subtle.is_none()
+            && self.oracle.is_none()
+            && self.yolo.is_default()
+            && self.use_same_on_all_targets
     }
 
     fn validate(&self) -> Result<()> {
-        for task_type in [
-            crate::subagent::SubagentTaskType::Straightforward,
-            crate::subagent::SubagentTaskType::Subtle,
-        ] {
-            if let Some(choice) = self.choice(task_type) {
-                anyhow::ensure!(
-                    choice.effort.as_deref() != Some("adaptive"),
-                    "[subagents.{}] adaptive effort is no longer supported",
-                    task_type.id()
-                );
-            }
+        validate_subagent_choices(
+            "subagents",
+            self.straightforward.as_ref(),
+            self.subtle.as_ref(),
+            self.oracle.as_ref(),
+        )?;
+        // Hidden choices are no-ops. They stay writable so re-checking the
+        // box never makes the configuration impossible to save.
+        if !self.use_same_on_all_targets {
+            self.yolo.validate("subagents.yolo")?;
         }
-        anyhow::ensure!(
-            self.subtle.is_none() || self.straightforward.is_some(),
-            "[subagents.subtle] requires [subagents.straightforward]; configure straightforward alone or both"
-        );
         if !(1..=64).contains(&self.max_concurrent) {
             bail!("[subagents] `max_concurrent` must be between 1 and 64");
         }
@@ -546,7 +907,7 @@ impl SubagentConfig {
 
 /// Read-only legacy policy, folded into machine settings when loading.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct LegacyBuildCacheConfig {
     enabled: bool,
 }
@@ -558,10 +919,10 @@ impl Default for LegacyBuildCacheConfig {
 }
 
 /// The one switch for the hosted Jev service. When it is off, Mjolnir sends
-/// nothing to Jev: no turn or GitHub-item classification, no automatic
-/// continuation verdicts, and no semantic help search. `[jev] enabled = false`.
+/// nothing to Jev: no turn or GitHub-item classification and no quota recovery.
+/// `[jev] enabled = false`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct JevConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
@@ -583,10 +944,14 @@ impl JevConfig {
 /// Codex app-server, Grok's agent, and Claude Code's login refresh.
 /// `[quota] runtime = "auto"`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct QuotaConfig {
     #[serde(skip_serializing_if = "QuotaRuntimeChoice::is_default")]
     pub runtime: QuotaRuntimeChoice,
+    /// Profiles chosen in the dashboard to win load balancing when their
+    /// quota allows, most preferred first. `[quota] prefer = [...]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prefer: Vec<String>,
 }
 
 impl QuotaConfig {
@@ -595,11 +960,13 @@ impl QuotaConfig {
     }
 }
 
-/// `Auto` runs the checks in the image of an enabled local Podman runtime,
-/// else an enabled local Docker runtime, when its engine is installed, and
-/// otherwise on the host. `Podman` and `Docker` insist on that engine (with
-/// its runtime's image, or the release's agent-dev image without one); `Host`
-/// never uses a container.
+/// `Auto` runs a check on the host when the host already has the harness it
+/// starts (Codex's managed installation, `grok`, or `claude`). Otherwise it
+/// runs the check in the image of an enabled local Podman runtime, else an
+/// enabled local Docker runtime, when its engine is installed, and on the host
+/// when there is no such runtime. `Podman` and `Docker` insist on that engine
+/// (with its runtime's image, or the release's agent-dev image without one),
+/// whether or not the host has the harness; `Host` never uses a container.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QuotaRuntimeChoice {
@@ -616,9 +983,18 @@ impl QuotaRuntimeChoice {
     }
 }
 
+/// Legacy automatic-continuation switch, read but never written. The feature
+/// was removed (#1532); an existing `[continuation]` section is still accepted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+struct LegacyContinuationConfig {
+    #[allow(dead_code, reason = "decoded only so an existing section still loads")]
+    enabled: bool,
+}
+
 /// Legacy GitHub event source switch, read but never written.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct LegacyMailboxConfig {
     pub enabled: bool,
 }
@@ -650,16 +1026,35 @@ impl Config {
     /// and each profile's current model have their efforts discovered ahead
     /// of a request; aggregating harnesses advertise hundreds of models.
     pub fn selected_models(&self, id: &str) -> BTreeSet<String> {
-        let mut models = [&self.subagents.straightforward, &self.subagents.subtle]
-            .into_iter()
-            .flatten()
-            .map(|choice| choice.model.clone())
-            .collect::<BTreeSet<_>>();
-        if self.review.profile.as_deref() == Some(id)
-            && let Some(model) = &self.review.model
-        {
-            models.insert(model.clone());
+        let mut models = [
+            &self.subagents.straightforward,
+            &self.subagents.subtle,
+            &self.subagents.oracle,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|choice| choice.model.clone())
+        .collect::<BTreeSet<_>>();
+        // Hidden YOLO choices do nothing, including their capability demand.
+        if !self.subagents.use_same_on_all_targets {
+            models.extend(
+                [
+                    &self.subagents.yolo.straightforward,
+                    &self.subagents.yolo.subtle,
+                    &self.subagents.yolo.oracle,
+                ]
+                .into_iter()
+                .flatten()
+                .map(|choice| choice.model.clone()),
+            );
         }
+        let _ = id;
+        models.extend(
+            self.review
+                .reviewers
+                .iter()
+                .map(|choice| choice.model.clone()),
+        );
         models
     }
 
@@ -696,11 +1091,11 @@ impl Config {
             .collect()
     }
 
-    /// Automatic continuation asks Jev whether a finished turn left work
-    /// undone, so it runs only while `[continuation]` and `[jev]` are both on.
+    /// Quota recovery resumes a session after a provider quota resets. It
+    /// depends on the turn classifier, so the Privacy switch owns it.
     #[must_use]
-    pub fn automatic_continuation_enabled(&self) -> bool {
-        self.continuation.enabled && self.jev.enabled
+    pub fn quota_recovery_enabled(&self) -> bool {
+        self.jev.enabled
     }
 
     /// The GitHub watcher uses Jev to classify activity, so both switches
@@ -711,21 +1106,28 @@ impl Config {
     }
 }
 
-// Version 20 adds daemon placement; 21 adds review counts. Older strict
+// Version 20 adds daemon placement; 21 adds review counts; 22 adds the session
+// GitHub credential default. Older strict
 // configuration readers reject the new fields instead of dropping them.
-pub const CONFIG_VERSION: u32 = 21;
+/// Historical per-session EC2 records remain readable, but new work uses a
+/// persistent SSH machine with a container runtime.
+pub const LEGACY_EC2_TARGET_NOTICE: &str = "Per-session EC2 targets were removed. Choose a persistent Podman target, or create one with `mj ec2 create <instance-type> --zone <zone>`.";
+
+pub const CONFIG_VERSION: u32 = 23;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
-/// The registry repository every session image name is built from.
+/// The registry repository for the release image.
 pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
-/// The container image a session uses when its target names none.
+/// The image for daemon-container mode and quota containers.
 ///
 /// A release build names the immutable image published for its own version; a
 /// development build names the floating image published from master.
 /// `mj-core/build.rs` resolves which one this build is and bakes the answer in.
-pub const DEFAULT_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
-/// Whether this is a release build whose [`DEFAULT_CONTAINER_IMAGE`] carries
+pub const RELEASE_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
+/// The session image used when neither its project nor target selects one.
+pub const DEFAULT_SESSION_IMAGE: &str = "docker.io/library/buildpack-deps:noble";
+/// Whether this is a release build whose [`RELEASE_CONTAINER_IMAGE`] carries
 /// its own worker. The release workflow publishes that image with the worker
 /// built from the same commit, whose identity equals this build's, so a
 /// container on it needs no worker from the host. Neither a development build
@@ -735,14 +1137,14 @@ pub const RELEASE_IMAGE_CARRIES_WORKER: bool =
 /// The image name every configuration up to [`LEGACY_DEFAULT_IMAGE_LAST_VERSION`]
 /// wrote into a container target a user had touched.
 ///
-/// Loading such a file replaces this literal with [`DEFAULT_CONTAINER_IMAGE`],
-/// so an upgraded install follows the image built for its own version instead
+/// Loading such a file replaces this literal with [`DEFAULT_SESSION_IMAGE`],
+/// so an upgraded install follows the current default session image instead
 /// of pinning whatever was current when the file was written.
 pub const LEGACY_DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 /// The last configuration version that wrote the default image into a file.
 const LEGACY_DEFAULT_IMAGE_LAST_VERSION: u32 = 14;
 
-/// The rule [`DEFAULT_CONTAINER_IMAGE`] is resolved from.
+/// The rule [`RELEASE_CONTAINER_IMAGE`] is resolved from.
 ///
 /// It is a function so one test build can exercise both channels; a single
 /// `build.rs` run compiles only one of them.
@@ -759,8 +1161,7 @@ pub fn container_image_for(version: &str, release: bool) -> String {
 /// `default_image`.
 ///
 /// A target the user customized -- any other image -- is left alone. Split from
-/// [`TryFrom<StoredConfig>`] so a test build can exercise the release channel's
-/// rewrite without compiling a release `build.rs`.
+/// [`TryFrom<StoredConfig>`] to exercise legacy config migration directly.
 fn migrate_legacy_default_image(target: &mut TargetTemplate, default_image: &str) {
     if let Some(container) = target.container_mut()
         && container.image == LEGACY_DEFAULT_CONTAINER_IMAGE
@@ -769,12 +1170,196 @@ fn migrate_legacy_default_image(target: &mut TargetTemplate, default_image: &str
     }
 }
 
+/// Refuse a configuration file that carries keys no setting reads, naming
+/// each one as the file spells it.
+fn refuse_unread_keys(path: &Path, unread: &[String]) -> Result<()> {
+    if unread.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{}: no Mjolnir setting is named {}; correct or remove it (see {CONFIGURATION_DOCUMENTATION_URL})",
+        path.display(),
+        unread
+            .iter()
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// A key path as the configuration file spells it, one segment per table or
+/// array level, such as `["profiles", "codex", "models"]`. Filters compare
+/// segments, so a quoted key that contains a dot is still one key.
+fn setting_path(path: &serde_ignored::Path<'_>) -> Vec<String> {
+    fn push(path: &serde_ignored::Path<'_>, segments: &mut Vec<String>) {
+        use serde_ignored::Path;
+        match path {
+            Path::Root => {}
+            Path::Seq { parent, index } => {
+                push(parent, segments);
+                segments.push(index.to_string());
+            }
+            Path::Map { parent, key } => {
+                push(parent, segments);
+                segments.push(key.clone());
+            }
+            Path::Some { parent }
+            | Path::NewtypeStruct { parent }
+            | Path::NewtypeVariant { parent } => push(parent, segments),
+        }
+    }
+    let mut segments = Vec::new();
+    push(path, &mut segments);
+    segments
+}
+
+/// `build_cache` keys that no setting reads, under a machine or runtime whose
+/// kind reads that table.
+///
+/// Machines and runtimes are tagged tables, which serde reads from a buffered
+/// copy out of sight of the file loader's unread-key check. Their
+/// `build_cache` tables have always refused a key they do not read, so each is
+/// read again here on its own. Under a kind without the setting, such as a
+/// bare runtime or an EC2 machine, the table was never read and still loads.
+fn unread_build_cache_keys(document: &toml::Value) -> Vec<String> {
+    let reads_build_cache = |section: &str, kind: &str| match section {
+        "machines" => matches!(kind, "local" | "ssh"),
+        // Container runtimes, under their current kinds and the fused kinds
+        // of files before version 12.
+        _ => matches!(
+            kind,
+            "podman"
+                | "docker"
+                | "apple-container"
+                | "nitro"
+                | "local-podman"
+                | "local-docker"
+                | "ssh-podman"
+                | "ssh-docker"
+                | "ssh-apple-container"
+                | "ssh-nitro"
+        ),
+    };
+    let mut unread = Vec::new();
+    for section in ["machines", "targets"] {
+        let Some(tables) = document.get(section).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for (id, table) in tables {
+            let kind = table
+                .get("kind")
+                .and_then(toml::Value::as_str)
+                .unwrap_or_default();
+            let Some(build_cache) = table.get("build_cache") else {
+                continue;
+            };
+            if !reads_build_cache(section, kind) {
+                continue;
+            }
+            // The whole file has already been read, this table with it, so
+            // only the names this read gathers matter.
+            let _ = serde_ignored::deserialize(build_cache.clone(), |key| {
+                unread.push(format!(
+                    "{section}.{id}.build_cache.{}",
+                    setting_path(&key).join(".")
+                ));
+            })
+            .map(|_: TargetBuildCache| ());
+        }
+    }
+    unread
+}
+
 // Old config files may still contain [startup]. Accept it without retaining
-// settings that could recreate automatic first-session behavior on save.
+// settings that could recreate automatic first-session behavior on save. The
+// section is read whole rather than as `IgnoredAny`, which the file loader
+// counts as a key no setting reads.
 fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<(), D::Error> {
-    serde::de::IgnoredAny::deserialize(deserializer).map(|_| ())
+    serde_json::Value::deserialize(deserializer).map(|_| ())
+}
+
+/// OCI spelling for the architecture aliases accepted by container engines.
+/// Variant suffixes share the project's architecture-specific assignment.
+pub fn canonical_image_platform(platform: &str) -> &str {
+    match platform
+        .strip_prefix("linux/")
+        .unwrap_or(platform)
+        .split('/')
+        .next()
+    {
+        Some("x86_64" | "amd64") => "linux/amd64",
+        Some("aarch64" | "arm64") => "linux/arm64",
+        _ => platform,
+    }
+}
+
+/// Registry namespace used for published project session images.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagesConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bundles: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl ImagesConfig {
+    /// Transfer assignments when project discovery consolidates two aliases.
+    /// Existing canonical assignments decide each platform.
+    pub fn consolidate_bundle(&mut self, alias: &str, canonical: &str) {
+        if alias == canonical {
+            return;
+        }
+        if let Some(images) = self.bundles.remove(alias) {
+            let canonical = self.bundles.entry(canonical.to_owned()).or_default();
+            for (platform, image) in images {
+                canonical.entry(platform).or_insert(image);
+            }
+        }
+    }
+
+    fn validate(&self, bundles: &BTreeMap<String, ProjectBundle>) -> Result<()> {
+        static REPORTED: std::sync::Mutex<BTreeSet<String>> =
+            std::sync::Mutex::new(BTreeSet::new());
+        for (bundle_id, images) in &self.bundles {
+            if !bundles.contains_key(bundle_id) {
+                if REPORTED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(bundle_id.clone())
+                {
+                    tracing::warn!(
+                        bundle = bundle_id,
+                        "image assignments for unknown bundle {bundle_id:?} are ignored; the entry is retained in config.toml"
+                    );
+                }
+                continue;
+            }
+            for (platform, image) in images {
+                let Some(architecture) = platform.strip_prefix("linux/") else {
+                    bail!("bundle {bundle_id:?} image platform {platform:?} must be linux/<arch>");
+                };
+                ensure!(
+                    !architecture.is_empty()
+                        && !architecture.contains('/')
+                        && architecture
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+                    "bundle {bundle_id:?} image platform {platform:?} must be linux/<arch>"
+                );
+                ensure!(
+                    !image.trim().is_empty() && !image.chars().any(char::is_whitespace),
+                    "bundle {bundle_id:?} image for {platform:?} must be a non-empty image reference without whitespace"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// The resolved configuration every part of Mjolnir works with.
@@ -801,7 +1386,6 @@ pub struct Config {
     pub daemon: DaemonConfig,
     pub github: GithubConfig,
     pub review: ReviewConfig,
-    pub continuation: crate::continuation::ContinuationConfig,
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub jev: JevConfig,
@@ -810,6 +1394,7 @@ pub struct Config {
     pub legacy_startup: (),
     pub profiles: BTreeMap<String, HarnessProfile>,
     pub bundles: BTreeMap<String, ProjectBundle>,
+    pub images: ImagesConfig,
     /// The hosts runtimes run on. `local` is implied even when it is absent.
     pub machines: BTreeMap<String, Machine>,
     pub targets: BTreeMap<String, TargetTemplate>,
@@ -827,7 +1412,6 @@ pub struct Config {
 /// The configuration file's own shape: hosts under `[machines.<id>]` and
 /// runtimes under `[targets.<id>]`, each runtime naming its machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct StoredConfig {
     /// A retired session filter. Files written before version 7 may still
     /// carry it, so it is accepted and dropped.
@@ -856,13 +1440,12 @@ struct StoredConfig {
     daemon: DaemonConfig,
     #[serde(default, skip_serializing_if = "GithubConfig::is_default")]
     github: GithubConfig,
-    #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
+    #[serde(default)]
     review: ReviewConfig,
-    #[serde(
-        default = "crate::continuation::ContinuationConfig::enabled",
-        skip_serializing_if = "crate::continuation::ContinuationConfig::is_default"
-    )]
-    continuation: crate::continuation::ContinuationConfig,
+    /// Legacy `[continuation]` section, read and ignored, never written.
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code, reason = "decoded only so an existing section still loads")]
+    continuation: LegacyContinuationConfig,
     #[serde(default, skip_serializing)]
     mailbox: LegacyMailboxConfig,
     #[serde(default, skip_serializing_if = "SessionWikiConfig::is_default")]
@@ -888,6 +1471,8 @@ struct StoredConfig {
     profiles: BTreeMap<String, HarnessProfile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     bundles: BTreeMap<String, ProjectBundle>,
+    #[serde(default, skip_serializing_if = "ImagesConfig::is_default")]
+    images: ImagesConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     machines: BTreeMap<String, Machine>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -948,7 +1533,8 @@ enum InterpretedTarget {
 /// leaving out any already reported by this process.
 ///
 /// Serde cannot refuse them: a container runtime's settings are flattened into
-/// the tagged `StoredTarget`, and flattening turns `deny_unknown_fields` off.
+/// the tagged `StoredTarget`, out of sight of the file loader's unread-key
+/// check.
 /// A misspelled or invented setting is therefore ignored, and saying so once
 /// is what stops a person from believing it applies (R4-6). The configuration
 /// is read many times in one process, so each key is reported only the first
@@ -964,7 +1550,7 @@ fn newly_unknown_target_keys(
         matches!(key, "kind" | "machine")
             || match kind {
                 "bare" => key == "permissions",
-                "podman" | "docker" | "apple-container" => {
+                "podman" | "docker" | "apple-container" | "nitro" => {
                     targets::CONTAINER_TEMPLATE_KEYS.contains(&key)
                 }
                 _ => true,
@@ -1050,7 +1636,7 @@ impl TryFrom<StoredConfig> for Config {
             daemon,
             mut github,
             review,
-            continuation,
+            continuation: _,
             mailbox,
             sessionwiki,
             subagents,
@@ -1061,6 +1647,7 @@ impl TryFrom<StoredConfig> for Config {
             legacy_startup,
             mut profiles,
             bundles,
+            images,
             mut machines,
             targets,
         } = stored;
@@ -1117,11 +1704,10 @@ impl TryFrom<StoredConfig> for Config {
         }
         // Up to version 14, a container target the user had touched carried
         // the then-current default image in the file. Move that literal back
-        // onto this build's default so an upgraded install follows the image
-        // built for its own version; a customized image is left alone.
+        // onto the current session default; a customized image is left alone.
         if version <= LEGACY_DEFAULT_IMAGE_LAST_VERSION {
             for target in resolved.values_mut() {
-                migrate_legacy_default_image(target, DEFAULT_CONTAINER_IMAGE);
+                migrate_legacy_default_image(target, DEFAULT_SESSION_IMAGE);
             }
         }
         Ok(Self {
@@ -1131,14 +1717,16 @@ impl TryFrom<StoredConfig> for Config {
             notify,
             // Versions 1 through 19 acquire this build's defaults in memory
             // and upgrade on the next ordinary save. Version 12 splits
-            // machines from runtimes; version 13 adds automatic continuation;
+            // machines from runtimes; version 13 added automatic continuation (since removed);
             // version 14 moves the global cache opt-out onto machines; version
             // 15 stops writing the default image into a container target;
             // 16 adds native tool cache storage; 17 replaces per-profile
             // delegation selectors with global task choices, without migrating them;
             // 18 moves the GitHub event switch to github.watch.enabled; 19 adds
-            // `enabled` to runtimes; 20 adds `[daemon]`; 21 adds review counts.
-            version: if matches!(version, 1..=20) {
+            // `enabled` to runtimes; 20 adds `[daemon]`; 21 adds review counts;
+            // 22 adds the session GitHub credential default; 23 adds
+            // target-specific sub-agent choices.
+            version: if matches!(version, 1..=22) {
                 CONFIG_VERSION
             } else {
                 version
@@ -1149,7 +1737,6 @@ impl TryFrom<StoredConfig> for Config {
             daemon,
             github,
             review,
-            continuation,
             sessionwiki,
             subagents,
             jev,
@@ -1158,6 +1745,7 @@ impl TryFrom<StoredConfig> for Config {
             legacy_startup,
             profiles,
             bundles,
+            images,
             machines,
             targets: resolved,
             default_targets: BTreeSet::new(),
@@ -1200,7 +1788,7 @@ impl From<Config> for StoredConfig {
             daemon: config.daemon,
             github: config.github,
             review: config.review,
-            continuation: config.continuation,
+            continuation: LegacyContinuationConfig::default(),
             mailbox: LegacyMailboxConfig::default(),
             sessionwiki: config.sessionwiki,
             subagents: config.subagents,
@@ -1211,6 +1799,7 @@ impl From<Config> for StoredConfig {
             legacy_startup: config.legacy_startup,
             profiles: config.profiles,
             bundles: config.bundles,
+            images: config.images,
             machines,
             targets,
         }
@@ -1231,7 +1820,6 @@ impl Default for Config {
             daemon: DaemonConfig::default(),
             github: GithubConfig::default(),
             review: ReviewConfig::default(),
-            continuation: crate::continuation::ContinuationConfig::enabled(),
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             jev: JevConfig::default(),
@@ -1240,6 +1828,7 @@ impl Default for Config {
             legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
+            images: ImagesConfig::default(),
             machines: BTreeMap::new(),
             targets: BTreeMap::new(),
             default_targets: BTreeSet::new(),
@@ -1249,6 +1838,46 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The image for a session on a container target. Bundle assignments take
+    /// precedence only for the target's platform; bare targets have no image.
+    pub fn session_image(
+        &self,
+        bundle_id: Option<&str>,
+        target_id: &str,
+        platform: &str,
+    ) -> Option<&str> {
+        let container = self.targets.get(target_id)?.container()?;
+        let platform = canonical_image_platform(platform);
+        Some(
+            bundle_id
+                .filter(|id| self.bundles.contains_key(*id))
+                .and_then(|id| self.images.bundles.get(id))
+                .and_then(|images| images.get(platform))
+                .map_or(container.image.as_str(), String::as_str),
+        )
+    }
+
+    /// Apply the same resolution to a configured target without changing it.
+    pub fn session_target(
+        &self,
+        bundle_id: Option<&str>,
+        target_id: &str,
+        platform: &str,
+    ) -> Result<TargetTemplate> {
+        let mut target = self
+            .targets
+            .get(target_id)
+            .with_context(|| format!("unknown target {target_id:?}"))?
+            .clone();
+        if let Some(image) = self.session_image(bundle_id, target_id, platform) {
+            target
+                .container_mut()
+                .expect("session image requires a container")
+                .image = image.to_owned();
+        }
+        Ok(target)
+    }
+
     /// Suggest additions for setup without replacing existing entries. Both
     /// setup surfaces use the same identities and collision-free names.
     pub fn setup_additions(&self, discovered: &Self) -> Self {
@@ -1363,7 +1992,7 @@ impl Config {
         self.profiles.is_empty() && self.bundles.is_empty() && self.targets.is_empty()
     }
 
-    /// Profiles available for new work, user-facing selectors, and probes.
+    /// Profiles Mjolnir may choose or probe automatically.
     pub fn enabled_profiles(&self) -> impl Iterator<Item = (&str, &HarnessProfile)> {
         self.profiles
             .iter()
@@ -1371,7 +2000,14 @@ impl Config {
             .map(|(id, profile)| (id.as_str(), profile))
     }
 
-    /// One profile when it exists and is available for new work.
+    /// Look up a profile explicitly named by a user or recorded on a session.
+    pub fn named_profile(&self, id: &str) -> anyhow::Result<&HarnessProfile> {
+        self.profiles
+            .get(id)
+            .with_context(|| format!("unknown profile {id:?}"))
+    }
+
+    /// One profile eligible for automatic selection or probing.
     pub fn enabled_profile(&self, id: &str) -> Option<&HarnessProfile> {
         self.profiles.get(id).filter(|profile| profile.enabled)
     }
@@ -1380,15 +2016,15 @@ impl Config {
     pub fn enabled_targets(&self) -> impl Iterator<Item = (&str, &TargetTemplate)> {
         self.targets
             .iter()
-            .filter(|(id, _)| !self.disabled_targets.contains(*id))
+            .filter(|(id, _)| self.enabled_target(id).is_some())
             .map(|(id, target)| (id.as_str(), target))
     }
 
     /// One runtime when it exists and is available for new work.
     pub fn enabled_target(&self, id: &str) -> Option<&TargetTemplate> {
-        self.targets
-            .get(id)
-            .filter(|_| !self.disabled_targets.contains(id))
+        self.targets.get(id).filter(|target| {
+            target.launch_refusal().is_none() && !self.disabled_targets.contains(id)
+        })
     }
 
     /// Refuse new work on runtime `id` when it is not configured or is
@@ -1398,6 +2034,9 @@ impl Config {
             .targets
             .get(id)
             .with_context(|| format!("unknown target template {id:?}"))?;
+        if let Some(notice) = target.launch_refusal() {
+            bail!("{notice}");
+        }
         if self.disabled_targets.contains(id) {
             return Err(crate::refusal::Refusal::precondition(format!(
                 "runtime {id:?} is turned off; turn it on in Settings › Runtimes or choose another"
@@ -1466,6 +2105,7 @@ impl Config {
         for (id, bundle) in &self.bundles {
             bundle.validate(id)?;
         }
+        self.images.validate(&self.bundles)?;
         machines::validate_machines(&self.machines)?;
         for (id, target) in &self.targets {
             target.validate(id)?;
@@ -1494,7 +2134,7 @@ impl Config {
     pub fn with_local_targets(mut self) -> Self {
         let container = ContainerTemplate {
             build_cache: None,
-            image: DEFAULT_CONTAINER_IMAGE.into(),
+            image: DEFAULT_SESSION_IMAGE.into(),
             pull_policy: Default::default(),
             platform: None,
             cpus: None,
@@ -1553,7 +2193,7 @@ impl Config {
     }
 
     /// Read the config from `path`, returning [`Config::default`] when the
-    /// file is missing or empty and an error when it is malformed or was
+    /// file is missing and an error when it is malformed or was
     /// written by a newer Mjolnir.
     pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
@@ -1604,7 +2244,8 @@ impl Config {
         // visibility as an advanced setting; version 8 lets profiles be
         // disabled; version 9 adds sub-agent policy; version 10 adds the
         // SessionWiki section; version 11 adds the key bindings; version 12
-        // splits machines from runtimes; version 13 adds automatic continuation.
+        // splits machines from runtimes; version 13 added automatic continuation
+        // (since removed).
         // Earlier configs acquire defaults in
         // memory, and their fused target kinds become machines plus runtimes,
         // on the next ordinary save. The version bump itself happens in
@@ -1614,9 +2255,26 @@ impl Config {
         // this configuration and the process environment. One that does not
         // resolve makes its profile or target unusable, not this file
         // unreadable; see `HarnessProfile::ensure_ready`.
-        let config: Self =
-            with_secret_resolver(SecretResolver::beside(path), || toml::from_str(&contents))
-                .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
+        // The configuration types read past keys they have no field for,
+        // because the daemon serves this configuration to clients that may
+        // predate a field (#1557). A person writes the file, so here such a
+        // key is a mistake, refused by name wherever a type used to refuse it.
+        let mut unread = Vec::new();
+        let config: Self = with_secret_resolver(SecretResolver::beside(path), || {
+            serde_ignored::deserialize(toml::Deserializer::new(&contents), |key| {
+                let key = setting_path(&key);
+                // These sections never refused a key, and files still carry
+                // retired ones such as `advanced.show_stopped_sessions`.
+                // Refusing them now would stop an upgraded daemon from
+                // starting.
+                if !(key.len() > 1 && matches!(key[0].as_str(), "advanced" | "notify")) {
+                    unread.push(key.join("."));
+                }
+            })
+        })
+        .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
+        unread.extend(unread_build_cache_keys(&document));
+        refuse_unread_keys(path, &unread)?;
         config.validate()?;
         Ok(config)
     }

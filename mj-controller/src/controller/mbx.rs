@@ -29,8 +29,8 @@ use mj_core::state::{
     SessionBuildCache,
 };
 
-/// The minimum mbx version whose cache format Mjolnir can share.
-pub(crate) const MBX_VERSION: &str = "1.22.0";
+/// Release installed by Mjolnir when a user installs or upgrades host mbx.
+pub const MBX_VERSION: &str = "1.30.0";
 
 const MBX_COPY_RELATIVE: &str = ".mjolnir/bin/mbx";
 /// mbx's running totals, relative to the cache directory.
@@ -122,6 +122,11 @@ static MBX_SYNC_LOCKS: std::sync::LazyLock<std::sync::Mutex<MbxSyncLocks>> =
 enum Freshness {
     /// Provisioning: an answer from the last `RESOLUTION_LIFETIME` will do.
     Memoized,
+    /// Configuration a session already depends on: a recent successful answer
+    /// will do, but a remembered failure is asked again. Another caller's
+    /// failure (such as the background policy service timing out on a busy
+    /// link) must not fail a launch that can still reach the host.
+    MemoizedSuccess,
     /// The settings screen, which is read precisely when somebody has just
     /// changed something on the host. A fresh answer also replaces the
     /// memoized one, so the next session sees the same thing the screen does.
@@ -138,9 +143,10 @@ fn inspect(
     executor: &impl CommandExecutor,
 ) -> Result<Inspection> {
     let key = format!("{}|{settings:?}", host.key());
-    if freshness == Freshness::Memoized
+    if freshness != Freshness::Fresh
         && let Some((recorded, inspection)) = RESOLUTIONS.lock().expect("mbx resolutions").get(&key)
         && recorded.elapsed() < RESOLUTION_LIFETIME
+        && (freshness == Freshness::Memoized || inspection.is_ok())
     {
         return inspection.clone().map_err(|error| anyhow::anyhow!(error));
     }
@@ -260,8 +266,9 @@ fn supported_host(target: &targets::TargetTemplate) -> Option<(CacheHost, Target
         }
         targets::TargetTemplate::AppleContainer(_)
         | targets::TargetTemplate::SshAppleContainer { .. }
+        // A sandbox is a VM with no way to mount a host directory.
+        | targets::TargetTemplate::SshNitro { .. }
         | targets::TargetTemplate::LocalBare
-        | targets::TargetTemplate::AwsEc2(_)
         | targets::TargetTemplate::SshBare { .. } => return None,
     };
     Some((CacheHost::for_target(target)?, settings))
@@ -279,13 +286,18 @@ pub fn preview_build_cache(
     };
     let settings = machine.build_cache().cloned().unwrap_or_default();
     let mut preview = inspect(&host, &settings, Freshness::Fresh, executor)?.preview;
-    if install::install_kind(&preview).is_some() {
-        let profile = install::login_profile_details(&host, executor)?;
+    if install::install_candidate_kind(&preview).is_some()
+        && let Some(profile) = install::login_profile_details(&host, executor)?
+    {
         preview.mbx_profile_file = Some(profile.file);
         preview.mbx_profile_warning = profile.warning;
         preview.mbx_manual_path_line = profile.manual_path_line;
     }
     Ok(Some(preview))
+}
+
+pub(crate) fn machine_cache_host_key(machine: &mj_core::config::Machine) -> Option<String> {
+    CacheHost::for_machine(machine).map(|host| host.key())
 }
 
 /// Apply one machine's desired policy. Both provisioning and the daemon use
@@ -316,9 +328,7 @@ pub(crate) fn apply_machine_build_cache(
     } else {
         match classify_native_mbx(probe_native_version(&host, executor)?) {
             NativeMbxStatus::Compatible(native) => Some(native),
-            NativeMbxStatus::Absent
-            | NativeMbxStatus::TooOld(_)
-            | NativeMbxStatus::Unknown { .. } => None,
+            NativeMbxStatus::Absent | NativeMbxStatus::Unknown { .. } => None,
         }
     };
     let Some(native) = native else {
@@ -385,11 +395,25 @@ pub(super) fn prepare_session_configuration(
         .next()
         .cloned()
         .unwrap_or_default();
-    settings.directory = Some(recorded.directory.clone());
-    // A disabled cache still exists in already provisioned containers. Keep
-    // its policy current until the session no longer mounts it.
-    settings.enabled = Some(true);
-    let inspected = inspect_host(&host, &settings, executor)?;
+    // Reuse the launch's original resolution key first. Retained containers
+    // can still mount an older directory, or a cache disabled since launch;
+    // only those need a second resolution projected onto the recorded mount.
+    let inspected = inspect(&host, &settings, Freshness::MemoizedSuccess, executor)?;
+    let needs_projection = inspected
+        .cache
+        .as_ref()
+        .is_some_and(|cache| cache.directory != recorded.directory)
+        || matches!(
+            inspected.preview.off_reason.as_ref(),
+            Some(BuildCacheOff::TurnedOff)
+        );
+    let inspected = if needs_projection {
+        settings.directory = Some(recorded.directory.clone());
+        settings.enabled = Some(true);
+        inspect(&host, &settings, Freshness::MemoizedSuccess, executor)?
+    } else {
+        inspected
+    };
     let cache = inspected.cache.with_context(|| {
         format!(
             "build cache configuration unavailable: {}",
@@ -414,7 +438,6 @@ pub(crate) enum DoctorHostMbxStatus {
     Unsupported(String),
     Absent,
     Compatible(String),
-    TooOld(String),
     Unknown(String),
 }
 
@@ -422,7 +445,6 @@ pub(crate) enum DoctorHostMbxStatus {
 enum NativeMbxStatus {
     Absent,
     Compatible(NativeMbx),
-    TooOld(NativeMbx),
     Unknown { version: String, reason: String },
 }
 
@@ -431,10 +453,7 @@ fn classify_native_mbx(native: Option<NativeMbx>) -> NativeMbxStatus {
         return NativeMbxStatus::Absent;
     };
     match semver::Version::parse(&native.version) {
-        Ok(_) if version_at_least(&native.version, MBX_VERSION) => {
-            NativeMbxStatus::Compatible(native)
-        }
-        Ok(_) => NativeMbxStatus::TooOld(native),
+        Ok(_) => NativeMbxStatus::Compatible(native),
         Err(_) => NativeMbxStatus::Unknown {
             reason: format!(
                 "the host reported an unrecognized mbx version {:?}",
@@ -445,22 +464,11 @@ fn classify_native_mbx(native: Option<NativeMbx>) -> NativeMbxStatus {
     }
 }
 
-pub(super) fn version_at_least(found: &str, required: &str) -> bool {
-    matches!(
-        (semver::Version::parse(found), semver::Version::parse(required)),
-        (Ok(found), Ok(required)) if found >= required
-    )
-}
-
 fn cache_unavailable_reason(status: &NativeMbxStatus) -> String {
     match status {
         NativeMbxStatus::Absent => {
             "mbx is not installed on the container host. Install mbx from Settings › Setup › Machines to enable the shared build cache.".into()
         }
-        NativeMbxStatus::TooOld(native) => format!(
-            "host mbx {} is older than the minimum supported version {}; upgrade mbx from Settings › Setup › Machines to enable the shared build cache",
-            native.version, MBX_VERSION
-        ),
         NativeMbxStatus::Unknown { reason, .. } => format!(
             "{reason}; install or upgrade mbx from Settings › Setup › Machines to enable the shared build cache"
         ),
@@ -520,7 +528,6 @@ pub(crate) fn doctor_host_mbx(
                     NativeMbxStatus::Compatible(native) => {
                         DoctorHostMbxStatus::Compatible(native.version)
                     }
-                    NativeMbxStatus::TooOld(native) => DoctorHostMbxStatus::TooOld(native.version),
                     NativeMbxStatus::Unknown { reason, .. } => DoctorHostMbxStatus::Unknown(reason),
                 },
             )
@@ -576,7 +583,6 @@ fn inspect_host(
         NativeMbxStatus::Compatible(native) => native,
         status => {
             let native_version = match &status {
-                NativeMbxStatus::TooOld(native) => Some(native.version.clone()),
                 NativeMbxStatus::Unknown { version, .. } => Some(version.clone()),
                 NativeMbxStatus::Absent | NativeMbxStatus::Compatible(_) => None,
             };
@@ -1396,6 +1402,29 @@ mod tests {
     }
 
     impl CommandExecutor for ProbeExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let line = format!("{} {}", command.program, command.args.join(" "));
             self.seen.lock().unwrap().push(line.clone());
@@ -1462,6 +1491,7 @@ mod tests {
     fn native_host() -> Vec<(&'static str, i32, &'static str)> {
         vec![
             ("$resolved\" --version", 0, "/usr/local/bin/mbx\nmbx 1.22.0"),
+            ("hel-mbx-home", 0, "/home/dev"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1631,6 +1661,7 @@ mod tests {
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
     fn recorded_darwin_cache_fails_explicitly_without_writing() {
+        let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
             ("uname -sm", 0, "Darwin x86_64"),
             ("$resolved\" --version", 1, ""),
@@ -1921,13 +1952,13 @@ mod tests {
         windows,
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
-    fn an_older_native_mbx_must_not_share_the_store() {
+    fn an_unrecognized_native_mbx_must_not_share_the_store() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
             (
                 "$resolved\" --version",
                 0,
-                "/home/jonathan/.local/bin/mbx\nmbx 1.15.0",
+                "/home/jonathan/.local/bin/mbx\nmbx unknown",
             ),
             ("hel-mbx-home", 0, "/home/jonathan"),
         ]);
@@ -1938,7 +1969,8 @@ mod tests {
         assert!(matches!(
             preview.off_reason,
             Some(BuildCacheOff::Unavailable(reason))
-                if reason.contains("1.15.0") && reason.contains("Settings › Setup › Machines")
+                if reason.contains("unrecognized mbx version")
+                    && reason.contains("Settings › Setup › Machines")
         ));
     }
 
@@ -2258,16 +2290,16 @@ mod tests {
             version: version.into(),
         };
         assert!(matches!(
+            classify_native_mbx(Some(native("1.22.0"))),
+            NativeMbxStatus::Compatible(_)
+        ));
+        assert!(matches!(
             classify_native_mbx(Some(native(MBX_VERSION))),
             NativeMbxStatus::Compatible(_)
         ));
         assert!(matches!(
-            classify_native_mbx(Some(native("1.23.0"))),
-            NativeMbxStatus::Compatible(_)
-        ));
-        assert!(matches!(
             classify_native_mbx(Some(native("1.15.0"))),
-            NativeMbxStatus::TooOld(_)
+            NativeMbxStatus::Compatible(_)
         ));
         assert!(matches!(
             classify_native_mbx(Some(native("not-a-version"))),
@@ -2398,6 +2430,29 @@ mod tests {
             home: String,
         }
         impl CommandExecutor for IsolatedHostExecutor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 let mut command = command.clone();
                 command.env.insert("PATH".into(), self.path.clone());
@@ -2467,6 +2522,29 @@ mod tests {
         }
 
         impl CommandExecutor for ReprobeExecutor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 self.commands.lock().unwrap().push(command.clone());
                 let (status, stdout, stderr) = match command.purpose.as_str() {
@@ -2582,6 +2660,29 @@ fi"#,
             new_source: PathBuf,
         }
         impl CommandExecutor for FallbackExecutor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 let mut command = command.clone();
                 command
@@ -2796,13 +2897,36 @@ while [ ! -e "$3" ]; do sleep 0.01; done"#;
         windows,
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
-    fn absent_or_too_old_native_mbx_leaves_the_existing_cache_copy() {
+    fn absent_or_unrecognized_native_mbx_leaves_the_existing_cache_copy() {
         struct ProbeAnswer {
             status: i32,
             stdout: Vec<u8>,
         }
 
         impl CommandExecutor for ProbeAnswer {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
                 Ok(CommandOutput {
                     status: self.status,
@@ -2825,7 +2949,7 @@ while [ ! -e "$3" ]; do sleep 0.01; done"#;
             },
             ProbeAnswer {
                 status: 0,
-                stdout: "/opt/old/mbx\nmbx 1.21.0".into(),
+                stdout: "/opt/old/mbx\nmbx unknown".into(),
             },
         ] {
             let result = sync_current_mbx_binary(&CacheHost::Local, &cache, &answer).unwrap();
@@ -2845,8 +2969,9 @@ while [ ! -e "$3" ]; do sleep 0.01; done"#;
         let preview = preview_build_cache(&configured_local_machine(), &executor)
             .unwrap()
             .unwrap();
-        assert_eq!(preview.native_mbx.as_deref(), Some(MBX_VERSION));
+        assert_eq!(preview.native_mbx.as_deref(), Some("1.22.0"));
         assert_eq!(preview.mbx_profile_file, None);
+        assert_eq!(install::install_kind(&preview), None);
         assert_eq!(
             preview.directory,
             Some(PathBuf::from("/mnt/fast/mbx-cache"))

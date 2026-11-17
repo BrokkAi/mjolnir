@@ -1,0 +1,182 @@
+{
+  "id": "W114",
+  "title": "Waiting candidate 114 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "182244c0f29058b3efd7a33adb130ad2",
+    "session_title": "jvm-gate-8623-r4",
+    "reply_position": 1990,
+    "captured_at": "2026-11-01T04:04:43.877Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:33",
+          "role": "assistant",
+          "text": "I’ll read the gate brief in full, then run its candidate-only lifecycle procedure and write the verdict and evidence under the specified directory."
+        },
+        {
+          "id": "agent:70",
+          "role": "assistant",
+          "text": "The checkout and merge base match the brief. I’ve extracted the gate tools; I’m now verifying the shared base binary and frozen inputs before building the candidate."
+        },
+        {
+          "id": "agent:122",
+          "role": "assistant",
+          "text": "Both shared base checksums match the required digest, and frozen, replay, and corpus manifests validate. The candidate archive is built and its measure-profile compilation is underway; I’m preserving its output and will continue through the gate surfaces."
+        },
+        {
+          "id": "agent:181",
+          "role": "assistant",
+          "text": "Compilation is still progressing through the analyzer crates with no reported errors. The required preflight evidence is captured in `logs/`; after the build I’ll use the supplied script protocol to run captures and comparisons."
+        },
+        {
+          "id": "agent:251",
+          "role": "assistant",
+          "text": "The compile has reached the runtime and MCP crates. Host load is currently above the capture threshold, so once compilation finishes I’ll wait for load below 100 before starting lifecycle capture, as specified."
+        },
+        {
+          "id": "agent:320",
+          "role": "assistant",
+          "text": "The candidate build and required preflight checks passed, but the lifecycle gate did not run. I recorded **FAIL (incomplete; candidate behavior not adjudicated)** in [REPORT.md](/tmp/lanes/jvm-gates/8623-r4/REPORT.md) and handed the evidence to the parent."
+        },
+        {
+          "id": "agent:417",
+          "role": "assistant",
+          "text": "I’m resuming from the saved binaries and gate files. I’ll follow the capture threshold and sequencing, preserve each capture until its server exits, then run the requested comparisons and closeout checks before handing back."
+        },
+        {
+          "id": "agent:514",
+          "role": "assistant",
+          "text": "The load crossed just above the capture threshold during setup, and the first capture attempt exited before starting because the cache path already existed. I removed the inactive cache directory; I’m waiting for load below 100 and will use a fresh nonexistent cache path for each run."
+        },
+        {
+          "id": "agent:591",
+          "role": "assistant",
+          "text": "Base A completed with the four required profile outputs and 150 sampled records plus its readiness request. I’m checking its stderr and starting candidate next on a fresh cache; no comparisons will begin until all three request counts and staging counts are recorded."
+        },
+        {
+          "id": "agent:987",
+          "role": "assistant",
+          "text": "All three captures finished at 150 measured records each; each has 133 selected-mount insert executions in SQL request record 0. Base A and candidate each had 387 seam records; base B had 388, so the extra seam item needs classification. The initial strict comparator reports extensive seam key churn, and the SQL band has out-of-band writer families; I’m auditing those against the specified identity and lifecycle classes."
+        },
+        {
+          "id": "agent:1135",
+          "role": "assistant",
+          "text": "The resumed gate ends with **FAIL**. Three lifecycle captures completed, but the strict comparison found unclassified seam key changes and the SQL band found unclassified writer-family movement. The external-owner probe count matched across all three captures.\n\nThe required replay, nine-answer, work50, and manual-golden comparisons remain incomplete. Details and evidence paths are in [REPORT.md](/tmp/lanes/jvm-gates/8623-r4/REPORT.md)."
+        },
+        {
+          "id": "agent:1261",
+          "role": "assistant",
+          "text": "I’ll continue from the retained captures and comparator output, and work through the remaining items in your order. First I’m locating the replay comparator module the gate script expects; then I’ll save each surface’s raw and comparison output before proceeding to the next."
+        },
+        {
+          "id": "agent:1357",
+          "role": "assistant",
+          "text": "Replay130 matches across all four streams after removing `milliseconds`. The nine-answer results also match in both empty and JDK 21 environments, with 50 answers per run and identical status counts. I’m moving to the per-site work comparison now."
+        },
+        {
+          "id": "agent:1445",
+          "role": "assistant",
+          "text": "The replay and nine-answer comparisons pass with no base/candidate differences after ignoring timing. The generic latency measurement did not emit the gate’s `J0_KPERF_SCOPE` or `ReceiverAnalysisWork` records, so I’m collecting those from the two manual work goldens, which print the scoped counters. Next I’ll run the four isolated manual-golden invocations from fresh archive extractions."
+        },
+        {
+          "id": "agent:1549",
+          "role": "assistant",
+          "text": "The base source-golden run is still compiling in its fresh extraction. I’m waiting on that run’s process and will not start the next invocation until it finishes and prints its nextest summary."
+        },
+        {
+          "id": "agent:1621",
+          "role": "assistant",
+          "text": "The first manual-golden invocation is still running after compiling the workspace’s analysis crates. I’m keeping it isolated and waiting for its own nextest summary before launching the separate work-golden invocation."
+        },
+        {
+          "id": "agent:1707",
+          "role": "assistant",
+          "text": "The base work-golden invocation is also compiling from its own extraction. Replay comparisons are complete; the remaining sequence depends on these separately compiled golden runs, after which I can pair the work counters, read keys, and producer-row SQL totals."
+        },
+        {
+          "id": "agent:1859",
+          "role": "assistant",
+          "text": "The candidate source-golden run is linking the tools test executable. It has not printed its nextest summary yet, so I’m continuing to wait on that invocation’s process."
+        },
+        {
+          "id": "agent:1924",
+          "role": "assistant",
+          "text": "The candidate work-golden invocation is compiling in the fourth fresh extraction. The other three manual runs have completed; I’m waiting for this run’s summary before decoding and comparing all four actual outputs and counters."
+        },
+        {
+          "id": "agent:1990",
+          "role": "assistant",
+          "text": "The last run remains in the `brokk-bifrost-tools` build/link stage. I’m waiting for the required summary line; then I’ll decode the golden actuals and extract the 50-element work arrays."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "The last run remains in the `brokk-bifrost-tools` build/link stage. I’m waiting for the required summary line; then I’ll decode the golden actuals and extract the 50-element work arrays.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 1253,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "The last run remains in the `brokk-bifrost-tools` build/link stage. I’m waiting for the required summary line; then I’ll decode the golden actuals and extract the 50-element work arrays."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-01T04:09:01.099Z",
+        "kind": "agent",
+        "text": "All four manual test invocations have finished. Cleanup hit read-only permissions preserved by `cp -a` on the disposable corpus copies; the source corpora were untouched. I’m making only those tempora"
+      },
+      {
+        "at": "2026-11-01T04:09:33.243Z",
+        "kind": "agent",
+        "text": "The gate is **FAIL**. Replay130 and nine-answer comparisons match; the manual actuals and work counters are compared and documented. The remaining failures are 22 read-key records with differences bey"
+      }
+    ]
+  }
+}

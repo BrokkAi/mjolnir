@@ -6,6 +6,7 @@
 //! and reconnect, so the sequence lives here once and each caller supplies
 //! only what it tells the operator.
 
+use mj_core::targets::SshTrafficClass;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -85,6 +86,8 @@ pub(super) struct InstalledWorkerRestart<'a> {
     pub reconnect: &'a CommandSpec,
     pub launch: Option<&'a mj_core::worker_launch::WorkerLaunchConfig>,
     pub prepared: bool,
+    pub discard_queued_prompts: Option<String>,
+    pub swap_admission: Option<crate::upgrade::Work>,
     pub messages: &'a WorkerRestartMessages,
 }
 
@@ -144,6 +147,86 @@ fn worker_runs_installed_build(reported: Option<&str>, installed: &str) -> bool 
 }
 
 impl Controller {
+    /// A reconstructed pathname cannot repair a process's unlinked cwd.
+    /// Reuse the upgrade reservation before replacing only this parent.
+    pub(in crate::controller) async fn restart_worker_after_checkout_recovery(
+        &mut self,
+        session_id: &str,
+        discard_queue: bool,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<mj_core::state::MaterializedSession> {
+        let (backend, root) = self.worker_placement(session_id)?;
+        let harness = self.state.sessions[session_id].harness_kind;
+        let reconnect = targets::reconnect_plan(&backend, session_id)?
+            .commands
+            .into_iter()
+            .next()
+            .context("missing reconnect command")?;
+        let clear_id = crate::session_manager::new_command_id("resume-clear-queue")?;
+        executor.begin_resumable_work()?;
+        loop {
+            let mut connection = connect_started_worker_with_timeout(
+                &reconnect,
+                session_id,
+                executor,
+                &backend,
+                &root,
+                WORKER_RESTART_TIMEOUT,
+            )
+            .await?;
+            if discard_queue {
+                connection
+                    .submit(
+                        clear_id.clone(),
+                        mj_core::relay::RelayCommand::ClearQueuedPrompts,
+                    )
+                    .await?;
+            }
+            wait_for_native_session(&mut connection, executor, harness).await?;
+            let swap = crate::upgrade::activity_unless_draining("resume checkout worker swap")?;
+            if let Some((command_id, cursor)) =
+                super::IdleWorkspaceLease::reserve_connection_for_upgrade(&mut connection, harness)
+                    .await?
+                && super::IdleWorkspaceLease::verify_reserved_connection(
+                    &mut connection,
+                    harness,
+                    &command_id,
+                    &cursor,
+                )
+                .await?
+            {
+                executor.end_resumable_work("restart parent after checkout recovery")?;
+                if let Some(intent) = crate::database::load_worker_restart(session_id)?
+                    && self.state.sessions[session_id].target.as_deref() == Some(&intent.target)
+                {
+                    crate::database::finish_worker_restart(session_id, &intent.operation_id)?;
+                }
+                let result = self
+                    .repair_existing_environment(
+                        session_id,
+                        super::resume::RetainedWorker::Reserved(swap),
+                        false,
+                        executor,
+                    )
+                    .await;
+                // Keep the reservation connection through replacement; the
+                // launch owner releases swap admission after durable launch.
+                drop(connection);
+                return result;
+            }
+            drop(swap);
+            let snapshot = connection.sync().await?;
+            executor.notify_notice(&format!(
+                "Checkout restored. Waiting to restart the parent: active prompt {}, {} queued prompts, {} tools, {} terminals and {} shells; accepted work and children are kept.",
+                snapshot.operational.active_prompt.as_ref().map(|prompt| prompt.command_id.as_str()).unwrap_or("none"),
+                snapshot.operational.queued_prompts.len(), snapshot.operational.tools_in_flight.len(),
+                snapshot.operational.active_agent_terminals.len(), snapshot.operational.active_user_shells.len(),
+            ));
+            drop(connection);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     /// Replace a session's worker with the binary this controller would
     /// install, when the session is quiet and its worker is incompatible.
     ///
@@ -155,6 +238,7 @@ impl Controller {
     /// working between an observation and this call.
     pub async fn upgrade_session_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -228,7 +312,7 @@ impl Controller {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
                 let Some(mut lease) =
-                    super::IdleWorkspaceLease::acquire_for_upgrade(&handle, harness).await?
+                    super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, harness).await?
                 else {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
@@ -240,7 +324,7 @@ impl Controller {
                 let operation_id = owner.operation_id().to_owned();
                 let intent = crate::database::WorkerRestartIntent {
                     operation_id: operation_id.clone(),
-                    target: self.state.sessions[session_id]
+                    target: *self.state.sessions[session_id]
                         .target
                         .clone()
                         .context("worker restart has no durable target")?,
@@ -250,10 +334,6 @@ impl Controller {
                     crate::database::begin_worker_restart(session_id, &intent)?;
                     install_staged_worker_binary(&owner, &staging, executor, &backend, session_id)
                         .context("install the prepared worker under its idle reservation")?;
-                    replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
-                        .context(
-                            "install the worker launch configuration under its idle reservation",
-                        )?;
                     crate::database::advance_worker_restart(
                         session_id,
                         &operation_id,
@@ -261,6 +341,13 @@ impl Controller {
                     )?;
                     stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
                         .context(RESTART_FOR_UPGRADE.stop)?;
+                    tracing::info!(%session_id, worker_root = %worker_root, "worker restart confirmed old process tree stopped");
+                    // Old workers reject unknown launch fields and may reread on stop.
+                    replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
+                        .context(
+                            "install the worker launch configuration under its idle reservation",
+                        )
+                        .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
                     start_worker_durably(
                         &owner,
                         target,
@@ -337,11 +424,12 @@ impl Controller {
                 if let Some(target) = target {
                     owner.verify_target(target)?;
                     if crate::database::load_worker_restart(session_id)?.is_some() {
-                        let output =
-                            executor.execute(&super::worker_binary::worker_liveness_command(
-                                restart.backend,
-                                restart.worker_root,
-                            ))?;
+                        let output = super::worker_binary::probe_worker_liveness(
+                            executor,
+                            restart.backend,
+                            session_id,
+                            restart.worker_root,
+                        )?;
                         anyhow::ensure!(
                             output.status == 0
                                 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
@@ -349,12 +437,14 @@ impl Controller {
                         );
                         owner.settle_dead_restart(target)?;
                     }
-                    owner.begin_restart(target, String::new())?;
-                    crate::database::advance_worker_restart(
-                        session_id,
-                        owner.operation_id(),
-                        crate::database::WorkerRestartPhase::Swapping,
-                    )?;
+                    if restart.discard_queued_prompts.is_none() {
+                        owner.begin_restart(target, String::new())?;
+                        crate::database::advance_worker_restart(
+                            session_id,
+                            owner.operation_id(),
+                            crate::database::WorkerRestartPhase::Swapping,
+                        )?;
+                    }
                 }
                 // A failed stop may leave the old worker alive, so it stays outside the
                 // marker the start below applies: only steps after a successful stop
@@ -392,6 +482,8 @@ impl Controller {
                 launch,
                 prepared,
                 messages,
+                swap_admission,
+                discard_queued_prompts,
             } = restart;
             let owner = crate::worker_lifecycle::require(session_id)?;
             let target = self
@@ -408,8 +500,11 @@ impl Controller {
                         || crate::database::worker_restart_phase(session_id)?
                             == Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
                     {
-                        let output = executor.execute(
-                            &super::worker_binary::worker_liveness_command(backend, worker_root),
+                        let output = super::worker_binary::probe_worker_liveness(
+                            executor,
+                            backend,
+                            session_id,
+                            worker_root,
                         )?;
                         anyhow::ensure!(
                             output.status == 0
@@ -419,7 +514,11 @@ impl Controller {
                         owner.settle_dead_restart(target)?;
                     }
                 }
-                if crate::database::load_worker_restart(session_id)?.is_none() {
+            }
+            let admit_start = || -> Result<()> {
+                if let Some(target) = target
+                    && crate::database::load_worker_restart(session_id)?.is_none()
+                {
                     owner.begin_restart(target, String::new())?;
                     crate::database::advance_worker_restart(
                         session_id,
@@ -427,6 +526,10 @@ impl Controller {
                         crate::database::WorkerRestartPhase::Swapping,
                     )?;
                 }
+                Ok(())
+            };
+            if discard_queued_prompts.is_none() {
+                admit_start()?;
             }
             // Everything up to the first successful connection either fails with no
             // worker running or cannot tell: the marker covers all of it.
@@ -444,6 +547,33 @@ impl Controller {
                         )
                         .context("install the current Mjolnir worker launch configuration")?;
                     }
+                }
+                if let Some(command_id) = &discard_queued_prompts {
+                    super::execute_checked(
+                        executor,
+                        targets::command_on_locator(
+                            SshTrafficClass::Control,
+                            backend,
+                            session_id,
+                            vec![
+                                format!("{worker_root}/hel"),
+                                "worker".into(),
+                                "discard-queued-prompts".into(),
+                                "--root".into(),
+                                worker_root.into(),
+                                "--session-id".into(),
+                                session_id.into(),
+                                "--command-id".into(),
+                                command_id.clone(),
+                            ],
+                            "discard queued prompts before repaired worker startup",
+                        )?,
+                    )?;
+                }
+                if discard_queued_prompts.is_some() {
+                    // Recovery may launch any recorded boot intent. Establish
+                    // queue disposition before making that restart possible.
+                    admit_start()?;
                 }
                 let started = match target {
                     Some(target) => start_worker_durably(
@@ -463,6 +593,12 @@ impl Controller {
             }
             .await
             .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+            if swap_admission.is_some() {
+                // Boot/journal recovery is durable and resumable. Match the
+                // upgrade path: readiness cannot hold daemon handoff.
+                executor.begin_resumable_work()?;
+            }
+            drop(swap_admission);
             self.observe_started_worker(
                 session_id,
                 executor,
@@ -473,6 +609,8 @@ impl Controller {
                     launch,
                     prepared,
                     messages,
+                    discard_queued_prompts: None,
+                    swap_admission: None,
                 },
             )
             .await
@@ -494,6 +632,7 @@ impl Controller {
             reconnect,
             launch,
             messages,
+            discard_queued_prompts,
             ..
         } = restart;
         let owner = crate::worker_lifecycle::require(session_id)?;
@@ -518,6 +657,11 @@ impl Controller {
                 .context(messages.connect)
                 .context(WorkerRestartLeftNoWorker)
         })?;
+        if let Some(command_id) = discard_queued_prompts {
+            connection
+                .submit(command_id, mj_core::relay::RelayCommand::ClearQueuedPrompts)
+                .await?;
+        }
         let project_memory = match self.project_memory_sync_target(session_id) {
             Ok(target) => target,
             Err(error) => {
@@ -602,7 +746,153 @@ mod tests {
     #[cfg(unix)]
     use crate::targets::CommandOutput;
 
-    /// Fails every command after the first, so a restart gets past its stop and
+    // Hard-won: 337bc5e follow-up: checkout repair held swap admission through slow harness readiness.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkout_repair_releases_swap_admission_after_durable_launch_before_readiness() {
+        const ID: &str = "aabbccddeeff00112233445566778899";
+        const LABEL: &str = "checkout repair swap regression";
+        const CHILD: &str = "MJ_CHECKOUT_SWAP_HANDOFF_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                "controller::worker_restart::tests::checkout_repair_releases_swap_admission_after_durable_launch_before_readiness",
+            ).env(CHILD, "1").isolated_store(directory.path()).run();
+            return;
+        }
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct LaunchThenHandoff {
+            started: AtomicBool,
+            discarded: AtomicBool,
+            yielded: AtomicBool,
+        }
+        impl CommandExecutor for LaunchThenHandoff {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                if !self.yielded.load(Ordering::SeqCst) {
+                    assert!(
+                        crate::upgrade::active_labels()
+                            .iter()
+                            .any(|label| label == LABEL)
+                    );
+                }
+                if command.purpose == "discard queued prompts before repaired worker startup" {
+                    assert!(!self.started.load(Ordering::SeqCst));
+                    assert!(crate::database::load_worker_restart(ID)?.is_none());
+                    self.discarded.store(true, Ordering::SeqCst);
+                }
+                if command.purpose == "start detached Mjolnir worker" {
+                    assert!(self.discarded.load(Ordering::SeqCst));
+                    assert_eq!(
+                        crate::database::worker_restart_phase(ID)?,
+                        Some(crate::database::WorkerRestartPhase::Swapping)
+                    );
+                    self.started.store(true, Ordering::SeqCst);
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+            fn begin_resumable_work(&self) -> Result<()> {
+                assert!(self.started.load(Ordering::SeqCst));
+                assert_eq!(
+                    crate::database::worker_restart_phase(ID)?,
+                    Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
+                );
+                self.yielded.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            fn cancellation_requested(&self) -> bool {
+                let yielded = self.yielded.load(Ordering::SeqCst);
+                if yielded {
+                    assert!(
+                        !crate::upgrade::active_labels()
+                            .iter()
+                            .any(|label| label == LABEL)
+                    );
+                }
+                yielded
+            }
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(ID).to_string_lossy().into_owned();
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: root.clone(),
+        };
+        let mut record = crate::controller::test_support::checkpoint_test_session(ID);
+        record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.clone().into(),
+        }));
+        record.target_template_id = "localhost".into();
+        record.state = mj_core::state::SessionState::Error;
+        crate::database::save_session(&record).unwrap();
+        let controller = Controller {
+            config: mj_core::config::Config::default(),
+            state: mj_core::state::State {
+                sessions: [(ID.into(), record)].into_iter().collect(),
+                ..Default::default()
+            },
+        };
+        let executor = LaunchThenHandoff {
+            started: AtomicBool::new(false),
+            discarded: AtomicBool::new(false),
+            yielded: AtomicBool::new(false),
+        };
+        let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
+        let error = match controller
+            .restart_worker_with_installed_binary(
+                ID,
+                &executor,
+                InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &root,
+                    reconnect: &reconnect,
+                    launch: None,
+                    prepared: true,
+                    discard_queued_prompts: Some("discard-before-boot".into()),
+                    swap_admission: Some(crate::upgrade::activity_unless_draining(LABEL).unwrap()),
+                    messages: &RESTART_FOR_UPGRADE,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("handoff must cancel observation"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        assert!(executor.yielded.load(Ordering::SeqCst));
+        assert_eq!(
+            crate::database::worker_restart_phase(ID).unwrap(),
+            Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
+        );
+    }
+
+    /// Fails every command after the first two (the control-worker check and the stop), so a restart gets past its stop and
     /// then loses the worker it was replacing.
     #[cfg(unix)]
     struct StopSucceedsThenFails {
@@ -611,10 +901,34 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for StopSucceedsThenFails {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let mut executed = self.executed.lock().expect("executed commands");
             executed.push(command.program.clone());
-            if executed.len() == 1 {
+            // The first two commands are the control-worker check and the stop.
+            if executed.len() <= 2 {
                 return Ok(CommandOutput {
                     status: 0,
                     stdout: Vec::new(),
@@ -634,6 +948,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for FailingStop {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 1,
@@ -671,6 +1008,8 @@ mod tests {
                     reconnect: &reconnect,
                     launch: None,
                     prepared: false,
+                    discard_queued_prompts: None,
+                    swap_admission: None,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },
             )
@@ -718,6 +1057,29 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct FailingCommands(AtomicUsize);
         impl CommandExecutor for FailingCommands {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(CommandOutput {
@@ -746,13 +1108,14 @@ mod tests {
             target: None,
             workspace: None,
             exit_record: None,
-            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()).into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: targets::CommandPlan {
                 description: "restart".into(),
                 commands: vec![],
-            },
+            }
+            .into(),
         };
         assert_eq!(
             crate::session_manager::recover_worker_controlled(recovery, true, Some(id), &executor)

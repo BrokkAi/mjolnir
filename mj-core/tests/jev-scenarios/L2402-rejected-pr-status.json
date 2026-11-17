@@ -1,0 +1,129 @@
+{
+  "id": "L2402",
+  "title": "rejected PR status",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "c4ff1d5f483a43b8c1513de718ef27c3",
+    "session_title": "bifrost via claude3",
+    "reply_position": 20188,
+    "captured_at": "2026-10-21T01:31:49.920Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:19440",
+          "role": "user",
+          "text": "what open PRs got rejected that are not in-progress already to remediate"
+        },
+        {
+          "id": "agent:19474",
+          "role": "assistant",
+          "text": "Four open PRs are rejected. I'm now checking which ones already have an active agent session working on them."
+        },
+        {
+          "id": "agent:19522",
+          "role": "assistant",
+          "text": "Four open PRs are rejected. One is being fixed and one is partly covered. The other two show no sign that anyone is fixing them.\n\nNote: nothing open has the `automerge-rejected` label. The queue now uses `mergemarshall:rejected`, so I searched for that.\n\n| PR | Rejected (UTC) | Fix in progress? | What failed |\n|---|---|---|---|\n| **#5732** Go qualified callees, call-or-conversion | 3 times, last at 10-19 12:18 | **No sign.** Draft since 12:19. No commits since 08:25. It has no linked issue (its body says \"Fixes #5732\", which is the PR itself). | `native_outgoing_projects_workspace_calls_and_omits_conversions`: conversions are recorded as calls. |\n| **#5898** Rust route precedence (#5780) | 10-19 14:17 | **No sign.** It became a draft 41 seconds after the rejection, but there are no commits or claim comments since. The `agent-in-progress` label on #5780 dates from the original work at 00:07. | Two Rust usage tests that this PR did not change, and that pass at the base commit: the explicit-bench dependency route is missing, and resolved std `Send` bounds add an extra result. |\n| **#5886** Rust macro token reads (#5658) | 10-19 12:18 | **Partly.** Ready ci-fix PR #5899 (for #5893) fixes the planner gate failure. Nobody has taken the second failure. Draft, no commits since 09:16. | 1. `every_pinned_query_plans_in_both_statistics_states`: fixed by #5899. 2. `layer_gate::layer_boundaries`: three build-layer violations from the nested `cfg(test)` block. No owner. |\n| **#5887** ci-fix, Rust inverse inventory (#5437) | 10-19 14:37 | **Yes, confirmed.** MergeMarshall fixer session `0b921275…` posted a claim on #5437 at 14:40. | Both Rust member-dispatch golden tests, on the item-macro scope with no definition. |\n\nSo **#5732** and **#5898** have no visible remediation, and so does the layer-gate half of **#5886**.\n\n\"No sign\" means I found no claim comment on the PR or issue, no commits after the rejection, and no replacement PR. I can't see other machines or Codex sessions directly. No other Claude session is running on this machine, and the session history index (which can lag) found nothing. The quick draft conversions, especially #5898's at 41 seconds, could mean the submitting session is still on it.\n\nIf you want me to take one: a memory note from 2026-10-09 limits Go work to changes that don't touch resolution. #5732 is Go resolution work, so check whether that limit still applies first. You opened #5732 after that date, so it may have been lifted.\n\n`★ Insight ─────────────────────────────────────`\n- The MergeMarshall fixer posts its claim on the *issue* (here #5437), not on the PR. To check whether a ci-fix is being repaired, read the linked issue's timeline.\n- Converting to draft is the first step of the repair process in `CLAUDE.md`, but a draft alone does not show that work continued. Commits after the rejection, or a claim comment, are better evidence.\n- One rejection can contain several unrelated failures. For #5886, the planner-gate failure got its own issue and ci-fix, while the layer-gate failure stayed with the original PR. A partial fix can make the PR look covered when it is not.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:20171",
+          "role": "user",
+          "text": "is 5732 still orphaned?"
+        },
+        {
+          "id": "agent:20188",
+          "role": "assistant",
+          "text": "No, #5732 is no longer orphaned. It merged on 2026-10-19 at 21:13 UTC in batch #5953 (merge commit `b774c063ec`).\n\nAfter it landed, it broke the resolution-facts golden test, which still expected a `callable_receiver_origin` for the package-qualified Go call (#5973). The ci-fix PR #5979 fixed that and merged on 2026-10-20 at 12:56 UTC, and #5973 is closed. Nothing about #5732 is still open.\n\nThe other three PRs from my earlier list have also merged:\n- #5886 merged 2026-10-19 21:13 UTC, in the same batch as #5732.\n- #5887 merged 2026-10-20 12:56 UTC.\n- #5898 merged 2026-10-20 17:36 UTC.\n\n`★ Insight ─────────────────────────────────────`\n- A draft PR with no new commits can still be under repair. All of #5732's repair commits went in before 08:25, and it was later re-readied and admitted to a batch. So my \"no sign\" read yesterday was a snapshot, not a sign it was abandoned.\n- Getting through the queue did not mean everything was fixed. #5732 passed its batch but broke a golden test that its lane never ran. Your memory note \"Fact-producer lanes run the resolution-facts golden\" records this case.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "is 5732 still orphaned?",
+    "assistant_text_tail": "No, #5732 is no longer orphaned. It merged on 2026-10-19 at 21:13 UTC in batch #5953 (merge commit `b774c063ec`).\n\nAfter it landed, it broke the resolution-facts golden test, which still expected a `callable_receiver_origin` for the package-qualified Go call (#5973). The ci-fix PR #5979 fixed that and merged on 2026-10-20 at 12:56 UTC, and #5973 is closed. Nothing about #5732 is still open.\n\nThe other three PRs from my earlier list have also merged:\n- #5886 merged 2026-10-19 21:13 UTC, in the same batch as #5732.\n- #5887 merged 2026-10-20 12:56 UTC.\n- #5898 merged 2026-10-20 17:36 UTC.\n\n`★ Insight ─────────────────────────────────────`\n- A draft PR with no new commits can still be under repair. All of #5732's repair commits went in before 08:25, and it was later re-readied and admitted to a batch. So my \"no sign\" read yesterday was a snapshot, not a sign it was abandoned.\n- Getting through the queue did not mean everything was fixed. #5732 passed its batch but broke a golden test that its lane never ran. Your memory note \"Fact-producer lanes run the resolution-facts golden\" records this case.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 20171,
+    "input_rationale": "The user asked whether #5732 was still orphaned; the answer is no, with merge facts. The sentence states that nothing remains, and the other PRs listed are merged. The earlier 'take one?' offer predates the latest user message.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-21T01:31:59.826Z",
+        "kind": "system",
+        "text": "Clearing context…"
+      },
+      {
+        "at": "2026-10-21T01:32:01.325Z",
+        "kind": "system",
+        "text": "Context cleared — a new conversation starts here."
+      },
+      {
+        "at": "2026-10-21T01:32:10.389Z",
+        "kind": "user",
+        "text": "pls take over PR 5682"
+      },
+      {
+        "at": "2026-10-21T01:32:28.590Z",
+        "kind": "system",
+        "text": "Interrupted"
+      },
+      {
+        "at": "2026-10-21T01:51:12.937Z",
+        "kind": "system",
+        "text": "Clearing context…"
+      },
+      {
+        "at": "2026-10-21T01:51:14.068Z",
+        "kind": "system",
+        "text": "Context cleared — a new conversation starts here."
+      }
+    ]
+  }
+}

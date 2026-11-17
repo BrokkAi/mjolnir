@@ -3,6 +3,27 @@ use super::*;
 /// Persist one operational session without rewriting unrelated controller
 /// state. Dashboard lifecycle jobs use this path so independent jobs can
 /// commit concurrently without restoring stale copies of other sessions.
+pub(crate) fn save_imported_session(
+    session: &SessionRecord,
+    materialized: &MaterializedSession,
+) -> Result<()> {
+    let session = session.clone();
+    let materialized = materialized.clone();
+    submit_database_write("save_imported_session", move |connection| {
+        validate_session_record(&session)?;
+        materialized.validate()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure!(
+            !session_exists(&tx, &session.id)?,
+            "imported session already exists"
+        );
+        insert_session(&tx, &session)?;
+        write_materialized_session(&tx, &materialized)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 pub fn save_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_session", move |_| {
@@ -43,6 +64,7 @@ pub(super) fn save_new_session_to(
         "a session profile id cannot use the reserved legacy preference key"
     );
     insert_session(&tx, session)?;
+    super::session_create::insert_create_intent(&tx, session, remember_launch_choices)?;
     if let Some((host, size)) = container_size.filter(|_| remember_container_size) {
         write_host_container_size(&tx, &host, size)?;
     }
@@ -52,6 +74,13 @@ pub(super) fn save_new_session_to(
             "INSERT INTO subagent_preference(profile_id, policy) VALUES(?1, ?2)
              ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
             params![session.last_profile, serde_json::to_string(&policy)?],
+        )?;
+    }
+    if remember_launch_choices {
+        tx.execute(
+            "INSERT INTO oracle_preference(profile_id, enabled) VALUES(?1, ?2)
+             ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
+            params![session.last_profile, session.oracle],
         )?;
     }
     tx.commit()?;
@@ -83,12 +112,24 @@ pub fn set_publication_assessment_if_current(
     })
 }
 
+/// A primary may have one live oracle; registration refused another.
+#[derive(Debug)]
+pub(crate) struct OracleAlreadyLive;
+
+impl std::fmt::Display for OracleAlreadyLive {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("this session already has a live oracle")
+    }
+}
+
+impl std::error::Error for OracleAlreadyLive {}
+
 /// Persist a borrowed-target child and its parent relationship atomically.
 pub fn save_subagent_session(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
 ) -> Result<()> {
-    register_subagent_with_startup(session, subagent, Vec::new())
+    register_subagent_with_startup(session, subagent, Vec::new(), None)
 }
 
 /// Publish the child and its complete initial input in the same transaction.
@@ -97,9 +138,11 @@ pub(crate) fn register_subagent_with_startup(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
     startup: Vec<super::startup::StartupDelivery>,
+    report_dir: Option<&str>,
 ) -> Result<()> {
     let session = session.clone();
     let subagent = subagent.clone();
+    let report_dir = report_dir.map(str::to_owned);
     submit_database_write("save_subagent_session", move |_| {
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -107,7 +150,38 @@ pub(crate) fn register_subagent_with_startup(
             &tx,
             &subagent.parent_session_id,
         )?;
-        insert_session(&tx, &session)?;
+        let parent_state = tx.query_row(
+            "SELECT state FROM sessions WHERE session_id=?1",
+            [&subagent.parent_session_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        ensure!(
+            super::values::stored_session_state(&parent_state).can_receive_child_work(),
+            "parent is no longer accepting child work"
+        );
+        if subagent.kind == mj_core::subagent::SubagentKind::Oracle {
+            let mut statement = tx.prepare(
+                "SELECT s.state FROM subagent_sessions c
+                 JOIN sessions s ON s.session_id = c.child_session_id
+                 WHERE c.parent_session_id = ?1 AND c.request_key LIKE 'oracle:%'",
+            )?;
+            let live = statement
+                .query_map([&subagent.parent_session_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .filter_map(|state| mj_core::state::SessionState::from_stored(state))
+                .any(mj_core::state::SessionState::can_receive_child_work);
+            drop(statement);
+            if live {
+                return Err(OracleAlreadyLive.into());
+            }
+        }
+        super::state_io::insert_session_with_parent(
+            &tx,
+            &session,
+            Some(&subagent.parent_session_id),
+        )?;
+        super::session_create::insert_create_intent(&tx, &session, false)?;
         super::usage::record_child_accounting(&tx, &subagent)?;
         tx.execute(
             "INSERT INTO subagent_sessions(
@@ -121,6 +195,11 @@ pub(crate) fn register_subagent_with_startup(
             ],
         )?;
         super::startup::enqueue_startup_deliveries_with(&tx, startup)?;
+        // The report directory commits with the registration, so no later
+        // step can leave a registered child without it.
+        if let Some(report_dir) = &report_dir {
+            record_subagent_report_dir_with(&tx, &subagent.child_session_id, report_dir)?;
+        }
         tx.commit()?;
         Ok(())
     })
@@ -164,6 +243,43 @@ pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::
     )?;
     statement
         .query_map([parent_session_id], |row| row.get::<_, String>(0))?
+        .map(|row| serde_json::from_str(&row?).context("decode sub-agent record"))
+        .collect()
+}
+
+/// A parent's child session ids in registration order, read from the index
+/// without decoding any record.
+pub fn list_subagent_ids(parent_session_id: &str) -> Result<Vec<String>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT child_session_id FROM subagent_sessions
+         WHERE parent_session_id = ?1 ORDER BY rowid",
+    )?;
+    statement
+        .query_map([parent_session_id], |row| row.get(0))?
+        .map(|row| row.map_err(Into::into))
+        .collect()
+}
+
+/// The parent's records for the given children, in registration order. A
+/// parent can hold thousands of children; a caller that needs a few decodes
+/// only those.
+pub fn list_subagents_among(
+    parent_session_id: &str,
+    child_session_ids: &[String],
+) -> Result<Vec<mj_core::subagent::SubagentRecord>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT record_json FROM subagent_sessions
+         WHERE parent_session_id = ?1
+           AND child_session_id IN (SELECT value FROM json_each(?2))
+         ORDER BY rowid",
+    )?;
+    let ids = serde_json::to_string(child_session_ids)?;
+    statement
+        .query_map(rusqlite::params![parent_session_id, ids], |row| {
+            row.get::<_, String>(0)
+        })?
         .map(|row| serde_json::from_str(&row?).context("decode sub-agent record"))
         .collect()
 }
@@ -370,7 +486,15 @@ pub(super) fn record_subagent_report_dir_to(
     child_session_id: &str,
     report_dir: &str,
 ) -> Result<()> {
-    open(path)?.execute(
+    record_subagent_report_dir_with(&open(path)?, child_session_id, report_dir)
+}
+
+fn record_subagent_report_dir_with(
+    connection: &rusqlite::Connection,
+    child_session_id: &str,
+    report_dir: &str,
+) -> Result<()> {
+    connection.execute(
         "INSERT INTO subagent_handbacks(child_session_id, report_dir)
          SELECT ?1, ?2 WHERE EXISTS (
              SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1
@@ -535,8 +659,8 @@ pub fn save_session_with_container_size(
     })
 }
 
-/// Resume owns the target, checkout and attached resources, never a client's
-/// title, draft, archive visibility or the worker's current display title.
+/// Resume publication owns the target and checkout. Requested size and mounts,
+/// client titles, drafts, archive visibility and worker titles keep their owners.
 pub fn save_resumed_session(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
@@ -554,10 +678,81 @@ pub fn save_resumed_session(
     })
 }
 
+/// Commit explicit dialog choices together with the first provisioning publication.
+pub(crate) fn accept_resumed_session(
+    session: &SessionRecord,
+    container_size: Option<(&str, HostContainerSize)>,
+    requests: &crate::controller::SessionResumeOptions,
+) -> Result<()> {
+    let session = session.clone();
+    let requests = requests.clone();
+    let container_size = container_size.map(|(host, size)| (host.to_owned(), size));
+    submit_database_write("accept resumed session", move |_| {
+        save_resumed_session_in_environment_to(
+            &database_path(),
+            &session,
+            container_size
+                .as_ref()
+                .map(|(host, size)| (host.as_str(), *size)),
+            None,
+            Some(&requests),
+            None,
+        )
+    })
+}
+
 pub(super) fn save_resumed_session_to(
     path: &Path,
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
+) -> Result<()> {
+    save_resumed_session_in_environment_to(path, session, container_size, None, None, None)
+}
+
+pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &str) -> Result<()> {
+    let session = session.clone();
+    let environment_id = environment_id.to_owned();
+    submit_database_write("restore resumed environment", move |_| {
+        save_resumed_session_in_environment_to(
+            &database_path(),
+            &session,
+            None,
+            Some(&environment_id),
+            None,
+            None,
+        )
+    })
+}
+
+/// Restore the source and release Move's restore authority in one commit.
+/// Read the latest intent here: destination retirement may have updated it.
+pub(crate) fn settle_superseded_move_source(
+    session: &SessionRecord,
+    environment_id: Option<&str>,
+    operation_id: &str,
+) -> Result<()> {
+    let session = session.clone();
+    let environment_id = environment_id.map(str::to_owned);
+    let operation_id = operation_id.to_owned();
+    submit_database_write("settle superseded Move source", move |_| {
+        save_resumed_session_in_environment_to(
+            &database_path(),
+            &session,
+            None,
+            environment_id.as_deref(),
+            None,
+            Some(&operation_id),
+        )
+    })
+}
+
+fn save_resumed_session_in_environment_to(
+    path: &Path,
+    session: &SessionRecord,
+    container_size: Option<(&str, HostContainerSize)>,
+    environment_id: Option<&str>,
+    requests: Option<&crate::controller::SessionResumeOptions>,
+    close_move: Option<&str>,
 ) -> Result<()> {
     validate_session_record(session)?;
     let mut connection = open(path)?;
@@ -572,18 +767,38 @@ pub(super) fn save_resumed_session_to(
         "session {} context changed before resume publication",
         session.id
     );
+    if let Some(environment_id) = environment_id {
+        let owner: String = tx.query_row(
+            "SELECT owner_session_id FROM environments WHERE environment_id=?1",
+            [environment_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            owner == session.id,
+            "resume rollback does not own the selected environment"
+        );
+        tx.execute(
+            "UPDATE environment_bindings SET environment_id=?2 WHERE session_id=?1",
+            params![session.id, environment_id],
+        )?;
+    }
     update_lifecycle_fields(&tx, session)?;
+    if let Some(requests) = requests {
+        super::state_io::update_container_requests(
+            &tx,
+            &session.id,
+            requests.resource_allocation.as_ref().map(Some),
+            requests.additional_mounts.as_deref(),
+        )?;
+    }
     tx.execute(
-        "UPDATE sessions SET native_session_id = ?2, container_cpus = ?3,
-             container_memory = ?4, container_workspace = ?5,
-             create_managed_worktree = ?6, launch_base = ?7, launch_branch = ?8,
-             checkout_json = ?9
+        "UPDATE sessions SET native_session_id = ?2, container_workspace = ?3,
+             create_managed_worktree = ?4, launch_base = ?5, launch_branch = ?6,
+             checkout_json = ?7
          WHERE session_id = ?1",
         params![
             session.id,
             session.native_session_id,
-            session.container_cpus,
-            session.container_memory,
             session
                 .container_workspace
                 .as_ref()
@@ -598,10 +813,17 @@ pub(super) fn save_resumed_session_to(
                 .transpose()?,
         ],
     )?;
-    replace_mounts(&tx, &session.id, &session.additional_mounts)?;
     replace_checkpoint(&tx, session)?;
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, host, size)?;
+    }
+    if let Some(operation_id) = close_move {
+        super::session_move::resolve_cancelled_move_for_close_with(
+            &tx,
+            &session.id,
+            operation_id,
+            &session.updated_at,
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -614,6 +836,140 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_lifecycle_session", move |_| {
         save_lifecycle_session_to(&database_path(), &session)
+    })
+}
+
+/// Acceptance of Suspend owns its intent, readiness and Closing publication.
+pub(crate) fn save_suspension_intent(
+    session: &SessionRecord,
+    ready_move: Option<&mj_core::state::MoveOperation>,
+) -> Result<()> {
+    let mut session = session.clone();
+    let ready_move = ready_move.cloned();
+    submit_database_write("save suspension intent", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut operation = super::session_move::load_move_operation_with(&tx, &session.id)?;
+        if let Some(operation) = operation.as_mut() {
+            if operation.is_resolved() {
+                tx.execute("UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1", [&session.id])?;
+            } else {
+                if let Some(ready) = ready_move
+                    .as_ref()
+                    .filter(|ready| ready.operation_id == operation.operation_id)
+                {
+                    operation.destination_target = ready.destination_target.clone();
+                    operation.destination_native_session_id =
+                        ready.destination_native_session_id.clone();
+                    operation.updated_at = session.updated_at.clone();
+                    super::session_move::save_move_operation_with(&tx, operation)?;
+                }
+                // Only this accepted request grants close authority. A Move's
+                // cancellation/phase alone never does, even for historical rows.
+                if session.state != SessionState::Destroying {
+                    session.state = SessionState::Closing;
+                }
+                tx.execute("UPDATE session_moves SET close_requested_operation_id=?2 WHERE session_id=?1 AND operation_id=?2", params![session.id, operation.operation_id])?;
+            }
+        }
+        validate_session_record(&session)?;
+        update_lifecycle_fields(&tx, &session)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+pub(crate) fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord> {
+    let mut session = session.clone();
+    submit_database_write("save failed close", move |connection| {
+        validate_session_record(&session)?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: String = tx.query_row(
+            "SELECT state FROM sessions WHERE session_id=?1",
+            [&session.id],
+            |row| row.get(0),
+        )?;
+        session.state = stored_session_state(&current);
+        let operation = super::session_move::load_move_operation_with(&tx, &session.id)?;
+        let close_intent: Option<(String, Option<String>)> = tx.query_row(
+            "SELECT operation_id, close_requested_operation_id FROM session_moves WHERE session_id=?1",
+            [&session.id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let accepted_move_close = operation
+            .as_ref()
+            .filter(|operation| !operation.is_resolved())
+            .zip(close_intent.as_ref())
+            .is_some_and(|(operation, (row_id, close_id))| {
+                super::session_move::exact_move_close_intent(
+                    &operation.operation_id,
+                    row_id,
+                    close_id.as_deref(),
+                )
+            });
+        let unresolved_move = operation
+            .as_ref()
+            .is_some_and(|operation| !operation.is_resolved());
+        if (session.state == SessionState::Closing && (!unresolved_move || accepted_move_close))
+            || (session.state == SessionState::Provisioning && accepted_move_close)
+        {
+            session.state = SessionState::Error;
+        }
+        update_lifecycle_fields(&tx, &session)?;
+        // Destroying is still an owned, verified teardown, not a terminal
+        // failure. Its request must survive until startup finishes cleanup.
+        if session.state != SessionState::Destroying {
+            tx.execute(
+                "UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1",
+                [&session.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(session)
+    })
+}
+
+/// A verified close of a restored destination also ends its cancelled Move.
+/// Check the old placement before publishing the terminal lifecycle state.
+pub(crate) fn save_closed_session(session: &SessionRecord) -> Result<()> {
+    let session = session.clone();
+    submit_database_write("save closed session", move |connection| {
+        validate_session_record(&session)?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let ready_move = if session.state == SessionState::Stopped {
+            super::session_move::load_move_operation_with(&tx, &session.id)?.filter(|operation| {
+                operation.phase == mj_core::state::MovePhase::Cancelled
+                    && !operation.queue_admission_started
+                    && operation.destination_target.is_some()
+            })
+        } else {
+            None
+        };
+        let ready_move = match ready_move {
+            Some(operation)
+                if super::state_io::read_targets(&tx, Some(&session.id))?
+                    .iter()
+                    .any(|(_, target)| Some(target) == operation.destination_target.as_ref()) =>
+            {
+                Some(operation)
+            }
+            _ => None,
+        };
+        update_lifecycle_fields(&tx, &session)?;
+        if let Some(operation) = ready_move {
+            super::session_move::resolve_cancelled_move_for_close_with(
+                &tx,
+                &session.id,
+                &operation.operation_id,
+                &session.updated_at,
+            )?;
+        }
+        if session.state == SessionState::Stopped {
+            tx.execute(
+                "UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1",
+                [&session.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     })
 }
 
@@ -709,6 +1065,16 @@ pub(super) fn rename_profile_references_at(
     )?;
     tx.execute(
         "DELETE FROM subagent_preference WHERE profile_id = ?1",
+        [old_id],
+    )?;
+    tx.execute(
+        "INSERT INTO oracle_preference(profile_id, enabled)
+         SELECT ?2, enabled FROM oracle_preference WHERE profile_id = ?1
+         ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
+        "DELETE FROM oracle_preference WHERE profile_id = ?1",
         [old_id],
     )?;
     tx.commit()?;
@@ -880,6 +1246,32 @@ pub(super) fn set_session_archived_to(path: &Path, session_id: &str, archived: b
     Ok(())
 }
 
+/// Change only whether this session raises notifications. Ignoring is a
+/// display choice, so it has its own writer and never rewrites lifecycle,
+/// checkpoint, or title columns another task owns.
+pub fn set_session_notifications_ignored(session_id: &str, ignored: bool) -> Result<()> {
+    let session_id = session_id.to_owned();
+    submit_database_write("set_session_notifications_ignored", move |_| {
+        set_session_notifications_ignored_to(&database_path(), &session_id, ignored)
+    })
+}
+
+pub(super) fn set_session_notifications_ignored_to(
+    path: &Path,
+    session_id: &str,
+    ignored: bool,
+) -> Result<()> {
+    let connection = open(path)?;
+    let changed = connection.execute(
+        "UPDATE sessions SET notifications_ignored = ?2 WHERE session_id = ?1",
+        params![session_id, ignored],
+    )?;
+    if changed != 1 {
+        bail!("unknown session {session_id}");
+    }
+    Ok(())
+}
+
 /// Native sessions the resume dialog hides. Hel never writes into a harness
 /// home, so the hidden set lives here instead of in the harness's own store.
 pub fn hidden_native_sessions() -> Result<BTreeSet<(mj_core::config::HarnessKind, String)>> {
@@ -957,22 +1349,19 @@ pub(super) fn set_native_session_hidden_to(
 /// owns is left to its own writer.
 pub fn set_session_container_settings(
     session_id: &str,
-    cpus: Option<&str>,
-    memory: Option<&str>,
+    allocation: Option<&SessionResourceAllocation>,
     mounts: &[AdditionalMount],
     updated_at: &str,
 ) -> Result<()> {
     let session_id = session_id.to_owned();
-    let cpus = cpus.map(str::to_owned);
-    let memory = memory.map(str::to_owned);
+    let allocation = allocation.cloned();
     let mounts = mounts.to_vec();
     let updated_at = updated_at.to_owned();
     submit_database_write("set_session_container_settings", move |_| {
         set_session_container_settings_to(
             &database_path(),
             &session_id,
-            cpus.as_deref(),
-            memory.as_deref(),
+            allocation.as_ref(),
             &mounts,
             &updated_at,
         )
@@ -982,8 +1371,7 @@ pub fn set_session_container_settings(
 pub(super) fn set_session_container_settings_to(
     path: &Path,
     session_id: &str,
-    cpus: Option<&str>,
-    memory: Option<&str>,
+    allocation: Option<&SessionResourceAllocation>,
     mounts: &[AdditionalMount],
     updated_at: &str,
 ) -> Result<()> {
@@ -1005,9 +1393,13 @@ pub(super) fn set_session_container_settings_to(
     }
     let changed = tx.execute(
         "UPDATE sessions
-         SET container_cpus = ?2, container_memory = ?3, updated_at = ?4
+         SET resource_allocation = ?2, updated_at = ?3
          WHERE session_id = ?1",
-        params![session_id, cpus, memory, updated_at],
+        params![
+            session_id,
+            allocation.map(serde_json::to_string).transpose()?,
+            updated_at
+        ],
     )?;
     if changed != 1 {
         bail!("unknown session {session_id}");
@@ -1128,8 +1520,9 @@ pub(super) fn mark_session_worker_connected_to(
     if updated_at.trim().is_empty() {
         bail!("worker connection timestamp is empty");
     }
-    let connection = open(path)?;
-    let changed = connection.execute(
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
         "UPDATE sessions
          SET state = 'running',
              native_session_id = coalesce(?2, native_session_id),
@@ -1141,6 +1534,9 @@ pub(super) fn mark_session_worker_connected_to(
     if changed != 1 {
         bail!("unknown session {session_id}");
     }
+    // The create commits in this write: nothing is left for a later daemon.
+    super::session_create::settle_create_intent_for_state(&tx, session_id, SessionState::Running)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1254,6 +1650,10 @@ pub(crate) fn save_startup_cleanup_outcome(session: &SessionRecord, archive: boo
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         update_lifecycle_fields(&tx, &session)?;
+        if session.state == SessionState::Provisioning {
+            // A retried child start continues its create.
+            super::session_create::restore_create_intent_for_retry(&tx, &session)?;
+        }
         if archive {
             tx.execute(
                 "UPDATE sessions SET archived=1 WHERE session_id=?1",
@@ -1289,7 +1689,7 @@ pub(super) fn validate_session_record(session: &SessionRecord) -> Result<()> {
 }
 
 /// Remove one operational session while retaining its relational history
-/// context and prompt history.
+/// context. A database trigger removes its prompt history with it.
 pub fn delete_session(session_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     submit_database_write("delete_session", move |_| {
@@ -1454,8 +1854,8 @@ fn record_recovery_success_if_current_with(
     let Some(mut current) = load_session_with(&tx, session_id)? else {
         return Ok(false);
     };
-    if current.target.as_ref() != Some(expected_target)
-        || current.checkpoint.as_ref() != expected_checkpoint
+    if current.target.as_deref() != Some(expected_target)
+        || current.checkpoint.as_deref() != expected_checkpoint
     {
         return Ok(false);
     }
@@ -1464,7 +1864,7 @@ fn record_recovery_success_if_current_with(
          WHERE session_id = ?1",
         params![session_id, native_session_id],
     )?;
-    current.checkpoint = Some(checkpoint.clone());
+    current.checkpoint = Some(Box::new(checkpoint.clone()));
     replace_checkpoint(&tx, &current)?;
     tx.commit()?;
     Ok(true)
@@ -1512,8 +1912,8 @@ fn record_recovery_failure_if_current_with(
     let Some(current) = load_session_with(&tx, session_id)? else {
         return Ok(false);
     };
-    if current.target.as_ref() != Some(expected_target)
-        || current.checkpoint.as_ref() != expected_checkpoint
+    if current.target.as_deref() != Some(expected_target)
+        || current.checkpoint.as_deref() != expected_checkpoint
     {
         return Ok(false);
     }
@@ -1583,10 +1983,29 @@ pub(super) fn rebind_session_bundle_to(
     Ok(canonical_bundle)
 }
 
+/// Compare and dismiss under the database writer, so a concurrent new failure
+/// cannot inherit the receipt for the failure the person saw.
+pub fn dismiss_recorded_failure(
+    session_id: &str,
+    failure: mj_core::attention::FailureIdentity,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let json = serde_json::to_string(&failure)?;
+    submit_database_write("dismiss recorded failure", move |connection| {
+        let changed = connection.execute(
+            "UPDATE sessions SET dismissed_failure_json=?2 WHERE session_id=?1 AND state=?3 AND last_error IS ?4 AND failure_generation=?5",
+            params![session_id, json, failure.state.as_str(), failure.last_error, failure.generation],
+        )?;
+        ensure!(changed == 1, "notification is no longer current");
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
 
+    // Hard-won: #1538: a resume save overwrote a Container settings edit made while it provisioned
     #[test]
     fn resume_and_rollback_preserve_edits_committed_after_their_snapshot() {
         let directory = tempfile::tempdir().unwrap();
@@ -1613,7 +2032,7 @@ mod ownership_tests {
             .unwrap();
         assert_eq!(current.state, SessionState::Provisioning);
         assert_eq!(current.native_session_id, provisioning.native_session_id);
-        assert!(current.additional_mounts.is_empty());
+        assert_eq!(current.additional_mounts, original.additional_mounts);
         assert_eq!(
             current.session_title_override.as_deref(),
             Some("renamed during resume")
@@ -1626,13 +2045,45 @@ mod ownership_tests {
         assert!(current.archived);
         assert_eq!(current.viewed_through_event_ordinal, 99);
 
+        let allocation = SessionResourceAllocation::Container {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        };
+        let mounts = vec![AdditionalMount {
+            source: "/new/source".into(),
+            destination: "/new/destination".into(),
+            access: crate::targets::MountAccess::Ro,
+        }];
+        set_session_container_settings_to(
+            &path,
+            &original.id,
+            Some(&allocation),
+            &mounts,
+            "2026-11-13T00:00:00Z",
+        )
+        .unwrap();
+        // The converted-checkpoint publication still holds the provisioning snapshot.
+        provisioning.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+            archive_path: "converted.hel.zip".into(),
+            sha256: "c".repeat(64),
+            created_at: "2026-11-13T00:01:00Z".into(),
+            event_frontier: 1,
+        }));
+        save_resumed_session_to(&path, &provisioning, None).unwrap();
+        let converted = load_session_with(&connection, &original.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(converted.resource_allocation, Some(allocation.clone()));
+        assert_eq!(converted.additional_mounts, mounts);
+
         // Failure restores a snapshot captured before those independent edits.
         save_resumed_session_to(&path, &original, None).unwrap();
         let rolled_back = load_session_with(&connection, &original.id)
             .unwrap()
             .unwrap();
         assert_eq!(rolled_back.state, original.state);
-        assert_eq!(rolled_back.additional_mounts, original.additional_mounts);
+        assert_eq!(rolled_back.additional_mounts, mounts);
+        assert_eq!(rolled_back.resource_allocation, Some(allocation));
         assert_eq!(
             rolled_back.session_title_override,
             current.session_title_override
@@ -1690,7 +2141,7 @@ mod ownership_tests {
         let current = load_session_with(&connection, &original.id)
             .unwrap()
             .unwrap();
-        assert_eq!(current.checkpoint.as_ref(), Some(&next));
+        assert_eq!(current.checkpoint.as_deref(), Some(&next).map(|v| &**v));
         assert_eq!(current.native_session_id.as_deref(), Some("new-native"));
         assert_eq!(current.last_checkpoint_error, None);
 
@@ -1733,7 +2184,7 @@ mod ownership_tests {
                 &mut connection,
                 &original.id,
                 original.target.as_ref().unwrap(),
-                original.checkpoint.as_ref(),
+                original.checkpoint.as_deref(),
                 "current failure",
             )
             .unwrap()
@@ -1754,7 +2205,7 @@ mod ownership_tests {
                 &mut connection,
                 &original.id,
                 original.target.as_ref().unwrap(),
-                original.checkpoint.as_ref(),
+                original.checkpoint.as_deref(),
                 "late failure",
             )
             .unwrap()

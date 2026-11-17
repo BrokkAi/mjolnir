@@ -1,0 +1,167 @@
+{
+  "id": "W136",
+  "title": "Waiting candidate 136 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "94e37ec581e3fc713431703e442fdc28",
+    "session_title": "8127p2-impl: request-scoped JVM import-context snapshot on a shared envelope",
+    "reply_position": 1317,
+    "captured_at": "2026-10-30T07:57:42.043Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I’ll read the final design conditions and ownership map, then implement the shared snapshot and run the focused certificate before broader validation."
+        },
+        {
+          "id": "agent:102",
+          "role": "assistant",
+          "text": "Implementation remains incomplete. No files changed or tests run. Findings and outstanding work were handed back to the parent."
+        },
+        {
+          "id": "agent:156",
+          "role": "assistant",
+          "text": "I’ll do Slice A only: extract the shared envelope, move Go onto it without changing storage or behavior, then run the specified checks and hand it back for your commit."
+        },
+        {
+          "id": "agent:260",
+          "role": "assistant",
+          "text": "The envelope now owns cloning, shared-name capture and restore, with hooks for the language payload and side effects. Go’s exhaustive field classification keeps the existing allow/refuse policy. Its cache keys, store-cache admission, and package-inventory replay remain in place. I’ll compile and check the refactor next."
+        },
+        {
+          "id": "agent:403",
+          "role": "assistant",
+          "text": "Validation is building dependencies through mbx. The diff is limited to `selected_context.rs` and `go_named.rs`; the existing Go snapshot refusal tests have been adapted to exercise the shared restore path."
+        },
+        {
+          "id": "agent:467",
+          "role": "assistant",
+          "text": "The store crate is compiling now. The retention census still counts the same Go payload allocations; the envelope adds an identity-table handle that shares those allocations. The store’s existing byte budget and oversize-entry refusal remain unchanged."
+        },
+        {
+          "id": "agent:531",
+          "role": "assistant",
+          "text": "The build is still running, with no compiler errors reported so far. I’ll leave Slice B untouched and stop after Slice A’s validation, as requested."
+        },
+        {
+          "id": "agent:591",
+          "role": "assistant",
+          "text": "The store build has progressed into `bifrost-analysis`, which Go analysis depends on. No test results or compiler errors have been reported yet. The validation script will then run the Go engine tests, issue suite, Clippy, formatting, and pack-drift checks."
+        },
+        {
+          "id": "agent:680",
+          "role": "assistant",
+          "text": "The first compilation has completed. I spotted a small retention issue in review: the payload already owns the isolated identity table, so a second retained handle is unnecessary. I’ll remove it and avoid a second payload clone during restore, then rerun the affected validation on that source."
+        },
+        {
+          "id": "agent:771",
+          "role": "assistant",
+          "text": "The initial store and Go analysis lib run passed all 1,266 tests. The Go engine test build is next. I’ll repeat the libs after the retention refinement so the handback includes results for the final source."
+        },
+        {
+          "id": "agent:856",
+          "role": "assistant",
+          "text": "I’m continuing Slice A. The retention edit accidentally removed an `identities` field from `SelectedContextPathPublication`, causing three compiler errors. I’ll restore that field and rerun the failed validation before handing this back."
+        },
+        {
+          "id": "agent:940",
+          "role": "assistant",
+          "text": "The field is restored, and validation has restarted on the corrected source. The pack-drift check passed outside the sandbox; its first attempt failed because the sandbox blocked Node’s `spawnSync git` call."
+        },
+        {
+          "id": "agent:1009",
+          "role": "assistant",
+          "text": "The corrected store build has progressed into `bifrost-analysis` without errors. Only the two intended files are modified. Go’s payload shape and retention census now match the original; the shared envelope owns capture, restore, and the empty-destination assertion."
+        },
+        {
+          "id": "agent:1081",
+          "role": "assistant",
+          "text": "The final lib build is still running with no reported errors. I’ve recorded the field classification and Go replay behavior in `/tmp/java-parity/8127p2/impl/slice-a-notes.txt` for review."
+        },
+        {
+          "id": "agent:1140",
+          "role": "assistant",
+          "text": "I’m finishing Slice A only. The corrected validation run is active under `/tmp/java-parity/8127p2/impl/final/`; I’ll report its pass/fail results and the Go classification table before starting Slice B."
+        },
+        {
+          "id": "agent:1210",
+          "role": "assistant",
+          "text": "The corrected source passed all 1,266 store and Go analysis lib tests. The Go engine target is compiling its language-analysis dependencies now. No further source edits are pending."
+        },
+        {
+          "id": "agent:1261",
+          "role": "assistant",
+          "text": "mbx found another build compiling the tools target with the same arguments and is waiting to reuse it if the results match. The remaining checks are still queued behind that build."
+        },
+        {
+          "id": "agent:1317",
+          "role": "assistant",
+          "text": "The tools build is still waiting on the matching mbx compilation. I’m leaving scheduling with mbx and keeping the source unchanged while validation runs."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "The tools build is still waiting on the matching mbx compilation. I’m leaving scheduling with mbx and keeping the source unchanged while validation runs.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 850,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "The tools build is still waiting on the matching mbx compilation. I’m leaving scheduling with mbx and keeping the source unchanged while validation runs."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-30T07:58:31.217Z",
+        "kind": "system",
+        "text": "warning: prompt failed: Selected model is at capacity. Please try a different model."
+      }
+    ]
+  }
+}

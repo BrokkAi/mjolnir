@@ -82,6 +82,11 @@ pub(super) async fn decode_prompt_images_off_task(
                 image.height = optimized.height;
             }
         }
+        // Every image is now the reference the worker will receive, so the
+        // whole prompt is measured as its command.
+        if let ControllerAction::Prompt { text, images, .. } = &action {
+            ensure_prompt_command_fits(text, images)?;
+        }
         Ok(action)
     })
     .await
@@ -166,7 +171,7 @@ pub(super) fn validate_move_selection(
     }
     if let Some(profile_id) = selection.profile_id.as_deref() {
         validate_public_id(profile_id)?;
-        require_profile(snapshot, profile_id)?;
+        require_named_profile(snapshot, profile_id)?;
     }
     if let Some(target_id) = selection.target_template_id.as_deref() {
         validate_public_id(target_id)?;
@@ -175,7 +180,7 @@ pub(super) fn validate_move_selection(
         if session
             .incompatible_resume_targets
             .iter()
-            .any(|id| id == target_id)
+            .any(|id| id.as_ref() == target_id)
         {
             return Err(resume_refusal(session, target_id));
         }
@@ -292,17 +297,64 @@ pub(super) fn validate_prompt_text(text: &str, has_images: bool) -> Result<(), A
             "leading ! is reserved for shell commands",
         ));
     }
-    if text.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(
-            "prompt must contain 1-65536 characters",
-        ));
-    }
+    // The worker refuses a relay command over its budget, so a prompt is
+    // held to that budget here, measured as the command the worker receives
+    // and with the worker's own limit (#1556). Images are measured once they
+    // are attachment references, in `decode_prompt_images_off_task`.
+    mj_core::relay::ensure_byte_budget(
+        text_prompt_command_bytes(text),
+        mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
+        "prompt",
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if text.trim().is_empty() && !has_images {
         return Err(ApiError::bad_request(
             "prompt must contain text or an image",
         ));
     }
     Ok(())
+}
+
+/// Serialized bytes of the relay command a text prompt becomes, counted
+/// without copying the text, since callers hold the snapshot while they
+/// validate: the command around an empty text block, with the text as JSON
+/// writes it in place of that empty string.
+fn text_prompt_command_bytes(text: &str) -> usize {
+    use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
+    let empty = mj_core::relay::RelayCommand::Prompt {
+        prompt: vec![ContentBlock::Text(TextContent::new(""))],
+    };
+    serialized_len(&empty) - serialized_len("") + serialized_len(text)
+}
+
+fn serialized_len(value: &(impl serde::Serialize + ?Sized)) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).expect("prompt text serializes to JSON");
+    count.0
+}
+
+/// The relay command a phone prompt becomes, once its images are attachment
+/// references, held to the worker's budget.
+fn ensure_prompt_command_fits(text: &str, images: &[ViewerPromptImage]) -> Result<(), ApiError> {
+    let command = mj_core::relay::RelayCommand::Prompt {
+        prompt: crate::server_runtime::phone_prompt_blocks(text.to_owned(), images.to_vec()),
+    };
+    mj_core::relay::ensure_serialized_budget(
+        &command,
+        mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
+        "prompt",
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
 pub(super) fn validate_action(
@@ -322,15 +374,28 @@ pub(super) async fn live_session_config_options(
     state: &ServerState,
     session_id: &str,
     harness: mj_core::config::HarnessKind,
-) -> Option<Vec<ViewerConfigOption>> {
+) -> Option<(Vec<ViewerConfigOption>, Vec<String>)> {
     let backend = state.subagent.as_ref()?;
     let handle = backend.session_handle(session_id.to_owned()).await.ok()??;
     let snapshot = handle.view().snapshot?;
     let options = session_config_view(harness, &snapshot.operational);
     // An empty list is the absence of an answer, not an agent that offers
     // nothing, so it must not become the authority the request is refused by.
-    (!options.is_empty()).then_some(options)
+    let owned = state
+        .snapshot_rx
+        .borrow()
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.execution_enforcement)
+        .map(|enforcement| enforcement.owned_config_keys(&snapshot.operational.config_options))
+        .unwrap_or_default();
+    (!options.is_empty()).then_some((options, owned))
 }
+
+/// Refusal for a setting the target's permission policy owns.
+const POLICY_OWNED_SETTING: &str =
+    "The target's permission policy sets this setting. Use plan mode to enter or leave Plan.";
 
 /// Validate an action against the live session where that matters.
 ///
@@ -363,7 +428,21 @@ pub(super) async fn validate_action_live(
         }
         _ => None,
     };
-    validate_action_against(action, &state.snapshot_rx.borrow(), live.as_deref())?;
+    if let (ControllerAction::SetConfig { key, .. }, Some((_, owned))) = (action, &live)
+        && owned.contains(key)
+    {
+        return Err(ApiError::bad_request(POLICY_OWNED_SETTING));
+    }
+    validate_action_against(
+        action,
+        &state.snapshot_rx.borrow(),
+        live.as_ref().map(|(options, _)| options.as_slice()),
+    )?;
+    if let ControllerAction::Resume { workspace_id, .. }
+    | ControllerAction::ChangeWorkspace { workspace_id, .. } = action
+    {
+        require_listed_workspace(state, workspace_id).await?;
+    }
     require_worker_source(state, action).await
 }
 
@@ -396,8 +475,26 @@ async fn require_worker_source(
         return Ok(());
     };
     let target_id = target_id.to_owned();
+    let bundle_id = match action {
+        ControllerAction::New { bundle_id, .. } => Some(bundle_id.clone()),
+        ControllerAction::Resume { session_id, .. } => state
+            .snapshot_rx
+            .borrow()
+            .sessions
+            .iter()
+            .find(|session| session.id == *session_id)
+            .map(|session| session.bundle_id.clone()),
+        ControllerAction::Move { request } => state
+            .snapshot_rx
+            .borrow()
+            .sessions
+            .iter()
+            .find(|session| session.id == request.preparation.selection.session_id)
+            .map(|session| session.bundle_id.clone()),
+        _ => None,
+    };
     let checked = target_id.clone();
-    let problem = tokio::task::spawn_blocking(move || check(&checked))
+    let problem = tokio::task::spawn_blocking(move || check(&checked, bundle_id.as_deref()))
         .await
         .map_err(|_| ApiError::controller_unavailable())?;
     match problem {
@@ -435,21 +532,50 @@ fn validate_action_against(
             review,
             no_project_memory: _,
             no_github_events: _,
+            no_github_credentials: _,
+            oracle: _,
+            oracle_choice: _,
         } => {
-            if let Some(
-                mj_core::config::SessionReview::Inherit { model, effort, .. }
-                | mj_core::config::SessionReview::Turn { model, effort, .. }
-                | mj_core::config::SessionReview::Push { model, effort, .. },
-            ) = review
-                && [model, effort].into_iter().flatten().any(|value| {
-                    value.trim().is_empty()
-                        || value.len() > 256
-                        || value.chars().any(char::is_control)
-                })
-            {
-                return Err(ApiError::bad_request(
-                    "a review model or effort must be 1-256 characters of plain text",
-                ));
+            if let Some(review) = review {
+                let reviewers = match review {
+                    mj_core::config::SessionReview::Inherit { reviewers }
+                    | mj_core::config::SessionReview::Push { reviewers } => {
+                        reviewers.as_deref().unwrap_or_default()
+                    }
+                    mj_core::config::SessionReview::Off
+                    | mj_core::config::SessionReview::Legacy { .. } => &[],
+                };
+                let invalid_legacy = match review {
+                    mj_core::config::SessionReview::Legacy { model, effort, .. } => {
+                        model.as_ref().is_some_and(|value| {
+                            value.trim().is_empty()
+                                || value.len() > 256
+                                || value.chars().any(char::is_control)
+                        }) || effort.as_ref().is_some_and(|value| {
+                            value.trim().is_empty()
+                                || value.len() > 256
+                                || value.chars().any(char::is_control)
+                        })
+                    }
+                    _ => false,
+                };
+                if invalid_legacy
+                    || reviewers.len() > mj_core::config::MAX_REVIEWERS
+                    || reviewers.iter().any(|choice| {
+                        choice.model.trim().is_empty()
+                            || choice.model.len() > 256
+                            || choice.model.chars().any(char::is_control)
+                            || choice.effort.as_ref().is_some_and(|effort| {
+                                effort.trim().is_empty()
+                                    || effort.len() > 256
+                                    || effort.chars().any(char::is_control)
+                            })
+                    })
+                {
+                    return Err(ApiError::bad_request(
+                        "reviewers must name 1-3 plain-text models and optional efforts",
+                    ));
+                }
             }
             if !workspace_id.is_empty() {
                 validate_public_id(workspace_id)?;
@@ -471,7 +597,7 @@ fn validate_action_against(
                     "dirty acknowledgement must name 0-32 repositories",
                 ));
             }
-            require_profile(snapshot, profile_id)?;
+            require_named_profile(snapshot, profile_id)?;
             let target = require_launchable_target(snapshot, target_id)?;
             validate_move_mounts(additional_mounts)?;
             mj_core::targets::validate_additional_mounts(additional_mounts)
@@ -548,13 +674,12 @@ fn validate_action_against(
             validate_public_id(profile_id)?;
             validate_public_id(target_id)?;
             let session = require_session_record(snapshot, session_id)?;
-            require_workspace(snapshot, workspace_id)?;
-            require_profile(snapshot, profile_id)?;
+            require_named_profile(snapshot, profile_id)?;
             require_launchable_target(snapshot, target_id)?;
             if session
                 .incompatible_resume_targets
                 .iter()
-                .any(|incompatible| incompatible == target_id)
+                .any(|incompatible| incompatible.as_ref() == target_id)
             {
                 return Err(resume_refusal(session, target_id));
             }
@@ -570,34 +695,6 @@ fn validate_action_against(
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
         }
-        ControllerAction::ResolveReview {
-            session_id,
-            resolution,
-        } => {
-            validate_public_id(session_id)?;
-            let session = require_session_record(snapshot, session_id)?;
-            let Some(resolution) = resolution_from_name(resolution) else {
-                return Err(ApiError::bad_request(
-                    "a review is resolved by forward, dismiss, or cancel",
-                ));
-            };
-            let Some(review) = session.turn_review.as_ref() else {
-                return Err(ApiError::bad_request("no review is open for that session"));
-            };
-            // Cancel is always available; the rest wait for the verdict the
-            // daemon published, which is the same gate the daemon enforces
-            // when it actually resolves.
-            let allowed = resolution == mj_core::review::driver::Resolution::Cancelled
-                || review.verdict.as_ref().is_some_and(|verdict| {
-                    resolution_name(&resolution)
-                        .is_some_and(|name| verdict.allowed.iter().any(|allowed| allowed == name))
-                });
-            if !allowed {
-                return Err(ApiError::bad_request(
-                    "that review cannot be resolved that way yet",
-                ));
-            }
-        }
         ControllerAction::Rename { session_id, title } => {
             validate_public_id(session_id)?;
             validate_title(title)?;
@@ -605,6 +702,14 @@ fn validate_action_against(
             if !session.capabilities.rename {
                 return Err(ApiError::bad_request("this session cannot be renamed"));
             }
+        }
+        ControllerAction::DismissNotification { session_id, .. } => {
+            validate_public_id(session_id)?;
+            require_session_record(snapshot, session_id)?;
+        }
+        ControllerAction::SetSessionNotificationsIgnored { session_id, .. } => {
+            validate_public_id(session_id)?;
+            require_session_record(snapshot, session_id)?;
         }
         ControllerAction::TurnControl {
             session_id,
@@ -637,6 +742,9 @@ fn validate_action_against(
         } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;
+            if session.policy_config_keys.contains(key) {
+                return Err(ApiError::bad_request(POLICY_OWNED_SETTING));
+            }
             if !session.capabilities.set_config {
                 return Err(ApiError::bad_request(
                     "this session cannot change configuration now",
@@ -660,9 +768,14 @@ fn validate_action_against(
                     ))
                 })?;
             if !option.choices.iter().any(|choice| choice.value == *value) {
-                return Err(ApiError::bad_request(
-                    "this agent does not offer that value for that setting",
-                ));
+                return Err(ApiError::bad_request(if key == "model" {
+                    format!(
+                        "this agent does not offer that model; check profile {:?}'s models setting",
+                        session.profile_id
+                    )
+                } else {
+                    "this agent does not offer that value for that setting".to_owned()
+                }));
             }
         }
         ControllerAction::SetPlanMode { session_id, .. } => {
@@ -686,7 +799,6 @@ fn validate_action_against(
                     "this session cannot change workspace now",
                 ));
             }
-            require_workspace(snapshot, workspace_id)?;
         }
         ControllerAction::SetContainerSettings { session_id, .. } => {
             validate_public_id(session_id)?;
@@ -725,7 +837,16 @@ fn validate_action_against(
                 ));
             }
         }
-        ControllerAction::RecordOperatorActivity | ControllerAction::SetOperatorAway { .. } => {}
+        ControllerAction::PushSubscribe { subscription }
+        | ControllerAction::PushRenew { subscription, .. } => {
+            subscription
+                .validate()
+                .map_err(|_| ApiError::bad_request("invalid Web Push subscription"))?;
+        }
+        ControllerAction::PushUnsubscribe { .. }
+        | ControllerAction::PushTest { .. }
+        | ControllerAction::RecordOperatorActivity
+        | ControllerAction::SetOperatorAway { .. } => {}
         ControllerAction::RefreshQuota { profile_id } => {
             validate_public_id(profile_id)?;
             require_profile(snapshot, profile_id)?;
@@ -753,15 +874,6 @@ fn validate_action_against(
                     "this session does not support image prompts",
                 ));
             }
-            // Review is synchronous: the turn under review stays where the
-            // review found it. The daemon's own submit path is what makes this
-            // true; refusing here as well is what turns it into an immediate
-            // answer rather than a rejected prompt.
-            if session.turn_review.is_some() {
-                return Err(ApiError::bad_request(
-                    crate::review_host::PROMPT_HELD_MESSAGE,
-                ));
-            }
         }
         ControllerAction::RunShell {
             session_id,
@@ -770,7 +882,7 @@ fn validate_action_against(
         } => {
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
-            if command.trim().is_empty() || command.chars().count() > MAX_PROMPT_CHARS {
+            if command.trim().is_empty() || command.chars().count() > MAX_SHELL_COMMAND_CHARS {
                 return Err(ApiError::bad_request(
                     "shell command must contain 1-65536 characters",
                 ));
@@ -832,7 +944,11 @@ fn validate_action_against(
 }
 
 pub(super) fn validate_public_id(id: &str) -> Result<(), ApiError> {
-    validate_id("request", id).map_err(|_| ApiError::bad_request("invalid id"))
+    // The validator's own sentence quotes the id; this one states the rule
+    // without echoing caller input back to a browser.
+    validate_id("request", id).map_err(|_| {
+        ApiError::bad_request("invalid id; use 1-64 ASCII letters, digits, '.', '-' or '_'")
+    })
 }
 
 pub(super) fn validate_title(title: &str) -> Result<(), ApiError> {
@@ -853,13 +969,29 @@ pub(super) fn require_session_record<'a>(
         .ok_or_else(|| ApiError::not_found("unknown session"))
 }
 
-pub(super) fn require_workspace(snapshot: &ViewerSnapshot, id: &str) -> Result<(), ApiError> {
-    snapshot
-        .workspaces
-        .iter()
-        .any(|workspace| workspace.id == id)
-        .then_some(())
-        .ok_or_else(|| ApiError::bad_request("unknown workspace"))
+/// Refuse a workspace the store does not list.
+///
+/// The store owns which workspaces exist, and it lists `default` only while
+/// that workspace holds a session. The snapshot's copy of the list is
+/// republished on a few daemon actions, so it can lag behind the store; a
+/// session that has just landed in `default` made the lag a refusal (#1334).
+/// Every check that a workspace exists therefore asks the store here.
+async fn require_listed_workspace(state: &ServerState, id: &str) -> Result<(), ApiError> {
+    let backend = state
+        .subagent
+        .as_ref()
+        .ok_or_else(ApiError::controller_unavailable)?;
+    match backend.workspace(id.to_owned()).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(ApiError::bad_request("unknown workspace")),
+        Err(error) => {
+            tracing::warn!(error = format!("{error:#}"), "workspace lookup failed");
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read the workspace list",
+            ))
+        }
+    }
 }
 
 pub(super) fn require_profile<'a>(
@@ -871,6 +1003,15 @@ pub(super) fn require_profile<'a>(
         .iter()
         .find(|profile| profile.id == id)
         .ok_or_else(|| ApiError::bad_request("unknown profile"))
+}
+
+/// A profile the request names explicitly: enabled, or configured but
+/// disabled. Automatic choices use [`require_profile`] instead.
+pub(super) fn require_named_profile(snapshot: &ViewerSnapshot, id: &str) -> Result<(), ApiError> {
+    if snapshot.disabled_profile_ids.contains(id) {
+        return Ok(());
+    }
+    require_profile(snapshot, id).map(|_| ())
 }
 
 pub(super) fn require_target<'a>(

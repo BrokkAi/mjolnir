@@ -11,7 +11,6 @@ pub(crate) enum ProjectTab {
     #[default]
     Recent,
     Github,
-    Folders,
     Url,
 }
 
@@ -19,11 +18,8 @@ pub(crate) enum ProjectTab {
 pub(crate) struct ProjectPicker {
     pub tab: ProjectTab,
     pub query: PathInput,
-    pub folder_filter: PathInput,
     pub entries: Vec<ProjectEntry>,
     pub selected: usize,
-    pub directory: Option<String>,
-    pub parent: Option<String>,
     pub truncated: bool,
     pub error: Option<String>,
     pub creation_error: Option<String>,
@@ -43,11 +39,8 @@ impl Default for ProjectPicker {
         Self {
             tab: ProjectTab::Recent,
             query: PathInput::new(),
-            folder_filter: PathInput::new(),
             entries: Vec::new(),
             selected: 0,
-            directory: None,
-            parent: None,
             truncated: false,
             error: None,
             creation_error: None,
@@ -139,12 +132,6 @@ impl NewWizard {
             ProjectTab::Github => self.project_picker.load(ProjectDiscoveryRequest::Github {
                 query: self.project_picker.query.trim().to_owned(),
             }),
-            ProjectTab::Folders => self
-                .project_picker
-                .load(ProjectDiscoveryRequest::Directory {
-                    path: self.project_picker.directory.clone().unwrap_or_default(),
-                    filter: self.project_picker.folder_filter.trim().to_owned(),
-                }),
             ProjectTab::Url => {}
         }
         if tab == ProjectTab::Github {
@@ -168,32 +155,15 @@ impl NewWizard {
         for id in [
             WizardControl::ProjectRecent,
             WizardControl::ProjectGithub,
-            WizardControl::ProjectFolders,
             WizardControl::ProjectUrl,
         ] {
             form.declare_with_enabled(id, ControlKind::Button, ready);
         }
-        if matches!(
-            self.project_picker.tab,
-            ProjectTab::Github | ProjectTab::Folders
-        ) {
+        if matches!(self.project_picker.tab, ProjectTab::Github) {
             form.declare_with_enabled(WizardControl::ProjectQuery, ControlKind::TextField, ready);
             if self.project_picker.tab == ProjectTab::Github {
                 form.declare_with_enabled(WizardControl::ProjectSearch, ControlKind::Button, ready);
             }
-        }
-        if self.project_picker.tab == ProjectTab::Folders {
-            form.declare_with_enabled(
-                WizardControl::ProjectUp,
-                ControlKind::Button,
-                ready && !self.project_picker.loading && self.project_picker.parent.is_some(),
-            );
-            form.declare_with_enabled(WizardControl::ProjectHome, ControlKind::Button, ready);
-            form.declare_with_enabled(
-                WizardControl::ProjectOpenFolder,
-                ControlKind::Button,
-                ready && !self.project_picker.loading && !self.project_picker.entries.is_empty(),
-            );
         }
         if self.project_picker.error.is_some() || self.project_picker.creation_error.is_some() {
             form.declare_with_enabled(WizardControl::ProjectRetry, ControlKind::Button, ready);
@@ -343,10 +313,6 @@ impl DashboardState {
         match result {
             Ok(result) => {
                 picker.entries = result.entries;
-                if picker.tab == ProjectTab::Folders {
-                    picker.directory = result.directory;
-                    picker.parent = result.parent;
-                }
                 picker.truncated = result.truncated;
                 picker.selected = 0;
                 picker.error = None;
@@ -371,57 +337,13 @@ impl DashboardState {
         match id {
             WizardControl::ProjectRecent => wizard.choose_project_tab(self, ProjectTab::Recent),
             WizardControl::ProjectGithub => wizard.choose_project_tab(self, ProjectTab::Github),
-            WizardControl::ProjectFolders => wizard.choose_project_tab(self, ProjectTab::Folders),
             WizardControl::ProjectUrl => wizard.choose_project_tab(self, ProjectTab::Url),
             WizardControl::ProjectQuery | WizardControl::ProjectSearch => {
-                let request = if wizard.project_picker.tab == ProjectTab::Folders {
-                    ProjectDiscoveryRequest::Directory {
-                        path: wizard.project_picker.directory.clone().unwrap_or_default(),
-                        filter: wizard.project_picker.folder_filter.trim().to_owned(),
-                    }
-                } else {
-                    ProjectDiscoveryRequest::Github {
-                        query: wizard.project_picker.query.trim().to_owned(),
-                    }
+                let request = ProjectDiscoveryRequest::Github {
+                    query: wizard.project_picker.query.trim().to_owned(),
                 };
                 wizard.project_picker.load(request);
                 wizard.form.get_mut().focus(WizardControl::ProjectResults);
-            }
-            WizardControl::ProjectHome => {
-                wizard.project_picker.folder_filter.clear();
-                wizard
-                    .project_picker
-                    .load(ProjectDiscoveryRequest::Directory {
-                        path: String::new(),
-                        filter: String::new(),
-                    });
-            }
-            WizardControl::ProjectUp => {
-                if let Some(path) = wizard.project_picker.parent.clone() {
-                    wizard.project_picker.folder_filter.clear();
-                    wizard
-                        .project_picker
-                        .load(ProjectDiscoveryRequest::Directory {
-                            path,
-                            filter: String::new(),
-                        });
-                }
-            }
-            WizardControl::ProjectOpenFolder => {
-                if let Some(entry) = wizard
-                    .project_picker
-                    .entries
-                    .get(wizard.project_picker.selected)
-                    .cloned()
-                {
-                    wizard.project_picker.folder_filter.clear();
-                    wizard
-                        .project_picker
-                        .load(ProjectDiscoveryRequest::Directory {
-                            path: entry.source,
-                            filter: String::new(),
-                        });
-                }
             }
             WizardControl::ProjectMakePrimary => {
                 if wizard.new_bundle_selected < wizard.new_bundle_repositories.len() {
@@ -460,15 +382,7 @@ impl DashboardState {
                     .get(wizard.project_picker.selected)
                     .cloned()
                 {
-                    if entry.kind == ProjectEntryKind::Directory {
-                        wizard.project_picker.folder_filter.clear();
-                        wizard
-                            .project_picker
-                            .load(ProjectDiscoveryRequest::Directory {
-                                path: entry.source,
-                                filter: String::new(),
-                            });
-                    } else if wizard.project_picker.multiple {
+                    if wizard.project_picker.multiple {
                         if let Some(index) = wizard
                             .new_bundle_repositories
                             .iter()
@@ -511,12 +425,11 @@ pub(super) fn render_project_picker(
         [Line::styled(
             match picker.tab {
                 ProjectTab::Recent => {
-                    "Pick up a recent project, or find another on GitHub or in Folders."
+                    "Pick up a recent project, or find another on GitHub or by URL or path."
                 }
                 ProjectTab::Github => {
                     "Your GitHub repositories. Search by name or owner/repository."
                 }
-                ProjectTab::Folders => "Browse folders on this computer.",
                 ProjectTab::Url => {
                     "Paste a GitHub URL, owner/repository, or local repository path."
                 }
@@ -525,17 +438,10 @@ pub(super) fn render_project_picker(
         )],
         inner.width,
     );
-    let directory = wrap_lines(
-        [Line::raw(picker.directory.as_deref().unwrap_or("Home"))],
-        inner.width,
-    );
     let input_row = description.len() as u16 + 3;
-    let folder_actions_row = input_row + directory.len() as u16 + 1;
-    let filter_row = folder_actions_row + 2;
     let list_row = match picker.tab {
         ProjectTab::Recent => input_row,
         ProjectTab::Github => input_row + 4,
-        ProjectTab::Folders => filter_row + 2,
         ProjectTab::Url => input_row + 2,
     };
     let error = picker.creation_error.as_ref().or(picker.error.as_ref());
@@ -546,12 +452,12 @@ pub(super) fn render_project_picker(
     } else if picker.entries.is_empty() && picker.tab != ProjectTab::Url {
         Some(match picker.tab {
             ProjectTab::Recent => {
-                "No recent projects yet. Choose GitHub or Folders above to get started."
+                "No recent projects yet. Choose GitHub or URL or path above to get started."
             }
             ProjectTab::Github => {
                 "No matching repositories. Try another search or paste a repository URL."
             }
-            _ => "No project folders here. Go up one folder or return Home.",
+            _ => "No projects found.",
         })
     } else {
         None
@@ -599,23 +505,11 @@ pub(super) fn render_project_picker(
     };
     let focused_row = match form.focused() {
         Some(
-            WizardControl::ProjectRecent
-            | WizardControl::ProjectGithub
-            | WizardControl::ProjectFolders
-            | WizardControl::ProjectUrl,
+            WizardControl::ProjectRecent | WizardControl::ProjectGithub | WizardControl::ProjectUrl,
         ) => Some(0),
-        Some(WizardControl::ProjectQuery) => Some(if picker.tab == ProjectTab::Folders {
-            filter_row
-        } else {
-            input_row
-        }),
+        Some(WizardControl::ProjectQuery) => Some(input_row),
         Some(WizardControl::NewBundleSource) => Some(input_row),
         Some(WizardControl::ProjectSearch) => Some(input_row + 2),
-        Some(
-            WizardControl::ProjectUp
-            | WizardControl::ProjectHome
-            | WizardControl::ProjectOpenFolder,
-        ) => Some(folder_actions_row),
         Some(WizardControl::ProjectResults) => Some(list_row + list_height.saturating_sub(1)),
         Some(WizardControl::ProjectRetry) => Some(retry_row),
         Some(WizardControl::ProjectMultiple) => Some(multiple_row),
@@ -632,12 +526,7 @@ pub(super) fn render_project_picker(
     let tabs = [
         (WizardControl::ProjectRecent, "Recent", ProjectTab::Recent),
         (WizardControl::ProjectGithub, "GitHub", ProjectTab::Github),
-        (
-            WizardControl::ProjectFolders,
-            "Folders",
-            ProjectTab::Folders,
-        ),
-        (WizardControl::ProjectUrl, "Paste URL", ProjectTab::Url),
+        (WizardControl::ProjectUrl, "URL or Path", ProjectTab::Url),
     ];
     let labels: Vec<String> = tabs
         .iter()
@@ -675,48 +564,6 @@ pub(super) fn render_project_picker(
                 row(input_row + 2),
                 &[(WizardControl::ProjectSearch, "Search", ready)],
                 form,
-            );
-        }
-        ProjectTab::Folders => {
-            for (index, line) in directory.into_iter().enumerate() {
-                frame.render_widget(Paragraph::new(line), row(input_row + index as u16));
-            }
-            Dialog::render_actions(
-                frame,
-                row(folder_actions_row),
-                &[
-                    (
-                        WizardControl::ProjectOpenFolder,
-                        "Open folder",
-                        ready && !picker.loading && !picker.entries.is_empty(),
-                    ),
-                    (
-                        WizardControl::ProjectUp,
-                        "Up one folder",
-                        ready && !picker.loading && picker.parent.is_some(),
-                    ),
-                    (WizardControl::ProjectHome, "Home", ready),
-                ],
-                form,
-            );
-            let filter = row(filter_row);
-            let label_width = 8.min(filter.width);
-            frame.render_widget(
-                Paragraph::new("Filter:"),
-                Rect::new(filter.x, filter.y, label_width, filter.height),
-            );
-            PathField::render_within(
-                frame,
-                layout.body,
-                Rect::new(
-                    filter.x + label_width,
-                    filter.y,
-                    filter.width - label_width,
-                    filter.height,
-                ),
-                &picker.folder_filter,
-                form,
-                WizardControl::ProjectQuery,
             );
         }
         ProjectTab::Url => PathField::render_within(

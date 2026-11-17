@@ -359,10 +359,10 @@ fn release_upgrade_replaces_every_packaged_binary_and_preserves_unrelated_files(
     let executable = root.path().join("custom-mj-name");
     std::fs::write(&executable, b"old controller").expect("old controller");
     std::fs::write(root.path().join("README.md"), b"user notes").expect("unrelated file");
+    std::fs::write(root.path().join("mj-desktop"), b"legacy desktop").unwrap();
     let new_binary = vec![b'n'; 128 * 1024];
     let entries: Vec<(&str, &[u8])> = [
         "release/mj",
-        "release/mj-desktop",
         "release/mj-voice-worker",
         "release/mj-worker",
         "release/mj-worker-x86_64-unknown-linux-musl",
@@ -384,6 +384,10 @@ fn release_upgrade_replaces_every_packaged_binary_and_preserves_unrelated_files(
     let installed = install_release_archive(&executable, "release.tar.gz", &archive)
         .expect("install complete release");
     assert_eq!(
+        std::fs::read(root.path().join("mj-desktop")).unwrap(),
+        b"legacy desktop"
+    );
+    assert_eq!(
         installed,
         executable.canonicalize().expect("resolved controller")
     );
@@ -403,7 +407,7 @@ fn release_upgrade_replaces_every_packaged_binary_and_preserves_unrelated_files(
     );
     assert_eq!(
         std::fs::read_dir(root.path()).unwrap().count(),
-        entries.len() + 1
+        entries.len() + 2
     );
 }
 
@@ -442,20 +446,15 @@ fn release_upgrade_allows_retired_companions() {
 fn zip_release_stages_application_binaries_without_extracting_documents() {
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
-    for name in [
-        "release/mj.exe",
-        "release/mj-worker.exe",
-        "release/mj-desktop.exe",
-        "release/LICENSE",
-    ] {
+    for name in ["release/mj.exe", "release/mj-worker.exe", "release/LICENSE"] {
         archive.start_file(name, options).expect("zip entry");
         archive.write_all(b"binary contents").expect("zip contents");
     }
     let bytes = archive.finish().expect("zip archive").into_inner();
     let root = tempfile::tempdir().expect("staging directory");
     let binaries = stage_release_archive("release.zip", &bytes, root.path()).expect("stage zip");
-    assert_eq!(binaries.len(), 3);
-    for name in ["mj.exe", "mj-worker.exe", "mj-desktop.exe"] {
+    assert_eq!(binaries.len(), 2);
+    for name in ["mj.exe", "mj-worker.exe"] {
         assert_eq!(
             std::fs::read(root.path().join(name)).unwrap(),
             b"binary contents"

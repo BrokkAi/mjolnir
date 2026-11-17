@@ -71,23 +71,14 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn form(&self) -> &RefCell<Dialog<WizardControl>>;
     fn form_mut(&mut self) -> &mut Dialog<WizardControl>;
     fn resource_allocation(&self) -> Option<&SessionResourceAllocation>;
-    fn sizing_error(&self) -> Option<&str>;
     fn resource_editor(&self) -> &ResourceEditor;
     fn resource_editor_mut(&mut self) -> &mut ResourceEditor;
     /// The explicit save-as-default checkbox only exists on new sessions.
     fn remember_container_size(&self) -> Option<bool> {
         None
     }
-    fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>>;
-    /// The three sizing fields at once, so a caller can read the cached AWS
-    /// sizes while writing the chosen allocation and the sizing error.
-    fn sizing_mut(
-        &mut self,
-    ) -> (
-        &mut BTreeMap<String, Vec<SessionResourceAllocation>>,
-        &mut Option<SessionResourceAllocation>,
-        &mut Option<String>,
-    );
+    /// The allocation and its validation error are edited together.
+    fn sizing_mut(&mut self) -> (&mut Option<SessionResourceAllocation>, &mut Option<String>);
     /// Puts the draft back into the mode that owns it.
     fn into_mode(self) -> Mode;
     /// The size this draft starts from when a target is selected: the
@@ -255,10 +246,6 @@ impl WizardDraft for NewWizard {
         self.resource_allocation.as_ref()
     }
 
-    fn sizing_error(&self) -> Option<&str> {
-        self.sizing_error.as_deref()
-    }
-
     fn resource_editor(&self) -> &ResourceEditor {
         &self.resource_editor
     }
@@ -268,22 +255,9 @@ impl WizardDraft for NewWizard {
     fn remember_container_size(&self) -> Option<bool> {
         Some(self.remember_container_size)
     }
-    fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>> {
-        &self.aws_options
-    }
 
-    fn sizing_mut(
-        &mut self,
-    ) -> (
-        &mut BTreeMap<String, Vec<SessionResourceAllocation>>,
-        &mut Option<SessionResourceAllocation>,
-        &mut Option<String>,
-    ) {
-        (
-            &mut self.aws_options,
-            &mut self.resource_allocation,
-            &mut self.sizing_error,
-        )
+    fn sizing_mut(&mut self) -> (&mut Option<SessionResourceAllocation>, &mut Option<String>) {
+        (&mut self.resource_allocation, &mut self.sizing_error)
     }
 
     fn into_mode(self) -> Mode {
@@ -425,12 +399,7 @@ impl WizardDraft for NewWizard {
                 Ok(())
             }
             WizardControl::ProjectQuery => {
-                let input = if self.project_picker.tab == ProjectTab::Folders {
-                    &mut self.project_picker.folder_filter
-                } else {
-                    &mut self.project_picker.query
-                };
-                if PathField::apply(input, edit) == EditOutcome::Changed {
+                if PathField::apply(&mut self.project_picker.query, edit) == EditOutcome::Changed {
                     self.project_picker.github_query_changed();
                     self.project_picker.focus_results = false;
                     dashboard.record_event_handled();
@@ -747,32 +716,15 @@ impl WizardDraft for ResumeWizard {
         self.resource_allocation.as_ref()
     }
 
-    fn sizing_error(&self) -> Option<&str> {
-        self.sizing_error.as_deref()
-    }
-
     fn resource_editor(&self) -> &ResourceEditor {
         &self.resource_editor
     }
     fn resource_editor_mut(&mut self) -> &mut ResourceEditor {
         &mut self.resource_editor
     }
-    fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>> {
-        &self.aws_options
-    }
 
-    fn sizing_mut(
-        &mut self,
-    ) -> (
-        &mut BTreeMap<String, Vec<SessionResourceAllocation>>,
-        &mut Option<SessionResourceAllocation>,
-        &mut Option<String>,
-    ) {
-        (
-            &mut self.aws_options,
-            &mut self.resource_allocation,
-            &mut self.sizing_error,
-        )
+    fn sizing_mut(&mut self) -> (&mut Option<SessionResourceAllocation>, &mut Option<String>) {
+        (&mut self.resource_allocation, &mut self.sizing_error)
     }
 
     fn into_mode(self) -> Mode {

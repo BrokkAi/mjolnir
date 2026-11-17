@@ -1,0 +1,429 @@
+{"intro_commit": "019c3919214308de290ffdc58f1088ee4d427a76", "trace_sources": ["issues-013-024/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "027206f27fb85b943d347885359022906ec4823a", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "02a3329d1d54ec101e636f31a3427178edd97f58", "trace_sources": ["audit-groups-097-108.json:intro_commit", "groups-097-108/attempts.jsonl:traced_intros", "groups-097-108/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "045ca4b0dfd15c5eb31c67b835194bc632b64558", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "057a5efa3555d645bbd8782acc19c2ecb937e0e4", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "057e16e886b7fa9826826fb6bb8f1b266d1e9d70", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros", "groups-133-144/attempts.jsonl:traced_intros", "groups-133-144/candidates.jsonl:intro_commit"]}
+{"intro_commit": "066cead96c609a13a794d6f876de0f16b249b095", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros", "groups-157-168/candidates.jsonl:intro_commit"]}
+{"intro_commit": "068bfa6532f26cddb25632745e756cd83d4971ee", "trace_sources": ["groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "06d521c06242eb810e00583feb46fb88a5363282", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros", "groups-157-168/candidates.jsonl:intro_commit"]}
+{"intro_commit": "071e3b034d5d056e0bf0cfbea7927b94e653b63e", "trace_sources": ["audit-025-036.json:intro_commit", "issues-025-036/attempts.jsonl:intro_commit", "issues-025-036/attempts.jsonl:traced_intros", "issues-025-036/candidates.jsonl:intro_commit"]}
+{"intro_commit": "07495166968d6e492b318e99d7f0c7f55bb06d89", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "074aecd8459d9e8823398c1bae112e434ec62a34", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0793e464aaa71c2b0d7d20a7c4115ccfe14c272a", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "07f4365c2d332a90062260a57e49adc305031c1d", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "08a48b5b69c1bb579230843eec0cec214e0f765e", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros", "groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "08e009d71c9bdf06f99ab936baec338836631938", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "093013efa3940b9d6e772b91a2cf0740021db440", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros", "groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "09b006454e308fe885b4b6b10b35aaa7e86dcb7f", "trace_sources": ["audit-groups-097-108.json:intro_commit", "groups-097-108/attempts.jsonl:traced_intros", "groups-097-108/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "09eb9574ea5489204f42f3fad11f956b8808e653", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0a2aeacd20c404d9a7f99d3615894cdffeb8a1d4", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0a46e902bcc88f87ff868e9d645dbd22b93d868e", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros", "groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0a9136fbed8201682d20099a77841c3967b6739d", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro", "issues-061-072/candidates.jsonl:intro_commit"]}
+{"intro_commit": "0b3547c322b5260fa26fd8119de6ebf5b351661a", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros", "issues-061-072/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "0b70286f4ee3562bbe39522313a7a7b9b2998d5c", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0ba5a94f82c1e8f1f07a2aded702196ae3f8d8e0", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros", "groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0c4fc4bdac9479d6182adecc822c46b4fa94f2a2", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0e5962100311eae2093dda3fec3d2b163eb5a1d4", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0e6df36dfa5d288b0680b1f263b17ea6353363e8", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0e8b85d5268b5a39e3d765a9ca955e3690b81249", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "0f05e9329a5eb0a148c9ebf71aa9a20dc668bb27", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros", "issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "10563175cba7efc1e2cf94aee9aa963b7acc1452", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "10736c252f44d597ad67b4c3ce36120102fd9470", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1159635df54c3d94a9584c23064cd78e836970a3", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "116f372c088dc964db1113bcdaf3d952630e797e", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro"]}
+{"intro_commit": "1242383341aca5b71ae2501f9b637641314f76d9", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "128c325dcdf76a31c3ee4deb40afaa11fca37ec9", "trace_sources": ["audit-025-036.json:intro_commit", "issues-025-036/attempts.jsonl:intro_commit", "issues-025-036/attempts.jsonl:traced_intros", "issues-025-036/candidates.jsonl:intro_commit"]}
+{"intro_commit": "14c372a2a10d1f0b2f9487b32e171cfdd8e79cd8", "trace_sources": ["audit-025-036.json:intro_commit", "issues-025-036/attempts.jsonl:intro_commit", "issues-025-036/attempts.jsonl:traced_intros", "issues-025-036/candidates.jsonl:intro_commit"]}
+{"intro_commit": "159bad60f96eec6e6c070d0d9603d7e4bd4901ff", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "15b5c2195090943f5be739f04549d72d9a1cdce1", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "15c504f04e4eda40f9143ecf415be4ea4f0c0da9", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "160c5443cc517620d544da5a585647343b8fbf98", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "162e21efd98e4160eccf55b26351b48aa0035354", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1674bb68311e4791a1c51f451b9e2a86abd792ed", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "177f49f0d2ef3cd0c5683f3c6dfdff13f40a96e6", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1837808855214eaf375798752f7ad614880ecc83", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros", "groups-025-036/attempts.jsonl:traced_intros", "groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros", "issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "18b2139451664d7304d89f02c11e70e67784d3ba", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "18d56efdccf0d6af176f6a0e8d9bd001b0368870", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "19559d39217557e955487152291016dbdada48bf", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "19f1d19a96856329f03c397512a4e40d09308101", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1a78838913f35c22f4242ee79673deb73c5a3546", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1ae881d85bce109e735e735277b65ef54746f9c9", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1aee53928932551c6a13eafbaeb57e5b4a4a69e1", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "1b2a66201197b348af1f062c30542bb16c0e083b", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1c1d9d8f1486437b2f558b9313ce651375c5047c", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro"]}
+{"intro_commit": "1c570a35813e96fd8ff6c58d5d1edc863d37adcd", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1d1b8a269b5241f381e9c4b45fccb5378558ddec", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1d2e35356a1d157f697e02966499c30a86615ba4", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1e0ec9cf75b40a8d50c5ef855e9e926b2be6d7e1", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1e9e3bec453304c397b386a00c7e5eaba4f967dc", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1ec35bbcd987cc7a1e33d7628e8c142d6282b8c4", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros", "groups-097-108/attempts.jsonl:traced_intros", "groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "1f391285f4688f0dbbd129e05fbbfd360df892ff", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "23a2512cf134393d961bf978fed0886b0f5da533", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros", "groups-145-156/candidates.jsonl:intro_commit"]}
+{"intro_commit": "23cd3f3bf57cb4bba9fd8f6cee9db087461e4e8c", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "24968ce3b3d6aa5a86bc2b89cd7e2392beed0b0e", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "24bd9be1e9d7fe2dd5cca7548e7a09a9a9750979", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "25bbd98914912722170d90ca34c72d3b4a8eed85", "trace_sources": ["groups-109-120/attempts.jsonl:intro_commit", "groups-109-120/attempts.jsonl:traced_intros", "groups-109-120/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "2635f0f06274dab5bba20bac0c5d3e92e2f15f83", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "26cdb5e57e824812c98ad920fae709c6525a6c57", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "28f0b8ec05a48f7589863afa8cb8c2ab24a4b464", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "29bdb5556feb7bec603c7f370968041ed31cd234", "trace_sources": ["audit-013-024.json:intro_commit", "issues-013-024/attempts.jsonl:traced_intro", "issues-013-024/candidates.jsonl:intro_commit"]}
+{"intro_commit": "29c9a33035a279f88b95f648676b89b1d6e6f00e", "trace_sources": ["issues-013-024/attempts.jsonl:traced_intro"]}
+{"intro_commit": "29f66908d35dcf4613319a1f82d14f8c3cb6d6c7", "trace_sources": ["groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "2ac7984d1e601a9ce2794372749bbf266a1029d9", "trace_sources": ["issues-013-024/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "2b225d6c642aa8d45f68f11ee714c847555435f1", "trace_sources": ["hard-won/attempts.jsonl:intro_commit", "hard-won/candidates.jsonl:intro_commit"]}
+{"intro_commit": "2b2a64b62a66cfaeb2dc2244e37f370a1e64c254", "trace_sources": ["audit-013-024.json:intro_commit", "issues-013-024/attempts.jsonl:traced_intro", "issues-013-024/candidates.jsonl:intro_commit"]}
+{"intro_commit": "2b6cf29e65dddc7799acc119a200868035d0344b", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros", "groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "2c3b26b44578ae7ee3f48ba82a3c768bd4020e26", "trace_sources": ["audit-groups-127-131.json:intro_commit", "groups-121-132/attempts.jsonl:traced_intros", "groups-121-132/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "2ca82d35d9b05ea425606accb9ee7f86036dee3f", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "2d409a57d2232b02cfeb377646981c1285831ed0", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros", "groups-157-168/candidates.jsonl:intro_commit"]}
+{"intro_commit": "2da69f7cd5c8e11dd1ca21c7be68d05486df4c9e", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "2dc7a9b231a028ebd9412c5241b90beea841c589", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros", "groups-013-024/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "2e45de5d00d15623e8002d75051104ab31fdd889", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "2f11b4f5b58dc0eb4a108cff0b99b5130fee9395", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "2f1583a335157e469c6afa985218d826d8e9d3a4", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "2f34151bec93ab645c8c2f6cb33a9f9452203ad4", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "2fac53aea335799a889f921033e48401d179e24b", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "305fc4ebe84b7bd84d623620baea404ddb5c69a8", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "309939da522fa0c3cf51ec922c15c1f5f81ff31a", "trace_sources": ["audit-groups-127-131.json:intro_commit", "groups-121-132/attempts.jsonl:traced_intros", "groups-121-132/candidates.jsonl:intro_commit", "groups-133-144/attempts.jsonl:traced_intros", "integrated-confirmed-record"]}
+{"intro_commit": "31860580f52a9dcb46add9ce05f2867ee30e3a92", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "31913fee42a05ec61aadd1f3ca0a76ba1fed51f8", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros", "issues-037-048/attempts.jsonl:identified_intro_commits", "issues-037-048/attempts.jsonl:intro_commit", "issues-037-048/candidates.jsonl:intro_commit"]}
+{"intro_commit": "31a39a1d900424110186a4cb3ac92a490b25d26b", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros", "issues-013-024/attempts.jsonl:traced_intro"]}
+{"intro_commit": "328331fb05519a7637d55b027bc7bae32b6c8b77", "trace_sources": ["groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "32c8378fd8d770592d69d166472f40a369086963", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "339662a7cd012aea4f2fd7b1464978d93d87e3cc", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "33fba95a5b77052176035d9c7c282258a3fd0c05", "trace_sources": ["audit-groups-061-072.json:intro_commit", "groups-061-072/attempts.jsonl:traced_intros", "groups-061-072/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "34e62e2c2acadd0d8a27f762c8e1210772205ee8", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "357a9f781b8c2c93a141b0dbcceec2afe58245b1", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "35fb6a871555b53617ca37061874362bff34ca4e", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "364787862145394da08d10b3ff1d8ca0697f6b27", "trace_sources": ["audit-001-012.json:intro_commit", "issues-001-012/attempts.jsonl:traced_intros", "issues-001-012/candidates.jsonl:intro_commit"]}
+{"intro_commit": "365d1a34bdbd52e199bf358fcfd03cc76397354b", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "367757217a16f0578465689e120eb1d68313f650", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "36d2ca4645e48e4f86468f11291766d62846bbbc", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "37776f915d6696463521fdbb8993844917ff2ea7", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "38214d4fe463bff95ddc675a1c1f89573585fc2f", "trace_sources": ["audit-025-036.json:intro_commit", "issues-025-036/attempts.jsonl:intro_commit", "issues-025-036/attempts.jsonl:traced_intros", "issues-025-036/candidates.jsonl:intro_commit"]}
+{"intro_commit": "38ac5b5b2b51de7742b7995669f6e335fd78afe2", "trace_sources": ["audit-groups-001-012.json:intro_commit", "groups-001-012/attempts.jsonl:traced_intros", "groups-001-012/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "3a634356440eb126ab7501acd24197b0c5296428", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "3ab6ed42d880a3800e0cd4d65a79783f60f9579b", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros", "groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "3b42f7553635530eb42b7970ac68ed5436d5b130", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "3bc986fde50aa43a3cfc03ee78c22311f9b97f83", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "3cb67b946e885e6af943d44e500497c8b71aca75", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "3cee60dfb96404b71fa66b68e38806ac1bca3eb3", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "3dff53e63982079ae99d359aebf295b3231dd828", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "3e51cfde577a31b83a72b8686694f3a2c0ea70ed", "trace_sources": ["audit-groups-001-012.json:intro_commit", "groups-001-012/attempts.jsonl:traced_intros", "groups-001-012/candidates.jsonl:intro_commit", "groups-013-024/attempts.jsonl:traced_intros", "integrated-confirmed-record"]}
+{"intro_commit": "3e5daca7b6c0c0a99fd65e5212a85f736c092c40", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "3f170fdac3867dfd009f6aa8b4f523acb8f27914", "trace_sources": ["audit-025-036.json:intro_commit", "issues-025-036/attempts.jsonl:intro_commit", "issues-025-036/attempts.jsonl:traced_intros", "issues-025-036/candidates.jsonl:intro_commit"]}
+{"intro_commit": "3fbdac5254fe556b7b50e5e90a4aa73bcb96f4ea", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "3fdaa7196951688c3829fbd06de9ef265c3aba92", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros", "issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "40a33c133dfb12cae26a33e1205a04d343a2d2e8", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "41f159d3e2b88a6b8444444e59ad590ca6cadba5", "trace_sources": ["audit-groups-049-060.json:intro_commit", "groups-049-060/attempts.jsonl:traced_intros", "groups-049-060/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "42985a00301ccd2c92c037b541084e199160a350", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro"]}
+{"intro_commit": "42b75e8a7c86cf7534e9917ae9f0eb815ef45bd1", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "438cc777edd956e5b147b904a25092ec107c813d", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros", "issues-037-048/attempts.jsonl:identified_intro_commits", "issues-037-048/attempts.jsonl:intro_commit", "issues-037-048/candidates.jsonl:intro_commit"]}
+{"intro_commit": "4399e73df91d1675df988f030e40c554bfa36129", "trace_sources": ["audit-013-024.json:intro_commit", "issues-013-024/attempts.jsonl:traced_intro", "issues-013-024/candidates.jsonl:intro_commit"]}
+{"intro_commit": "445e5b1801d5b479aa28a53291a963a1de444ba9", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "44d4a263be87c65c24426d843ba83601e310cd29", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4530afa0b64f210214ecd63645628d2f7befda70", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "45d2fc4ee61451de98c39ca0bfd88d500a7bb602", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "45ebf3665cfabf59b3c3a4c2f7db2156765be644", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "487f58c2a8dcf220575482c13caffdbcdc8be4d4", "trace_sources": ["issues-061-072/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "48a5e74b5ab944907a3e16fbd2946e4fe8c845b7", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "48c156c965b70729c1aa2bac2f148d530166fda0", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros", "groups-013-024/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "49774d9ef920d60b46a92cc9cd7236cc0520e627", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "49cb343551c24bf8d0cb599d1542211caceab0cb", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "4ad9a16ba0da392bf3f97ed778c9db9879ca932a", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4b029305844ebef4bef1649e07825500574a8a60", "trace_sources": ["audit-001-012.json:intro_commit", "issues-001-012/attempts.jsonl:traced_intros", "issues-001-012/candidates.jsonl:intro_commit"]}
+{"intro_commit": "4b85a3a9d79b0982f6744b3a1b749e1e371d3a0e", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros", "issues-013-024/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "4b96ba9255a8de37cc30dca8b2461bded25d3a2c", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4bd160e6c28e4642400d9cac9a1f15ca5c4e0694", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4be28bcdec18577b91ae10b010ef26d64815b5e5", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4c02334855bac0bdd789b94170d833144c0bb302", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4c36b5b86e837da115e86286a7b311dc62361ecc", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4d548f6fc3602ccaee04f50489f611f8b0b0fe75", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros", "groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4db7da2ed3d86f297e35cb12c9482afd0c29e82a", "trace_sources": ["hard-won/attempts.jsonl:earliest_possible_intro"]}
+{"intro_commit": "4dc88359665452c37a41addd6a718bcb9693c237", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4ea6d2b2f5cb382aae1a22bed36146024deb8d2a", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "4ea7c3e8feda6ce2395477cc46be7c52694b1841", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "51bc9a1ccf97b18a9e73ffaedf9c1e0d5a727509", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "51e1cab1cbde51637bf121d7720f6c984536642d", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros", "groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "523adbf17d0e310c460c510111c2c81136086233", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "5256a67ba37994e0be1aa4360edf7029c37e5ec6", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "532ab4ced3c0345f548e027b0c89727f6c3e74b2", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro"]}
+{"intro_commit": "53a242a1fdab8de2cad89a177eddd63501dd0f67", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "53f8e5a76b07ca215a9e877f5a99fbc10289fe7f", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "547164b2ae09080c0cc672a07efd268321959779", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "54e463f18fd450544b21a955bf21d85e4d870190", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "54eee258535d424a78907bf4b34ebf5ea1deb2d2", "trace_sources": ["audit-groups-097-108.json:intro_commit", "groups-097-108/attempts.jsonl:traced_intros", "groups-097-108/candidates.jsonl:intro_commit", "issues-037-048/attempts.jsonl:identified_intro_commits", "issues-037-048/attempts.jsonl:intro_commit", "issues-037-048/candidates.jsonl:intro_commit"]}
+{"intro_commit": "5526963ec2a39e9b05515d7f4cec4706c438f4d0", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "56d667c4fcc47c7fa2973294055016ee57626c98", "trace_sources": ["groups-133-144/attempts.jsonl:traced_intros", "groups-133-144/candidates.jsonl:intro_commit"]}
+{"intro_commit": "573fede371edfece3a8344bb63beb341657da86a", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "5769b7165ea652ed216b45826dc4bc3d2cc61b11", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "58f59aa767dc1ed86efc9a4ff2e5647644f50de2", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "5a61f8026268fd3e852cbad36039e5b8c0310ddd", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "5b258841ad07af9a5ba47cddf02d977d0e992f5a", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "5ba543b53ee1247ca547faf6698efa960d946975", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro", "issues-061-072/candidates.jsonl:intro_commit"]}
+{"intro_commit": "5c5d4e214494c1c5568d8de29259e9bc3bd0cdd9", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "5cf975419e3ad5b3f27ba0d0990401925b35b7b3", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "5d2a883d74b925681c10936b59bde4d495896dc7", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "5d7e0f4c2b70e9dcc3553a4e808f5c44c11c7ea1", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "5e7fc37ffcee058c0ab64e4a147dd7e5d2ec3441", "trace_sources": ["audit-013-024.json:intro_commit", "issues-013-024/attempts.jsonl:traced_intro", "issues-013-024/candidates.jsonl:intro_commit"]}
+{"intro_commit": "5efdd69c913c64bd379e4dfb4aef76000fb791b3", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "5f52f2db502c715c8d6378b7d61f3ab1d8d1a1f6", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "5f687c6c4a7660809ff2d9cf723436db291ff863", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "5fe973286ef4cf71f26a19c78ff1261f671a43d2", "trace_sources": ["audit-groups-122-125.json:intro_commit", "groups-121-132/attempts.jsonl:traced_intros", "groups-121-132/candidates.jsonl:intro_commit"]}
+{"intro_commit": "61947ed027faead23f157993c92da3ec57b6f1c7", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros", "issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "619a6c1b0a020b3bfe498c68263c65a926b44fa4", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "61d43fc75a6f9770dfe13e22415b89de96beda49", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "62a1ef24af994b510ee17ee99240b6e27b97ef0a", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "631f09e41cc7fc9d1a1f728a9343c91e1ac3533a", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "63d6ed7b2c848a3e9767f7b0053af5e47b224ed5", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "63feeb6a9ec4324e3a47f06d8b834d22a42cb3c0", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "655e8df7cccb23c738049408c405d38cf29e9134", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "65795398d2708e19dbb3b5eb5a83cf1af0677559", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "66182991c0694c4692c394ad94dda27b936fee8a", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "66c8fafb1bb0ff41e2cb427dc5fcf15c336ddec0", "trace_sources": ["groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "681cde7714ca51d3122e7398efda0308e158375a", "trace_sources": ["audit-001-012.json:intro_commit", "issues-001-012/attempts.jsonl:traced_intros", "issues-001-012/candidates.jsonl:intro_commit"]}
+{"intro_commit": "68bff9d95e38c2b401394b3d3b9380e8a71e01e7", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "695dc96b457c856d1a0c22f375649b9827aa399a", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "69ac1d51967341a10046630b897d2361e7215970", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "69cf30a9f37429146e83eb2fc0389811dbe1a99e", "trace_sources": ["hard-won/attempts.jsonl:intro_commit", "hard-won/candidates.jsonl:intro_commit"]}
+{"intro_commit": "69e3afb5d2c4a2799c14e9d5e092b8619c9f8e1f", "trace_sources": ["audit-correction-034.json:intro_commit", "groups-025-036/correction-034.json:intro_commit", "groups-025-036/correction-034.json:traced_intros", "integrated-confirmed-record"]}
+{"intro_commit": "6ac4593deee3adba092ab6e72cada15f431e731e", "trace_sources": ["audit-groups-061-072.json:intro_commit", "groups-061-072/attempts.jsonl:traced_intros", "groups-061-072/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "6b509560a5076bf193fa8db13941929126568f81", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "6be4bd32056cb8cd0c11b73f76ef9aba0d6c0553", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "6c14248b47bd0b72e22aed06a61130e3f09235f1", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros", "groups-157-168/candidates.jsonl:intro_commit"]}
+{"intro_commit": "6c9d79ca2c3c0fa46832bc06d5cf55ef9ea42565", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "6cd62681a91696cb5c27c0c029c7e26eb73a11e0", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "6d832d910ceebf496378c9574df7ddf97576fd25", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "6db218a8a66517f03c95cd4bacf5aee57f566215", "trace_sources": ["audit-013-024.json:intro_commit", "issues-013-024/attempts.jsonl:traced_intro", "issues-013-024/candidates.jsonl:intro_commit"]}
+{"intro_commit": "6dbc11b53f9d173743576ef7a523fe2fa706a0b1", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "6ecf92322c561889bfe84dc502f3209584dd166e", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros", "issues-013-024/attempts.jsonl:traced_intro"]}
+{"intro_commit": "6fb0ce47d87b120f16018949334e706896aba5cc", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro"]}
+{"intro_commit": "6fb5b5d1e9eed4366ea2527c3b77375fcdeafab8", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "703c11a82b7cd9542ae93b8a312b3682f4ea0e31", "trace_sources": ["groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "71ae963ac0a2bc707f0bf9f8635f18c1203be377", "trace_sources": ["audit-groups-122-125.json:intro_commit", "groups-121-132/attempts.jsonl:traced_intros", "groups-121-132/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "71c764d1bfb3932b7127cb175bc731ccb1ab9ce3", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "7285a1be8283e1191d2b9fbd2bbdf311bb602b86", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "72e0f71b4cf8ecfee6cb78ad91e1c34c1551b61e", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "734f0093ad39c284d588817893ee720b1ac4329e", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "74545a6cb96e65f08adb84c8187505e484946d07", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7511100cc7852ea642c89d6d73a56b1e69d3527e", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "75135e29d1c050a2a9b8211d61ffab934a76c184", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "753033ea0263d59ebbf10e7e5b188c8f06926115", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7533bd5d593ff3b172f65e0ffb10e6a655e19a71", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "754457cd805419127719fd382424491fc50da14c", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "756bc20ca2431efc63a89ed0acc13c399bc8a19d", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "76961e38283ee6a6141ac75c2623c7e706705834", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "77062110636d6acc011f889465412866f143f7d0", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "77506f4ee41d0691a9e5282ff038209fa713c724", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "776315a465bc83ad98650b4f283762ab981659ca", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros", "groups-037-048/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "779911515056c0e7a28bf11fa66d8b4035cc0e84", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "77fa704168d5d86edf55cdc2a0278c3b8888358a", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "78b2bf2e2797250e0a273e227a5498ff048a2973", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7a00192bb238375482f80ed202cac348d7360184", "trace_sources": ["audit-001-012.json:intro_commit", "groups-025-036/attempts.jsonl:traced_intros", "issues-001-012/attempts.jsonl:traced_intros", "issues-001-012/candidates.jsonl:intro_commit"]}
+{"intro_commit": "7a7652a35653edcb3b912d662f986a1575be8b60", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7a8e96440ef6cc8d40e31b6afe8a548d8c0ac899", "trace_sources": ["issues-013-024/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "7af8d1ac5315d050cb7dc05c4086b55588816c8c", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros", "groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7b4c2c67bd66eed780ef9e84964756812594cd96", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7bc9473ac96cd34172721b26dde525abd7376f58", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7cac14b633553d6970883749069daeedd0a5beed", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros", "issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "7e03ed26e7348e5adf3c91510e97b9b4e091ffa2", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7e3aab9b5c25779d15498b4c7fcf1936adf6ec65", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros", "groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7ef48c35ba2ab9a8afb23c177906ee5192a178ca", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7f338e3b9c4fc006bdcde84bfc42025d64d7c6bf", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "7fa41c7a80b6d3a8899e2f8991371e15d0f4c9cb", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8074d5a5ba47584ef5a1a80e98b8c8ef07021505", "trace_sources": ["issues-013-024/attempts.jsonl:traced_intro"]}
+{"intro_commit": "80d3ed76dc51e00251962e4ae14e0522d890ff7e", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "813cd40f05c600316414d61e269a9e75aa69042c", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "814b7c596ad94cadde5eb9db824d2d980f7e6ad9", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "81abf401ea810092b14818ae83ec2c3746df3113", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "82151e1e5636bfc3215ccce8ed64b079b68f1dc4", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros", "groups-025-036/candidates.jsonl:intro_commit", "groups-025-036/correction-034.json:rejected_historical_intro", "groups-025-036/correction-034.json:traced_intros"]}
+{"intro_commit": "82c8dd6b26663eec860b7e36cb72354af1c9b177", "trace_sources": ["audit-groups-127-131.json:intro_commit", "groups-121-132/attempts.jsonl:traced_intros", "groups-121-132/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "83af5b34fd9baf3732aa0f79f9444cad094a2ddf", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "847cee536608f2b216eddead78342ff1045678ee", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "853aed79cfec13d5a841087ccb09862c63ff6868", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8589010fa1a2f73a9c4d48781149884978ae0629", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8671edb2033955fb224798dfebbf7b8041eab7e6", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "86e7440a87d35df723597ead9de254089156cb46", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8783178144aee145430b80334aa85c8be8401917", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "880e3e3c567ecbfb7a24fd9578d3cb09b28da22a", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "883a63bab742f311f17a4e65712aca608d7a1792", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "88bd1fb9bb4fb49eb2d772b0625522fcb7807ccc", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "88c5f86d0851ead140a3fa847a072fb444c02896", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "88fa9bb729af44cc316e5b18c68ca7443cfb25c5", "trace_sources": ["groups-109-120/attempts.jsonl:intro_commit", "groups-109-120/attempts.jsonl:traced_intros", "groups-109-120/candidates.jsonl:intro_commit", "integrated-confirmed-record", "issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "891aff069ffec98decdf41d4a59e6f76b879a1d2", "trace_sources": ["issues-061-072/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "89780234623a2ddd26a03dadcf7757e0df434bd5", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8bd7ac4470bf243be6d4a0fbac3af5bd9a23d2ff", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8bdf6fee5c66fdfeb98660b5869c3862dc5765e2", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros", "groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8c6e892d1b6ebd3fda329aadc0b5138704e67f41", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro"]}
+{"intro_commit": "8c883a6eccade70b9b1ba77353f0cd47d4e7cb65", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits", "issues-049-060/candidates.jsonl:intro_commit"]}
+{"intro_commit": "8d432752ce82eeba06b3ab40c5c5f6295b1507a7", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8ea28a492d39d520bc5e8c41d676460147910400", "trace_sources": ["audit-groups-001-012.json:intro_commit", "groups-001-012/attempts.jsonl:traced_intros", "groups-001-012/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "8ec3835f948c1268a25040717dac40528bccd6e0", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8f0d2a75baddda42ce1cb9a7252b71ff3ae8a7b6", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros", "groups-073-084/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "8f11273e451dd41ba0b3fff1e73fbf41e57d3158", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros", "issues-061-072/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "8fde3ccea930dbfcd65b175da2ccd8b1adee5d6b", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "8ff0108f8253ee9017055a3ddf1e163c4ff27b87", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9160510629ac5af5414aea755dae308537fd247a", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "9335380f83ae19c2e0d575592bae1cba912beb71", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "946710c4483960434ce6b46c6d440d83e2602d91", "trace_sources": ["groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "98dc13b8663020c15cef8b4be0fb802d87122640", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "9935adacf379b21b167d4be0a33e45bf5030e42f", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9a256635685edcfffdd9c0629ca5f008ea833ea1", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9a6d3a82e88bd313edcd478e6940400ad1c36a54", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9a8cd9b7bd6346ab6ce9e41a7c482a9de4296886", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9ac8fa58d20370090225a3a6cd978969f2d2f9dc", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9afa226e3da34789cafbc42742b63cf4bb7320a8", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9be12af8bace75f0455e9e805b42049a3176943f", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9c367d3f2eb0eabcbc97c36596d09052e1c3395d", "trace_sources": ["audit-groups-001-012.json:intro_commit", "groups-001-012/attempts.jsonl:traced_intros", "groups-001-012/candidates.jsonl:intro_commit", "integrated-confirmed-record", "issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9cb5fb5ca12931991f4cce95b30ecfde03300226", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9cce90a891289ead4a82b85a11d50cb144cb139b", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9cd4fcf8e80c0a6f21f6601fdf6c9de86e6396dc", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9ce1a3aecb5a68793fe0c0051d9e137d0fcaf1a5", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros", "groups-013-024/attempts.jsonl:traced_intros", "groups-025-036/attempts.jsonl:traced_intros", "issues-013-024/attempts.jsonl:traced_intro"]}
+{"intro_commit": "9d635b5199cac0bf8d0cf95bf08d24b08adba676", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9e032012f5305a07b52c20e375b63bfdd32cd9c4", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9e06457b3d0ae22d6d27de3bc4418ea8e73939a7", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "9f69d5d9f03ec5dd02ed6cfdf461c4fbe27abe5a", "trace_sources": ["issues-013-024/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "9fe3e9ee76f68a3cc43958bd7ca3094887faf8ab", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a001eaf392284070ed0a9851086f5206c28b7118", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a12bb540f9fa2d10fabbecc0d25fcdff9b317794", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a1325d4134979fc4cf1911344ab4ec0ea3abe6d0", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a1dd06847b9318df1d55f0c86fcb6fa658bc4764", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a2497bfc89cb2537150b0648a8c258c5e78e647c", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a283aabd5106deb40bb006017829a6aedb826601", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a3bcf5ec29ac5cf1f6b20aa7fcf920d7e4b3cc8e", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a438f125e172b23efc0636f6663bf837e8ca7fdd", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a4625155a61c56c35b056943032f293ffa1f4ec3", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros", "groups-013-024/attempts.jsonl:traced_intros", "groups-109-120/attempts.jsonl:traced_intros", "groups-157-168/attempts.jsonl:traced_intros", "issues-025-036/attempts.jsonl:traced_intros", "issues-037-048/attempts.jsonl:identified_intro_commits", "issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "a4e5a842d1d26dcd144999c04e1302979244fb8a", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "a50da77c92313c7db0fe0c74b87520498102cd37", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a669cc76ffaafbbebc6db18230c797acae058ca3", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a677e5e333e2cff6ac24c43113e6de6d8e619cc3", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a77c8f2172c09749df56196f3cd3932f9b3acc48", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "a830471d19390c947b93e047483ab4e41f49ebe5", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros", "groups-025-036/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "a84d6df418e8975019007a60872e5788320ff54f", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits", "issues-037-048/attempts.jsonl:intro_commit", "issues-037-048/candidates.jsonl:intro_commit"]}
+{"intro_commit": "a98a09471df5ff9c7aa0c0aa29cb07d3edd7cdb9", "trace_sources": ["audit-groups-127-131.json:intro_commit", "groups-121-132/attempts.jsonl:traced_intros", "groups-121-132/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "aa49f37bb86c6971038f57a22583eb1036001b97", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "aa7903ffc63903d13009b359d3512d6c42a54494", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "ab0955c18e6563e625ed7d6e63eb1019d095fb66", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "ab0988d4b35d4ca36b764e98082824039902e9ab", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "acd8c5e47f6af107e4929fddff662e003c79c1b2", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "ad12d1bf9a269ba2b641413e060192bf9569cef6", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "adbc30517fb72c9abcd526aebbd202c078c21beb", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "ade0caac57ae1f409522965c8e5802b49de6ccf5", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "ae39f0cfe5d0232ba68849556bb56ecb52a3c8c7", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "aee20dbdbd627c38122f6de11c07f1ebd7152aea", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "af5d1f1655b2c390efc14b4b3bc63372712f3ded", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "b1b77f63a031d336e297b567c3941b72a6c1c30d", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros", "groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "b2025951b28b2e6838eaf741f45c6727449dbbd3", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "b203781da5ef082b6b51431c749549256488ac48", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "b228cf9869b952f47bb84bfdf31962d4edbcb40a", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "b26b20516926e1fa79574cdb06e292f904852d8d", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "b5b0dc3f0c4a3b56397bdc8b5112e41a1cb37140", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "b610cdc857044be0f8023ee8ce18278e084747db", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "b63438d0a266daa1857b4f875e194753fc7aae1d", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "b73a383797683a2128fe176f85d9457a5f073ad0", "trace_sources": ["audit-groups-122-125.json:intro_commit", "groups-121-132/attempts.jsonl:traced_intros", "groups-121-132/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "ba47ae3f428ea3e1d51d999176397a21ea71bff5", "trace_sources": ["audit-groups-085-096.json:intro_commit", "groups-085-096/attempts.jsonl:traced_intros", "groups-085-096/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "ba5e96cb3a6888831bd28cde18a2e138fcdbdb81", "trace_sources": ["audit-013-024.json:intro_commit", "issues-013-024/attempts.jsonl:traced_intro", "issues-013-024/candidates.jsonl:intro_commit"]}
+{"intro_commit": "ba6e73440d7d6a204f67bcac4371719d65859505", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "baa95bf7d68e23c9a7698a95525c024ed7a02494", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "bb45edd4de962f4fc229aa15caae3941edd9e250", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "bcbcb0c1ee82c22f607a0254900dc350489bf825", "trace_sources": ["groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "bcfe6d0e4c02e92b15f29db5b763c7feaea1dd37", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "bd0fc82f84c37b163c56c961b9af689449cd9d78", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "bdafcb7f2667e5a69351d0275b047f9cd50a5f09", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros", "groups-133-144/attempts.jsonl:traced_intros", "groups-133-144/candidates.jsonl:intro_commit"]}
+{"intro_commit": "be511874bb397df6aacf21eacc190d54712440f9", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "bf254d693b90e88f60f1cebb9d0f61c4598300f5", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c04260c11e367a6bf6154fe53e4c4dea821ea08f", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c0728bc0f0de7e9197ab1d4daa7cd7f0e1b152a6", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c110bbdb394bb84edd504858c9acfbcdac8212f3", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c1420d158c5767796c58d3cc3e6b4e41148af397", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros", "issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c29a152ab08a99a5b7d7b7b48424867db3ee4227", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c371d09a9045034a0f6cd066c4a4b2cbcc612a0e", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits", "issues-049-060/candidates.jsonl:intro_commit"]}
+{"intro_commit": "c51cdc3a534add3331a660c2df9dc55164e846d7", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c520ffdb9b67b064a4ffe77dd1b0466520a34bc7", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c5663ff4a73360ddfc182f34ebe05e283150573c", "trace_sources": ["audit-groups-097-108.json:intro_commit", "groups-097-108/attempts.jsonl:traced_intros", "groups-097-108/candidates.jsonl:intro_commit"]}
+{"intro_commit": "c651684701d9ea74aa37572c0b4708dc75a28460", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c665f8b52b72f0201e025e2c91f0a45a16adbda5", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros", "issues-013-024/attempts.jsonl:traced_intro"]}
+{"intro_commit": "c77afe04ca8d1f897d676c22e852e34025dddea3", "trace_sources": ["audit-001-012.json:intro_commit", "issues-001-012/attempts.jsonl:traced_intros", "issues-001-012/candidates.jsonl:intro_commit"]}
+{"intro_commit": "c820d8c6a8e353cc1c3a6bbd10e2c36c921cbf51", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros", "issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "c98fe7142ff9a4e3bff9996074cd781f22465961", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "ca70ab5ca4b91cb411e8ed619150c1c04652b408", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "cb09ba6774e5bb7316533fbe05c84b866c250999", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "cb8ce6ed350652396ce74edb5ea14bf0d9ba3bda", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "cc45d8f092e525615117108fbecf9453aed29bc4", "trace_sources": ["groups-109-120/attempts.jsonl:intro_commit", "groups-109-120/attempts.jsonl:traced_intros", "groups-109-120/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "ce819e280768f01c2ea42650c1ac47caee95f4bd", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "cef57b5cf653a945b8397dab27f443999fd7fab0", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d049842cc0ffbe9068fb610f27dee8239d063c42", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros", "groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d0a2ca5f1710ef30806a2f762d5c97fab821cf70", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros", "groups-085-096/attempts.jsonl:traced_intros", "issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "d0ce89824e2792b3faa4967315ad2e0252fd4312", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d0e84716086df726e3ee86138058f59e3396c919", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d0f2fcb213551ccffeeed63ccd1b772e055c146d", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d13eae520cd63d275afd8b91241a35342bcc6361", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits", "issues-049-060/candidates.jsonl:intro_commit"]}
+{"intro_commit": "d21b8c25a958d6116b7f31ba1410734b66b533a7", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d31de9e1c8c1e30a0615bc437bffad8bfc6cfa95", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d338f34f8e43f92e04232ee98ffbb15e4455d283", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d5026b930eee6fa03eb4cbd756ffbd29235f76b2", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d58ab0f272720c33dfb3973c64c376198ce14911", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro", "issues-061-072/candidates.jsonl:intro_commit"]}
+{"intro_commit": "d5c9845b7488e63b08987de579d381e76f751b5e", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros", "groups-073-084/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "d5dc0feb4ca39f13f77003c6677646d35c2fe886", "trace_sources": ["issues-061-072/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "d7285eea718bf9f0283e6a255962fbf6ee5a97e7", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d72a98334deb1e3867d567c65d940ee4bb341ae3", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d76655a2d06fa8981b0cb1eb3ade89d2192a041f", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d8763ec201f9eb3acc20eb77335e49d05e8db8f8", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d883a143f31aba973401ad079e313bf080aafe17", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d989279dc939b5664a3b5df9ef8002c3fa84a2b0", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "d9dfbb4fb3da8d581bde0a7156c13fab0229e7bc", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros", "groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "dabd52dc3b57f9d9750b7d3ed269e5df8e73bb4b", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros"]}
+{"intro_commit": "dad61927907764ffc3c62d4a9b436729961baad5", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "db238908013acbe1691445f9470ce5f2f78fde4a", "trace_sources": ["groups-109-120/attempts.jsonl:intro_commit", "groups-109-120/attempts.jsonl:traced_intros", "groups-109-120/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "db37ea2b21e0c92bd070b33839650518b295cddc", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "db9ad26b1211960f04bde7a3c4ea378f5ecb0612", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "dbfc41af22d33d3c530e7d3937ddbf8497505143", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "dc0ba96f220bf0066892f98a6757a4c96d38335f", "trace_sources": ["audit-groups-061-072.json:intro_commit", "groups-037-048/attempts.jsonl:traced_intros", "groups-061-072/attempts.jsonl:traced_intros", "groups-061-072/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "dc1b8c5a6ee8b391195f6cad29dd401c99ccf030", "trace_sources": ["groups-109-120/attempts.jsonl:traced_intros"]}
+{"intro_commit": "dc3dfba35fa2f5d62971a4a1930950c79f9c3ac1", "trace_sources": ["groups-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "dc5377aab1663e5691190a7cff4f982a97f2844f", "trace_sources": ["issues-061-072/attempts.jsonl:additional_traced_commits"]}
+{"intro_commit": "dc99f4fb344edb439811fb40873a426dc7e6e095", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "dd9df356894c2c2d1d9b4dccb73e8d3678d8e2d8", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "ddf1fa6da14d5c3152c76b1696036796482c324d", "trace_sources": ["issues-061-072/attempts.jsonl:traced_intro", "issues-061-072/candidates.jsonl:intro_commit"]}
+{"intro_commit": "de4e42df911b14f03f78f0eb468e5c09440ab529", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "de6736bb6cb6974e1c0846accadb4a232a0c569e", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e0056b2d2901cc36858a18a2ae2ad2ec0b0bd957", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e0b09002ed4d04b0bfc42cf0ab02de5b8cea76ec", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e102717c907f2eede3aaa7fbfc5b75fac70eb5b5", "trace_sources": ["groups-013-024/attempts.jsonl:traced_intros", "groups-025-036/attempts.jsonl:traced_intros", "groups-157-168/attempts.jsonl:traced_intros", "issues-013-024/attempts.jsonl:additional_traced_commits", "issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "e14fdac82d288ac826a6b1a13fa642e9f714d6c6", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros", "groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros", "groups-133-144/attempts.jsonl:traced_intros", "issues-001-012/attempts.jsonl:traced_intros", "issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e21778d1d9516d5180308a4fd5dd503bbe5296c8", "trace_sources": ["audit-groups-049-060.json:intro_commit", "groups-049-060/attempts.jsonl:traced_intros", "groups-049-060/candidates.jsonl:intro_commit", "integrated-confirmed-record", "issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e343581adc025ddf0215ad768a2bdac04f55f123", "trace_sources": ["groups-049-060/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e36282ee691d0113ac0cb794f7bc41ec52f4ccf4", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e415653b28ec8feeb73b43867c6969d35a579a4f", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e52f5b854a9bb5030598c8d66cf8ea7d27a07ad8", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "e55ed6f4a8aa392bd5186df034d9e4eede8eb250", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros", "groups-073-084/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "e5bdbd39bc9b166639abce81852f8e6341edb800", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e758e5ab27341fb753083c55185cc64046ea05c0", "trace_sources": ["groups-001-012/attempts.jsonl:traced_intros"]}
+{"intro_commit": "e855c190efb31a501e222c5acc90dbc35938102d", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "e86e4a28cd4a01bf8388656902dd05a40b2a6abd", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "ec36dfd90e1241d446d15bf62ab6c20b41b5a81b", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "ed722fa56803e3b783889067c3407372f4e401fc", "trace_sources": ["groups-085-096/attempts.jsonl:traced_intros"]}
+{"intro_commit": "eea67f99599410a874c7c37dea4fb40b0f9c187c", "trace_sources": ["audit-groups-049-060.json:intro_commit", "groups-049-060/attempts.jsonl:traced_intros", "groups-049-060/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "ef3b2bee3e5af413e292ee63e9b876d85b76b759", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros"]}
+{"intro_commit": "ef892ce5c8838559a42befba34c8d5b992fce04e", "trace_sources": ["groups-133-144/attempts.jsonl:traced_intros"]}
+{"intro_commit": "eff59cd0d2a2e6b5a786a90f2ac46c8a0e200adc", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "f22b408ba983282daded39de69fcec935364268b", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "f4495e5c7c626610e0c86863b85a9d316ff37904", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros"]}
+{"intro_commit": "f5a7198da1d916c19c7d5a7087e923979981d0d5", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "f5cf77da184060e453f69b0c4f04e27d1ba2ae8b", "trace_sources": ["audit-groups-122-125.json:intro_commit", "groups-121-132/attempts.jsonl:traced_intros", "groups-121-132/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "f5ff17edf1709fcde9f753c2cf92b143cbf5d448", "trace_sources": ["audit-groups-061-072.json:intro_commit", "groups-061-072/attempts.jsonl:traced_intros", "groups-061-072/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "f6d7038d918e4d2f84c7ae28c715ab2405ecbea5", "trace_sources": ["groups-157-168/attempts.jsonl:traced_intros"]}
+{"intro_commit": "f7142990b454ed1d89496030d8680366aa0b8f3a", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "f7e2d59ae8064a007b67aa6aca043eb21b64c08d", "trace_sources": ["issues-037-048/attempts.jsonl:identified_intro_commits"]}
+{"intro_commit": "fc21db0b47d8b245848bcbe9906785d14fc95f47", "trace_sources": ["issues-049-060/attempts.jsonl:intro_commits"]}
+{"intro_commit": "fc2a4cffdfe13d56ed2c772ce88c2f55a0b7c9ba", "trace_sources": ["groups-037-048/attempts.jsonl:traced_intros"]}
+{"intro_commit": "fc73e3479647e5b3f5789833fca49a87adb23e46", "trace_sources": ["groups-097-108/attempts.jsonl:traced_intros", "groups-133-144/attempts.jsonl:traced_intros", "issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "fcbadd07475c6ca9d610e9734dfbbfaf323be93a", "trace_sources": ["groups-073-084/attempts.jsonl:intro_commit", "groups-073-084/attempts.jsonl:traced_intros"]}
+{"intro_commit": "fd0f7bd9cf4daf7098171376491e1c1374d34d31", "trace_sources": ["groups-145-156/attempts.jsonl:traced_intros", "groups-145-156/candidates.jsonl:intro_commit"]}
+{"intro_commit": "fd18c41b8412579c4ff8ce3063f273cffe53d771", "trace_sources": ["hard-won/attempts.jsonl:intro_commit"]}
+{"intro_commit": "fd4774441e975910ea5f6e5620cd4cda176bd00f", "trace_sources": ["groups-121-132/attempts.jsonl:traced_intros"]}
+{"intro_commit": "fd90c94a4f6bdb498a5cf5b05e58ecc5e1d2c5f1", "trace_sources": ["groups-061-072/attempts.jsonl:traced_intros"]}
+{"intro_commit": "fe862359a21a9f7ce9b72ecf2e8dc1481d191f6f", "trace_sources": ["audit-groups-049-060.json:intro_commit", "groups-049-060/attempts.jsonl:traced_intros", "groups-049-060/candidates.jsonl:intro_commit", "integrated-confirmed-record"]}
+{"intro_commit": "fe99b78f29c709232a95e7cdf5d52799def8df31", "trace_sources": ["issues-025-036/attempts.jsonl:traced_intros"]}
+{"intro_commit": "ff63e25fefc265e76a1db9f05ffa6d320b799c04", "trace_sources": ["issues-001-012/attempts.jsonl:traced_intros"]}

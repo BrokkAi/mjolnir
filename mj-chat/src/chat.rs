@@ -123,34 +123,23 @@ pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
 
 /// What `/review status` reports, on every surface.
 ///
-/// It answers the two questions a person actually has: is every turn reviewed,
-/// and is one being reviewed right now.
+/// It answers the two questions a person actually has: does review run before
+/// push, and is one being reviewed right now.
 #[must_use]
 pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) -> String {
-    let armed = match (review.trigger, review.reviewer_profile()) {
-        (mj_core::config::ReviewTrigger::Push, _) => "Review trigger is before push".to_owned(),
-        (mj_core::config::ReviewTrigger::Turn, Some(profile)) => {
-            format!("Reviewing every completed turn with [review] profile {profile:?}")
-        }
-        (mj_core::config::ReviewTrigger::Turn, None) => {
-            "Reviewing every completed turn with Auto".to_owned()
-        }
-        (mj_core::config::ReviewTrigger::Off, Some(profile)) => {
-            format!("Automatic review is off; /review reviews one turn with {profile:?}")
-        }
-        (mj_core::config::ReviewTrigger::Off, None) => {
-            "Automatic review is off; /review uses Auto".to_owned()
-        }
+    let armed = match review.trigger() {
+        mj_core::config::ReviewTrigger::Push => "Review trigger is before push",
+        mj_core::config::ReviewTrigger::Off => "Automatic review is off; /review reviews commits",
     };
-    let armed = match &review.model {
-        Some(model) => format!("{armed}, model {model:?}"),
-        None => armed,
+    let count = review.reviewers.len();
+    let armed = if count == 0 {
+        format!("{armed}; no reviewers")
+    } else {
+        format!(
+            "{armed}; {count} reviewer{}",
+            if count == 1 { "" } else { "s" }
+        )
     };
-    let count = review.count.get();
-    let armed = format!(
-        "{armed}; {count} reviewer{}",
-        if count == 1 { "" } else { "s" }
-    );
     if open {
         format!("{armed}. A review is open now.")
     } else {
@@ -276,6 +265,12 @@ pub enum ChatAction {
     OpenSubagents,
     OpenReviewers,
     Prompt(String),
+    ResendSubmission {
+        command_id: String,
+    },
+    DismissSubmission {
+        command_id: String,
+    },
     RunShell(String),
     RemoveQueuedPrompt {
         id: String,
@@ -528,11 +523,15 @@ pub struct ChatState {
     /// reads capture this value so a slow native read cannot paste into a new
     /// draft after the user has continued editing.
     input_generation: u64,
-    /// Stored prompts from other sessions in this project, oldest-first.
-    project_history: Vec<String>,
     /// Stored prompts from this session, oldest-first.
     session_history: Vec<String>,
-    project_history_error: Option<String>,
+    session_history_error: Option<String>,
+    /// The latest session-history listing requested; an older answer that
+    /// arrives after a newer request is dropped.
+    session_history_generation: u64,
+    /// A listing to request, set when the chat opens and after each turn so
+    /// prompts sent to this session from elsewhere reach Up and Ctrl-P.
+    pending_session_history: Option<u64>,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -586,6 +585,8 @@ pub struct ChatState {
     command_choices: Vec<CommandChoice>,
     model_values: Vec<SessionConfigChoice>,
     effort_values: Vec<SessionConfigChoice>,
+    /// Config keys owned by this session's execution policy.
+    policy_config_keys: Vec<String>,
     autocomplete: Option<Autocomplete>,
     /// The `/model` / `/effort` value selector, when one is open. It owns the
     /// keyboard while it is up, though an arriving elicitation still wins.
@@ -638,8 +639,6 @@ pub struct ChatState {
     task_dialog_form: Form<BackgroundTaskControl>,
     task_control_area: Option<Rect>,
     subagent_count: usize,
-    /// The session runs with Mjolnir sub-agents, whether or not any exist.
-    subagents_enabled: bool,
     subagent_working_count: usize,
     reviewers: ReviewerCounts,
     reviewer_control_area: Option<Rect>,
@@ -736,9 +735,10 @@ impl ChatState {
             submitting_images: Vec::new(),
             pending_attachment_markers: BTreeMap::new(),
             input_generation: 0,
-            project_history: Vec::new(),
             session_history: Vec::new(),
-            project_history_error: None,
+            session_history_error: None,
+            session_history_generation: 0,
+            pending_session_history: None,
             prompt_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
@@ -781,6 +781,7 @@ impl ChatState {
             command_choices: builtin_command_choices(),
             model_values: Vec::new(),
             effort_values: Vec::new(),
+            policy_config_keys: Vec::new(),
             autocomplete: None,
             config_picker: None,
             anchor: TranscriptAnchor::Bottom,
@@ -812,7 +813,6 @@ impl ChatState {
             task_dialog_form: Form::new(),
             task_control_area: None,
             subagent_count: 0,
-            subagents_enabled: false,
             subagent_working_count: 0,
             reviewers: ReviewerCounts::default(),
             reviewer_control_area: None,
@@ -1074,6 +1074,9 @@ impl ChatState {
                 self.unconverted_prefix,
                 std::mem::take(&mut self.entries),
             );
+            if self.has_inline_submissions() {
+                self.sync_inline_submissions();
+            }
             // Reusing entry rows is safe only after the collapse topology is
             // recomputed. A tool can become completed without changing the
             // transcript length, joining or splitting a collapsed streak.

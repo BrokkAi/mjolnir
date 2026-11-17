@@ -34,12 +34,18 @@ const auditedLinksPackages = new Set([
   "webkit2gtk-sys",
   "alsa-sys",
   "libmimalloc-sys",
+  // The jemalloc C allocator has a separate BSD license, included below.
+  "tikv-jemalloc-sys",
   "libsqlite3-sys",
   "prettyplease",
   // rayon-core uses `links` only to prevent multiple versions; its build
   // script does not link or ship a native library.
   "rayon-core",
   "ring",
+  // Dynamic ORT payloads are pinned downloads with their own cached notices.
+  "ort-sys",
+  // The tokenizer statically links Oniguruma; its BSD notice is below.
+  "onig_sys",
   // rusqlite selects sqlite-wasm-rs only for wasm32-unknown-unknown. Official
   // Mjolnir archives target native platforms, so its compiled SQLite payload
   // is not present in any release artifact.
@@ -185,12 +191,12 @@ async function checkedInLegalFile(relativePath) {
 
 
 async function sqliteNativePayload(metadata) {
-  const packageInfo = resolvedPackage(metadata, "libsqlite3-sys", "0.38.2");
+  const packageInfo = resolvedPackage(metadata, "libsqlite3-sys", "0.39.1");
   const amalgamation = await readFile(
     path.join(packageRoot(packageInfo), "sqlite3", "sqlite3.c"),
     "utf8",
   );
-  const sqliteVersion = "3.53.2";
+  const sqliteVersion = "3.54.1";
   if (!amalgamation.includes(`SQLite\n** version ${sqliteVersion}`)) {
     throw new Error(
       `libsqlite3-sys does not contain the audited SQLite ${sqliteVersion} amalgamation`,
@@ -275,7 +281,15 @@ async function main() {
       "0.1.49",
       "c_src/mimalloc/v3/LICENSE",
       "mimalloc native allocator",
-      "statically linked into the musl Linux Mjolnir controller and worker",
+      "statically linked into the musl Linux Mjolnir worker",
+    ),
+    await legalFile(
+      metadata,
+      "tikv-jemalloc-sys",
+      "0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8",
+      "jemalloc/COPYING",
+      "jemalloc native allocator",
+      "statically linked into the Linux Mjolnir CLI and daemon",
     ),
     await legalFile(
       metadata,
@@ -285,6 +299,24 @@ async function main() {
       "Zstandard native compression library",
       "statically linked for checkpoint archive compression",
     ),
+    await legalFile(
+      metadata,
+      "onig_sys",
+      "69.9.3",
+      "oniguruma/COPYING",
+      "Oniguruma tokenizer regular-expression engine",
+      "statically linked into the GitHub relevance tokenizer",
+    ),
+    {
+      component: "Downloaded GitHub relevance inference runtime",
+      source: "mj-controller/src/github_student/runtime.json (official ONNX Runtime GitHub and Microsoft NuGet artifacts)",
+      scope: "downloaded, verified and atomically cached at first preparation; not bundled in release archives",
+      text: [
+        "ONNX Runtime 1.23.0 is MIT licensed. Its LICENSE and ThirdPartyNotices.txt accompany the verified native library in the Mjolnir data-directory cache.",
+        "GPU-eligible Windows hosts additionally download Microsoft.ML.OnnxRuntime.DirectML 1.23.0 and Microsoft.AI.DirectML 1.15.4. Their LICENSE, ThirdPartyNotices.txt, DirectML-LICENSE.txt and DirectML-LICENSE-CODE.txt accompany the cached DLLs.",
+        "Only the official URL, size and SHA-256 pinned in runtime.json are accepted. The ORT main library is never selected from the system or PATH. Linux CUDA uses administrator-installed CUDA 12 and cuDNN 9 dependencies.",
+      ].join("\n"),
+    },
     await sqliteNativePayload(metadata),
     await embeddedFontsNotice(),
   ];

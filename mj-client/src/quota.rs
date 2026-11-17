@@ -13,6 +13,44 @@ pub const API_LABEL: &str = "API";
 /// is no reading to take and none is missing.
 pub const NOT_REPORTED_LABEL: &str = "n/a";
 
+/// The independent subscription pools returned by Antigravity's `/usage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AntigravityQuotaPool {
+    Gemini,
+    Claude,
+}
+
+impl AntigravityQuotaPool {
+    pub const ALL: [Self; 2] = [Self::Gemini, Self::Claude];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Gemini => "Ge",
+            Self::Claude => "Cl",
+        }
+    }
+
+    pub const fn bucket_prefix(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini-",
+            Self::Claude => "3p-",
+        }
+    }
+
+    pub const fn model_scope(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::Claude => "claude,gpt",
+        }
+    }
+
+    pub fn of_window(window: &QuotaWindow) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|pool| window.model_scope.as_deref() == Some(pool.model_scope()))
+    }
+}
+
 /// A quota window reported by a harness.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuotaWindow {
@@ -21,6 +59,7 @@ pub struct QuotaWindow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Model-name fragments sharing this allowance, separated by commas.
     pub model_scope: Option<String>,
     pub used: Option<i64>,
     pub limit: Option<i64>,
@@ -30,6 +69,16 @@ pub struct QuotaWindow {
 }
 
 impl QuotaWindow {
+    pub fn applies_to_model(&self, model: &str) -> bool {
+        self.model_scope.as_deref().is_none_or(|scope| {
+            let model = model.to_ascii_lowercase();
+            scope.split(',').any(|fragment| {
+                let fragment = fragment.trim();
+                !fragment.is_empty() && model.contains(&fragment.to_ascii_lowercase())
+            })
+        })
+    }
+
     /// Whether this allowance spans a week or longer, including model-scoped labels.
     pub fn is_weekly_or_longer(&self) -> bool {
         let label = if self.model_scope.is_some() {
@@ -63,6 +112,12 @@ pub struct QuotaSnapshot {
 /// The quota report shown for one harness profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileQuota {
+    /// Monthly USD list price used as a subscription capacity proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_price_usd: Option<u32>,
+    /// Paid extra usage, independent of included quota and banked resets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paid_credits: Option<PaidCredits>,
     /// Unused provider-granted resets, absent when the provider cannot report them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banked_resets: Option<u64>,
@@ -78,18 +133,99 @@ pub struct ProfileQuota {
     /// when it was taken.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limited_until_epoch_seconds: Option<u64>,
+    /// With a hold: when the daemon next asks the provider, one regular
+    /// interval after the refused attempt or the end of the hold, whichever is
+    /// later. Readers that predate it fall back to the hold's end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check_at_epoch_seconds: Option<u64>,
+}
+
+/// Provider-native paid funds usable after included subscription quota ends.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "balance", rename_all = "snake_case")]
+pub enum PaidCredits {
+    /// Remaining funds, constrained by any applicable spending cap.
+    Limited(serde_json::Number),
+    /// The provider explicitly reports unrestricted paid usage.
+    Unlimited,
+    /// The provider confirms funds but does not disclose their amount.
+    Available,
+}
+
+impl PaidCredits {
+    pub fn limited(balance: f64) -> Option<Self> {
+        serde_json::Number::from_f64(balance.max(0.0))
+            .filter(|_| balance.is_finite())
+            .map(Self::Limited)
+    }
+}
+
+/// Actionable refusal text shared by profile, doctor, and session views.
+pub fn refused_login_message(profile_id: &str) -> String {
+    format!("login refused; automatic renewal failed; run `mj login --profile {profile_id}`")
 }
 
 impl ProfileQuota {
-    /// `rate limited · retry in N min` while the provider's hold lasts.
+    /// A display projection of one pool; the original report retains all scopes
+    /// for model selection and quota recovery.
+    pub fn for_antigravity_pool(&self, pool: AntigravityQuotaPool) -> Self {
+        let mut report = self.clone();
+        report
+            .windows
+            .retain(|window| window.model_scope.as_deref() == Some(pool.model_scope()));
+        for window in &mut report.windows {
+            window.model_scope = None;
+        }
+        report
+    }
+
+    /// Billing mode inferred from the daemon's cached report.
+    pub fn billing_class(&self) -> QuotaBilling {
+        if self.error.is_some() {
+            QuotaBilling::Unknown
+        } else if self.is_usage_priced() {
+            QuotaBilling::Usage
+        } else if !self.windows.is_empty() || self.paid_credits.is_some() {
+            QuotaBilling::Subscription
+        } else {
+            QuotaBilling::Unknown
+        }
+    }
+
+    /// Billing of a profile on `harness` given its last report, if any. A
+    /// report that classifies the profile decides; otherwise the harness may
+    /// decide on its own (see [`harness_billing`]).
+    pub fn billing_for(harness: HarnessKind, report: Option<&Self>) -> QuotaBilling {
+        match report.map_or(QuotaBilling::Unknown, Self::billing_class) {
+            QuotaBilling::Unknown => harness_billing(harness),
+            billing => billing,
+        }
+    }
+
+    /// After a refused check: when the daemon checks again. A daemon that
+    /// predates `next_check_at_epoch_seconds` checks again when the hold ends.
+    pub fn next_check_at(&self) -> Option<u64> {
+        let until = self.rate_limited_until_epoch_seconds?;
+        Some(self.next_check_at_epoch_seconds.unwrap_or(until).max(until))
+    }
+
+    /// `quota check refused · next in N min` from a refused check until the
+    /// next one runs. The provider refused the check, not the account; the
+    /// windows beside it are the last good reading.
     pub fn rate_limit_label(&self, now: u64) -> Option<String> {
-        let until = self
-            .rate_limited_until_epoch_seconds
-            .filter(|until| *until > now)?;
+        let next = self.next_check_at().filter(|next| *next > now)?;
         Some(format!(
-            "rate limited · retry in {} min",
-            (until - now).div_ceil(60)
+            "quota check refused · next in {} min",
+            (next - now).div_ceil(60)
         ))
+    }
+
+    /// The refused-check label when there is no good reading behind it, so the
+    /// label stands in for the reading. With a good reading, the reading is
+    /// shown and the label is a note beside it.
+    pub fn refused_check_without_reading(&self, now: u64) -> Option<String> {
+        self.error.as_ref()?;
+        self.rate_limit_label(now)
     }
 
     pub fn weekly_window(&self) -> Option<&QuotaWindow> {
@@ -187,13 +323,20 @@ impl ProfileQuota {
                     (_, Some(used), Some(limit)) => format!("{used}/{limit}"),
                     _ => "available".to_string(),
                 };
+                let label = if self.harness == HarnessKind::Antigravity {
+                    AntigravityQuotaPool::of_window(window)
+                        .map(|pool| format!("{} ({})", window.label, pool.label()))
+                        .unwrap_or_else(|| window.label.clone())
+                } else {
+                    window.label.clone()
+                };
                 match window
                     .resets
                     .as_ref()
                     .filter(|reset| seen_resets.insert((*reset).clone()))
                 {
-                    Some(reset) => format!("{} {usage}, resets {reset}", window.label),
-                    None => format!("{} {usage}", window.label),
+                    Some(reset) => format!("{label} {usage}, resets {reset}"),
+                    None => format!("{label} {usage}"),
                 }
             })
             .collect::<Vec<_>>();
@@ -212,10 +355,30 @@ impl ProfileQuota {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaBilling {
+    Usage,
+    Subscription,
+    Unknown,
+}
+
+/// Billing a harness implies when no report classifies the profile. OpenCode
+/// authenticates with API keys and reports no allowance, and dsh-acp talks to
+/// DeepSeek's API, so both are billed per use. Other harnesses are unknown
+/// until a report says.
+pub fn harness_billing(harness: HarnessKind) -> QuotaBilling {
+    match harness {
+        HarnessKind::OpenCode | HarnessKind::Dsh => QuotaBilling::Usage,
+        _ => QuotaBilling::Unknown,
+    }
+}
+
 fn quota_error_label(error: &str) -> String {
     // This is the stable user-facing marker emitted by the Claude usage
     // adapter. Keep the display contract independent of the controller crate.
-    if error == "login expired" {
+    if error.starts_with("login refused;") {
+        "login required".to_owned()
+    } else if error == "login expired" {
         error.to_string()
     } else if error.starts_with("rate limited") {
         // The provider is throttling the usage endpoint, which is not the same
@@ -282,8 +445,13 @@ pub enum ResetCountdownStyle {
 }
 
 impl QuotaWindow {
+    /// Whether this is the provider's short rolling five-hour window.
+    pub fn is_five_hour(&self) -> bool {
+        is_short_quota_window(&self.label)
+    }
+
     pub fn reset_countdown_style(&self) -> ResetCountdownStyle {
-        if is_short_quota_window(&self.label) {
+        if self.is_five_hour() {
             ResetCountdownStyle::FiveHour
         } else {
             ResetCountdownStyle::Long
@@ -421,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_limit_hold_reads_as_minutes_until_the_retry_and_ends_with_the_hold() {
+    fn a_refused_check_reads_as_minutes_until_the_next_check_and_ends_with_it() {
         let mut quota: ProfileQuota = serde_json::from_value(serde_json::json!({
             "profile_id": "claude", "harness": "claude", "windows": [],
             "extra": null, "error": null, "refreshed_at_epoch_seconds": 0,
@@ -430,14 +598,24 @@ mod tests {
         .unwrap();
         assert_eq!(
             quota.rate_limit_label(1000).as_deref(),
-            Some("rate limited · retry in 15 min")
+            Some("quota check refused · next in 15 min")
         );
         assert_eq!(
             quota.rate_limit_label(1000 + 15 * 60 - 1).as_deref(),
-            Some("rate limited · retry in 1 min")
+            Some("quota check refused · next in 1 min")
         );
         assert_eq!(quota.rate_limit_label(1000 + 15 * 60), None);
+        // A short hold inside the regular interval: the label lasts until the
+        // next check, not until the hold ends.
+        quota.rate_limited_until_epoch_seconds = Some(1000 + 60);
+        quota.next_check_at_epoch_seconds = Some(1000 + 10 * 60);
+        assert_eq!(
+            quota.rate_limit_label(1000 + 61).as_deref(),
+            Some("quota check refused · next in 9 min")
+        );
+        assert_eq!(quota.rate_limit_label(1000 + 10 * 60), None);
         quota.rate_limited_until_epoch_seconds = None;
+        assert_eq!(quota.next_check_at(), None);
         assert!(
             serde_json::to_value(&quota)
                 .unwrap()
@@ -457,6 +635,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(quota.banked_resets, None);
+        assert_eq!(quota.paid_credits, None);
         assert_eq!(quota.windows[0].duration_seconds, None);
         assert_eq!(quota.windows[0].model_scope, None);
         assert!(

@@ -1,7 +1,7 @@
 //! Move intent uses the same guarded writer as session lifecycle transitions.
 
 use super::*;
-use mj_core::state::MoveOperation;
+use mj_core::state::{MoveOperation, MoveSelection};
 
 pub fn retain_move_source(operation: &MoveOperation) -> Result<()> {
     let operation = operation.clone();
@@ -11,8 +11,8 @@ pub fn retain_move_source(operation: &MoveOperation) -> Result<()> {
             .as_ref()
             .context("Move transfer missing")?;
         connection.execute(
-            "INSERT INTO retained_move_sources(operation_id, session_id, source_json, exclusions_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(operation_id) DO NOTHING",
+            "INSERT INTO retained_move_sources(operation_id, session_id, source_json, exclusions_json, created_at,environment_id)
+             VALUES (?1, ?2, ?3, ?4, ?5,(SELECT source_environment_id FROM session_moves WHERE operation_id=?1)) ON CONFLICT(operation_id) DO NOTHING",
             params![operation.operation_id, operation.selection.session_id,
                 serde_json::to_string(&transfer.source)?, serde_json::to_string(&operation.selection.workspace.exclusions)?, operation.created_at],
         )?;
@@ -62,6 +62,42 @@ pub fn save_move_operation(operation: &MoveOperation) -> Result<()> {
     submit_database_write("save_move_operation", move |connection| {
         save_move_operation_with(connection, &operation)
     })
+}
+
+/// Record the person's requests atomically with acceptance of the Move intent.
+pub(crate) fn accept_move_operation(operation: &MoveOperation) -> Result<()> {
+    let operation = operation.clone();
+    submit_database_write("accept Move", move |connection| {
+        let tx = connection.transaction()?;
+        update_move_requests(&tx, &operation.selection)?;
+        save_move_operation_with(&tx, &operation)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+/// An unchanged Move still accepts the person's explicit next-creation choices.
+pub(crate) fn accept_unchanged_move(selection: &MoveSelection) -> Result<()> {
+    let selection = selection.clone();
+    submit_database_write("accept unchanged Move", move |connection| {
+        let tx = connection.transaction()?;
+        update_move_requests(&tx, &selection)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+fn update_move_requests(tx: &Transaction<'_>, selection: &MoveSelection) -> Result<()> {
+    super::state_io::update_container_requests(
+        tx,
+        &selection.session_id,
+        if selection.clear_resource_allocation {
+            Some(None)
+        } else {
+            selection.resource_allocation.as_ref().map(Some)
+        },
+        selection.additional_mounts.as_deref(),
+    )
 }
 
 /// Publish destination adoption and ownership together, without changing client fields.
@@ -117,9 +153,12 @@ pub(super) fn save_move_operation_with(
         tx.commit()?;
         return Ok(());
     }
+    super::environments::record_prepared_move_environment(connection, operation)?;
     connection.execute(
-        "INSERT INTO session_moves(session_id, operation_id, operation_json) VALUES (?1, ?2, ?3)
-         ON CONFLICT(session_id) DO UPDATE SET operation_id=excluded.operation_id,
+        "INSERT INTO session_moves(session_id, operation_id, operation_json,source_environment_id)
+         VALUES (?1, ?2, ?3,(SELECT environment_id FROM environment_bindings WHERE session_id=?1))
+         ON CONFLICT(session_id) DO UPDATE SET source_environment_id=CASE WHEN session_moves.operation_id=excluded.operation_id THEN session_moves.source_environment_id ELSE excluded.source_environment_id END,
+             operation_id=excluded.operation_id,
              operation_json=CASE WHEN session_moves.operation_id=excluded.operation_id
                  AND json_extract(session_moves.operation_json, '$.cancellation_requested')=1
                  THEN json_set(excluded.operation_json, '$.cancellation_requested', json('true'))
@@ -180,6 +219,31 @@ pub(super) fn load_move_operation_with(
     Ok(json.and_then(|json| decode_move_operation(session_id, &json)))
 }
 
+/// Release only the cancelled Move's restore authority. Placement ownership
+/// has already been settled; do not adopt or recreate it while resolving.
+pub(super) fn resolve_cancelled_move_for_close_with(
+    connection: &Connection,
+    session_id: &str,
+    operation_id: &str,
+    updated_at: &str,
+) -> Result<()> {
+    let mut operation = load_move_operation_with(connection, session_id)?
+        .context("superseded Move disappeared before close publication")?;
+    ensure!(
+        operation.operation_id == operation_id
+            && operation.phase == mj_core::state::MovePhase::Cancelled
+            && !operation.queue_admission_started,
+        "superseded Move no longer permits close settlement"
+    );
+    operation.queue_admission_finished = true;
+    operation.updated_at = updated_at.to_owned();
+    connection.execute(
+        "UPDATE session_moves SET operation_json=?2, close_requested_operation_id=NULL WHERE session_id=?1",
+        params![session_id, serde_json::to_string(&operation)?],
+    )?;
+    Ok(())
+}
+
 /// Decode one stored move intent, or `None` when it no longer decodes.
 ///
 /// A move intent recorded before a harness was removed keeps that harness in
@@ -210,6 +274,64 @@ pub fn load_move_operations() -> Result<Vec<MoveOperation>> {
     }
     let connection = open_reader(&database_path())?;
     load_move_operations_with(&connection)
+}
+
+/// Read Move and close intent together; an unmatched/stale close ID is inert.
+pub(super) fn exact_move_close_intent(
+    decoded_id: &str,
+    row_id: &str,
+    close_id: Option<&str>,
+) -> bool {
+    decoded_id == row_id && close_id == Some(row_id)
+}
+
+/// The durable owner of an interrupted Move, shared by startup and intent GC.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoveRecoveryOwner {
+    Move,
+    Close,
+}
+
+pub(crate) fn move_recovery_owner(
+    state: Option<SessionState>,
+    exact_close_intent: bool,
+) -> Option<MoveRecoveryOwner> {
+    if exact_close_intent {
+        Some(MoveRecoveryOwner::Close)
+    } else if matches!(
+        state,
+        Some(SessionState::Closing | SessionState::Destroying)
+    ) {
+        Some(MoveRecoveryOwner::Move)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn load_move_recovery() -> Result<(Vec<MoveOperation>, BTreeSet<String>)> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare("SELECT session_id, operation_id, operation_json, close_requested_operation_id FROM session_moves ORDER BY session_id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut operations = Vec::new();
+    let mut closes = BTreeSet::new();
+    for row in rows {
+        let (session_id, operation_id, json, close_id) = row?;
+        if let Some(operation) = decode_move_operation(&session_id, &json) {
+            if exact_move_close_intent(&operation.operation_id, &operation_id, close_id.as_deref())
+            {
+                closes.insert(operation_id);
+            }
+            operations.push(operation);
+        }
+    }
+    Ok((operations, closes))
 }
 
 pub(super) fn load_move_operations_with(connection: &Connection) -> Result<Vec<MoveOperation>> {
@@ -263,6 +385,23 @@ pub fn reap_finished_move_intents() -> Result<usize> {
 pub(super) fn reap_finished_move_intents_with(connection: &Connection) -> Result<usize> {
     let mut reaped = 0;
     for operation in load_move_operations_with(connection)? {
+        let (state, close_id): (Option<String>, Option<String>) = connection.query_row(
+            "SELECT s.state, m.close_requested_operation_id FROM session_moves m LEFT JOIN sessions s ON s.session_id=m.session_id WHERE m.session_id=?1 AND m.operation_id=?2",
+            params![operation.selection.session_id, operation.operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if move_recovery_owner(
+            state.as_deref().map(stored_session_state),
+            exact_move_close_intent(
+                &operation.operation_id,
+                &operation.operation_id,
+                close_id.as_deref(),
+            ),
+        )
+        .is_some()
+        {
+            continue;
+        }
         if (operation.phase != mj_core::state::MovePhase::Completed
             && operation
                 .prepared_destination
@@ -331,6 +470,37 @@ pub fn move_pending_work(session_id: &str) -> Result<(bool, Vec<MaterializedQueu
     ))
 }
 
+/// Cleanup uses the accepted source owner, independent of the current binding.
+pub(crate) fn move_source_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
+    let connection = open_reader(&database_path())?;
+    let id: Option<String> = connection
+        .query_row(
+            "SELECT source_environment_id FROM session_moves WHERE operation_id=?1",
+            [operation_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    id.map(|id| super::environments::read_environment(&connection, &id))
+        .transpose()
+        .map(Option::flatten)
+}
+
+pub(crate) fn retained_move_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
+    let connection = open_reader(&database_path())?;
+    let id: Option<String> = connection
+        .query_row(
+            "SELECT environment_id FROM retained_move_sources WHERE operation_id=?1",
+            [operation_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    id.map(|id| super::environments::read_environment(&connection, &id))
+        .transpose()
+        .map(Option::flatten)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +519,8 @@ mod tests {
             source_checkpoint_only: false,
             operation_id: "move-one".into(),
             selection: MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
@@ -360,15 +532,17 @@ mod tests {
             },
             source_profile_id: session.last_profile.clone(),
             source_target_template_id: session.target_template_id.clone(),
-            source_target: session.target.clone(),
+            source_target: session.target.clone().map(|v| *v),
             source_native_session_id: session.native_session_id.clone(),
+            inherited_resource_allocation: None,
+            inherited_additional_mounts: Vec::new(),
             source_additional_mounts: session.additional_mounts.clone(),
             source_resource_allocation: session.resource_allocation.clone(),
             destination_target: None,
             destination_native_session_id: None,
             destination_store_id: None,
             configuration_fingerprint: "fingerprint".into(),
-            checkpoint: session.checkpoint.clone(),
+            checkpoint: session.checkpoint.clone().map(|v| *v),
             recovery_session: Some(session.clone()),
             queue: ResumeQueueDisposition::Start,
             phase: MovePhase::Preparing,
@@ -477,12 +651,12 @@ mod tests {
         )
         .unwrap();
         session.target_runtime = Some((&template).into());
-        session.target = Some(mj_core::state::TargetLocator::SshPodman {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::SshPodman {
             host: "original.test".into(),
             container_id: "source-container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         save_session_to(&path, &session).unwrap();
         let mut intent = operation(&session);
         for phase in [
@@ -496,7 +670,7 @@ mod tests {
             intent.phase = phase;
             if phase == MovePhase::StartingQueue {
                 intent.queue_admission_started = true;
-                intent.destination_target = session.target.clone();
+                intent.destination_target = session.target.clone().map(|v| *v);
                 intent.destination_store_id = Some("durable-destination".into());
             }
             if phase == MovePhase::Completed {
@@ -510,7 +684,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(restored, intent);
-            assert_eq!(restored.source_target, session.target);
+            assert_eq!(restored.source_target, session.target.as_deref().cloned());
             assert_eq!(restored.retains_checkpoint(), phase != MovePhase::Completed);
         }
     }
@@ -842,5 +1016,38 @@ mod tests {
         assert_eq!(current.draft_input, "keep this draft");
         assert_eq!(current.session_title_override.as_deref(), Some("new title"));
         assert_eq!(current.last_profile, "destination");
+
+        // A no-op Move's omitted choices cannot overwrite a settings edit.
+        let allocation = SessionResourceAllocation::Container {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        };
+        set_session_container_settings_to(
+            &path,
+            &stale.id,
+            Some(&allocation),
+            &current.additional_mounts,
+            &current.updated_at,
+        )
+        .unwrap();
+        let mut selection = operation(&stale).selection;
+        selection.additional_mounts = None;
+        let mut connection = open(&path).unwrap();
+        let tx = connection.transaction().unwrap();
+        update_move_requests(&tx, &selection).unwrap();
+        tx.commit().unwrap();
+        let retained = load_session_with(&connection, &stale.id).unwrap().unwrap();
+        assert_eq!(retained.resource_allocation, Some(allocation));
+        assert_eq!(retained.additional_mounts, current.additional_mounts);
+
+        // An explicit choice still applies when no environment change is needed.
+        selection.clear_resource_allocation = true;
+        selection.additional_mounts = Some(Vec::new());
+        let tx = connection.transaction().unwrap();
+        update_move_requests(&tx, &selection).unwrap();
+        tx.commit().unwrap();
+        let changed = load_session_with(&connection, &stale.id).unwrap().unwrap();
+        assert_eq!(changed.resource_allocation, None);
+        assert!(changed.additional_mounts.is_empty());
     }
 }

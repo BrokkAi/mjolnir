@@ -237,7 +237,9 @@ button:disabled {
   color: var(--dim);
 }
 
-.pill.alert {
+.pill.alert,
+#subagents-button.alert,
+#subagents-button-desktop.alert {
   border-color: var(--failed);
   color: var(--failed);
 }
@@ -293,6 +295,13 @@ button:disabled {
   line-height: 1;
 }
 
+.session-attention-item.queue {
+  width: auto;
+  min-width: 1.25em;
+  padding: 0 0.35em;
+  border-radius: 999px;
+}
+
 .session-attention-item.alert {
   border-color: var(--failed);
   color: var(--failed);
@@ -337,6 +346,14 @@ button:disabled {
 .session-menu button {
   width: 100%;
   text-align: left;
+}
+
+/* The menu's top line reads the session's model, effort, and profile. */
+.session-menu-info {
+  padding: 2px 12px 4px;
+  color: var(--dim);
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .session-meta {
@@ -641,28 +658,10 @@ pre.entry-body {
   overscroll-behavior: contain;
 }
 
-/* A turn review under way, or waiting for the reader to answer its findings.
- * It borrows the elicitation card's shape because it asks the same kind of
- * question: something is blocked until you answer it. */
-.turn-review {
-  border-color: var(--plan);
-}
-
-.turn-review-roles {
-  margin: 6px 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-}
-
-.turn-review-findings {
-  font: inherit;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin: 0 0 10px;
-  /* Findings scroll rather than pushing their own buttons off the screen. */
-  max-height: 40dvh;
-  overflow-y: auto;
+/* Passive review progress: one line above the composer. */
+#turn-review > p {
+  margin: 4px 0;
+  font-size: 13px;
 }
 
 .elicitation-field {
@@ -1032,13 +1031,26 @@ details.mailbox-event[open] > summary::before {
 /* ---- workspace picker ---- */
 
 .workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 4px 0 10px;
   border-bottom: 1px solid var(--border);
 }
 
 /* The select shortens a long workspace name itself; it never widens the page. */
 #workspace-select {
+  min-width: 0;
   max-width: 100%;
+}
+
+.notifications-badge {
+  flex: 0 0 auto;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding: 0 8px;
+  color: var(--accent);
+  font-weight: 700;
 }
 
 /* ---- pages ---- */
@@ -1051,16 +1063,17 @@ details.mailbox-event[open] > summary::before {
   margin: 12px 0;
 }
 
-.recent-projects {
-  display: grid;
-  gap: 6px;
-  margin-bottom: 16px;
+/* Above the session list so a failed card action is seen where it ran. */
+#action-error:empty {
+  display: none;
 }
 
-.recent-project {
-  text-align: left;
-  overflow-wrap: anywhere;
-  white-space: normal;
+/* The Notifications heading holds its Clear all at the right edge. */
+.notifications-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .project {
@@ -1533,6 +1546,10 @@ article > h3 {
   text-overflow: ellipsis;
 }
 
+#conversation-move-failure {
+  overflow-wrap: anywhere;
+}
+
 .conversation-transition {
   margin: auto 0;
   padding: 24px;
@@ -1588,7 +1605,7 @@ article > h3 {
   display: contents;
 }
 
-#subagents-button {
+.child-workspace-buttons {
   display: none;
 }
 
@@ -1615,11 +1632,12 @@ article > h3 {
 
 .composer-lower-border {
   display: flex;
+  gap: 8px;
   min-height: 0;
   margin-top: -0.35rem;
 }
 
-.composer-lower-border:has(.hidden) {
+.composer-lower-border:not(:has(> button:not(.hidden))) {
   display: none;
 }
 
@@ -2153,7 +2171,7 @@ body[data-connection='reconnecting'] .connection {
   body.elicitation-focused #turn-review,
   body.elicitation-focused #conversation-status,
   body.elicitation-focused #conversation-side,
-  body.elicitation-focused #subagents-button,
+  body.elicitation-focused .child-workspace-buttons,
   body.elicitation-focused #prompt-form {
     display: none !important;
   }
@@ -2242,8 +2260,13 @@ body[data-connection='reconnecting'] .connection {
     white-space: nowrap;
   }
 
-  .conversation-status:has(> #subagents-button:not(.hidden)) #conversation-side > summary {
+  .conversation-status:has(#subagents-button:not(.hidden)) #conversation-side > summary,
+  .conversation-status:has(#reviewers-button:not(.hidden)) #conversation-side > summary {
     padding-right: 138px;
+  }
+
+  .conversation-status:has(#subagents-button:not(.hidden)):has(#reviewers-button:not(.hidden)) #conversation-side > summary {
+    padding-right: 258px;
   }
 
   .conversation-summary-full {
@@ -2262,11 +2285,16 @@ body[data-connection='reconnecting'] .connection {
     padding: 4px 8px 8px;
   }
 
-  #conversation-status > #subagents-button {
+  #conversation-status > .child-workspace-buttons {
     position: absolute;
     z-index: 1;
     top: 0;
     right: 0;
+    display: flex;
+    gap: 8px;
+  }
+
+  .child-workspace-buttons > button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -2278,6 +2306,7 @@ body[data-connection='reconnecting'] .connection {
   }
 
   #subagents-button-desktop,
+  #reviewers-button-desktop,
   .composer-lower-border {
     display: none !important;
   }
@@ -2461,3 +2490,7 @@ body[data-connection='reconnecting'] .connection {
   margin: 0;
   flex: 1 1 12rem;
 }
+
+#notification-offer:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .5rem; margin-bottom: .75rem; border: 1px solid var(--border); border-radius: .4rem; }
+#notification-offer-text { flex: 1 1 15rem; }
+#notification-offer-error { flex-basis: 100%; }

@@ -238,6 +238,22 @@ pub(super) fn start_database_writer_at(
     static NEXT_WRITER_ID: AtomicU64 = AtomicU64::new(1);
 
     let mut connection = schema::open_writer(path)?;
+    // 0x10002 is SQLite's recommendation for long-lived connections. Bit 0x10
+    // applies a temporary analysis_limit, keeping the first run bounded on a
+    // large store that has never been analyzed. Refresh statistics once at
+    // every daemon start by design; there is no periodic run.
+    let optimize_started = std::time::Instant::now();
+    match connection.execute_batch("PRAGMA optimize=0x10012") {
+        Ok(()) => tracing::info!(
+            elapsed_ms = optimize_started.elapsed().as_millis() as u64,
+            "optimized SQLite query planner statistics"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            elapsed_ms = optimize_started.elapsed().as_millis() as u64,
+            "failed to optimize SQLite query planner statistics; continuing startup"
+        ),
+    }
     let mut observed_revision = schema::read_schema_state(&connection)?.revision;
     let initial = CommittedState::bootstrap(&mut connection)?;
     let (committed, _) = tokio::sync::watch::channel(Ok(Arc::new(initial)));

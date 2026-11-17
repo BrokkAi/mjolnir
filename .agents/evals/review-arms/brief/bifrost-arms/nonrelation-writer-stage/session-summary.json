@@ -1,0 +1,123 @@
+{
+  "observed_at": "2026-11-17T06:32:17.234411+00:00",
+  "live_own_writers": [],
+  "sessions": [
+    {
+      "id": "model-overload-unknown-competitor-discarded",
+      "sid": "ed965eebe3d29d1abaed211da6d57d02",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/ed965eebe3d29d1abaed211da6d57d02.json"
+    },
+    {
+      "id": "rust-while-let-binder-body-field",
+      "sid": "90878775d6a298486f47617381db79a9",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/90878775d6a298486f47617381db79a9.json"
+    },
+    {
+      "id": "javascript-object-method-indexed-as-field",
+      "sid": "669ced85cbe642ab57b3fb55f0e9b1f3",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/669ced85cbe642ab57b3fb55f0e9b1f3.json"
+    },
+    {
+      "id": "matching-analyzer-epoch-needs-writer-slot",
+      "sid": "85b3ccf8e8593227d6c7b4bafac37e73",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/85b3ccf8e8593227d6c7b4bafac37e73.json"
+    },
+    {
+      "id": "maintainability-file-cap-missing-truncated",
+      "sid": "526babaf9257ad36ee12b0164533f0ee",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/526babaf9257ad36ee12b0164533f0ee.json"
+    },
+    {
+      "id": "rust-enum-variant-named-fields-omitted",
+      "sid": "be1fea635a78e844eb820a7d82d514d1",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/be1fea635a78e844eb820a7d82d514d1.json"
+    },
+    {
+      "id": "rust-importer-planning-widens-to-code-mentions",
+      "sid": "bb7f122893e6d596d0152fa0eb0f41e5",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/bb7f122893e6d596d0152fa0eb0f41e5.json"
+    },
+    {
+      "id": "rust-item-macro-evades-plain-struct-drop-proof",
+      "sid": "7c9f8f68b353d82a0cf900ba0fad1e9f",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/7c9f8f68b353d82a0cf900ba0fad1e9f.json"
+    },
+    {
+      "id": "mcp-timed-out-progress-survives-response",
+      "sid": "8ffdf0d78d0f3a7a302b9a6de713f68b",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/8ffdf0d78d0f3a7a302b9a6de713f68b.json"
+    },
+    {
+      "id": "csharp-single-file-namespace-prunes-usages",
+      "sid": "6b340e577d561d88c2f4847fdfd93637",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/6b340e577d561d88c2f4847fdfd93637.json"
+    },
+    {
+      "id": "rust-bare-value-admits-associated-constant",
+      "sid": "a0d1c870e1c1041364d7b71d206b47cd",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/a0d1c870e1c1041364d7b71d206b47cd.json"
+    },
+    {
+      "id": "ruby-constant-navigation-climbs-to-terminal",
+      "sid": "f674f2614a8932f05d4f3029ecde1d2f",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/f674f2614a8932f05d4f3029ecde1d2f.json"
+    },
+    {
+      "id": "rust-option-return-implicitly-unwrapped",
+      "sid": "f8126ef4bb4587d420202a5d2cbf7adb",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/sessions/f8126ef4bb4587d420202a5d2cbf7adb.json"
+    }
+  ]
+}

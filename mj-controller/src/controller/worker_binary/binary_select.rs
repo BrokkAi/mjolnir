@@ -1,5 +1,6 @@
 use super::*;
 use mj_core::hex::lower_hex;
+use mj_core::targets::SshTrafficClass;
 
 /// Linux appends " (deleted)" to `/proc/<pid>/exe` for a removed image. That
 /// marker belongs in a message but never in a decision, which `is_file` makes.
@@ -24,7 +25,8 @@ pub(super) fn template_architecture(
         | Template::AppleContainer { container }
         | Template::SshPodman { container, .. }
         | Template::SshDocker { container, .. }
-        | Template::SshAppleContainer { container, .. } => container.platform.as_deref()?,
+        | Template::SshAppleContainer { container, .. }
+        | Template::SshNitro { container, .. } => container.platform.as_deref()?,
         Template::LocalBare | Template::SshBare { .. } | Template::AwsEc2 { .. } => return None,
     };
     // Platform strings appear as "linux/arm64", "arm64", or "linux/arm64/v8".
@@ -57,6 +59,7 @@ pub(super) fn preflight_architectures(
         Template::SshBare { .. }
         | Template::SshPodman { .. }
         | Template::SshDocker { .. }
+        | Template::SshNitro { .. }
         | Template::AwsEc2 { .. } => {
             vec!["x86_64", "aarch64"]
         }
@@ -71,7 +74,7 @@ pub(crate) fn release_image_supplies_worker(template: &mj_core::config::TargetTe
     mj_core::config::RELEASE_IMAGE_CARRIES_WORKER
         && template
             .container()
-            .is_some_and(|container| container.image == mj_core::config::DEFAULT_CONTAINER_IMAGE)
+            .is_some_and(|container| container.image == mj_core::config::RELEASE_CONTAINER_IMAGE)
 }
 
 /// Resolve the worker before expensive provisioning or transcript compaction.
@@ -99,8 +102,12 @@ pub(in crate::controller) fn preflight_host_worker_binary(
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     if let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template {
-        let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
-            .purpose("detect target platform");
+        let command = targets::ssh_command(
+            SshTrafficClass::Control,
+            &SshTarget::from(ssh),
+            ["uname", "-sm"],
+        )
+        .purpose("detect target platform");
         let platform = probe_platform(executor, command)?;
         return materialize_worker_source(worker_binary_for_arch(
             platform.architecture,
@@ -147,8 +154,12 @@ pub(crate) fn worker_source_problem(
         return None;
     }
     if let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template {
-        let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
-            .purpose("detect target platform");
+        let command = targets::ssh_command(
+            SshTrafficClass::Control,
+            &SshTarget::from(ssh),
+            ["uname", "-sm"],
+        )
+        .purpose("detect target platform");
         let platform = probe_platform(executor, command).ok()?;
         return worker_binary_for_arch(
             platform.architecture,
@@ -183,8 +194,12 @@ pub fn ssh_worker_binary_prerequisite(
     let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template else {
         return None;
     };
-    let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
-        .purpose("detect target platform");
+    let command = targets::ssh_command(
+        SshTrafficClass::Control,
+        &SshTarget::from(ssh),
+        ["uname", "-sm"],
+    )
+    .purpose("detect target platform");
     let platform = probe_platform(executor, command).ok()?;
     let requirement = WorkerBinaryRequirement::for_os(platform.os);
     Some((

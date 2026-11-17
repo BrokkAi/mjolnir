@@ -6,7 +6,7 @@ use mj_core::config::{TargetTemplate, raw_project_context_id};
 use mj_core::go::GoRecipe;
 use mj_core::state::SessionRecord;
 
-use crate::{DashboardAction, DashboardState};
+use crate::{CarriedLaunchSettings, DashboardAction, DashboardState};
 
 const SIMPLE_TARGET_ID: &str = "localhost";
 
@@ -81,7 +81,7 @@ impl DashboardState {
                 session.state.is_active()
                     && session.target_template_id == SIMPLE_TARGET_ID
                     && session.create_managed_worktree == Some(true)
-                    && session.review == Some(mj_core::config::SessionReview::Off)
+                    && session.review.as_deref() == Some(&mj_core::config::SessionReview::Off)
             });
             if let Some(session) = startup {
                 let session_id = session.id.clone();
@@ -117,8 +117,8 @@ impl DashboardState {
         let Some(session) = self.state.sessions.get(session_id) else {
             return "Conversation".into();
         };
-        if session.display_title() != session.id {
-            return session.display_title().to_owned();
+        if session.has_given_name() {
+            return session.listed_title().to_owned();
         }
         let mut sessions = self
             .state
@@ -173,6 +173,7 @@ impl DashboardState {
     }
 
     pub fn go_launch_action(&mut self, workspace_id: String, recipe: GoRecipe) -> DashboardAction {
+        let oracle = self.state.last_oracle_choice_for(&recipe.profile_id);
         // A recipe saved before DSH stopped offering Native, or one without a
         // policy, reads as the choice this profile's harness offers.
         let subagents = match self.config.profiles.get(&recipe.profile_id) {
@@ -199,11 +200,14 @@ impl DashboardState {
             project_directory: recipe.project_directory,
             create_managed_worktree: recipe.create_managed_worktree,
             subagents: Some(subagents),
+            oracle: Some(oracle),
+            oracle_choice: None,
             review: self
                 .simple_mode
                 .then_some(mj_core::config::SessionReview::Off),
             additional_mounts: recipe.additional_mounts,
             resource_allocation: recipe.resource_allocation,
+            carried: CarriedLaunchSettings::default(),
         }
     }
 

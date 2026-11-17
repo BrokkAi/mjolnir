@@ -48,7 +48,7 @@ jobs:
         working-directory: docs
         env:
           ASTRO_TELEMETRY_DISABLED: 1
-          PUBLIC_DOCS_SITE: https://mjolnir.brokk.ai
+          PUBLIC_DOCS_SITE: https://mjolnir.slopcop.com
           PUBLIC_DOCS_BASE: /
 
       - name: Upload Pages artifact

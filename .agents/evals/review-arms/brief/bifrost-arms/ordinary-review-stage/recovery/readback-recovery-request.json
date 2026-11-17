@@ -1,0 +1,37 @@
+{
+  "recorded_at": "2026-11-17T10:12:07.227922+00:00",
+  "failed_job": {
+    "bug": "diff-bb39a5fd49",
+    "arm": "BT"
+  },
+  "carrier_sid": "0f23bb69a200485d9306560e463ae6a7",
+  "failed_expected_reviewer_sid": "c8757173aac60ff861754ba851e318f9",
+  "failed_argv": [
+    "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/mjx",
+    "usage",
+    "--session",
+    "c8757173aac60ff861754ba851e318f9",
+    "--json"
+  ],
+  "reviewers": {
+    "c8757173aac60ff861754ba851e318f9": {
+      "slot": 0,
+      "latest_role_state": "running"
+    },
+    "2be51eba653cb3939b13ecda2083bc56": {
+      "slot": 1,
+      "latest_role_state": "findings"
+    },
+    "3eefdcce61d77b652364d43d0485728c": {
+      "slot": 2,
+      "latest_role_state": "findings"
+    }
+  },
+  "review_status_path": "/mnt/optane/review-arms-bifrost-20261116/runs/diff-bb39a5fd49/BT/review-status.jsonl",
+  "reviewer_partial_stored_path": "/mnt/optane/review-arms-bifrost-20261116/runs/diff-bb39a5fd49/BT/reviewers/c8757173aac6/stored.json",
+  "launch_path": "/mnt/optane/review-arms-bifrost-20261116/runs/diff-bb39a5fd49/BT/launch.json",
+  "review_start_path": "/mnt/optane/review-arms-bifrost-20261116/runs/diff-bb39a5fd49/BT/review-start.json",
+  "verdict_path": "/mnt/optane/review-arms-bifrost-20261116/runs/diff-bb39a5fd49/BT/verdict.json",
+  "error_path": "/mnt/optane/review-arms-bifrost-20261116/runs/diff-bb39a5fd49/BT/error.json",
+  "response_failure": "CLI rejected crossed request IDs; no successful usage JSON was published"
+}

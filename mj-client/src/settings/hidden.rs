@@ -51,6 +51,23 @@ pub fn hide(value: &mut Value) {
     }
 }
 
+/// Hide only literals that were markers in the browser's incoming draft.
+/// Values newly entered by the user must survive a server-side page action.
+pub fn rehide_restored(value: &mut Value, incoming: &Value) {
+    for (section, id, environment) in environments(value) {
+        let owner = if section == "profile" {
+            "profiles"
+        } else {
+            "targets"
+        };
+        for (key, entry) in environment.iter_mut() {
+            if is_marker(&incoming[owner][id.as_str()]["environment"][key.as_str()]) {
+                *entry = json!({ MARKER_KEY: true });
+            }
+        }
+    }
+}
+
 /// Put back each hidden value from `stored`, the stored shape of the
 /// configuration as it is now, and return the values put back, so a caller
 /// can keep them out of anything else it sends. A marker whose value the file
@@ -104,4 +121,45 @@ fn contains_marker(value: &Value) -> bool {
             Value::Array(entries) => entries.iter().any(contains_marker),
             _ => false,
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_action_preserves_typed_environment_values_through_save() {
+        let stored = json!({
+            "profiles": {"old": {"environment": {"TOKEN": "old-secret"}}},
+            "targets": {"box": {"environment": {"KEY": "old-runtime"}}}
+        });
+        let mut incoming = stored.clone();
+        hide(&mut incoming);
+        incoming["profiles"]["old"]["environment"]["TOKEN"] = json!("edited-secret");
+        incoming["profiles"]["old"]["environment"]["NEW"] = json!("new-secret");
+        incoming["targets"]["box"]["environment"]["NEW"] = json!("new-runtime");
+        let mut action_result = incoming.clone();
+        restore(&mut action_result, &stored).unwrap();
+        rehide_restored(&mut action_result, &incoming);
+        assert_eq!(
+            action_result["profiles"]["old"]["environment"]["TOKEN"],
+            "edited-secret"
+        );
+        assert_eq!(
+            action_result["profiles"]["old"]["environment"]["NEW"],
+            "new-secret"
+        );
+        assert!(is_marker(
+            &action_result["targets"]["box"]["environment"]["KEY"]
+        ));
+        restore(&mut action_result, &stored).unwrap();
+        assert_eq!(
+            action_result["targets"]["box"]["environment"]["NEW"],
+            "new-runtime"
+        );
+        assert_eq!(
+            action_result["targets"]["box"]["environment"]["KEY"],
+            "old-runtime"
+        );
+    }
 }

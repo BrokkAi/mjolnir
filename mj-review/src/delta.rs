@@ -1,16 +1,4 @@
-//! What a turn changed: capturing it in the worker, and describing it to the
-//! reviewing agents.
-//!
-//! The review target is a pair of Git ids per repository -- the baseline
-//! recorded when the last review completed, and a capture taken the moment the
-//! turn finished -- plus the unified diff between them. Each id names a tree and
-//! the HEAD it was taken at; the diff starts from the baseline with whatever
-//! history the turn merged in folded into it, so it shows the turn's own work.
-//! The ids are content ids, so a baseline stays valid across a daemon restart,
-//! a harness swap, and a cross-harness resume.
-
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+//! Describe committed changes captured for push review.
 
 use mj_core::relay::RepoDelta;
 
@@ -86,25 +74,6 @@ impl RawDiffSummary {
     }
 }
 
-/// Whether any repository has something to review.
-#[must_use]
-pub fn has_changes(deltas: &[RepoDelta]) -> bool {
-    deltas.iter().any(|delta| {
-        !delta.patch.trim().is_empty()
-            || match (&delta.base_commit, &delta.head_commit) {
-                (Some(base), Some(head)) => base != head,
-                // Commits that share no history with any start point are new
-                // work even when they leave the tree empty.
-                (None, Some(_)) => true,
-                _ => false,
-            }
-    })
-}
-
-/// Whether every repository's tree is its base tree. A push capture like this
-/// adds nothing unreviewed, so it is recorded clean without a reviewer. Tree
-/// ids, not the diff, decide: diff settings such as `diff.ignoreSubmodules`
-/// can hide a change.
 #[must_use]
 pub fn trees_unchanged(deltas: &[RepoDelta]) -> bool {
     deltas
@@ -164,18 +133,10 @@ pub fn changed_line_count(deltas: &[RepoDelta]) -> usize {
     })
 }
 
-/// The trees a completed review should record as its new baselines.
-#[must_use]
-pub fn captured_trees(deltas: &[RepoDelta]) -> BTreeMap<PathBuf, String> {
-    deltas
-        .iter()
-        .map(|delta| (delta.root.clone(), delta.current_tree.clone()))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn trees_unchanged_compares_tree_ids_not_the_diff() {
@@ -192,19 +153,6 @@ mod tests {
             current_tree: "tree1".into(),
             ..RepoDelta::default()
         }]));
-    }
-
-    #[test]
-    fn commits_without_a_base_are_changes_even_with_an_empty_patch() {
-        let delta = |base: Option<&str>, head: Option<&str>| RepoDelta {
-            base_commit: base.map(str::to_owned),
-            head_commit: head.map(str::to_owned),
-            ..Default::default()
-        };
-        assert!(has_changes(&[delta(None, Some("head"))]));
-        assert!(has_changes(&[delta(Some("base"), Some("head"))]));
-        assert!(!has_changes(&[delta(Some("head"), Some("head"))]));
-        assert!(!has_changes(&[delta(None, None)]));
     }
 
     const PATCH: &str = "diff --git a/one.rs b/one.rs\n\

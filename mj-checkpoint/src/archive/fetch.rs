@@ -1,17 +1,12 @@
-use super::{MAX_SESSION_FILE_BYTES, SessionExportError};
+use super::SessionExportError;
 use anyhow::{Context, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::io::{BufRead, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
-
-/// The most file content a directory fetch reads before it compresses any of
-/// it. The archive itself is held to [`MAX_SESSION_FILE_BYTES`]; this bound
-/// stops a directory of very compressible files from costing minutes of reading
-/// on the target to produce an archive that would still fit.
-pub const MAX_FETCHED_DIRECTORY_BYTES: u64 = 8 * MAX_SESSION_FILE_BYTES;
 
 /// What a caller asked of a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,12 +62,14 @@ pub enum ListedKind {
 }
 
 /// One path read from a session's target by [`fetch_session_path`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct FetchedPath {
     pub kind: FetchedKind,
     /// The path on the target after symlinks were resolved.
     pub path: String,
-    pub bytes: Vec<u8>,
+    payload: Arc<fs::File>,
+    length: u64,
+    offset: u64,
 }
 
 /// A fetched copy on the calling machine, without its content in the response.
@@ -81,81 +78,248 @@ pub struct SavedFetch {
     pub path: PathBuf,
     pub kind: FetchedKind,
     pub source: String,
-    pub bytes: usize,
+    pub bytes: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct FetchedHeader {
     kind: FetchedKind,
     path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    length: Option<u64>,
 }
 
 impl FetchedPath {
     /// Keep the source's whole path below `<temp>/mjolnir/<session>` so equal
     /// filenames from different paths or sessions cannot overwrite each other.
     pub fn local_path(&self, temp: &Path, session: &str) -> anyhow::Result<PathBuf> {
-        let mut components = Path::new(session).components();
-        ensure!(
-            matches!(
-                (components.next(), components.next()),
-                (Some(std::path::Component::Normal(_)), None)
-            ),
-            "session id {session:?} cannot name a directory"
-        );
-        let mut local = temp.join("mjolnir").join(session);
-        let mut named = false;
-        for component in Path::new(&self.path).components() {
-            if let std::path::Component::Normal(part) = component {
-                local.push(part);
-                named = true;
-            }
+        local_fetch_path(self.kind, &self.path, temp, session)
+    }
+
+    pub fn from_file(kind: FetchedKind, path: String, file: fs::File) -> anyhow::Result<Self> {
+        let length = file.metadata().context("inspect fetched payload")?.len();
+        Ok(Self {
+            kind,
+            path,
+            payload: Arc::new(file),
+            length,
+            offset: 0,
+        })
+    }
+
+    pub fn from_reader(
+        kind: FetchedKind,
+        path: String,
+        mut reader: impl Read,
+        mut file: fs::File,
+    ) -> anyhow::Result<Self> {
+        std::io::copy(&mut reader, &mut file).context("spool fetched payload")?;
+        Self::from_file(kind, path, file)
+    }
+
+    pub fn len(&self) -> u64 {
+        self.length
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
+    /// Readers have independent positions even when their file handle is shared.
+    pub fn reader(&self) -> impl Read + Seek + Send + 'static {
+        super::ArchiveFile {
+            file: self.payload.clone(),
+            len: self.length,
+            position: 0,
+            start: self.offset,
+            cancelled: None,
         }
-        ensure!(named, "the target answered no path for the fetch");
-        if self.kind == FetchedKind::Directory {
-            let mut name = local.file_name().unwrap_or_default().to_os_string();
-            name.push(".zip");
-            local.set_file_name(name);
-        }
-        Ok(local)
     }
 
     pub fn save(&self, temp: &Path, session: &str) -> anyhow::Result<SavedFetch> {
-        let path = self.local_path(temp, session)?;
-        mj_core::config::atomic_write(&path, &self.bytes)?;
+        Self::store(
+            self.kind,
+            self.path.clone(),
+            temp,
+            session,
+            self.length,
+            self.reader(),
+        )
+    }
+
+    /// Stage on the destination filesystem and publish only a complete transfer.
+    pub fn store(
+        kind: FetchedKind,
+        source: String,
+        temp: &Path,
+        session: &str,
+        expected: u64,
+        mut reader: impl Read,
+    ) -> anyhow::Result<SavedFetch> {
+        let path = local_fetch_path(kind, &source, temp, session)?;
+        let parent = path.parent().context("fetch destination has no parent")?;
+        fs::create_dir_all(parent).context("create fetch destination")?;
+        // One lock owns this destination's staging path, including across
+        // killed worker processes. Never remove the lock inode: another owner
+        // may already be waiting on it. Unrelated destinations stay concurrent.
+        let key = blake3::hash(path.as_os_str().as_encoded_bytes()).to_hex();
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join(format!(".mj-fetch-{key}.lock")))
+            .context("open fetch destination lock")?;
+        lock.lock().context("lock fetch destination")?;
+        let _lock = mj_core::file_lock::FileLock::new(lock);
+        let stage_path = parent.join(format!(".mj-fetch-{key}.part"));
+        // The lock proves the preceding writer has stopped. Reclaim its partial
+        // file before reading a retried payload, so restarts cannot accumulate it.
+        match fs::remove_file(&stage_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("reclaim interrupted fetch"),
+        }
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut staged = StagedFetch {
+            file: Some(
+                options
+                    .open(&stage_path)
+                    .context("stage fetch destination")?,
+            ),
+            path: stage_path,
+        };
+        let received = std::io::copy(&mut reader, staged.file.as_mut().unwrap())
+            .context("write fetched payload")?;
+        ensure!(
+            received == expected,
+            "incomplete fetch transfer: expected {expected} bytes, received {received}"
+        );
+        mj_core::test_hooks::reach_test_hook("fetch_destination_ready")?;
+        staged
+            .file
+            .take()
+            .unwrap()
+            .sync_all()
+            .context("sync fetched payload")?;
+        fs::rename(&staged.path, &path).context("publish fetched payload")?;
+        mj_core::config::sync_directory(parent)?;
         Ok(SavedFetch {
             path,
-            kind: self.kind,
-            source: self.path.clone(),
-            bytes: self.bytes.len(),
+            kind,
+            source,
+            bytes: received,
         })
     }
 
-    /// The worker's standard output: one JSON line naming the kind and the
-    /// resolved path, then the bytes.
-    pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
-        let mut output = serde_json::to_vec(&FetchedHeader {
-            kind: self.kind,
-            path: self.path.clone(),
-        })?;
-        output.push(b'\n');
-        output.extend_from_slice(&self.bytes);
-        Ok(output)
+    /// Metadata framing is unchanged: a JSON line followed by payload bytes.
+    pub fn write_to(&self, mut writer: impl Write) -> anyhow::Result<()> {
+        serde_json::to_writer(
+            &mut writer,
+            &FetchedHeader {
+                kind: self.kind,
+                path: self.path.clone(),
+                length: Some(self.length),
+            },
+        )?;
+        writer.write_all(b"\n")?;
+        std::io::copy(&mut self.reader(), &mut writer).context("stream fetched payload")?;
+        writer.flush().context("flush fetched payload")
     }
 
-    pub fn decode(mut output: Vec<u8>) -> anyhow::Result<Self> {
-        let end = output
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .context("the fetched path has no header line")?;
+    /// Keep the wire payload in its original anonymous file. The metadata line
+    /// is a prefix, not another copy of the artifact to allocate or rewrite.
+    pub fn read_from(file: fs::File) -> anyhow::Result<Self> {
+        let mut reader = std::io::BufReader::new(file);
+        reader.rewind()?;
+        let mut line = String::new();
+        ensure!(
+            reader.read_line(&mut line)? != 0,
+            "the fetched path has no header line"
+        );
         let header: FetchedHeader =
-            serde_json::from_slice(&output[..end]).context("decode the fetched path header")?;
-        let bytes = output.split_off(end + 1);
+            serde_json::from_str(&line).context("decode fetched path header")?;
+        let offset = reader.stream_position()?;
+        let file = reader.into_inner();
+        let length = file
+            .metadata()?
+            .len()
+            .checked_sub(offset)
+            .context("fetch header exceeds payload")?;
+        if let Some(expected) = header.length {
+            ensure!(
+                length == expected,
+                "incomplete fetch transfer: expected {expected} bytes, received {length}"
+            );
+        }
         Ok(Self {
             kind: header.kind,
             path: header.path,
-            bytes,
+            payload: Arc::new(file),
+            length,
+            offset,
         })
     }
+}
+
+/// Internal transfer spools belong to the instance's data filesystem, not
+/// `/tmp`, which is commonly tmpfs. The final user copy keeps its requested
+/// destination; only rebuildable transport scratch lives here.
+pub fn create_fetch_spool() -> anyhow::Result<fs::File> {
+    let directory = mj_core::config::data_dir().join("fetch-spool");
+    fs::create_dir_all(&directory).context("create fetch spool directory")?;
+    tempfile::tempfile_in(directory).context("create fetch spool")
+}
+
+struct StagedFetch {
+    file: Option<fs::File>,
+    path: PathBuf,
+}
+impl Drop for StagedFetch {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        if let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path=%self.path.display(), %error, "could not remove staged fetch");
+        }
+    }
+}
+
+fn local_fetch_path(
+    kind: FetchedKind,
+    source: &str,
+    temp: &Path,
+    session: &str,
+) -> anyhow::Result<PathBuf> {
+    let mut components = Path::new(session).components();
+    ensure!(
+        matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        ),
+        "session id {session:?} cannot name a directory"
+    );
+    let mut local = temp.join("mjolnir").join(session);
+    let mut named = false;
+    for component in Path::new(source).components() {
+        if let std::path::Component::Normal(part) = component {
+            local.push(part);
+            named = true;
+        }
+    }
+    ensure!(named, "the target answered no path for the fetch");
+    if kind == FetchedKind::Directory {
+        let mut name = local.file_name().unwrap_or_default().to_os_string();
+        name.push(".zip");
+        local.set_file_name(name);
+    }
+    Ok(local)
 }
 
 /// Read a file, zip a directory, or list either, when it lies inside one of
@@ -170,24 +334,7 @@ pub fn fetch_session_path(
     roots: &[PathBuf],
     temp: bool,
     mode: FetchMode,
-) -> Result<FetchedPath, SessionExportError> {
-    fetch_with_limits(
-        path,
-        roots,
-        temp,
-        mode,
-        MAX_SESSION_FILE_BYTES,
-        MAX_FETCHED_DIRECTORY_BYTES,
-    )
-}
-
-fn fetch_with_limits(
-    path: &Path,
-    roots: &[PathBuf],
-    temp: bool,
-    mode: FetchMode,
-    max_output: u64,
-    max_content: u64,
+    mut payload: fs::File,
 ) -> Result<FetchedPath, SessionExportError> {
     let mut allowed = roots.to_vec();
     if temp {
@@ -240,46 +387,30 @@ fn fetch_with_limits(
     let metadata =
         fs::metadata(&resolved).with_context(|| format!("inspect {}", resolved.display()))?;
     let display = resolved.to_string_lossy().into_owned();
-    if mode == FetchMode::Listing {
-        let bytes = list_path(&resolved, &metadata, max_output)?;
-        return Ok(FetchedPath {
-            kind: FetchedKind::Listing,
-            path: display,
-            bytes,
-        });
-    }
-    if metadata.is_file() {
-        if metadata.len() > max_output {
-            return Err(SessionExportError::Refused(format!(
-                "{display} is larger than {max_output} bytes"
-            )));
-        }
-        let bytes = fs::read(&resolved).with_context(|| format!("read {display}"))?;
-        return Ok(FetchedPath {
-            kind: FetchedKind::File,
-            path: display,
-            bytes,
-        });
-    }
-    if !metadata.is_dir() {
+    let kind = if mode == FetchMode::Listing {
+        list_path(&resolved, &metadata, &mut payload)?;
+        FetchedKind::Listing
+    } else if metadata.is_file() {
+        let mut file = fs::File::open(&resolved).with_context(|| format!("open {display}"))?;
+        std::io::copy(&mut file, &mut payload).with_context(|| format!("read {display}"))?;
+        FetchedKind::File
+    } else if metadata.is_dir() {
+        zip_directory(&resolved, &mut payload)?;
+        FetchedKind::Directory
+    } else {
         return Err(SessionExportError::Refused(format!(
             "{display} is neither a regular file nor a directory"
         )));
-    }
-    let bytes = zip_directory(&resolved, max_output, max_content)?;
-    Ok(FetchedPath {
-        kind: FetchedKind::Directory,
-        path: display,
-        bytes,
-    })
+    };
+    Ok(FetchedPath::from_file(kind, display, payload)?)
 }
 
-/// A [`SessionListing`] of `path` as JSON, no larger than `max_output`.
+/// A [`SessionListing`] of `path` as JSON.
 fn list_path(
     path: &Path,
     metadata: &fs::Metadata,
-    max_output: u64,
-) -> Result<Vec<u8>, SessionExportError> {
+    writer: impl Write,
+) -> Result<(), SessionExportError> {
     let display = path.to_string_lossy().into_owned();
     let entries = if metadata.is_dir() {
         let mut names = fs::read_dir(path)
@@ -304,17 +435,15 @@ fn list_path(
             .unwrap_or_else(|| display.clone());
         vec![listed_entry(path, name, metadata)?]
     };
-    let bytes = serde_json::to_vec(&SessionListing {
-        path: display.clone(),
-        entries,
-    })
+    serde_json::to_writer(
+        writer,
+        &SessionListing {
+            path: display.clone(),
+            entries,
+        },
+    )
     .context("encode the listing")?;
-    if bytes.len() as u64 > max_output {
-        return Err(SessionExportError::Refused(format!(
-            "{display} has too many entries to list in {max_output} bytes; list a subdirectory"
-        )));
-    }
-    Ok(bytes)
+    Ok(())
 }
 
 fn listed_entry(path: &Path, name: String, metadata: &fs::Metadata) -> anyhow::Result<ListedEntry> {
@@ -347,7 +476,7 @@ fn listed_entry(path: &Path, name: String, metadata: &fs::Metadata) -> anyhow::R
 
 enum Entry {
     Directory,
-    File { size: u64 },
+    File,
     Symlink { target: PathBuf },
 }
 
@@ -378,57 +507,27 @@ fn collect_entries(
         } else if kind.is_dir() {
             collect_entries(&path, &child_name, entries)?;
         } else if kind.is_file() {
-            entries.push((
-                child_name,
-                Entry::File {
-                    size: metadata.len(),
-                },
-            ));
+            entries.push((child_name, Entry::File));
         }
         // Sockets, FIFOs and devices have no content to archive.
     }
     Ok(())
 }
 
-fn zip_directory(
-    directory: &Path,
-    max_output: u64,
-    max_content: u64,
-) -> Result<Vec<u8>, SessionExportError> {
-    let display = directory.display().to_string();
+fn zip_directory(directory: &Path, output: impl Write + Seek) -> Result<(), SessionExportError> {
     let name = directory
         .file_name()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("root"));
     let mut entries = Vec::new();
     collect_entries(directory, &name, &mut entries)?;
-    let content: u64 = entries
-        .iter()
-        .map(|(_, entry)| match entry {
-            Entry::File { size } => *size,
-            _ => 0,
-        })
-        .sum();
-    if content > max_content {
-        return Err(SessionExportError::Refused(format!(
-            "{display} holds {content} bytes of files, more than the {max_content} a directory fetch reads; fetch a subdirectory"
-        )));
-    }
-    let too_large = || {
-        SessionExportError::Refused(format!(
-            "{display} is larger than {max_output} bytes as a zip archive; fetch a subdirectory"
-        ))
-    };
     let failed = |error: zip::result::ZipError, entry: &Path| -> SessionExportError {
-        match error {
-            zip::result::ZipError::Io(error) if is_limit(&error) => too_large(),
-            error => anyhow!(error)
-                .context(format!("archive {}", entry.display()))
-                .into(),
-        }
+        anyhow!(error)
+            .context(format!("archive {}", entry.display()))
+            .into()
     };
     let parent = directory.parent().unwrap_or(directory);
-    let mut writer = zip::ZipWriter::new(BoundedBuffer::new(max_output));
+    let mut writer = zip::ZipWriter::new(output);
     for (entry_name, entry) in &entries {
         // Zip names use `/` whatever the target's separator is.
         let zip_name = entry_name
@@ -448,9 +547,11 @@ fn zip_directory(
                     SimpleFileOptions::default(),
                 )
                 .map_err(|error| failed(error, &path))?,
-            Entry::File { .. } => {
-                let options =
-                    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            Entry::File => {
+                // ZIP64 also handles files that grow past 4 GiB while being read.
+                let options = SimpleFileOptions::default()
+                    .compression_method(CompressionMethod::Deflated)
+                    .large_file(true);
                 #[cfg(unix)]
                 let options = {
                     use std::os::unix::fs::PermissionsExt as _;
@@ -466,9 +567,6 @@ fn zip_directory(
                 let mut file =
                     fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
                 if let Err(error) = std::io::copy(&mut file, &mut writer) {
-                    if is_limit(&error) {
-                        return Err(too_large());
-                    }
                     return Err(anyhow::Error::new(error)
                         .context(format!("archive {}", path.display()))
                         .into());
@@ -476,90 +574,27 @@ fn zip_directory(
             }
         }
     }
-    let buffer = writer.finish().map_err(|error| failed(error, directory))?;
-    Ok(buffer.into_inner())
-}
-
-/// The error [`BoundedBuffer`] answers once a write would pass its limit.
-#[derive(Debug)]
-struct OverLimit;
-
-impl std::fmt::Display for OverLimit {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the archive passed its size limit")
-    }
-}
-
-impl std::error::Error for OverLimit {}
-
-fn is_limit(error: &std::io::Error) -> bool {
-    error.get_ref().is_some_and(|inner| inner.is::<OverLimit>())
-}
-
-/// An in-memory archive that refuses to grow past a limit, so compressing a
-/// large directory stops at the limit instead of after the whole directory.
-///
-/// After the first refusal it discards what it is given: the zip writer
-/// finishes the archive when it is dropped, and would otherwise print that
-/// second failure to standard error.
-struct BoundedBuffer {
-    cursor: Cursor<Vec<u8>>,
-    limit: u64,
-    refused: bool,
-}
-
-impl BoundedBuffer {
-    fn new(limit: u64) -> Self {
-        Self {
-            cursor: Cursor::new(Vec::new()),
-            limit,
-            refused: false,
-        }
-    }
-
-    fn into_inner(self) -> Vec<u8> {
-        self.cursor.into_inner()
-    }
-}
-
-impl Write for BoundedBuffer {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        if self.refused {
-            return Ok(buffer.len());
-        }
-        if self.cursor.position() + buffer.len() as u64 > self.limit {
-            self.refused = true;
-            return Err(std::io::Error::other(OverLimit));
-        }
-        self.cursor.write(buffer)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Seek for BoundedBuffer {
-    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
-        self.cursor.seek(position)
-    }
+    writer.finish().map_err(|error| failed(error, directory))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use std::io::Read as _;
 
     #[test]
     fn a_fetched_path_lands_under_its_session_and_cannot_leave_it() {
         let fetched_location =
             |temp: &Path, session: &str, fetched: &FetchedPath| fetched.local_path(temp, session);
         let temp = PathBuf::from("/scratch");
-        let fetched = |kind, path: &str| FetchedPath {
-            kind,
-            path: path.to_owned(),
-            bytes: Vec::new(),
+        let fetched = |kind, path: &str| {
+            FetchedPath::from_reader(
+                kind,
+                path.to_owned(),
+                std::io::empty(),
+                tempfile::tempfile().unwrap(),
+            )
+            .unwrap()
         };
         // Two children's reports share a name; the target path keeps them apart.
         assert_eq!(
@@ -601,6 +636,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn refusal(result: Result<FetchedPath, SessionExportError>) -> String {
         match result {
             Err(SessionExportError::Refused(reason)) => reason,
@@ -635,7 +671,13 @@ mod tests {
                 .join("../")
                 .join(outside.path().file_name().unwrap()),
         ] {
-            let reason = refusal(fetch_session_path(&path, &roots, false, FetchMode::Content));
+            let reason = refusal(fetch_session_path(
+                &path,
+                &roots,
+                false,
+                FetchMode::Content,
+                tempfile::tempfile().unwrap(),
+            ));
             assert!(
                 reason.contains("outside the directories a session shares"),
                 "{}: {reason}",
@@ -643,14 +685,22 @@ mod tests {
             );
         }
 
-        let fetched = fetch_session_path(&evidence, &roots, false, FetchMode::Content).unwrap();
+        let fetched = fetch_session_path(
+            &evidence,
+            &roots,
+            false,
+            FetchMode::Content,
+            tempfile::tempfile().unwrap(),
+        )
+        .unwrap();
         assert_eq!(fetched.kind, FetchedKind::Directory);
-        assert_eq!(
-            fetched,
-            FetchedPath::decode(fetched.encode().unwrap()).unwrap(),
-            "the worker's framing carries the archive intact"
-        );
-        let mut archive = zip::ZipArchive::new(Cursor::new(fetched.bytes)).unwrap();
+        let mut wire = tempfile::tempfile().unwrap();
+        fetched.write_to(&mut wire).unwrap();
+        wire.rewind().unwrap();
+        let decoded = FetchedPath::read_from(wire).unwrap();
+        assert_eq!(decoded.kind, fetched.kind);
+        assert_eq!(decoded.path, fetched.path);
+        let mut archive = zip::ZipArchive::new(decoded.reader()).unwrap();
         let names: Vec<_> = archive.file_names().map(str::to_owned).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -681,14 +731,14 @@ mod tests {
         assert_eq!(link, outside.path().join("secret.txt").to_string_lossy());
     }
 
+    // Hard-won: #1543: fetch rejected real artifacts and directories at arbitrary size limits.
     #[test]
-    fn a_directory_fetch_stops_at_its_limits_instead_of_after_the_whole_directory() {
+    fn fetch_transfers_files_and_archives_beyond_the_former_size_limits() {
         let workspace = tempfile::tempdir().unwrap();
         let directory = workspace.path().join("probes");
         fs::create_dir(&directory).unwrap();
-        // Incompressible, so the archive grows as fast as the input.
         let mut state = 0x2545_f491_4f6c_dd1du64;
-        let noise: Vec<u8> = (0..300_000)
+        let noise: Vec<u8> = (0..17 * 1024 * 1024)
             .map(|_| {
                 state ^= state << 13;
                 state ^= state >> 7;
@@ -696,39 +746,71 @@ mod tests {
                 state as u8
             })
             .collect();
-        fs::write(directory.join("noise.bin"), &noise).unwrap();
+        let file = directory.join("noise.bin");
+        fs::write(&file, &noise).unwrap();
         let roots = [workspace.path().to_path_buf()];
-
-        let reason = refusal(fetch_with_limits(
-            &directory,
+        let fetched = fetch_session_path(
+            &file,
             &roots,
             false,
             FetchMode::Content,
-            100_000,
-            1_000_000,
-        ));
-        assert!(reason.contains("as a zip archive"), "{reason}");
-        let reason = refusal(fetch_with_limits(
-            &directory,
-            &roots,
-            false,
-            FetchMode::Content,
-            1_000_000,
-            100_000,
-        ));
-        assert!(reason.contains("bytes of files"), "{reason}");
-        assert_eq!(
-            fetch_with_limits(
-                &directory,
-                &roots,
-                false,
-                FetchMode::Content,
-                1_000_000,
-                1_000_000
-            )
+            tempfile::tempfile().unwrap(),
+        )
+        .unwrap();
+        let mut restored = Vec::new();
+        fetched.reader().read_to_end(&mut restored).unwrap();
+        assert_eq!(restored, noise);
+        // This compresses well but exceeds the former directory input limit.
+        fs::File::create(directory.join("zeros.bin"))
             .unwrap()
-            .kind,
-            FetchedKind::Directory
+            .set_len(129 * 1024 * 1024)
+            .unwrap();
+        let fetched = fetch_session_path(
+            &directory,
+            &roots,
+            false,
+            FetchMode::Content,
+            tempfile::tempfile().unwrap(),
+        )
+        .unwrap();
+        assert!(fetched.len() > 16 * 1024 * 1024);
+        let mut wire = tempfile::tempfile().unwrap();
+        fetched.write_to(&mut wire).unwrap();
+        wire.rewind().unwrap();
+        let truncated = wire.try_clone().unwrap();
+        let decoded = FetchedPath::read_from(wire).unwrap();
+        let mut first = decoded.reader();
+        let mut second = decoded.reader();
+        let mut prefix = [0; 128 * 1024];
+        let mut other_prefix = [0; 128 * 1024];
+        first.read_exact(&mut prefix).unwrap();
+        second.read_exact(&mut other_prefix).unwrap();
+        assert_eq!(
+            prefix, other_prefix,
+            "readers must not share the spool cursor"
+        );
+        let mut archive = zip::ZipArchive::new(decoded.reader()).unwrap();
+        let mut restored = Vec::new();
+        archive
+            .by_name("probes/noise.bin")
+            .unwrap()
+            .read_to_end(&mut restored)
+            .unwrap();
+        assert_eq!(restored, noise);
+        let bytes = std::io::copy(
+            &mut archive.by_name("probes/zeros.bin").unwrap(),
+            &mut std::io::sink(),
+        )
+        .unwrap();
+        assert_eq!(bytes, 129 * 1024 * 1024);
+        truncated
+            .set_len(truncated.metadata().unwrap().len() - 1)
+            .unwrap();
+        assert!(
+            FetchedPath::read_from(truncated)
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete fetch transfer")
         );
     }
 }

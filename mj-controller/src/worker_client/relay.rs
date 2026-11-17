@@ -1,4 +1,67 @@
 use super::*;
+use mj_core::relay::{
+    ProjectMemoryTransferAction as MemoryAction, ProjectMemoryTransferResult as MemoryResult,
+};
+
+/// Owns a staged transfer until completion or an acknowledged abort. Dropping
+/// its future closes the input and invalidates the existing connection owner.
+struct ProjectMemoryTransfer<'a> {
+    client: Option<&'a mut RelayClient>,
+    id: u64,
+}
+
+impl ProjectMemoryTransfer<'_> {
+    async fn call(&mut self, action: MemoryAction) -> Result<MemoryResult> {
+        match self
+            .client
+            .as_mut()
+            .unwrap()
+            .call(RelayRequest::ProjectMemoryTransfer { action })
+            .await?
+        {
+            RelayResponsePayload::ProjectMemoryTransfer { result } => Ok(result),
+            _ => bail!("relay returned an unexpected project-memory transfer response"),
+        }
+    }
+
+    async fn abort(mut self, error: anyhow::Error) -> anyhow::Error {
+        let client = self.client.as_ref().unwrap();
+        if client.abandoned.is_some()
+            || client.cancelled()
+            || error.downcast_ref::<RelayTransportDead>().is_some()
+        {
+            // Drop closes the connection and lets its worker clean up staging.
+            // An abort cannot succeed here and would obscure the primary cause.
+            return error;
+        }
+        match self
+            .call(MemoryAction::Abort {
+                transfer_id: self.id,
+            })
+            .await
+        {
+            Ok(MemoryResult::Aborted { transfer_id }) if transfer_id == self.id => {
+                self.client.take();
+                error
+            }
+            result => error.context(format!("abort project-memory transfer failed: {result:?}")),
+        }
+    }
+
+    fn complete(mut self) {
+        self.client.take();
+    }
+}
+
+impl Drop for ProjectMemoryTransfer<'_> {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            client.abandoned =
+                Some("project-memory transfer was abandoned; reconnect the relay".into());
+            client.input.take();
+        }
+    }
+}
 
 impl RelayClient {
     pub async fn cpu_usage(&mut self) -> Result<Option<mj_core::cpu_usage::SessionCpuUsage>> {
@@ -71,6 +134,11 @@ impl RelayClient {
         self.protocol_version
     }
 
+    /// The digest of the operational state this connection last received.
+    pub fn known_state_digest(&self) -> Option<&str> {
+        self.known_state.as_ref().map(|(digest, _)| digest.as_str())
+    }
+
     pub fn latest_ordinal(&self) -> u64 {
         self.latest_ordinal
     }
@@ -85,11 +153,16 @@ impl RelayClient {
         after_digest: impl Into<String>,
     ) -> Result<RelayAttachment> {
         let after_digest = after_digest.into();
-        match self
+        let known_state_digest = (self.protocol_version
+            >= mj_core::relay::RELAY_STATE_DIGEST_PROTOCOL)
+            .then(|| self.known_state.as_ref().map(|(digest, _)| digest.clone()))
+            .flatten();
+        let (state, events, through_ordinal, through_digest) = match self
             .call_with_timeout(
                 RelayRequest::Attach {
                     after_ordinal,
                     after_digest: after_digest.clone(),
+                    known_state_digest: known_state_digest.clone(),
                 },
                 RELAY_HISTORY_TIMEOUT,
             )
@@ -100,32 +173,48 @@ impl RelayClient {
                 events,
                 through_ordinal,
                 through_digest,
+                state_digest,
             } => {
-                let mut cursor = RelayCursor {
-                    ordinal: after_ordinal,
-                    digest: after_digest,
-                };
-                for event in &events {
-                    validate_relay_event(cursor.ordinal, &cursor.digest, event)
-                        .context("verify relay attachment event chain")?;
-                    cursor.ordinal = event.ordinal;
-                    cursor.digest.clone_from(&event.digest);
-                }
-                if cursor.ordinal != through_ordinal || cursor.digest != through_digest {
-                    bail!("relay attachment frontier does not match its event chain");
-                }
                 state.relay_protocol_version = Some(self.protocol_version);
-                self.latest_ordinal = state.latest_ordinal;
-                self.latest_digest = state.latest_digest.clone();
-                Ok(RelayAttachment {
-                    state,
-                    events,
-                    through_ordinal,
-                    through_digest,
-                })
+                let state = mj_core::snapshot_map::SharedSnapshot::from(state);
+                self.known_state = state_digest.map(|digest| (digest, state.clone()));
+                (state, events, through_ordinal, through_digest)
+            }
+            RelayResponsePayload::AttachedWithKnownState {
+                events,
+                through_ordinal,
+                through_digest,
+            } => {
+                let held = self
+                    .known_state
+                    .as_ref()
+                    .filter(|(digest, _)| Some(digest) == known_state_digest.as_ref())
+                    .context("relay answered with a state this connection does not hold")?;
+                (held.1.clone(), events, through_ordinal, through_digest)
             }
             _ => bail!("relay returned an unexpected attach response"),
+        };
+        let mut cursor = RelayCursor {
+            ordinal: after_ordinal,
+            digest: after_digest,
+        };
+        for event in &events {
+            validate_relay_event(cursor.ordinal, &cursor.digest, event)
+                .context("verify relay attachment event chain")?;
+            cursor.ordinal = event.ordinal;
+            cursor.digest.clone_from(&event.digest);
         }
+        if cursor.ordinal != through_ordinal || cursor.digest != through_digest {
+            bail!("relay attachment frontier does not match its event chain");
+        }
+        self.latest_ordinal = state.latest_ordinal;
+        self.latest_digest = state.latest_digest.clone();
+        Ok(RelayAttachment {
+            state,
+            events,
+            through_ordinal,
+            through_digest,
+        })
     }
 
     /// Start a bounded catch-up by capturing the relay frontier before the
@@ -147,8 +236,21 @@ impl RelayClient {
             ordinal: after_ordinal,
             digest: after_digest,
         };
-        let state = first.state.clone();
-        let first_page = clip_catch_up_page(first, &previous, &frontier)?;
+        let RelayAttachment {
+            state,
+            events,
+            through_ordinal,
+            through_digest,
+        } = first;
+        let first_page = clip_catch_up_page(
+            RelayEventPage {
+                events,
+                through_ordinal,
+                through_digest,
+            },
+            &previous,
+            &frontier,
+        )?;
         Ok(RelayCatchUp {
             state,
             frontier,
@@ -167,10 +269,23 @@ impl RelayClient {
         if previous.ordinal >= frontier.ordinal {
             bail!("relay catch-up is already at its fixed frontier");
         }
-        let attachment = self
+        let RelayAttachment {
+            events,
+            through_ordinal,
+            through_digest,
+            ..
+        } = self
             .attach(previous.ordinal, previous.digest.clone())
             .await?;
-        clip_catch_up_page(attachment, previous, frontier)
+        clip_catch_up_page(
+            RelayEventPage {
+                events,
+                through_ordinal,
+                through_digest,
+            },
+            previous,
+            frontier,
+        )
     }
 
     pub async fn acknowledge(
@@ -228,9 +343,46 @@ impl RelayClient {
         credential_snapshot(
             self.call(RelayRequest::InstallAwsCredentials {
                 data: BASE64.encode(credentials.encode()?),
+                // A worker before protocol 55 rejects the unknown field.
+                scope: credentials
+                    .scope()
+                    .filter(|_| {
+                        self.protocol_version
+                            >= mj_core::relay::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL
+                    })
+                    .cloned(),
             })
             .await?,
         )
+    }
+
+    /// The scope the worker recorded beside the session's AWS credentials, and
+    /// the AWS profile the session was staged with (`None` when nothing was
+    /// staged). Needs a worker at relay protocol 55 or later.
+    pub async fn aws_credentials_staging(
+        &mut self,
+    ) -> Result<(
+        Option<mj_core::aws_credentials::AwsCredentialScope>,
+        Option<String>,
+    )> {
+        match self.call(RelayRequest::AwsCredentialsScope).await? {
+            RelayResponsePayload::AwsCredentialsScope { scope, profile } => Ok((scope, profile)),
+            _ => bail!("relay returned an unexpected AWS credential scope response"),
+        }
+    }
+
+    /// The scope the worker recorded beside the session's AWS credentials.
+    /// Needs a worker at relay protocol 55 or later.
+    pub async fn aws_credentials_scope(
+        &mut self,
+    ) -> Result<Option<mj_core::aws_credentials::AwsCredentialScope>> {
+        Ok(self.aws_credentials_staging().await?.0)
+    }
+
+    /// Delete the session's AWS credentials. Needs a worker at relay protocol
+    /// 55 or later.
+    pub async fn remove_aws_credentials(&mut self) -> Result<CredentialSnapshot> {
+        credential_snapshot(self.call(RelayRequest::RemoveAwsCredentials).await?)
     }
 
     /// Read this session's credential file. Callers must keep these bytes out
@@ -316,14 +468,32 @@ impl RelayClient {
         .map(|_| ())
     }
 
+    async fn call_legacy_project_memory(
+        &mut self,
+        request: RelayRequest,
+    ) -> Result<RelayResponsePayload> {
+        // Legacy workers send one whole tree. Keep their connection protected
+        // from a late response when checkpoint cancellation drops this future.
+        let mut transfer = ProjectMemoryTransfer {
+            client: Some(self),
+            id: 0,
+        };
+        let result = transfer.client.as_mut().unwrap().call(request).await;
+        transfer.complete();
+        result
+    }
+
     pub async fn project_memory_snapshot(
         &mut self,
     ) -> Result<(
         mj_core::project_memory::ProjectMemorySnapshot,
         mj_core::project_memory::ProjectMemorySnapshot,
     )> {
+        if self.protocol_version >= mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL {
+            return self.download_project_memory().await;
+        }
         let request = RelayRequest::ProjectMemorySnapshot;
-        match self.call(request).await? {
+        match self.call_legacy_project_memory(request).await? {
             RelayResponsePayload::ProjectMemorySnapshot { baseline, replica } => {
                 tokio::task::spawn_blocking(move || Ok((baseline.decode()?, replica.decode()?)))
                     .await
@@ -333,10 +503,193 @@ impl RelayClient {
         }
     }
 
+    async fn begin_memory_transfer(&mut self, action: MemoryAction) -> Result<MemoryResult> {
+        let mut transfer = ProjectMemoryTransfer {
+            client: Some(self),
+            id: 0,
+        };
+        let result = transfer.call(action).await;
+        if result.is_ok()
+            || result
+                .as_ref()
+                .is_err_and(|error| error.downcast_ref::<RelayRejected>().is_some())
+        {
+            transfer.complete();
+        }
+        result
+    }
+
+    async fn download_project_memory(
+        &mut self,
+    ) -> Result<(
+        mj_core::project_memory::ProjectMemorySnapshot,
+        mj_core::project_memory::ProjectMemorySnapshot,
+    )> {
+        let MemoryResult::SnapshotStarted {
+            transfer_id,
+            total_bytes,
+        } = self
+            .begin_memory_transfer(MemoryAction::BeginSnapshot)
+            .await?
+        else {
+            self.abandoned =
+                Some("invalid project-memory snapshot start; reconnect the relay".into());
+            self.input.take();
+            bail!("relay returned an unexpected project-memory snapshot start response");
+        };
+        let mut transfer = ProjectMemoryTransfer {
+            client: Some(self),
+            id: transfer_id,
+        };
+        let result = async {
+            let mut bytes = Vec::new();
+            let mut offset = 0u64;
+            loop {
+                let MemoryResult::SnapshotPage {
+                    transfer_id: page_id,
+                    offset: page_offset,
+                    next_offset,
+                    complete,
+                    chunk,
+                } = transfer
+                    .call(MemoryAction::ReadSnapshotPage {
+                        transfer_id,
+                        offset,
+                    })
+                    .await?
+                else {
+                    bail!("relay returned an unexpected project-memory page response");
+                };
+                let chunk = tokio::task::spawn_blocking(move || BASE64.decode(chunk))
+                    .await
+                    .context("decode project-memory page task failed")??;
+                anyhow::ensure!(
+                    page_id == transfer_id && page_offset == offset,
+                    "project-memory page identity or offset changed"
+                );
+                anyhow::ensure!(
+                    offset.checked_add(chunk.len() as u64) == Some(next_offset)
+                        && next_offset <= total_bytes,
+                    "project-memory page length is inconsistent"
+                );
+                anyhow::ensure!(
+                    complete == (next_offset == total_bytes) && (complete || next_offset > offset),
+                    "project-memory page did not advance to its declared end"
+                );
+                bytes.extend_from_slice(&chunk);
+                offset = next_offset;
+                if complete {
+                    return Ok(bytes);
+                }
+            }
+        }
+        .await;
+        let bytes = match result {
+            Ok(bytes) => {
+                transfer.complete();
+                bytes
+            }
+            Err(error) => return Err(transfer.abort(error).await),
+        };
+        tokio::task::spawn_blocking(move || {
+            mj_core::relay::ProjectMemoryWireSnapshot::decode(&bytes)
+        })
+        .await
+        .context("decode project-memory snapshot task failed")?
+    }
+
+    async fn upload_project_memory(
+        &mut self,
+        kind: mj_core::relay::ProjectMemoryUploadKind,
+        tree: mj_core::project_memory::ProjectMemorySnapshot,
+    ) -> Result<MemoryResult> {
+        let protocol = self.protocol_version;
+        let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+            Ok(serde_json::to_vec(
+                &mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol)?,
+            )?)
+        })
+        .await
+        .context("encode project-memory upload task failed")??;
+        // The counter's type bounds the actual ID width for every page.
+        let chunk_bytes = mj_core::relay::project_memory_transfer_request_chunk_bytes(
+            protocol,
+            &self.request_id_for(u64::MAX),
+        )?;
+        let MemoryResult::UploadStarted { transfer_id } = self
+            .begin_memory_transfer(MemoryAction::BeginUpload {
+                kind,
+                total_bytes: bytes.len() as u64,
+            })
+            .await?
+        else {
+            self.abandoned =
+                Some("invalid project-memory upload start; reconnect the relay".into());
+            self.input.take();
+            bail!("relay returned an unexpected project-memory upload start response");
+        };
+        let mut transfer = ProjectMemoryTransfer {
+            client: Some(self),
+            id: transfer_id,
+        };
+        let result = async {
+            let mut offset = 0u64;
+            for chunk in bytes.chunks(chunk_bytes) {
+                let next = offset + chunk.len() as u64;
+                let chunk = BASE64.encode(chunk);
+                let MemoryResult::UploadProgress {
+                    transfer_id: upload_id,
+                    next_offset,
+                } = transfer
+                    .call(MemoryAction::AppendUpload {
+                        transfer_id,
+                        offset,
+                        chunk,
+                    })
+                    .await?
+                else {
+                    bail!("relay returned an unexpected project-memory upload progress response");
+                };
+                anyhow::ensure!(
+                    upload_id == transfer_id && next_offset == next,
+                    "project-memory upload offset changed"
+                );
+                offset = next_offset;
+            }
+            match transfer
+                .call(MemoryAction::CommitUpload { transfer_id })
+                .await?
+            {
+                outcome @ (MemoryResult::Installed | MemoryResult::Replaced { .. }) => Ok(outcome),
+                _ => bail!("relay returned an unexpected project-memory upload commit response"),
+            }
+        }
+        .await;
+        match result {
+            Ok(outcome) => {
+                transfer.complete();
+                Ok(outcome)
+            }
+            Err(error) => Err(transfer.abort(error).await),
+        }
+    }
+
     pub async fn install_project_memory_snapshot(
         &mut self,
         snapshot: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<()> {
+        if self.protocol_version >= mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL {
+            return match self
+                .upload_project_memory(
+                    mj_core::relay::ProjectMemoryUploadKind::InstallSnapshot,
+                    snapshot,
+                )
+                .await?
+            {
+                MemoryResult::Installed => Ok(()),
+                _ => bail!("relay returned an unexpected project-memory install terminal response"),
+            };
+        }
         let protocol = self.protocol_version;
         let snapshot = tokio::task::spawn_blocking(move || {
             mj_core::relay::ProjectMemoryWireTree::encode(snapshot, protocol)
@@ -344,7 +697,7 @@ impl RelayClient {
         .await
         .context("encode project memory task failed")??;
         let request = RelayRequest::InstallProjectMemorySnapshot { snapshot };
-        match self.call(request).await? {
+        match self.call_legacy_project_memory(request).await? {
             RelayResponsePayload::ProjectMemorySnapshotInstalled => Ok(()),
             _ => bail!("relay returned an unexpected project-memory install response"),
         }
@@ -363,6 +716,18 @@ impl RelayClient {
         expected_replica: mj_core::project_memory::TreeVersion,
         tree: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<mj_core::project_memory::ReplicaReplaceOutcome> {
+        if self.protocol_version >= mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL {
+            return match self
+                .upload_project_memory(
+                    mj_core::relay::ProjectMemoryUploadKind::ReplaceTree { expected_replica },
+                    tree,
+                )
+                .await?
+            {
+                MemoryResult::Replaced { outcome } => Ok(outcome),
+                _ => bail!("relay returned an unexpected project-memory replace terminal response"),
+            };
+        }
         let protocol = self.protocol_version;
         let tree = tokio::task::spawn_blocking(move || {
             mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol)
@@ -373,7 +738,7 @@ impl RelayClient {
             expected_replica,
             tree,
         };
-        match self.call(request).await? {
+        match self.call_legacy_project_memory(request).await? {
             RelayResponsePayload::ProjectMemoryTreeReplaced { outcome } => Ok(outcome),
             _ => bail!("relay returned an unexpected project-memory replace response"),
         }
@@ -394,20 +759,28 @@ impl RelayClient {
         )
     }
 
-    /// Copy a verified controller blob to this session before admitting its reference.
-    pub async fn ensure_attachment(
+    pub async fn attachment_present(
         &mut self,
         reference: &mj_core::attachment::AttachmentRef,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         match self
             .call(RelayRequest::AttachmentPresent {
                 reference: reference.clone(),
             })
             .await?
         {
-            RelayResponsePayload::AttachmentPresent { present: true } => return Ok(()),
-            RelayResponsePayload::AttachmentPresent { present: false } => {}
+            RelayResponsePayload::AttachmentPresent { present } => Ok(present),
             _ => bail!("unexpected image presence response"),
+        }
+    }
+
+    /// Copy a verified controller blob to this session before admitting its reference.
+    pub async fn ensure_attachment(
+        &mut self,
+        reference: &mj_core::attachment::AttachmentRef,
+    ) -> Result<()> {
+        if self.attachment_present(reference).await? {
+            return Ok(());
         }
         let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let reference_copy = reference.clone();

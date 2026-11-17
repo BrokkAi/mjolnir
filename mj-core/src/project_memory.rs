@@ -3,8 +3,10 @@
 //! Each session works with a private replica that the controller synchronizes
 //! with the canonical project memory tree.
 
+use crate::confined_path::{ConfinedDir, EntryKind, Publish};
 use crate::hex::lower_hex;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -650,7 +652,7 @@ impl ProjectMemoryIdentity {
         let project = checkout
             .project_directory()
             .context("raw session project directory is missing")?;
-        let repository = match session.target.as_ref() {
+        let repository = match session.target.as_deref() {
             Some(crate::state::TargetLocator::LocalBare { .. }) => {
                 RepositoryMemoryIdentity::Local {
                     canonical_root: std::fs::canonicalize(project)
@@ -752,43 +754,34 @@ impl ProjectMemoryStore {
 
     /// Capture the safe, model-visible tree for controller synchronization.
     pub fn snapshot(&self) -> Result<ProjectMemorySnapshot> {
-        let mut entries = Vec::new();
-        if self.root.is_dir() {
-            collect_entries(&self.root, &self.root, &mut entries)?;
+        match ConfinedDir::open_root(&self.root)? {
+            Some(root) => root_snapshot(&root),
+            None => Ok(ProjectMemorySnapshot::default()),
         }
-        let mut files = BTreeMap::new();
-        for entry in entries {
-            let relative = validate_virtual_path(&entry.path)?;
-            let content = fs::read_to_string(self.root.join(relative))
-                .with_context(|| format!("read memory snapshot document {}", entry.path))?;
-            files.insert(entry.path, content);
-        }
-        Ok(ProjectMemorySnapshot { files })
     }
 
     /// Apply documents from a legacy relay snapshot. This stays additive so an
     /// older controller cannot delete documents it does not know to sync.
     pub fn install_snapshot(&self, snapshot: &ProjectMemorySnapshot) -> Result<bool> {
+        let mut root = ConfinedDir::open_root(&self.root)?;
         let mut changed = false;
         for (path, content) in &snapshot.files {
             let relative = validate_virtual_path(path)?;
-            crate::confined_path::reject_symlinks(&self.root, &relative, true)?;
             ensure_snapshot_document(content)?;
-            let destination = self.root.join(relative);
-            match fs::read_to_string(&destination) {
-                Ok(existing) if existing == *content => continue,
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("read memory document {}", destination.display())
-                    });
-                }
+            let (parent, name) = document_location(&relative);
+            let existing = match &root {
+                Some(root) => match root.open_dir(parent)? {
+                    Some(directory) => directory
+                        .read_to_string(name)
+                        .with_context(|| format!("read memory document {path}"))?,
+                    None => None,
+                },
+                None => None,
+            };
+            if existing.as_deref() == Some(content.as_str()) {
+                continue;
             }
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            crate::config::atomic_write(&destination, content.as_bytes())?;
+            write_document(&self.root, &mut root, &relative, content)?;
             changed = true;
         }
         Ok(changed)
@@ -801,7 +794,6 @@ impl ProjectMemoryStore {
         let mut relative_paths = BTreeSet::new();
         for (path, content) in &tree.files {
             let relative = validate_virtual_path(path)?;
-            crate::confined_path::reject_symlinks(&self.root, &relative, true)?;
             ensure_snapshot_document(content)?;
             anyhow::ensure!(
                 relative_paths.insert(relative.clone()),
@@ -820,31 +812,37 @@ impl ProjectMemoryStore {
             }
         }
 
-        crate::confined_path::reject_symlinks(&self.root, Path::new(""), true)?;
-        if let Ok(metadata) = fs::symlink_metadata(&self.root) {
-            anyhow::ensure!(metadata.is_dir(), "project memory root is not a directory");
-        }
-        let current = self.snapshot()?;
+        // Every read, delete, and write below resolves from this one handle,
+        // so a link planted in the tree mid-sync cannot redirect them (#1419).
+        let mut root =
+            ConfinedDir::open_root(&self.root).context("open the project memory root")?;
+        let current = match &root {
+            Some(root) => root_snapshot(root)?,
+            None => ProjectMemorySnapshot::default(),
+        };
         let mut changed = false;
 
-        for path in current.files.keys() {
-            if desired.contains_key(path) || path == "/memory-redirect.json" {
-                continue;
-            }
-            let relative = validate_virtual_path(path)?;
-            crate::confined_path::reject_symlinks(&self.root, &relative, false)?;
-            let file = self.root.join(relative);
-            match fs::remove_file(&file) {
-                Ok(()) => changed = true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("delete memory document {}", file.display()));
+        if let Some(root) = &root {
+            for path in current.files.keys() {
+                if desired.contains_key(path) || path == "/memory-redirect.json" {
+                    continue;
+                }
+                let relative = validate_virtual_path(path)?;
+                let (parent, name) = document_location(&relative);
+                let Some(directory) = root.open_dir(parent)? else {
+                    continue;
+                };
+                match directory.remove_file(name) {
+                    Ok(()) => changed = true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("delete memory document {path}"));
+                    }
                 }
             }
+            prune_empty_memory_directories(root, &mut changed)?;
         }
-
-        prune_empty_memory_directories(&self.root, &mut changed)?;
 
         for (path, (relative, content)) in desired {
             if path == "/memory-redirect.json"
@@ -855,63 +853,107 @@ impl ProjectMemoryStore {
             {
                 continue;
             }
-            crate::confined_path::reject_symlinks(&self.root, &relative, true)?;
-            let destination = self.root.join(relative);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("create memory directory {}", parent.display()))?;
-            }
-            crate::config::atomic_write(&destination, content.as_bytes())
-                .with_context(|| format!("write memory document {}", destination.display()))?;
+            write_document(&self.root, &mut root, &relative, content)
+                .with_context(|| format!("write memory document {path}"))?;
             changed = true;
         }
         Ok(changed)
     }
 }
 
-fn prune_empty_memory_directories(root: &Path, changed: &mut bool) -> Result<()> {
-    if !root.is_dir() {
-        return Ok(());
-    }
-    let mut directories = Vec::new();
-    collect_visible_directories(root, root, &mut directories)?;
-    for directory in directories {
-        match fs::remove_dir(&directory) {
-            Ok(()) => *changed = true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                let mut entries = fs::read_dir(&directory)
-                    .with_context(|| format!("inspect memory directory {}", directory.display()))?;
-                if entries.next().transpose()?.is_none() {
-                    return Err(error).with_context(|| {
-                        format!("remove empty memory directory {}", directory.display())
-                    });
+/// The directory holding a validated memory document, relative to the memory
+/// root, and the document's own name in it.
+fn document_location(relative: &Path) -> (&Path, &OsStr) {
+    (
+        relative.parent().unwrap_or_else(|| Path::new("")),
+        relative
+            .file_name()
+            .expect("a validated memory path ends in a document name"),
+    )
+}
+
+/// Write one document below `root`, creating the memory root on first use.
+fn write_document(
+    root_path: &Path,
+    root: &mut Option<ConfinedDir>,
+    relative: &Path,
+    content: &str,
+) -> Result<()> {
+    let root = match root {
+        Some(root) => root,
+        None => root.insert(ConfinedDir::create_root(root_path)?),
+    };
+    let (parent, name) = document_location(relative);
+    root.create_dir_all(parent)?
+        .write_atomically(name, content.as_bytes(), Publish::Replace)?;
+    Ok(())
+}
+
+/// The model-visible documents below an open memory root: neither hidden
+/// names nor links are read or entered.
+fn root_snapshot(root: &ConfinedDir) -> Result<ProjectMemorySnapshot> {
+    let mut files = BTreeMap::new();
+    collect_documents(root, Path::new(""), &mut files)?;
+    Ok(ProjectMemorySnapshot { files })
+}
+
+fn collect_documents(
+    directory: &ConfinedDir,
+    relative: &Path,
+    files: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    for (name, kind) in directory.entries()? {
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let child = relative.join(&name);
+        match kind {
+            EntryKind::Directory => {
+                if let Some(subdirectory) = directory.open_dir(Path::new(&name))? {
+                    collect_documents(&subdirectory, &child, files)?;
                 }
             }
+            EntryKind::File => {
+                let path = format!("/{}", child.to_string_lossy().replace('\\', "/"));
+                validate_virtual_path(&path)?;
+                let content = directory
+                    .read_to_string(&name)
+                    .and_then(|content| content.context("the document disappeared"))
+                    .with_context(|| format!("read memory snapshot document {path}"))?;
+                files.insert(path, content);
+            }
+            EntryKind::Other => {}
         }
     }
     Ok(())
 }
 
-fn collect_visible_directories(
-    root: &Path,
-    directory: &Path,
-    output: &mut Vec<PathBuf>,
-) -> Result<()> {
-    for entry in fs::read_dir(directory)
-        .with_context(|| format!("list memory directory {}", directory.display()))?
-    {
-        let entry = entry?;
-        if entry.file_type()?.is_symlink()
-            || entry.file_name().to_string_lossy().starts_with('.')
-            || !entry.file_type()?.is_dir()
-        {
+/// Remove every visible directory below `directory` that holds nothing,
+/// deepest first.
+fn prune_empty_memory_directories(directory: &ConfinedDir, changed: &mut bool) -> Result<()> {
+    for (name, kind) in directory.entries()? {
+        if kind != EntryKind::Directory || name.to_string_lossy().starts_with('.') {
             continue;
         }
-        let path = entry.path();
-        collect_visible_directories(root, &path, output)?;
-        if path != root {
-            output.push(path);
+        let Some(child) = directory.open_dir(Path::new(&name))? else {
+            continue;
+        };
+        prune_empty_memory_directories(&child, changed)?;
+        let child_is_empty = child.entries()?.is_empty();
+        // Windows cannot remove a directory while a handle to it is open.
+        drop(child);
+        match directory.remove_dir(&name) {
+            Ok(()) => *changed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if child_is_empty => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "remove empty memory directory {}",
+                        directory.path().join(&name).display()
+                    )
+                });
+            }
+            Err(_) => {}
         }
     }
     Ok(())
@@ -1101,37 +1143,6 @@ fn validate_virtual_path(path: &str) -> Result<PathBuf> {
         bail!("memory document path cannot be empty");
     }
     Ok(relative)
-}
-
-struct MemoryFileEntry {
-    path: String,
-}
-
-fn collect_entries(root: &Path, directory: &Path, output: &mut Vec<MemoryFileEntry>) -> Result<()> {
-    for entry in fs::read_dir(directory)
-        .with_context(|| format!("list memory directory {}", directory.display()))?
-    {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if entry.file_type()?.is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            if entry.file_name().to_string_lossy().starts_with('.') {
-                continue;
-            }
-            collect_entries(root, &entry.path(), output)?;
-        } else if metadata.is_file() && !entry.file_name().to_string_lossy().starts_with('.') {
-            output.push(snapshot_entry(root, &entry.path())?);
-        }
-    }
-    Ok(())
-}
-
-fn snapshot_entry(root: &Path, path: &Path) -> Result<MemoryFileEntry> {
-    let relative = path.strip_prefix(root)?;
-    let rendered = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
-    Ok(MemoryFileEntry { path: rendered })
 }
 
 #[cfg(test)]
@@ -1361,6 +1372,36 @@ mod tests {
             fs::read_to_string(directory.path().join("memory-redirect.json")).unwrap(),
             "redirect"
         );
+    }
+
+    // Hard-won: #1419: a link planted in the memory tree redirected sync deletes and writes outside it.
+    #[cfg(unix)]
+    #[test]
+    fn replace_tree_never_deletes_or_writes_through_a_planted_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("memory");
+        let outside = directory.path().join("outside");
+        let store = ProjectMemoryStore::new(&root);
+        seed_file(&store, "/notes/a.md", "memory");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("a.md"), "victim").unwrap();
+        fs::remove_dir_all(root.join("notes")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("notes")).unwrap();
+
+        // The link is neither read as part of the tree nor deleted through.
+        assert_eq!(store.snapshot().unwrap(), ProjectMemorySnapshot::default());
+        store
+            .replace_tree(&ProjectMemorySnapshot::default())
+            .unwrap();
+        // Writing a document under the link is refused instead of followed.
+        let write = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/notes/a.md".into(), "sync content".into())]),
+        };
+        assert!(store.replace_tree(&write).is_err());
+        assert!(store.install_snapshot(&write).is_err());
+
+        assert_eq!(fs::read_to_string(outside.join("a.md")).unwrap(), "victim");
+        assert!(root.join("notes").is_symlink());
     }
 
     // Hard-won: a5d320817: memory trees above one MiB prevented Move, Suspend and recovery checkpoints.

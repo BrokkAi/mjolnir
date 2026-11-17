@@ -9,8 +9,10 @@
 //! SessionWiki can parse, so the indexer enumerates sessions by key and asks
 //! this adapter to parse the ones whose checkpoint changed.
 
-mod harness_adapters;
+mod harness_tools;
 pub(crate) mod history;
+#[cfg(test)]
+mod native_tests;
 mod provenance;
 mod search_query;
 pub mod tags;
@@ -37,7 +39,6 @@ use sessionwiki::model::{Message, Role, Session};
 
 use crate::controller::Controller;
 use crate::controller::checkpoint::managed_checkpoint_archive_name;
-use harness_adapters::HarnessAdapter;
 
 /// The tool name every Mjolnir instance publishes under. One name means one
 /// search partition; reconciliation is scoped per instance instead (see
@@ -113,7 +114,7 @@ fn project_directories_of(
 
 /// The project path SessionWiki should search for this session: the attached
 /// or managed raw checkout, or the primary repository in a managed workspace.
-fn indexed_project_directory(
+pub(crate) fn indexed_project_directory(
     state: &State,
     config: Option<&Config>,
     session_id: &str,
@@ -291,10 +292,9 @@ impl MjolnirAdapter {
         let archive = newest
             .get(session_id)
             .with_context(|| format!("no checkpoint archive for session {session_id}"))?;
-        let snapshot = mj_checkpoint::archive::read_archive_verified(&archive.path)
+        let snapshot = mj_checkpoint::archive::verify_archive_streaming(&archive.path)
             .with_context(|| format!("read checkpoint {}", archive.path.display()))?
-            .canonical_session()
-            .with_context(|| format!("read the transcript of session {session_id}"))?;
+            .canonical_session;
         let mut evidence = provenance::Evidence::default();
         for item in &snapshot.transcript {
             if let mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } = &item.body {
@@ -321,7 +321,7 @@ impl MjolnirAdapter {
         let mut evidence = provenance::Evidence::default();
         for item in &projection.transcript {
             if let mj_core::state::TranscriptBody::Tool { call, .. } = &item.body {
-                evidence.observe(call, item.created_at_ms);
+                evidence.observe(&call.value(), item.created_at_ms);
             }
         }
         Ok(IndexedTranscript {
@@ -413,6 +413,43 @@ fn checkpoint_archive_session(name: &std::ffi::OsStr) -> Option<(String, u64)> {
         .then(|| (stem.to_owned(), 0))
 }
 
+/// The newest full checkpoint for one session, if Mjolnir still has one.
+/// Observe uses this after SessionWiki discovers a session whose operational
+/// record has been removed but whose canonical archive has not.
+pub(crate) fn newest_checkpoint_archive(session_id: &str) -> Result<Option<PathBuf>> {
+    let directory = mj_core::config::sessions_dir();
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("list checkpoint directory {}", directory.display()));
+        }
+    };
+    let mut newest: Option<(u64, PathBuf)> = None;
+    for entry in entries {
+        let entry = entry.context("read a checkpoint directory entry")?;
+        if !entry
+            .file_type()
+            .context("read a checkpoint entry type")?
+            .is_file()
+        {
+            continue;
+        }
+        let Some((found, frontier)) = checkpoint_archive_session(&entry.file_name()) else {
+            continue;
+        };
+        if found == session_id
+            && newest
+                .as_ref()
+                .is_none_or(|(current, _)| frontier > *current)
+        {
+            newest = Some((frontier, entry.path()));
+        }
+    }
+    Ok(newest.map(|(_, path)| path))
+}
+
 /// A running session's conversation, as SessionWiki stores it.
 fn projected_messages(projection: &mj_core::state::MaterializedSession) -> Vec<Message> {
     summary_messages(
@@ -430,12 +467,12 @@ fn projected_messages(projection: &mj_core::state::MaterializedSession) -> Vec<M
 fn summary_messages(summary: mj_transcript::summary::TranscriptSummary) -> Vec<Message> {
     use mj_transcript::summary::SummaryRole;
     let mut messages = Vec::with_capacity(summary.entries.len());
-    for entry in summary.entries {
+    for mut entry in summary.entries {
         let role = match entry.role {
             SummaryRole::User => Role::User,
             SummaryRole::Assistant => Role::Assistant,
             SummaryRole::Tool => {
-                if let Some(tool) = &entry.tool {
+                if let Some(tool) = entry.tool.take() {
                     messages.extend(tool_messages(tool, entry.created_at_ms));
                     continue;
                 }
@@ -455,7 +492,7 @@ fn summary_messages(summary: mj_transcript::summary::TranscriptSummary) -> Vec<M
 /// into a single summary line such as `→ execute(cargo test) ⇒ ok · 12 lines`.
 /// The result carries the output only so SessionWiki can count its lines and
 /// quote the first line of a failure; the index keeps neither in full.
-fn tool_messages(tool: &serde_json::Value, created_at_ms: i64) -> Vec<Message> {
+fn tool_messages(tool: serde_json::Value, created_at_ms: i64) -> Vec<Message> {
     use sessionwiki::model::{ToolCall, ToolResult};
     let ts = DateTime::from_timestamp_millis(created_at_ms);
     let text = |key: &str| tool.get(key).and_then(serde_json::Value::as_str);
@@ -499,22 +536,25 @@ fn tool_messages(tool: &serde_json::Value, created_at_ms: i64) -> Vec<Message> {
 }
 
 /// The text a finished tool call produced, as Mjolnir's transcript shows it.
-fn tool_output(tool: &serde_json::Value) -> String {
-    let Some(call) = tool.get("call").and_then(|call| {
-        serde_json::from_value::<agent_client_protocol::v1::schema::ToolCall>(call.clone()).ok()
+fn tool_output(mut tool: serde_json::Value) -> String {
+    let Some(call) = tool.get_mut("call").and_then(|call| {
+        serde_json::from_value::<agent_client_protocol::v1::schema::ToolCall>(call.take()).ok()
     }) else {
         return String::new();
     };
     let terminals: Vec<mj_core::transcript::TerminalOutputRecord> = tool
-        .get("terminals")
-        .and_then(serde_json::Value::as_object)
+        .get_mut("terminals")
+        .map(serde_json::Value::take)
+        .and_then(|value| match value {
+            serde_json::Value::Object(object) => Some(object),
+            _ => None,
+        })
         .into_iter()
         .flatten()
-        .filter_map(|(id, record)| {
-            let mut record = record.clone();
+        .filter_map(|(id, mut record)| {
             record
                 .as_object_mut()?
-                .insert("terminal_id".into(), id.clone().into());
+                .insert("terminal_id".into(), id.into());
             serde_json::from_value(record).ok()
         })
         .collect();
@@ -658,9 +698,12 @@ impl Adapter for MjolnirAdapter {
                 .unwrap_or_default(),
         };
 
+        // A manual name, harness title, or first-prompt provisional title, as
+        // the session list shows it. Without one the index prefers the
+        // transcript's title over the creation title.
         let title = record
-            .and_then(|record| record.session_title_override.clone())
-            .or_else(|| record.and_then(|record| record.acp_session_title.clone()))
+            .filter(|record| record.has_given_name())
+            .map(|record| record.listed_title().to_owned())
             .or_else(|| snapshot_title.clone())
             .unwrap_or_else(|| {
                 messages
@@ -720,6 +763,14 @@ impl Adapter for SharedMjolnirAdapter {
         self.0.parse_key(key)
     }
 
+    fn modified_at(&self, key: &str) -> Option<DateTime<Utc>> {
+        self.0.modified_at(key)
+    }
+
+    fn path_key_depth(&self) -> Option<usize> {
+        self.0.path_key_depth()
+    }
+
     fn reconcile_scope(&self) -> Option<String> {
         self.0.reconcile_scope()
     }
@@ -735,7 +786,6 @@ pub struct WikiIndexer {
     inner: Arc<Indexer>,
 }
 
-#[derive(Default)]
 struct Indexer {
     /// Held for the whole of one run: this is what makes syncs single-flight.
     running: tokio::sync::Mutex<()>,
@@ -749,6 +799,24 @@ struct Indexer {
     in_flight: AtomicBool,
     last_success: std::sync::Mutex<Option<Success>>,
     native_scan_cache: crate::import::NativeScanCache,
+    /// Completed sync passes. Observe uses this to look again for sessions
+    /// that exist only in the index, without polling or delaying live events.
+    completed: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for Indexer {
+    fn default() -> Self {
+        Self {
+            running: tokio::sync::Mutex::new(()),
+            notify: tokio::sync::Notify::new(),
+            requested: AtomicBool::new(false),
+            full_requested: AtomicBool::new(false),
+            in_flight: AtomicBool::new(false),
+            last_success: std::sync::Mutex::new(None),
+            native_scan_cache: crate::import::NativeScanCache::default(),
+            completed: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -819,6 +887,12 @@ impl WikiIndexer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .map(|success| success.at)
     }
+
+    /// A change fires after each successful pass. A receiver made before
+    /// `request_sync` therefore cannot miss the pass it asked for.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.completed.subscribe()
+    }
 }
 
 impl Indexer {
@@ -877,6 +951,8 @@ impl Indexer {
                 at: started,
                 epoch_seconds: Utc::now().timestamp(),
             });
+            self.completed
+                .send_modify(|generation| *generation = generation.saturating_add(1));
         }
         Ok(())
     }
@@ -1034,16 +1110,14 @@ fn write_session_tags(
 /// indexed, not the stock `~/.codex` and `~/.claude` locations. A user who
 /// runs several profile homes expects every session Mjolnir can start to be
 /// searchable, and a home no profile names is not Mjolnir's to walk. So the
-/// stock Codex and Claude adapters are dropped and one adapter per enabled
-/// profile home takes their place; of the rest, only OpenCode is kept, the
-/// only other harness Mjolnir can start. Every other built-in adapter (aider,
-/// gemini, cline, ...) is dropped, so a tool Mjolnir cannot run can neither
-/// trigger a home-directory walk nor add rows Resume cannot act on.
+/// stock adapters are replaced with one adapter per enabled profile home,
+/// except OpenCode, which still uses its stock SQLite adapter. Adapters for
+/// unsupported harnesses (aider, gemini, cline, ...) are dropped, so they can
+/// neither trigger a home-directory walk nor add unrelated search results.
 ///
-/// Kimi Code, Grok Build and Muse have no SessionWiki adapter at all, so
-/// Mjolnir supplies one per enabled profile home of its own (see
-/// [`harness_adapters`]). Without them those sessions would never appear in
-/// the Resume dialog's search.
+/// Kimi Code, Grok Build, Muse and DSH use SessionWiki's public adapters
+/// directly, one per enabled profile home. DSH histories are searchable even
+/// though Mjolnir does not yet import them for native resume.
 ///
 /// Each per-home adapter reports a reconcile scope covering only its own root,
 /// so a sync of one install never archives the rows of another.
@@ -1074,15 +1148,36 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
             HarnessKind::Claude => {
                 adapters.push(Box::new(sessionwiki::adapters::ClaudeCode::in_home(home)));
             }
-            kind => {
-                if let Some(adapter) = HarnessAdapter::in_home(kind, home) {
-                    adapters.push(Box::new(adapter));
-                }
+            HarnessKind::Kimi => {
+                adapters.push(Box::new(sessionwiki::adapters::KimiCode::in_home(home)));
             }
+            // Earlier mj Grok/Muse keys used the configured home spelling,
+            // including symlinks. Keep those IDs and reconciliation scopes.
+            HarnessKind::Grok => {
+                adapters.push(Box::new(
+                    sessionwiki::adapters::GrokBuild::in_home(home).keep_configured_paths(),
+                ));
+            }
+            HarnessKind::Muse => {
+                // Share the import root, including native Windows separators.
+                adapters.push(Box::new(
+                    sessionwiki::adapters::Muse::in_sessions_root(
+                        mj_checkpoint::native::muse_sessions_root(&home)
+                            .expect("Muse always has a nested data directory"),
+                    )
+                    .keep_configured_paths(),
+                ));
+            }
+            HarnessKind::Dsh => {
+                adapters.push(Box::new(sessionwiki::adapters::Dsh::in_home(home)));
+            }
+            HarnessKind::OpenCode => {}
+            // SessionWiki has no adapter for Antigravity's session records yet.
+            HarnessKind::Antigravity => {}
         }
     }
     adapters.extend(sessionwiki::adapters::all().into_iter().filter(|adapter| {
-        harness_adapters::harness_for_tool(adapter.name()) == Some(HarnessKind::OpenCode)
+        harness_tools::harness_for_tool(adapter.name()) == Some(HarnessKind::OpenCode)
     }));
     adapters
 }
@@ -1739,6 +1834,24 @@ pub fn query_rows(
     )
 }
 
+/// Session ids SessionWiki has indexed under Mjolnir's tool name. This is a
+/// discovery supplement: the daemon's durable session table remains the
+/// authority, while the index can reveal a checkpointed session that has not
+/// been materialized into controller state in this daemon run.
+pub(crate) fn mjolnir_session_ids() -> Result<BTreeSet<String>> {
+    let Some(connection) = readable_index()? else {
+        return Ok(BTreeSet::new());
+    };
+    let mut statement = connection
+        .prepare("SELECT DISTINCT session_id FROM files WHERE tool = ?1")
+        .context("prepare Mjolnir SessionWiki discovery")?;
+    statement
+        .query_map([TOOL], |row| row.get::<_, String>(0))
+        .context("query Mjolnir SessionWiki discovery")?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()
+        .context("read Mjolnir SessionWiki discovery")
+}
+
 fn query_rows_from(
     connection: &rusqlite::Connection,
     query: &str,
@@ -1780,20 +1893,33 @@ fn query_rows_from(
         sessionwiki::index::search_with_roles(connection, query, search_limit, None, None, roles)
             .context("search the SessionWiki index")?;
     let mut rows = Vec::with_capacity(hits.len().min(limit));
+    let mut found = BTreeSet::new();
+    // A pasted session id names the session itself, so it ranks above the
+    // sessions that merely mention that id in their messages.
+    for row in id_like(connection, query)? {
+        if rows.len() >= limit {
+            break;
+        }
+        if top_level::is_child(&row, ownership, cache)? {
+            continue;
+        }
+        found.insert(row.session_id.clone());
+        rows.push(wiki_row(row, None, live));
+    }
     for hit in hits {
         if rows.len() >= limit {
             break;
         }
-        if top_level::is_child(&hit.row, ownership, cache)? {
+        if found.contains(&hit.row.session_id) || top_level::is_child(&hit.row, ownership, cache)? {
             continue;
         }
+        found.insert(hit.row.session_id.clone());
         rows.push(wiki_row(hit.row, Some(hit.snippet), live));
     }
     // SessionWiki searches message text alone, so a session known by a title
     // or a project that is never said out loud would be unfindable. Those
     // matches follow the full-text ones rather than displacing them.
     if rows.len() < limit {
-        let mut found: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
         for row in named_like(connection, query)? {
             if rows.len() >= limit {
                 break;
@@ -1941,6 +2067,26 @@ fn fill_session_tags(connection: &rusqlite::Connection, rows: &mut [WikiRow]) ->
 /// also loads a preview, summary and tags for every row, none of which title
 /// matching needs.
 const NAME_SCAN_LIMIT: usize = 2_000;
+
+/// Indexed sessions whose id starts with the query, when the query reads as a
+/// pasted id: hexadecimal digits and dashes only (dashes for a harness's own
+/// UUID), and at least as long as the id prefix Mjolnir shows. The length
+/// keeps short hex words such as "face" or "added" from reading as ids.
+/// SessionWiki's `resolve` matches Mjolnir and other tools' short ids as well
+/// as Codex and Claude native ids.
+fn id_like(
+    connection: &rusqlite::Connection,
+    query: &str,
+) -> Result<Vec<sessionwiki::index::SessionRow>> {
+    let hex_digits = query.chars().filter(char::is_ascii_hexdigit).count();
+    let only_id_characters = query
+        .chars()
+        .all(|character| character.is_ascii_hexdigit() || character == '-');
+    if !only_id_characters || hex_digits < mj_core::state::SHORT_ID_LEN {
+        return Ok(Vec::new());
+    }
+    sessionwiki::index::resolve(connection, query).context("look up a pasted session id")
+}
 
 /// Indexed sessions whose title or project contains the query, ignoring case.
 fn named_like(
@@ -2103,14 +2249,21 @@ pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
     let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
         return Ok(None);
     };
-    let session = sessionwiki::index::session_from_index(&connection, &row)
+    archived_session_from_row(&connection, &row).map(Some)
+}
+
+fn archived_session_from_row(
+    connection: &rusqlite::Connection,
+    row: &sessionwiki::index::SessionRow,
+) -> Result<ArchivedSession> {
+    let session = sessionwiki::index::session_from_index(connection, row)
         .context("read an indexed session")?;
     let snapshot = snapshot_of(&session)?;
-    Ok(Some(ArchivedSession {
+    Ok(ArchivedSession {
         title: session.title.clone(),
         project_directory: project_directory_of(&session.project),
         snapshot,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2583,7 +2736,7 @@ pub fn wiki_continuation(
             },
         });
     }
-    let harness = harness_adapters::harness_for_tool(tool)
+    let harness = harness_tools::harness_for_tool(tool)
         .with_context(|| format!("Mjolnir cannot continue a {tool} session"))?;
     let native_session_id = match harness {
         HarnessKind::Codex => sessionwiki::index::native_id_of(&path.to_string_lossy()),
@@ -2657,7 +2810,7 @@ fn wiki_session_from(
         .and_then(|id| id.parse::<HarnessKind>().ok())
         .or_else(|| {
             (!is_mjolnir)
-                .then(|| harness_adapters::harness_for_tool(&row.tool))
+                .then(|| harness_tools::harness_for_tool(&row.tool))
                 .flatten()
         });
     Ok(Some(WikiSessionInfo {
@@ -2986,11 +3139,11 @@ mod tests {
             id: session_id.into(),
             project_directory: None,
             container_workspace: Some(PathBuf::from(format!("/workspace/{session_id}"))),
-            target: Some(mj_core::state::TargetLocator::LocalPodman {
+            target: Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
                 container_id: "test-container".into(),
                 workspace_storage: Default::default(),
                 borrowed_from: None,
-            }),
+            })),
             ..record_template()
         }
     }
@@ -3003,6 +3156,9 @@ mod tests {
 
     fn record_template() -> SessionRecord {
         SessionRecord {
+            oracle_choice: None,
+            oracle: true,
+            notifications_ignored: false,
             project: None,
             target_runtime: None,
             launch_base: None,
@@ -3015,8 +3171,6 @@ mod tests {
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             id: "0123456789abcdef0123456789abcdef".into(),
             title: "indexed session".into(),
             harness_kind: mj_core::config::HarnessKind::Codex,
@@ -3027,6 +3181,7 @@ mod tests {
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             target_template_id: "local-bare".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),
@@ -3040,6 +3195,8 @@ mod tests {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         }
@@ -3179,7 +3336,7 @@ mod tests {
             ended: None,
             title: String::new(),
             subagent: false,
-            messages: tool_messages(&tool, 0),
+            messages: tool_messages(tool, 0),
             touched: Vec::new(),
             edits: Vec::new(),
         };
@@ -3277,22 +3434,22 @@ mod tests {
     fn the_documented_sessionwiki_install_is_the_linked_version() {
         const LOCK: &str = include_str!("../../Cargo.lock");
         const DOCS: &str = include_str!("../../docs/src/content/docs/sessions.md");
+        const CRATE: &str = "brokk-sessionwiki";
         let linked = LOCK
             .split("[[package]]\n")
-            .find_map(|package| package.strip_prefix("name = \"sessionwiki\"\nversion = \""))
+            .find_map(|package| package.strip_prefix(&format!("name = \"{CRATE}\"\nversion = \"")))
             .and_then(|rest| rest.split('"').next())
-            .expect("Cargo.lock resolves sessionwiki");
+            .expect("Cargo.lock resolves the SessionWiki crate");
         for line in [
-            format!("This build links the `sessionwiki` crate, version {linked}."),
-            format!("cargo install --locked sessionwiki@{linked}\n"),
-            format!("npm install --global @youdie006/sessionwiki@{linked}\n"),
+            format!("This build links the `{CRATE}` crate, version {linked}."),
+            format!("cargo install --locked {CRATE}@{linked}\n"),
         ] {
             assert!(DOCS.contains(&line), "sessions.md must say {line:?}");
         }
     }
 
     #[test]
-    fn a_bundle_session_is_indexed_and_searchable_by_its_primary_repository() {
+    fn a_bundle_session_is_indexed_and_searchable_by_its_primary_repository_and_id() {
         let _held = tags::testing::lock();
         let (_index_dir, mut connection) = tags::testing::isolated_index();
         let directory = tempfile::tempdir().unwrap();
@@ -3317,6 +3474,15 @@ mod tests {
                 .iter()
                 .any(|row| row.id == session_id),
             "the indexed bundle session is found by its repository name"
+        );
+        let pasted = session_id[..mj_core::state::SHORT_ID_LEN].to_uppercase();
+        assert_eq!(
+            query_rows_for_test(&pasted, 10, false)
+                .unwrap()
+                .first()
+                .map(|row| row.id.as_str()),
+            Some(session_id),
+            "a pasted session id prefix finds the session first"
         );
     }
 
@@ -3492,6 +3658,8 @@ mod tests {
     /// record's own last update can tell the index the title moved.
     #[test]
     fn a_rename_moves_a_session_change_token() {
+        let _held = tags::testing::lock();
+        let (_index, mut connection) = tags::testing::isolated_index();
         let directory = tempfile::tempdir().unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         write_archive(directory.path(), session_id, 1);
@@ -3515,6 +3683,18 @@ mod tests {
                 .unwrap()
                 .title,
             "the new name"
+        );
+
+        // Cross the durable index boundary, then discard both the source
+        // record and checkpoint, as destruction after archiving does.
+        sync_adapter(&mut connection, &Arc::new(adapter));
+        std::fs::remove_dir_all(directory.path()).unwrap();
+        let row = row_by_id(&connection, session_id).unwrap().unwrap();
+        let archived = archived_session_from_row(&connection, &row).unwrap();
+        assert_eq!(archived.title, "the new name");
+        assert_eq!(
+            archived.snapshot.session.session_title.as_deref(),
+            Some("the new name")
         );
     }
 
@@ -3745,7 +3925,7 @@ mod tests {
             "2026-09-01T00:00:00Z",
         );
         session.project_directory = Some(root.clone());
-        session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
             kind: mj_core::state::ManagedCheckoutKind::Clone,
             source_project_directory: "/srv/project".into(),
             source_repository: "/srv/project".into(),
@@ -3753,15 +3933,15 @@ mod tests {
             branch: "feature".into(),
             target: mj_core::state::ManagedWorktreeTarget::Local,
             base_commit: Some("1".repeat(40)),
-        });
-        session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+        }));
+        session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
             archive_path: "sessions/checkpoint.hel.zip".into(),
             sha256: "a".repeat(64),
             created_at: "2026-09-01T00:00:00Z".into(),
             event_frontier: 0,
-        });
+        }));
         assert!(ready(vec![session.clone()], vec![]).is_empty());
-        session.publication = Some(mj_core::state::PublicationAssessment {
+        session.publication = Some(Box::new(mj_core::state::PublicationAssessment {
             checkpoint_sha256: "a".repeat(64),
             state: mj_core::state::PublicationState::Published,
             dirty: false,
@@ -3770,7 +3950,7 @@ mod tests {
             destinations: vec!["https://example.test/repository.git".into()],
             checked_at: "2026-09-01T01:00:00Z".into(),
             reason: Some("feature branch was pushed but not merged".into()),
-        });
+        }));
         assert_eq!(ready(vec![session.clone()], vec![]), vec![id]);
         session.publication.as_mut().unwrap().stashed = true;
         assert!(ready(vec![session.clone()], vec![]).is_empty());
@@ -3801,12 +3981,12 @@ mod tests {
         }
         SessionRecord {
             project: None,
-            checkpoint: Some(mj_core::state::CheckpointMetadata {
+            checkpoint: Some(Box::new(mj_core::state::CheckpointMetadata {
                 archive_path,
                 sha256: "0".repeat(64),
                 created_at: updated_at.into(),
                 event_frontier: 1,
-            }),
+            })),
             ..record(
                 session_id,
                 mj_core::state::SessionState::Stopped,
@@ -3826,12 +4006,12 @@ mod tests {
             // rather than failing the whole estimate.
             SessionRecord {
                 project: None,
-                checkpoint: Some(mj_core::state::CheckpointMetadata {
+                checkpoint: Some(Box::new(mj_core::state::CheckpointMetadata {
                     archive_path: root.join("missing.hel.zip"),
                     sha256: "0".repeat(64),
                     created_at: "2026-09-01T00:00:00Z".into(),
                     event_frontier: 1,
-                }),
+                })),
                 ..record(
                     "lost-checkpoint",
                     mj_core::state::SessionState::Stopped,
@@ -4111,6 +4291,22 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // A pasted native id finds a top-level session and hides a child, as
+        // every other way of naming a child does.
+        let by_id = |id: &str| -> Vec<String> {
+            query_rows_with_snapshot_for_test(id, 10, false, &ownership)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect()
+        };
+        assert_eq!(
+            by_id("00000000-0000-4000-8000-000000000001"),
+            [ids_for_paths[0].clone()]
+        );
+        for child in &child_native_ids {
+            assert!(by_id(child).is_empty(), "child {child} must stay hidden");
+        }
 
         let search_sessions = mj_core::history::HistoryRequest {
             request_id: "test-search".into(),
@@ -4672,14 +4868,17 @@ mod tests {
                 format!("profile-{index}"),
                 HarnessProfile {
                     enabled: true,
-                    kind,
-                    home,
                     environment: Default::default(),
                     context_window_bytes: None,
+                    models: Default::default(),
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     codex_profile: None,
-                    muse_auto_review: None,
+                    legacy_muse_auto_review: None,
+                    load_balancing_may_consume_credits: false,
+                    claude_permission_mode: None,
+                    aws: None,
+                    ..mj_core::config::HarnessProfile::new(kind, home)
                 },
             );
         }
@@ -4695,6 +4894,7 @@ mod tests {
                 "codex",
                 "codex",
                 "codex",
+                "dsh",
                 "grok-build",
                 "kimi-code",
                 "muse",

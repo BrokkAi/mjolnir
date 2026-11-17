@@ -24,28 +24,35 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
         bundle_id: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
-    ) -> mj_client::session::BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> mj_client::session::BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>> {
         let session_id = self.0.session_id().to_owned();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                crate::database::search_prompts(&session_id, &bundle_id, scope, &query)
+                crate::database::search_prompt_page(
+                    &session_id,
+                    &bundle_id,
+                    scope,
+                    &query,
+                    after,
+                    limit,
+                )
             })
             .await
             .context("history search task")?
         })
     }
 
-    fn resolve_review_settings(
+    fn session_prompts(
         &self,
-        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> mj_client::session::BoxFuture<'_, Result<mj_core::review::settings::ResolvedReviewSettings>>
-    {
-        Box::pin(crate::review_selection::resolve(
-            self.0.clone(),
-            None,
-            cancelled,
-            None,
-        ))
+    ) -> mj_client::session::BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        let session_id = self.0.session_id().to_owned();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::database::session_prompts(&session_id))
+                .await
+                .context("session history task")?
+        })
     }
 
     fn config_result(

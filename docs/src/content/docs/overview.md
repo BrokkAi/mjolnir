@@ -7,7 +7,7 @@ Mjolnir (`mj`) is a session manager for coding agents that provisions their
 execution environments and lets you continue work across harnesses, accounts,
 and machines. It supports Codex, Claude Code, Kimi Code, Grok Build, Muse
 Code, OpenCode, and DSH through the Agent Client Protocol (ACP), with a terminal dashboard,
-personal web viewer, and desktop app.
+and personal web viewer.
 
 Choose a harness account independently from the target where it runs. Mjolnir
 provisions containers or instances, synchronizes credentials, and can move the
@@ -30,15 +30,15 @@ A Mjolnir installation has four main parts:
 1. The **controller daemon** owns the local session database, provisions
    targets, synchronizes credentials, and serves the web viewer.
 2. A **target** is the place where a session runs: a local checkout or clone, a
-   container, a named SSH machine, or an EC2 instance.
+   container or a named SSH machine, including a persistent EC2 host.
 3. A **session worker** runs on that target beside the selected harness. It
    owns the durable command queue and event journal, so it does not depend on
    an attached terminal client.
-4. The **terminal dashboard**, **web viewer**, and **desktop app** are clients
+4. The **terminal dashboard** and **web viewer** are clients
    of the daemon. Detaching a client does not stop the session.
 
 A profile selects a harness account, and a target selects the execution
-boundary. Managed container and EC2 sessions use a bundle describing the
+boundary. Managed container sessions use a bundle describing the
 repositories in their workspace; bare sessions instead select an existing
 project directory, which may be a plain local folder. See [Profiles and harnesses](/profiles/), [Workspaces and
 bundles](/workspaces-bundles/), and [Targets](/targets/).
@@ -112,8 +112,8 @@ directories.
 
 ## Supported machines and runtimes
 
-A machine is a host: `local` (this computer), `ssh` (a named host), or
-`aws-ec2` (a launch template). A runtime says how the session runs on it.
+A machine is a host: `local` (this computer) or `ssh` (a named host, including
+EC2 hosts created with `mj ec2 create`). A runtime says how the session runs on it.
 
 | What you get | Runtime | Machine | Execution policy | Session boundary |
 | --- | --- | --- | --- | --- |
@@ -124,7 +124,6 @@ A machine is a host: `local` (this computer), `ssh` (a named host), or
 | Remote checkout or isolated clone | `bare` | an `ssh` machine, a named Linux host | Guardian or unconstrained | Existing directory or independent clone on that host |
 | Podman over SSH | `podman` | an `ssh` machine | Unconstrained | Disposable remote container |
 | Docker over SSH | `docker` | an `ssh` machine | Unconstrained | Disposable remote container |
-| AWS EC2 | `bare` | an `aws-ec2` machine, in your AWS account | Unconstrained | Disposable instance |
 
 “Configured approvals” means the harness profile remains in control of its
 approval behavior. “Unconstrained” means Mjolnir deliberately selects the

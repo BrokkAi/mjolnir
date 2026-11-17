@@ -1,228 +1,280 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
-/// POSIX shell helpers that identify the daemon for one exact worker root.
-/// The match is assembled at run time so the script's own command line cannot
-/// select itself, and `worker proxy` command lines cannot match either.
-pub fn worker_daemon_identity_script(worker_root: &str) -> String {
-    format!(
-        r#"{process_birth_script}
-hel_root={root}
-hel_match="hel worker run --root $hel_root"
-hel_match_home="hel worker run --root $HOME/$hel_root"
-hel_ps() {{
-    ps -ww "$@" 2>/dev/null || ps "$@" 2>/dev/null
-}}
-hel_is_worker() {{
-    hel_args=$(hel_ps -o args= -p "$1") || return 1
-    case "$hel_args" in
-        *"$hel_match"*|*"$hel_match_home"*) return 0 ;;
-    esac
-    return 1
-}}
-hel_recorded_worker() {{
-    if [ -f "$hel_root/{pid_file}" ]; then
-        hel_pid=$(cat "$hel_root/{pid_file}" 2>/dev/null)
-        case "$hel_pid" in
-            '' | *[!0-9]*) hel_pid="" ;;
-        esac
-        # The pidfile outlives a launch, so a recycled pid has to be ruled out
-        # by what the process actually is.
-        if [ -n "$hel_pid" ] && hel_is_worker "$hel_pid"; then
-            printf '%s\n' "$hel_pid"
-            return 0
-        fi
+/// Where this build's control worker lives: `hel-control-<hash of the build>`
+/// in the session's own worker root, a hard link to this build's entry in the
+/// worker store. The worker never executes it, so installing it is not a worker
+/// swap. The root is its one owner: the link keeps the store entry alive under
+/// the collector's ordinary link-count rule, whichever daemon collects, and
+/// goes with the root. The name carries the build, so daemons of different
+/// builds each install and use their own file in the same root and never
+/// overwrite another's. The build is known statically, so plans can embed the
+/// path without any I/O. Files of older builds stay until the root is removed.
+pub fn control_worker_path(worker_root: &str) -> String {
+    control_worker_path_for_build(worker_root, mj_core::worker_build::WORKER_BUILD_ID)
+}
+
+/// [`control_worker_path`] for a named build.
+pub fn control_worker_path_for_build(worker_root: &str, build_id: &str) -> String {
+    use sha2::Digest as _;
+    let name = format!(
+        "hel-control-{}",
+        &mj_core::hex::lower_hex(sha2::Sha256::digest(build_id.as_bytes()))[..16]
+    );
+    mj_core::target_path::text(&mj_core::target_path::join(
+        std::path::Path::new(worker_root),
+        std::path::Path::new(&name),
+    ))
+}
+
+/// Exit status of a control script whose control worker is not in the root.
+/// Nothing ran. Decisions install it first
+/// (`controller::worker_binary::ensure_control_worker`); a read-only diagnosis
+/// reports it as a finding.
+pub const WORKER_CONTROL_UNSTAGED_STATUS: i32 = 78;
+
+/// Shell that runs `hel worker <subcommand> --root <root>` from this build's
+/// control worker ([`control_worker_path`]), never from the root's own `hel`. A
+/// root keeps the build that last started a worker there, which can predate
+/// these subcommands; the lock they inspect (`<root>/worker.lock`, which no
+/// shell can test portably) and the startup record are older than they are, so
+/// the current build judges and stops an older worker correctly. A root without
+/// a `hel` never had a worker started from it, so `when_no_binary` answers for
+/// it.
+fn installed_worker_script(
+    worker_root: &str,
+    subcommand: &str,
+    when_no_binary: &str,
+) -> ControlScript {
+    ControlScript::new(
+        worker_root,
+        format!(
+            r#"hel_root={root}
+hel_control={control}
+if [ -e "$hel_root/hel" ]; then
+    if [ ! -x "$hel_control" ]; then
+        echo "control worker for this build not installed in $hel_root" >&2
+        exit {unstaged}
     fi
-    # Startup records survive process death. Match the process birth as well
-    # as its PID before treating a breadcrumb as authority to signal it.
-    [ -f "$hel_root/{startup_file}" ] || return 1
-    hel_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$hel_root/{startup_file}" 2>/dev/null | head -n 1)
-    case "$hel_pid" in
-        '' | *[!0-9]*) return 1 ;;
-    esac
-    hel_birth=$(sed -n 's/.*"process_birth"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$hel_root/{startup_file}" 2>/dev/null | head -n 1)
-    if [ -n "$hel_birth" ]; then
-        hel_current_birth=$(mj_process_birth "$hel_pid") || return 1
-        [ "$hel_birth" = "$hel_current_birth" ] || return 1
-    else
-        # Older workers have no birth record; only their exact command line
-        # can identify them. PID existence alone cannot identify a worker.
-        hel_is_worker "$hel_pid" || return 1
-    fi
-    printf '%s\n' "$hel_pid"
-}}"#,
-        root = posix_quote(worker_root),
-        process_birth_script = mj_core::subprocess::PROCESS_BIRTH_SCRIPT,
-        pid_file = mj_core::relay::WORKER_PID_FILE,
-        startup_file = mj_core::relay::WORKER_STARTUP_FILE,
+    "$hel_control" worker {subcommand} --root "$hel_root" || exit $?
+else
+    {when_no_binary}
+fi
+"#,
+            root = posix_quote(worker_root),
+            control = posix_quote(&control_worker_path(worker_root)),
+            unstaged = WORKER_CONTROL_UNSTAGED_STATUS,
+        ),
+    )
+}
+
+/// A shell script that carries the root whose control worker it invokes.
+/// Composition and transport wrapping preserve the requirement without parsing shell text.
+#[derive(Debug, Clone)]
+pub struct ControlScript {
+    root: Option<PathBuf>,
+    script: String,
+}
+
+impl ControlScript {
+    fn new(root: &str, script: String) -> Self {
+        Self {
+            root: Some(PathBuf::from(root)),
+            script,
+        }
+    }
+
+    pub fn without_control(script: String) -> Self {
+        Self { root: None, script }
+    }
+
+    pub fn map_script(mut self, compose: impl FnOnce(String) -> String) -> Self {
+        self.script = compose(self.script);
+        self
+    }
+
+    pub fn into_command(self, wrap: impl FnOnce(String) -> CommandSpec) -> ControlCommand {
+        ControlCommand {
+            root: self.root,
+            command: wrap(self.script),
+        }
+    }
+
+    /// Explicit escape for the staging check itself and read-only diagnoses.
+    pub fn unstaged_script(&self) -> &str {
+        &self.script
+    }
+}
+
+/// A command whose staging requirement survives SSH and container wrapping.
+#[derive(Debug, Clone)]
+pub struct ControlCommand {
+    root: Option<PathBuf>,
+    command: CommandSpec,
+}
+
+impl ControlCommand {
+    /// Only for a caller that stages separately or reports an unstaged diagnosis.
+    pub fn unstaged_command(self) -> CommandSpec {
+        self.command
+    }
+}
+
+impl From<CommandSpec> for ControlCommand {
+    fn from(command: CommandSpec) -> Self {
+        Self {
+            root: None,
+            command,
+        }
+    }
+}
+
+/// Commands are private: execution stages the requirement carried by their builders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerControlPlan {
+    description: String,
+    commands: Vec<CommandSpec>,
+    control: Option<(TargetLocator, String, PathBuf)>,
+}
+
+impl WorkerControlPlan {
+    pub fn new(
+        description: impl Into<String>,
+        commands: Vec<ControlCommand>,
+        locator: &TargetLocator,
+        session_id: &str,
+    ) -> Result<Self> {
+        let mut root = None;
+        for command in &commands {
+            if let Some(required) = &command.root {
+                ensure!(
+                    root.as_ref().is_none_or(|root| root == required),
+                    "a control plan cannot stage different worker roots"
+                );
+                root = Some(required.clone());
+            }
+        }
+        Ok(Self {
+            description: description.into(),
+            commands: commands
+                .into_iter()
+                .map(|command| command.command)
+                .collect(),
+            control: root.map(|root| (locator.clone(), session_id.to_owned(), root)),
+        })
+    }
+
+    /// A plan whose commands never run the control worker.
+    #[cfg(test)]
+    pub fn without_control(description: &str, commands: Vec<CommandSpec>) -> Self {
+        Self {
+            description: description.to_owned(),
+            commands,
+            control: None,
+        }
+    }
+
+    /// Whether running this plan stages the control worker first.
+    pub fn stages_control_worker(&self) -> bool {
+        self.control.is_some()
+    }
+
+    /// Stage the control worker (on its own executor, without `executor`'s
+    /// deadline), then run every command with `executor`.
+    pub fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
+        if let Some((locator, session_id, root)) = &self.control {
+            ensure!(
+                Path::new(&worker_root(locator, session_id)?) == root,
+                "control script root differs from the staging target"
+            );
+            crate::controller::ensure_control_worker(executor, locator, session_id)?;
+        }
+        CommandPlan {
+            description: self.description.clone(),
+            commands: self.commands.clone(),
+        }
+        .execute(executor)
+    }
+
+    /// The commands of a plan that does not run the control worker, for a
+    /// caller that composes them itself. A plan that does run it is refused:
+    /// running its scripts would skip staging.
+    pub fn commands_without_staging(&self) -> Result<&[CommandSpec]> {
+        ensure!(
+            self.control.is_none(),
+            "{} runs the staged control worker, so it must run through `execute`",
+            self.description
+        );
+        Ok(&self.commands)
+    }
+
+    /// The scripts of any plan, for a test that inspects them. They skip staging.
+    #[cfg(test)]
+    pub fn scripts(&self) -> &[CommandSpec] {
+        &self.commands
+    }
+}
+
+#[cfg(test)]
+impl From<CommandSpec> for WorkerControlPlan {
+    fn from(command: CommandSpec) -> Self {
+        Self::without_control(&command.purpose.clone(), vec![command])
+    }
+}
+
+#[cfg(test)]
+impl From<CommandPlan> for WorkerControlPlan {
+    fn from(plan: CommandPlan) -> Self {
+        Self::without_control(&plan.description, plan.commands)
+    }
+}
+
+/// Print `absent` when the root never ran a worker (no `hel`), `present` when
+/// this build's control worker is installed in the root, and `missing`
+/// otherwise.
+pub fn control_worker_state_script(worker_root: &str) -> ControlScript {
+    ControlScript::new(
+        worker_root,
+        format!(
+            r#"hel_root={root}
+hel_control={control}
+if [ ! -e "$hel_root/hel" ]; then printf 'absent\n'
+elif [ -x "$hel_control" ] && [ "$("$hel_control" worker build-id 2>/dev/null)" = {build} ]; then printf 'present\n'
+else printf 'missing\n'
+fi
+"#,
+            root = posix_quote(worker_root),
+            control = posix_quote(&control_worker_path(worker_root)),
+            build = posix_quote(mj_core::worker_build::WORKER_BUILD_ID),
+        ),
     )
 }
 
 /// Report whether the exact session worker is alive without signaling it.
-/// A successful probe prints one stable token; transport or shell failures
-/// stay distinguishable from a confirmed absent worker.
-pub fn worker_daemon_liveness_script(worker_root: &str) -> String {
-    let mut script = worker_daemon_identity_script(worker_root);
-    script.push_str(
-        r#"
-hel_report_worker_state() {
-    if [ -S "$hel_root/control.sock" ]; then
-        printf 'alive\n'
-    else
-        printf 'starting\n'
-    fi
-}
-if hel_recorded_worker >/dev/null; then
-    hel_report_worker_state
-    exit 0
-fi
-while read -r hel_pid hel_args; do
-    case "$hel_pid" in
-        '' | *[!0-9]*) continue ;;
-    esac
-    [ "$hel_pid" -eq $$ ] && continue
-    case "$hel_args" in
-        *"$hel_match"*|*"$hel_match_home"*) hel_report_worker_state; exit 0 ;;
-    esac
-done <<MJ_PS
-$(hel_ps -eo pid=,args=)
-MJ_PS
-printf 'dead\n'
-"#,
-    );
-    script
+/// A successful probe prints one of `alive`, `starting` or `dead`; transport or
+/// shell failures stay distinguishable from a confirmed absent worker.
+pub fn worker_daemon_liveness_script(worker_root: &str) -> ControlScript {
+    installed_worker_script(worker_root, "liveness", "printf 'dead\\n'")
 }
 
-/// Stop the detached worker daemon rooted at `worker_root`.
-///
-/// The daemon leads its own process group, so the signal goes to the group
-/// first to take the agent down with it. Shells disagree about how to write a
-/// negative PID (`dash` rejects `--`), hence the two forms before the
-/// single-process fallback for daemons predating the group leadership.
-pub fn stop_worker_daemon_script(worker_root: &str) -> String {
-    let mut script = worker_daemon_identity_script(worker_root);
-    script.push_str(
-        r#"
-hel_signal() {
-    if [ "$hel_group" = "$2" ]; then
-        kill -"$1" -- "-$2" 2>/dev/null && return 0
-        kill -"$1" "-$2" 2>/dev/null
-        return $?
-    fi
-    kill -"$1" "$2" 2>/dev/null
+/// The pid of the worker that holds the root's lock, printed alone, or nothing.
+pub fn worker_daemon_holder_script(worker_root: &str) -> ControlScript {
+    installed_worker_script(worker_root, "holder", ":")
 }
-hel_group_running() {
-    if [ "$hel_group" = "$1" ]; then
-        hel_processes=$(hel_ps -eo pgid=,stat=) || return 2
-        printf '%s\n' "$hel_processes" | awk -v group="$1" '$1 == group && $2 !~ /^Z/ {found=1} END {exit !found}'
-    else
-        hel_process_state=$(hel_ps -o stat= -p "$1") || return 1
-        printf '%s\n' "$hel_process_state" | awk '$1 !~ /^Z/ && NF {found=1} END {exit !found}'
-    fi
+
+/// Stop the detached worker daemon rooted at `worker_root`: TERM, then KILL
+/// after two seconds. Use this when the session continues from the root, so
+/// the worker and its harness can shut down in order. Returns once the root's
+/// lock is free and nothing the worker started is left.
+pub fn stop_worker_daemon_script(worker_root: &str) -> ControlScript {
+    installed_worker_script(worker_root, "stop", ":")
 }
-# The harness and its helpers lead process groups of their own, so the leader's
-# group can empty while they still write into the worker root. `hel_tree` is the
-# snapshot, taken before any signal, of every process descended from the leader
-# or in its group, as "pid pgid" lines; the stop is finished only when none is
-# left.
-hel_snapshot_tree() {
-    hel_tree=$(hel_ps -eo pid=,ppid=,pgid= | awk -v lead="$1" -v self="$$" '
-        {pid[NR]=$1; ppid[NR]=$2; pg[NR]=$3; n=NR}
-        END {
-            for (i = 1; i <= n; i++) if (pid[i] == lead || pg[i] == lead) member[pid[i]] = 1
-            do {
-                grew = 0
-                for (i = 1; i <= n; i++) if (!(pid[i] in member) && (ppid[i] in member)) { member[pid[i]] = 1; grew = 1 }
-            } while (grew)
-            for (i = 1; i <= n; i++) if ((pid[i] in member) && pid[i] != self) print pid[i], pg[i]
-        }') || hel_tree=""
-}
-hel_tree_running() {
-    [ -n "$hel_tree" ] || return 1
-    hel_processes=$(hel_ps -eo pid=,stat=) || return 2
-    hel_tree_pids=" $(printf '%s\n' "$hel_tree" | while read -r hel_tpid hel_tgroup; do printf '%s ' "$hel_tpid"; done)"
-    while read -r hel_ppid hel_pstat; do
-        [ -n "$hel_ppid" ] || continue
-        case "$hel_pstat" in Z*) continue ;; esac
-        case "$hel_tree_pids" in *" $hel_ppid "*) return 0 ;; esac
-    done <<MJ_TREE
-$hel_processes
-MJ_TREE
-    return 1
-}
-hel_running() {
-    hel_group_running "$1"
-    hel_run_status=$?
-    [ "$hel_run_status" -eq 1 ] || return "$hel_run_status"
-    hel_tree_running
-}
-hel_kill_tree() {
-    printf '%s\n' "$hel_tree" | while read -r hel_tpid hel_tgroup; do
-        [ -n "$hel_tpid" ] || continue
-        kill -KILL "$hel_tpid" 2>/dev/null || true
-        case "$hel_tgroup" in
-            '' | 0 | 1 | *[!0-9]*) ;;
-            *) kill -KILL -- "-$hel_tgroup" 2>/dev/null || kill -KILL "-$hel_tgroup" 2>/dev/null || true ;;
-        esac
-    done
-}
-hel_stop() {
-    hel_group=$1
-    hel_tree=""
-    hel_running "$1" || {
-        hel_status=$?
-        [ "$hel_status" -eq 1 ] || return "$hel_status"
-        hel_group=legacy
-    }
-    hel_snapshot_tree "$1"
-    hel_signal TERM "$1" || true
-    hel_waited=0
-    while [ "$hel_waited" -lt 2 ]; do
-        hel_running "$1" || { hel_status=$?; [ "$hel_status" -eq 1 ] && return 0; return "$hel_status"; }
-        sleep 1
-        hel_waited=$((hel_waited + 1))
-    done
-    hel_signal KILL "$1" || true
-    hel_kill_tree
-    hel_waited=0
-    while [ "$hel_waited" -lt 3 ]; do
-        hel_running "$1" || { hel_status=$?; [ "$hel_status" -eq 1 ] && return 0; return "$hel_status"; }
-        sleep 1
-        hel_waited=$((hel_waited + 1))
-    done
-    echo "worker process tree still running after stop: $1" >&2
-    return 1
-}
-if hel_pid=$(hel_recorded_worker); then
-    hel_stop "$hel_pid" || exit $?
-fi
-hel_ps -eo pid=,args= | while read -r hel_pid hel_args; do
-    case "$hel_pid" in
-        '' | *[!0-9]*) continue ;;
-    esac
-    [ "$hel_pid" -eq $$ ] && continue
-    case "$hel_args" in
-        *"$hel_match"*|*"$hel_match_home"*) hel_stop "$hel_pid" || exit $? ;;
-    esac
-done || exit $?
-hel_left=0
-while read -r hel_pid hel_args; do
-    case "$hel_pid" in
-        '' | *[!0-9]*) continue ;;
-    esac
-    [ "$hel_pid" -eq $$ ] && continue
-    case "$hel_args" in
-        *"$hel_match"*|*"$hel_match_home"*) hel_left=1 ;;
-    esac
-done <<MJ_PS
-$(hel_ps -eo pid=,args=)
-MJ_PS
-if [ "$hel_left" -ne 0 ]; then
-    echo "worker still running after stop: $hel_root" >&2
-    exit 1
-fi
-"#,
-    );
-    script
+
+/// Kill a retired worker daemon rooted at `worker_root`, and its process tree,
+/// at once. Only for retirement: the caller removes the root next, and a sealed
+/// checkpoint (or a discard) means nothing in it needs an orderly shutdown.
+pub fn kill_worker_daemon_script(worker_root: &str) -> ControlScript {
+    installed_worker_script(worker_root, "stop --kill", ":")
 }
 
 /// Stop a leaked worker and delete the durable relay state under its root.
@@ -240,39 +292,74 @@ fi
 pub fn clear_relay_state_plan(
     locator: &TargetLocator,
     session_id: &str,
-) -> Result<Option<CommandSpec>> {
+) -> Result<Option<WorkerControlPlan>> {
     verify_locator(locator, session_id)?;
     let session_worker_root = worker_root(locator, session_id)?;
     let staged_home = posix_quote(&format!("{session_worker_root}/profile"));
-    let script = format!(
-        "{}\nrm -rf -- {} {}\nif [ -L {staged_home} ]; then rm -f -- {staged_home}; fi\n",
-        stop_worker_daemon_script(&session_worker_root),
-        posix_quote(&format!(
-            "{session_worker_root}/{}",
-            mj_core::relay::RELAY_STATE_FILE
-        )),
-        posix_quote(&format!(
-            "{session_worker_root}/{}",
-            mj_core::relay::RELAY_JOURNAL_DIR
-        )),
-    );
-    Ok(match locator {
-        TargetLocator::LocalBare { .. } => Some(
+    let script = stop_worker_daemon_script(&session_worker_root).map_script(|stop| {
+        format!(
+            "{stop}\nrm -rf -- {} {}\nif [ -L {staged_home} ]; then rm -f -- {staged_home}; fi\n",
+            posix_quote(&format!(
+                "{session_worker_root}/{}",
+                mj_core::relay::RELAY_STATE_FILE
+            )),
+            posix_quote(&format!(
+                "{session_worker_root}/{}",
+                mj_core::relay::RELAY_JOURNAL_DIR
+            )),
+        )
+    });
+    let command = match locator {
+        TargetLocator::LocalBare { .. } => Some(script.into_command(|script| {
             CommandSpec::new("sh", ["-c", script.as_str()])
-                .purpose("stop a leaked local Mjolnir worker and clear its relay state"),
-        ),
-        TargetLocator::SshBare { ssh, .. } => Some(
-            ssh_command(ssh, ["sh", "-c", script.as_str()])
-                .purpose("stop a leaked remote Mjolnir worker and clear its relay state"),
-        ),
+                .purpose("stop a leaked local Mjolnir worker and clear its relay state")
+        })),
+        TargetLocator::SshBare { ssh, .. } => Some(script.into_command(|script| {
+            ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c", script.as_str()])
+                .purpose("stop a leaked remote Mjolnir worker and clear its relay state")
+        })),
         TargetLocator::LocalPodman { .. }
         | TargetLocator::LocalDocker { .. }
         | TargetLocator::AppleContainer { .. }
         | TargetLocator::SshPodman { .. }
         | TargetLocator::SshDocker { .. }
         | TargetLocator::SshAppleContainer { .. }
+        | TargetLocator::SshNitro { .. }
         | TargetLocator::AwsEc2 { .. } => None,
-    })
+    };
+    command
+        .map(|command| {
+            WorkerControlPlan::new(
+                "clear a leaked worker's relay state",
+                vec![command],
+                locator,
+                session_id,
+            )
+        })
+        .transpose()
+}
+
+/// Stop the session's worker with the staged control worker. The plan stages it
+/// first when it runs.
+pub fn stop_worker_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+    purpose: &str,
+) -> Result<WorkerControlPlan> {
+    let script = stop_worker_daemon_script(&worker_root(locator, session_id)?);
+    WorkerControlPlan::new(
+        purpose,
+        vec![script.into_command(|script| {
+            locator_command(
+                SshTrafficClass::Control,
+                locator,
+                vec!["sh".into(), "-c".into(), script],
+            )
+            .purpose(purpose)
+        })],
+        locator,
+        session_id,
+    )
 }
 
 /// Everything an in-place harness replacement must remove before the new
@@ -290,7 +377,7 @@ pub fn in_place_worker_reset_plan(
     locator: &TargetLocator,
     session_id: &str,
     previous_profile_root: &str,
-) -> Result<CommandSpec> {
+) -> Result<WorkerControlPlan> {
     worker_reset_plan(locator, session_id, Some(previous_profile_root))
 }
 
@@ -299,7 +386,7 @@ pub fn in_place_worker_reset_plan(
 pub fn retained_native_worker_reset_plan(
     locator: &TargetLocator,
     session_id: &str,
-) -> Result<CommandSpec> {
+) -> Result<WorkerControlPlan> {
     worker_reset_plan(locator, session_id, None)
 }
 
@@ -307,59 +394,139 @@ fn worker_reset_plan(
     locator: &TargetLocator,
     session_id: &str,
     previous_profile_root: Option<&str>,
-) -> Result<CommandSpec> {
+) -> Result<WorkerControlPlan> {
     verify_locator(locator, session_id)?;
     let session_worker_root = worker_root(locator, session_id)?;
     // A root that is a link left for a session an earlier release started
     // (`controller::local_profile_homes`) is unlinked, never followed: the path
     // carries no trailing slash, so `rm` removes the link itself.
-    let mut script = format!(
-        "{}\nrm -rf -- {} {}\n",
-        stop_worker_daemon_script(&session_worker_root),
-        posix_quote(&format!(
-            "{session_worker_root}/{}",
-            mj_core::relay::RELAY_STATE_FILE
-        )),
-        posix_quote(&format!(
-            "{session_worker_root}/{}",
-            mj_core::relay::RELAY_JOURNAL_DIR
-        )),
-    );
-    let mut metadata = vec!["launch.json", "ownership.json"];
-    if previous_profile_root.is_some() {
-        metadata.insert(0, "hel");
-    } else {
-        metadata.extend([
-            mj_core::relay::NATIVE_SESSION_IDENTITY_FILE,
-            mj_core::relay::RESTORED_RELAY_SEED_FILE,
-        ]);
-    }
-    script.push_str(&format!(
-        "rm -f -- {}\n",
-        metadata
-            .into_iter()
-            .map(|name| posix_quote(&format!("{session_worker_root}/{name}")))
-            .collect::<Vec<_>>()
-            .join(" ")
-    ));
-    if let Some(profile_root) = previous_profile_root {
+    let script = stop_worker_daemon_script(&session_worker_root).map_script(|stop| {
+        let mut script = format!(
+            "{stop}\nrm -rf -- {} {}\n",
+            posix_quote(&format!(
+                "{session_worker_root}/{}",
+                mj_core::relay::RELAY_STATE_FILE
+            )),
+            posix_quote(&format!(
+                "{session_worker_root}/{}",
+                mj_core::relay::RELAY_JOURNAL_DIR
+            )),
+        );
+        let mut metadata = vec!["launch.json", "ownership.json"];
+        if previous_profile_root.is_some() {
+            metadata.insert(0, "hel");
+        } else {
+            metadata.extend([
+                mj_core::relay::NATIVE_SESSION_IDENTITY_FILE,
+                mj_core::relay::RESTORED_RELAY_SEED_FILE,
+            ]);
+        }
         script.push_str(&format!(
-            "rm -rf -- {}\nmkdir -p -- {}\n",
-            posix_quote(profile_root.trim_end_matches('/')),
-            posix_quote(&session_worker_root),
+            "rm -f -- {}\n",
+            metadata
+                .into_iter()
+                .map(|name| posix_quote(&format!("{session_worker_root}/{name}")))
+                .collect::<Vec<_>>()
+                .join(" ")
         ));
-    }
-    Ok(
-        locator_command(locator, vec!["sh".into(), "-c".into(), script])
-            .purpose("reset the worker root for an in-place harness replacement")
-            .stage(ProvisionStage::Syncing),
-    )
+        if let Some(profile_root) = previous_profile_root {
+            script.push_str(&format!(
+                "rm -rf -- {}\nmkdir -p -- {}\n",
+                posix_quote(profile_root.trim_end_matches('/')),
+                posix_quote(&session_worker_root),
+            ));
+        }
+        script
+    });
+    let command = script.into_command(|script| {
+        locator_command(
+            SshTrafficClass::Control,
+            locator,
+            vec!["sh".into(), "-c".into(), script],
+        )
+        .purpose("reset the worker root for an in-place harness replacement")
+        .stage(ProvisionStage::Syncing)
+    });
+    WorkerControlPlan::new("reset the worker root", vec![command], locator, session_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Hard-won: #1550: an SSH root with an apostrophe hid the control path from the text scan, so staging was skipped
+    #[test]
+    fn ssh_control_plans_preserve_quoted_root_staging() {
+        const SESSION: &str = "0123456789abcdef";
+        let locator = TargetLocator::SshBare {
+            worker_id: None,
+            ssh: SshTarget {
+                destination: "example.invalid".into(),
+                ssh_args: vec![],
+            },
+            workspace: format!(".local/share/hel/workspaces/{SESSION}"),
+        };
+        // SSH locators currently derive a restricted root from the session ID.
+        // Exercise arbitrary root text at the script/transport boundary instead.
+        let root = Path::new(".local/share/hel/worker's space").join(SESSION);
+        let root_text = root.to_str().unwrap();
+        let close = kill_worker_daemon_script(root_text)
+            .map_script(|kill| format!("{kill}\nrm -rf -- {}\n", posix_quote(root_text)));
+        for script in [
+            stop_worker_daemon_script(root_text),
+            close,
+            worker_daemon_liveness_script(root_text),
+        ] {
+            let TargetLocator::SshBare { ssh, .. } = &locator else {
+                unreachable!()
+            };
+            let command = script.into_command(|script| {
+                ssh_command_owned(
+                    SshTrafficClass::Control,
+                    ssh,
+                    vec!["sh".into(), "-c".into(), script],
+                )
+            });
+            let plan =
+                WorkerControlPlan::new("quoted SSH control", vec![command], &locator, SESSION)
+                    .unwrap();
+            assert_eq!(plan.commands[0].program, "ssh");
+            assert!(plan.stages_control_worker());
+            assert_eq!(plan.control.as_ref().map(|(_, _, root)| root), Some(&root));
+            assert!(plan.commands_without_staging().is_err());
+        }
+        // Actual locator plans also retain the builder's requirement.
+        let expected = PathBuf::from(worker_root(&locator, SESSION).unwrap());
+        for plan in [
+            stop_worker_plan(&locator, SESSION, "stop").unwrap(),
+            close_plan(&locator, SESSION).unwrap(),
+            WorkerControlPlan::new(
+                "liveness",
+                vec![
+                    worker_daemon_liveness_script(expected.to_str().unwrap()).into_command(
+                        |script| {
+                            locator_command(
+                                SshTrafficClass::Control,
+                                &locator,
+                                vec!["sh".into(), "-c".into(), script],
+                            )
+                        },
+                    ),
+                ],
+                &locator,
+                SESSION,
+            )
+            .unwrap(),
+        ] {
+            assert_eq!(
+                plan.control.as_ref().map(|(_, _, root)| root),
+                Some(&expected)
+            );
+        }
+    }
+
+    // Only the Unix case below runs a probe script.
+    #[cfg(unix)]
     fn run_script(script: &str) -> (i32, String) {
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -390,7 +557,7 @@ mod tests {
             &root.join("profile").to_string_lossy(),
         )
         .unwrap();
-        let (status, stdout) = run_script(&plan.args[1]);
+        let (status, stdout) = run_script(&plan.commands[0].args[1]);
         assert_eq!(status, 0, "{stdout}");
         assert_eq!(
             std::fs::read_to_string(record).unwrap(),
@@ -398,260 +565,5 @@ mod tests {
         );
         assert!(!root.join(mj_core::relay::RELAY_STATE_FILE).exists());
         assert!(!root.join("profile").exists());
-    }
-
-    /// A worker records its own pid in its startup file before it writes a
-    /// pidfile and before its socket exists. The probe has to believe that
-    /// record: a worker is not always recognisable by its command line, and
-    /// one that is not was reported as gone while it was still running.
-    // Hard-won: 915d5c30: a live worker with an unexpected command line was reported gone.
-    // Hard-won: #1383: a worker recorded local time while its controller checked UTC.
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1296: process cancellation and relay recovery assume Unix"
-    )]
-    fn a_worker_is_found_by_the_pid_it_recorded_even_when_its_command_line_differs() {
-        let root = tempfile::tempdir().unwrap();
-        // This test process is certainly alive, and its command line is a test
-        // binary, which matches nothing the probe looks for. Recording and
-        // checking use different environments, as worker login re-exec does.
-        let locales = mj_core::subprocess::run_with_input(
-            std::process::Command::new("locale").arg("-a"),
-            &[],
-        )
-        .unwrap();
-        assert!(locales.status.success());
-        let locales = String::from_utf8(locales.stdout).unwrap();
-        let recording_locale = locales
-            .lines()
-            .find(|locale| !matches!(*locale, "C" | "POSIX"))
-            .unwrap_or("C");
-        let birth = mj_core::subprocess::run_with_input(
-            std::process::Command::new("sh")
-                .args([
-                    "-c",
-                    &format!(
-                        "{}\nmj_process_birth \"$1\"",
-                        mj_core::subprocess::PROCESS_BIRTH_SCRIPT
-                    ),
-                    "record-worker-birth",
-                    &std::process::id().to_string(),
-                ])
-                .env("TZ", "America/Chicago")
-                .env("LC_ALL", recording_locale),
-            &[],
-        )
-        .unwrap();
-        assert!(birth.status.success());
-        let birth = String::from_utf8(birth.stdout).unwrap().trim().to_owned();
-        std::fs::write(
-            root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
-            serde_json::to_vec(&serde_json::json!({
-                "step": "review-baseline",
-                "pid": std::process::id(),
-                "process_birth": birth,
-                "steps": [],
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let script = format!(
-            "{}\nhel_recorded_worker",
-            worker_daemon_identity_script(&root.path().to_string_lossy())
-        );
-        let output = mj_core::subprocess::run_with_input(
-            std::process::Command::new("sh")
-                .args(["-c", &script])
-                .env("TZ", "UTC")
-                .env("LC_ALL", "C"),
-            &[],
-        )
-        .unwrap();
-        assert!(
-            output.status.success(),
-            "the probe must find the recorded worker across TZ/locale changes: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap().trim(),
-            std::process::id().to_string()
-        );
-    }
-
-    /// A startup record left by a worker that has since gone must not be read
-    /// as a live worker.
-    #[test]
-    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
-    fn a_startup_record_for_a_dead_pid_reports_no_worker() {
-        let root = tempfile::tempdir().unwrap();
-        // A pid that cannot exist: the kernel rejects it outright.
-        std::fs::write(
-            root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
-            "{\n  \"step\": \"start\",\n  \"pid\": 2147483647,\n  \"steps\": []\n}",
-        )
-        .unwrap();
-
-        let script = format!(
-            "{}\nhel_recorded_worker",
-            worker_daemon_identity_script(&root.path().to_string_lossy())
-        );
-        let (status, stdout) = run_script(&script);
-
-        assert_ne!(status, 0, "a dead pid is not a worker: {stdout}");
-        assert!(stdout.is_empty(), "{stdout}");
-    }
-
-    #[test]
-    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
-    fn a_recycled_startup_pid_never_identifies_or_stops_an_unrelated_process() {
-        let root = tempfile::tempdir().unwrap();
-        for birth in [
-            serde_json::Value::Null,
-            serde_json::json!("previous-process-birth"),
-        ] {
-            std::fs::write(
-                root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
-                serde_json::to_vec(
-                    &serde_json::json!({"pid": std::process::id(), "process_birth": birth}),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-            let script = format!(
-                "{}\nhel_recorded_worker",
-                worker_daemon_identity_script(&root.path().to_string_lossy())
-            );
-            let (status, stdout) = run_script(&script);
-            assert_ne!(status, 0);
-            assert!(stdout.is_empty());
-            let (status, _) =
-                run_script(&stop_worker_daemon_script(&root.path().to_string_lossy()));
-            assert_eq!(status, 0);
-        }
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn stopping_worker_waits_for_term_resistant_descendants_after_leader_exit() {
-        use std::os::unix::process::CommandExt;
-        let root = tempfile::tempdir().unwrap();
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", "sh -c 'trap \"\" TERM; echo ready > ready; while :; do sleep 1; done' & echo $! > descendant; wait"])
-            .current_dir(root.path()).process_group(0)
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn().unwrap();
-        let _group = mj_core::subprocess::ProcessGroupGuard::new(Some(child.id()));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !root.path().join("ready").exists() {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        std::fs::write(root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
-            serde_json::to_vec(&serde_json::json!({"pid": child.id(), "process_birth": mj_core::subprocess::process_birth_identity(child.id()).unwrap()})).unwrap()).unwrap();
-        let (status, _) = run_script(&stop_worker_daemon_script(&root.path().to_string_lossy()));
-        assert_eq!(status, 0);
-        assert!(child.wait().is_ok());
-        let descendant = std::fs::read_to_string(root.path().join("descendant")).unwrap();
-        let (_, state) = run_script(&format!("ps -o stat= -p {}", descendant.trim()));
-        assert!(
-            state.is_empty() || state.starts_with('Z'),
-            "descendant survived: {state}"
-        );
-    }
-
-    /// The harness runs in a process group of its own, so the worker leader's
-    /// group empties as soon as the leader exits. The stop must still wait for
-    /// the harness, or the `rm` that follows races its last writes (I2-9).
-    // Hard-won: 2f859c8f: a harness outlived its worker group and raced removal of staged state.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn stopping_worker_waits_for_a_harness_in_its_own_process_group() {
-        use std::os::unix::process::CommandExt;
-        let outside = tempfile::tempdir().unwrap();
-        let root = outside.path().join("worker");
-        std::fs::create_dir_all(root.join("profile")).unwrap();
-        // The harness ignores TERM and keeps writing into the staged home.
-        let harness = format!(
-            "trap \"\" TERM; echo $$ > {out}/harness; while :; do echo x >> profile/state.sqlite-wal; sleep 0.05; done",
-            out = outside.path().display()
-        );
-        let mut leader = std::process::Command::new("sh")
-            .args(["-c", &format!("setsid sh -c '{harness}' & wait")])
-            .current_dir(&root)
-            .process_group(0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !outside.path().join("harness").exists() {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        std::fs::write(
-            root.join(mj_core::relay::WORKER_STARTUP_FILE),
-            serde_json::to_vec(&serde_json::json!({"pid": leader.id(), "process_birth": mj_core::subprocess::process_birth_identity(leader.id()).unwrap()})).unwrap(),
-        )
-        .unwrap();
-        let root_path = root.to_string_lossy().into_owned();
-        let script = format!(
-            "{}\nrm -rf -- \"$hel_root\"\n",
-            stop_worker_daemon_script(&root_path)
-        );
-        let (status, _) = run_script(&script);
-        let _ = leader.wait();
-        assert_eq!(status, 0, "the stop and the removal succeed");
-        assert!(!root.exists(), "the removal is complete");
-        let harness = std::fs::read_to_string(outside.path().join("harness")).unwrap();
-        let (_, state) = run_script(&format!("ps -o stat= -p {}", harness.trim()));
-        assert!(
-            state.is_empty() || state.starts_with('Z'),
-            "harness survived: {state}"
-        );
-    }
-
-    /// The script runs through the target's own shell and awk. macOS awk
-    /// rejects a newline inside a `-v` value, and `/bin/sh` may be dash,
-    /// busybox or bash, so the script must be plain POSIX sh with no
-    /// multi-line `-v` assignment.
-    // Hard-won: 3002b626: macOS destroy failed when awk -v received a newline.
-    #[test]
-    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
-    fn stop_script_is_posix_sh_and_passes_no_multiline_value_to_awk() {
-        let script = stop_worker_daemon_script("/tmp/mj-worker-root");
-        let mut assignments = 0;
-        for (i, _) in script.match_indices(" -v ") {
-            assignments += 1;
-            let assignment = script[i + 4..].split_whitespace().next().unwrap();
-            let (_, value) = assignment.split_once('=').expect("-v name=value");
-            assert!(
-                matches!(value, "\"$1\"" | "\"$$\""),
-                "awk -v value may span lines: {assignment}"
-            );
-            assert!(!assignment.contains('\n'));
-        }
-        assert!(assignments > 0, "the check found no awk -v assignments");
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("stop.sh");
-        std::fs::write(&file, &script).unwrap();
-        for shell in ["sh", "dash", "busybox"] {
-            let mut cmd = std::process::Command::new(shell);
-            if shell == "busybox" {
-                cmd.arg("sh");
-            }
-            match cmd.arg("-n").arg(&file).output() {
-                Ok(out) => assert!(
-                    out.status.success(),
-                    "{shell} -n: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                ),
-                Err(_) if shell != "sh" => {}
-                Err(e) => panic!("{shell}: {e}"),
-            }
-        }
     }
 }

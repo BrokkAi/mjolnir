@@ -122,6 +122,18 @@ the primary design not working. This includes options in third-party tools
 that quietly degrade, such as OpenSSH's `ControlMaster=auto` opening a direct
 connection when sharing fails: choose the configuration that fails visibly.
 
+Do not add protective caps on speculation: concurrency limits, admission
+gates, rate limits, retry budgets, size limits, or timeouts that guard against
+a failure nobody has observed. A fixed guess becomes the bottleneck as soon as
+conditions change, and it fails far from its cause. Prefer reacting to the
+real limit when the other side reports it, such as a refusal, an error, or
+backpressure. Add a cap only for a limit that is documented or measured, take
+its value from that limit (read it from the other side or its configuration
+where possible), and say in a comment where the number comes from. Remove a
+cap when the reason for it no longer holds, for example when the work it
+guarded moves to another path. A timeout covers only the work it names; time
+spent waiting in a queue for a slot must not count against it.
+
 Never leave the user stuck. When a request conflicts with a setting, or the
 setting cannot apply here, do not refuse and tell the user to change something
 before they can try again. Do the sensible thing for them, such as creating the
@@ -170,7 +182,7 @@ the worker holds the turn.
 Automatic upgrades must never cancel accepted work that cannot start again from
 durable state, or use a timeout as permission to stop a busy process. Daemon
 handoff waits only for daemon-owned work: lifecycle operations, startup and
-session recovery, admissions, automatic continuations, and in-flight request and
+session recovery, admissions, quota recovery, and in-flight request and
 response delivery, including after the originating client disconnects. It never
 waits for worker turns, pending questions, or reviews; those live in workers and
 survive the handoff. The wait must take seconds, not minutes. Work that can take
@@ -251,6 +263,15 @@ container sessions run the same harness versions as managed bare workers:
   `mj-core/assets/harnesses/`. The test
   `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
   Containerfile and the pins disagree.
+- Claude Code or its bridge: run `python3 tests/e2e/claude_stripped_credentials.py`
+  against the new pin on Linux and on a Mac. Sessions hold a login without a
+  refresh token and rely on Claude Code never refreshing it and rereading a
+  replaced file (#1490); on macOS, also on Claude Code reading that file when
+  the Keychain has no item for the session's config directory (#1491).
+- Antigravity: run `python3 tests/e2e/antigravity_owned_mcp_grants.py`
+  against the new pin. Sessions trust Mjolnir's MCP servers through agy's
+  undocumented project grant file; the script checks that agy still reads it
+  and still matches a grant to the owning server rather than the call title.
 - Muse: update `mj-core/assets/muse/runtime.json`. The image installs Muse
   from that file.
 - dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs` and
@@ -280,6 +301,11 @@ Always test new code in a separate named instance using `--instance <test-name>`
 Use that instance for every daemon, TUI, CLI, and end-to-end test invocation of
 the new build. Never point a test build at the host's default instance or live
 session data: protocol and store changes must not disrupt ongoing session work.
+Separate instances are for short-lived testing. Stop a test instance's daemon
+(`mj --instance <test-name> daemon stop`) when the test is done. Each running
+daemon refreshes quotas on its own, so leftover daemons add load on shared
+logins. Run long-running work, such as campaigns, experiments and judges, on
+the main instance.
 A binary run from a Cargo target directory, test binaries included, enforces
 this: it refuses to start, replace, stop, or migrate the default instance's
 daemon and store. When it refuses, add `--instance` (or, in a unit test, give
@@ -318,7 +344,7 @@ only when it is one of the following, in priority order:
 3. Integration: two sides that change independently must agree. In this
    project those are the store schema and migrations against data-access code
    and other daemon revisions; the daemon API against mj-client, `mj api`,
-   the TUI, the web viewer and the desktop shell; the relay protocol and
+   the TUI, the web viewer; the relay protocol and
    journal across worker and daemon versions; checkpoint, handoff and other
    persisted formats against their readers; ACP and the pinned harness
    bridges; harness transcripts that we import; the MCP servers we expose;
@@ -353,27 +379,30 @@ follow the existing descriptive naming style, e.g.
 event transition or input handling directly rather than relying only on manual
 TUI checks.
 
-For Rust code or Cargo dependency changes, run `cargo test` and
-`cargo clippy --all-targets -- -D warnings` before submitting changes. For
-documentation or agent-configuration-only changes, review the diff and run
-applicable format or configuration checks; Cargo checks are not required.
-Release work must still pass all validations in `RELEASING.md`.
+Local validation catches failures sooner than CI; it does not need to repeat
+CI. Pick the cheapest check that would catch the failures your change can
+plausibly cause. For docs or comment changes, review the diff; no test run is
+needed. For agent-configuration changes, run applicable format or configuration
+checks. For a compile fix or rename, `cargo check -p <crate>` on the edited
+crates is enough. For a behavior change, run the tests that exercise it and
+`cargo clippy -p <crate> --all-targets -- -D warnings` on the affected crates.
+Reserve broad runs for changes to shared APIs, schemas, relay protocols, or
+persisted formats, and run the suites at that boundary, including affected
+consumers. Release work must still pass all validations in `RELEASING.md`.
 
 Run those checks on the dev profile, which is where `debug_assert!` and
 overflow checks run; this workspace sets no `[profile.release]` overrides, so a
 release test run silently drops both. The build scripts defaulting to release is
 not a reason to validate there.
 
-Run tests appropriate to the change and complete required checks. Once those pass, broaden or repeat testing only when new changes, failures, or unresolved concerns justify it; otherwise, continue toward completing the task.
-
 When work takes several rounds, such as review fixes or follow-up changes, run
 only the tests for what changed in each round: the affected modules or test
-names, with `cargo test -p <crate> <filter>`. Run the full validation, meaning
-workspace `cargo clippy --all-targets -- -D warnings` and the full suites of
-every touched crate, once, after the last round. When a test fails, fix it and
+names, with `cargo test -p <crate> <filter>`. When a test fails, fix it and
 rerun only the failing tests; do not rerun a whole suite to confirm one fix.
-Agents that delegate work to other agents should ask for this pattern
-explicitly instead of asking for full validation in every round.
+Broaden or repeat testing only when new changes, failures, or unresolved
+concerns justify it. Agents that delegate work to other agents should ask
+for this pattern explicitly instead of asking for full validation in every
+round.
 
 ## GitHub Authentication
 

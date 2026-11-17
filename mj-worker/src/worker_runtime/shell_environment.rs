@@ -15,6 +15,16 @@ pub(super) fn configure(path: &Path, environment: &mut BTreeMap<String, String>)
     . "${MJ_ORIGINAL_BASH_ENV}"
 fi
 if [ -n "${MJ_GITHUB_CLI_BIN:-}" ]; then
+    if [ "${MJ_GITHUB_CREDENTIALS:-}" = disabled ]; then
+        unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+        unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_SSH GIT_SSH_COMMAND
+        GH_CONFIG_DIR=$MJ_GITHUB_CLI_BIN/../gh-without-credentials
+        GIT_CONFIG_GLOBAL=$MJ_GITHUB_CLI_BIN/../gitconfig
+        GIT_CONFIG_NOSYSTEM=1
+        GIT_TERMINAL_PROMPT=0
+        GIT_ASKPASS=/bin/false
+        export GH_CONFIG_DIR GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT GIT_ASKPASS
+    fi
     case ":${PATH:-}:" in
         *:"${MJ_GITHUB_CLI_BIN}":*) ;;
         *) PATH="${MJ_GITHUB_CLI_BIN}${PATH:+:${PATH}}"; export PATH ;;

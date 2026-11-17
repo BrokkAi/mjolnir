@@ -145,7 +145,7 @@ fn tool_value(call: &Value, presentation: Option<&ToolCallPresentation>, full: b
     };
     let mut compact = json!({
         "toolCallId": call.get("toolCallId").and_then(Value::as_str).unwrap_or("unknown"),
-        "name": excerpt(&name, 256),
+        "name": mj_core::activity::verdict::tool_title(&name),
         "kind": call.get("kind").and_then(Value::as_str).unwrap_or("other"),
         "status": call.get("status").and_then(Value::as_str).unwrap_or("pending"),
     });
@@ -236,6 +236,8 @@ impl TranscriptSummary {
         full_tool_calls: usize,
     ) -> Self {
         let mut summary = Self::default();
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of_canonical(snapshot.transcript.iter());
         let start = snapshot.current_context_start();
         let cutoff = snapshot
             .transcript
@@ -269,19 +271,16 @@ impl TranscriptSummary {
                     None,
                 ),
                 CanonicalTranscriptBody::Tool {
-                    call,
-                    terminal_outputs,
-                    presentation,
-                    ..
+                    call, presentation, ..
                 } => {
                     let mut value =
                         tool_value(call, presentation.as_ref(), item.position >= cutoff);
                     attach_terminals(
                         &mut value,
-                        terminal_outputs.iter().map(|t| {
+                        outputs.for_tool(&item.stable_id).iter().map(|t| {
                             (
                                 &t.terminal_id,
-                                &t.output,
+                                t.output.as_str().into(),
                                 t.exit_code,
                                 t.signal.as_deref(),
                                 t.truncated,
@@ -340,6 +339,8 @@ impl TranscriptSummary {
             .map(|i| i.position)
             .min()
             .unwrap_or(u64::MAX);
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of(session.transcript.iter().map(AsRef::as_ref));
         let mut summary = Self::default();
         for item in session
             .transcript
@@ -363,19 +364,19 @@ impl TranscriptSummary {
                     None,
                 ),
                 TranscriptBody::Tool {
-                    call,
-                    terminal_outputs,
-                    presentation,
-                    ..
+                    call, presentation, ..
                 } => {
-                    let mut value =
-                        tool_value(call, presentation.as_deref(), item.position >= cutoff);
+                    let mut value = tool_value(
+                        &call.value(),
+                        presentation.as_deref(),
+                        item.position >= cutoff,
+                    );
                     attach_terminals(
                         &mut value,
-                        terminal_outputs.iter().map(|t| {
+                        outputs.for_tool(&item.stable_id).iter().map(|t| {
                             (
                                 &t.terminal_id,
-                                &t.output,
+                                t.output.text(),
                                 t.exit_code,
                                 t.signal.as_deref(),
                                 t.truncated,
@@ -600,7 +601,7 @@ impl TranscriptSummary {
                     value,
                     std::iter::once((
                         &terminal.terminal_id,
-                        &terminal.output,
+                        terminal.output.text(),
                         terminal.exit_code,
                         terminal.signal.as_deref(),
                         terminal.truncated,
@@ -781,7 +782,15 @@ impl TranscriptSummary {
 
 fn attach_terminals<'a>(
     value: &mut Value,
-    terminals: impl Iterator<Item = (&'a String, &'a String, Option<u32>, Option<&'a str>, bool)>,
+    terminals: impl Iterator<
+        Item = (
+            &'a String,
+            std::borrow::Cow<'a, str>,
+            Option<u32>,
+            Option<&'a str>,
+            bool,
+        ),
+    >,
 ) {
     for (id, output, code, signal, truncated) in terminals {
         if let Some(code) = code {

@@ -1,0 +1,172 @@
+{
+  "id": "W102",
+  "title": "Waiting candidate 102 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "deac587176c48e8c93af04ec20ef08cf",
+    "session_title": "bifrost-ci-monitor via codex4",
+    "reply_position": 9321,
+    "captured_at": "2026-10-07T12:56:50.633Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:6825",
+          "role": "user",
+          "text": "How is automerge looking after several runs? Is it using our tools effectively, or are there confusing affordances that we should fix / additional functionality we should provide? ? And is the agent selecting tests well, or is it doing dumb things like running tests from crates that nobody edited? How about the fixer agent? "
+        },
+        {
+          "id": "agent:6829",
+          "role": "assistant",
+          "text": "I’ll review recent automerge and fixer runs, compare their tool use and test choices with the files they changed, and look for recurring friction in the workflow."
+        },
+        {
+          "id": "agent:6952",
+          "role": "assistant",
+          "text": "I’m using the mj skill to inspect the agents’ transcripts and outcomes. I’ll separate unnecessary test runs from legitimate dependency checks, since an unchanged crate can still be affected by an edited dependency."
+        },
+        {
+          "id": "agent:7119",
+          "role": "assistant",
+          "text": "The local database is an older copy, so I’m switching to the live CI host. The current guidance calls for affected checks plus exact-base reproduction of failures; I’ll check whether recent agents followed that and whether the new helper skills saved them work."
+        },
+        {
+          "id": "agent:7260",
+          "role": "assistant",
+          "text": "The live records show two completed integration PRs, a batch that finished without publishing, and a current batch that used the new shared-state helpers. I’m checking the commands and test evidence behind those outcomes.\n\nAutomatic approval review rejected exporting full database rows and transcripts because they could contain sensitive data. I’ll use narrower reads of run summaries and relevant commands."
+        },
+        {
+          "id": "agent:7598",
+          "role": "assistant",
+          "text": "The latest batch isolated a regression in #4599 with repeated passes at the base and repeated failures at the PR head, then excluded it and published the remaining two PRs. Its report says `ci-impact` selected `full`, so the broad workspace run may be required by that policy. I’m checking what triggered it.\n\nThe fixer sample is still small: one agent deferred to an existing repair PR, and another concluded that a stale platform failure was already fixed."
+        },
+        {
+          "id": "agent:7806",
+          "role": "assistant",
+          "text": "I found concrete friction: `ci-impact` crashed twice when invoked without its CI arguments, and the agent wrote baseline-comparison scripts by hand despite having `mm-compare`. The latest full run was triggered by a change to `.github/workflows/release-readiness.yml`.\n\nThere are also two operational holds: #4602 is awaiting workflow-change review, and the next fixer launch has been unresolved for about four hours."
+        },
+        {
+          "id": "agent:7905",
+          "role": "assistant",
+          "text": "The fixer stall has a concrete cause: its prompt was 70,682 characters, above mj’s 65,536-character limit. mj explicitly rejected it, but the scheduler treated the result as an unknown launch and kept waiting for a session that wasn’t created.\n\nFor the completed fixer work, test restraint looks sensible: it used existing CI evidence to verify an already-fixed issue and avoided duplicating another open repair. Neither run produced a code change, so they don’t yet tell us how well it validates a fresh fix."
+        },
+        {
+          "id": "agent:8010",
+          "role": "assistant",
+          "text": "Automerge’s diagnosis looks reasonably good; **test selection and tooling still make it work much harder than necessary. The fixer currently has a concrete scheduler bug blocking progress.**\n\nI reviewed nine automerge attempts and both completed issue-fixer sessions on the live host.\n\nAutomerge has useful successes:\n\n- [#4550](https://github.com/BrokkAi/bifrost-dev/pull/4550) landed **15 source PRs**, preserving their ancestry and resolving a conflict.\n- [#4602](https://github.com/BrokkAi/bifrost-dev/pull/4602) validated two PRs after isolating a regression in #4599: the failing test passed **3/3 at the base** and failed **3/3 at the rejected head**. It is now awaiting human review because it changes a workflow.\n- Earlier history includes three exits from the since-removed timeout and deliberate aborts, so the raw completion rate understates current agent performance.\n\n**It does test unchanged crates, but the examples aren’t simply random testing.** Both substantial batches selected `ci-impact=full`, and our prompt explicitly requires the full selected scope. In #4602, the trigger was `.github/workflows/release-readiness.yml`. Its Rust lane ran 12,491 tests; failure diagnosis then used narrow test filters at the base and individual PR heads.\n\nThe distinction matters: unchanged downstream crates can need testing, but **`ci-impact` currently returns broad components rather than crate and suite selections**. We are asking the agent to reconstruct that mapping from workflow YAML. Its transcript explicitly wrestles with conflicting guidance: “choose the cheapest affected check” versus “run the full selected scope.” That is an affordance we should fix.\n\nThe new helpers are being adopted. The latest batch used **`mm-merge` for assembly and rebuilding, `mm-db` for rejection and test evidence, and `mm-autopr` for publication**. It never used `mm-compare`; it created worktrees and comparison scripts manually. That deserves some nuance: it wanted a persistent base checkout for repeated investigations, whereas `mm-compare` provides a temporary two-commit comparison.\n\nOther observed friction:\n\n- `ci-impact` crashed twice when called without its required CI arguments.\n- The agent encountered missing `uv` and Python linking prerequisites.\n- An older run manually set `CARGO_TARGET_DIR`, despite our mbx guidance.\n- The large batch later preempted by priority work spent **5½ hours** without publishing. The helpers have improved assembly, but test orchestration remains expensive.\n\n**The completed fixer runs showed sensible restraint, though neither produced a fresh repair.**\n\n- For [#4571](https://github.com/BrokkAi/bifrost-dev/issues/4571), it identified an existing matching PR and deferred instead of duplicating the work.\n- For [#4574](https://github.com/BrokkAi/bifrost-dev/issues/4574), it compared historical and current CI logs, corrected the dossier’s attribution, and established that the mass failure was already fixed. It used current aarch64 Linux scheduled-test evidence and explicitly acknowledged the missing current macOS confirmation. It ran no unnecessary local crate suites.\n\nThat is promising investigation behavior, but we still lack evidence about its test choices after making an actual code fix.\n\n**The first things I’d change, in order:**\n\n1. **Fix the blocked fixer launch.** Issue #4600’s prompt was **70,682 characters**, exceeding mj’s **65,536-character limit**. mj explicitly rejected it, but the scheduler recorded an ambiguous launch and has waited roughly four hours for a nonexistent session. Add a total prompt budget and distinguish definite rejection from uncertain delivery.\n2. **Provide an executable test plan.** Given base and candidate, return affected crates, downstream suites, commands, environment, and selection reasons. Preserve deliberate full-scope requirements while removing the YAML archaeology.\n3. **Make local `ci-impact` usage straightforward.** Provide documented defaults or a wrapper, useful missing-argument errors, and JSON output.\n4. **Improve comparison and evidence tools.** Support repeated checks against a persistent base or several PR heads, and record actual commands/results rather than relying on free-text test summaries.\n5. **Surface workflow-review holds early** and supply the recurring CI prerequisites in the agent image.\n\nRelevant sessions: automerge `b97bcbd9318424181c32934592d6b1aa` and `47478e2c1495979a53a1fac54460b304`; fixer `bb67f9eb197f40628f60173d82b09fe3` and `9a6b2a7cfcb8e6c2d401b00f9225cf3c`."
+        },
+        {
+          "id": "user:9018",
+          "role": "user",
+          "text": "> The agent encountered missing uv and Python linking prerequisites\n\nshould we update our image?\n\n> test orchestration remains expensive\n\nhow can we improve?\n\n1. yes\n\n2. i really don't think we can do this deterministically, should we hook up Jev as a classifier?\n\n3. is ci-impact a bifrost tool or something we wrote custom for this?\n\n4. let's wait for further evidence\n\n5. what are workflow-review holds"
+        },
+        {
+          "id": "agent:9022",
+          "role": "assistant",
+          "text": "I’ll fix the oversized-prompt launch failure and recovery handling, then deploy it to the CI host. I’ll also check the image definition and Jev’s existing capabilities so the recommendations fit what we already have."
+        },
+        {
+          "id": "agent:9120",
+          "role": "assistant",
+          "text": "Yes, I’d update the image with pinned `uv` and a working Python development/linking environment. The checked-in image has neither `uv` nor `python3-dev`.\n\nI agree that semantic test selection won’t be fully deterministic. Jev could classify which test families a diff plausibly affects, while a command catalog supplies the exact invocations. I’d evaluate its selections against recent batches before letting it narrow the merge gate.\n\n`ci-impact` is Bifrost’s existing CI selector, in `scripts/public/ci-impact.mjs`; MergeMarshall currently reuses it. Workflow-review holds are our supervisor’s rule that changes under `.github/workflows/` or `.github/actions/` require human review before landing."
+        },
+        {
+          "id": "user:9316",
+          "role": "user",
+          "text": "wow, that's really surprising, i thought we were based on a github runner image with lots of common dev tools, or did past-you roll a custom image for this"
+        },
+        {
+          "id": "agent:9321",
+          "role": "assistant",
+          "text": "The launch fix passes 105 tests. It checks both mj’s character limit and the request-size budget, compacts older saved prompts before sending them, and makes explicit prompt rejections retryable. Ambiguous launches still wait for discovery, with the original error preserved.\n\nI’m committing and deploying it, then recovering the blocked job after another check that no matching session exists."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "wow, that's really surprising, i thought we were based on a github runner image with lots of common dev tools, or did past-you roll a custom image for this",
+    "assistant_text_tail": "The launch fix passes 105 tests. It checks both mj’s character limit and the request-size budget, compacts older saved prompts before sending them, and makes explicit prompt rejections retryable. Ambiguous launches still wait for discovery, with the original error preserved.\n\nI’m committing and deploying it, then recovering the blocked job after another check that no matching session exists.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 9316,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "et, compacts older saved prompts before sending them, and makes explicit prompt rejections retryable. Ambiguous launches still wait for discovery, with the original error preserved.\n\nI’m committing and deploying it, then recovering the blocked job after another check that no matching session exists."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-07T12:56:56.319Z",
+        "kind": "user",
+        "text": "> rule that changes under .github/workflows/ or .github/actions/ require human review before landing  that could get irritating quickly, how common are these"
+      },
+      {
+        "at": "2026-10-07T12:57:16.844Z",
+        "kind": "agent",
+        "text": "The CI agents are using **Mjolnir’s custom `agent-dev` image**, built from the official Rust image with Node copied in and an explicit apt package list. It’s separate from the runner images used by Gi"
+      },
+      {
+        "at": "2026-10-07T12:57:59.009Z",
+        "kind": "agent",
+        "text": "I’ll count them across recent source PRs and distinguish release-workflow edits from changes to the merge checks.  The image history is clear too: the custom Rust/Node image dates back to August 10; t"
+      },
+      {
+        "at": "2026-10-07T12:58:47.554Z",
+        "kind": "user",
+        "text": "ok but i wanted the custom rust image to build on a broader one"
+      },
+      {
+        "at": "2026-10-07T12:59:33.949Z",
+        "kind": "agent",
+        "text": "Understood—the intended setup is a broad development image, with our Rust and Mjolnir tooling layered on top. I’ll check suitable base images and architecture support before changing the recipe. I’m a"
+      },
+      {
+        "at": "2026-10-07T13:01:51.429Z",
+        "kind": "user",
+        "text": "so what is the rust image based on? probably we want to split out mj-generic (gh runner style, ~everything and the kitchen sink, uses a RunsOn image) and mj-dev (custom rust + node) image"
+      }
+    ]
+  }
+}

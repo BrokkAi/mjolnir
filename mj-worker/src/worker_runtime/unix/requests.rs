@@ -1,4 +1,5 @@
 use super::*;
+use tracing::{Instrument, instrument::WithSubscriber};
 
 /// Answer one relay request, keeping the relay lock for exactly as long as
 /// the request needs it.
@@ -13,8 +14,9 @@ use super::*;
 /// agent's turn stalls with it. So attach captures a plan under the lock
 /// and does its reading on a blocking thread with the lock released.
 pub(crate) async fn handle_request(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     envelope: RelayRequestEnvelope,
+    harness_preparation: Option<mj_core::relay::HarnessPreparation>,
 ) -> Result<RelayResponseEnvelope> {
     // Sealing and garbage collection can move the segments a plan named
     // while it is being read. That is not the controller's fault and not
@@ -31,6 +33,7 @@ pub(crate) async fn handle_request(
         }
     };
     for _ in 0..REPLAN_ATTEMPTS {
+        deferred.set_harness_preparation(harness_preparation.clone());
         let generation = deferred.journal_generation();
         let response = tokio::task::spawn_blocking(move || deferred.finish())
             .await
@@ -153,7 +156,7 @@ pub(crate) async fn elicitation_response(
 pub(crate) async fn background_task_stop_response(
     envelope: RelayRequestEnvelope,
     commands: Option<&mpsc::Sender<CommandRequest>>,
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
 ) -> RelayResponseEnvelope {
     let protocol_version = envelope.protocol_version;
     let request_id = envelope.request_id;
@@ -235,6 +238,7 @@ pub(crate) async fn credential_response(
     envelope: RelayRequestEnvelope,
     credentials: &std::result::Result<CredentialEndpoint, String>,
     relay_root: &std::path::Path,
+    login_identity: &crate::acp::ClaudeLoginIdentity,
 ) -> RelayResponseEnvelope {
     let body = match credentials {
         Err(message) => RelayResponseBody::Error {
@@ -248,12 +252,28 @@ pub(crate) async fn credential_response(
         Ok(endpoint) => {
             let endpoint = endpoint.clone();
             let github_token_path = relay_root.join("github-token");
-            let request = envelope.request.clone();
-            match tokio::task::spawn_blocking(move || {
-                apply_credential_request_at(&endpoint, &github_token_path, &request)
-            })
-            .await
-            {
+            let result = match &envelope.request {
+                RelayRequest::InstallCredentials { .. }
+                    if endpoint.harness.keeps_logins_in_database() =>
+                {
+                    let request = envelope.request.clone();
+                    tokio::task::spawn_blocking(move || {
+                        apply_credential_request_at(&endpoint, &github_token_path, &request)
+                    })
+                    .await
+                }
+                RelayRequest::InstallCredentials { data } => {
+                    Ok(apply_install_credentials(&endpoint, data, login_identity).await)
+                }
+                request => {
+                    let request = request.clone();
+                    tokio::task::spawn_blocking(move || {
+                        apply_credential_request_at(&endpoint, &github_token_path, &request)
+                    })
+                    .await
+                }
+            };
+            match result {
                 Ok(Ok(payload)) => RelayResponseBody::Ok { payload },
                 Ok(Err(error)) => RelayResponseBody::Error {
                     error: RelayProtocolError {
@@ -281,36 +301,107 @@ pub(crate) async fn credential_response(
     }
 }
 
+async fn apply_install_credentials(
+    endpoint: &CredentialEndpoint,
+    data: &str,
+    login_identity: &crate::acp::ClaudeLoginIdentity,
+) -> Result<RelayResponsePayload> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use mj_core::credentials::{MAX_CREDENTIAL_BYTES, validate_credential_payload};
+
+    if endpoint.harness.keeps_logins_in_database() {
+        bail!("database-backed credentials require the authoritative install path");
+    }
+    if data.len() > MAX_CREDENTIAL_BYTES * 2 {
+        bail!("credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
+    }
+    let bytes = BASE64
+        .decode(data.as_bytes())
+        .context("decode credential payload")?;
+    validate_credential_payload(endpoint.harness, &bytes)?;
+    // File commit and identity publication have the same owner and order,
+    // including when several clients install credentials concurrently.
+    let _installation = login_identity.installation().await;
+    let installed = mj_core::credentials::install_session_credentials(
+        endpoint.harness,
+        &endpoint.marker,
+        &bytes,
+    )
+    .await
+    .with_context(|| format!("install credentials at {}", endpoint.marker.display()))?;
+    if endpoint.harness == HarnessKind::Claude
+        && installed.snapshot.fingerprint == mj_core::credentials::credential_fingerprint(&bytes)
+    {
+        login_identity.installed(mj_core::credentials::claude_access_token_fingerprint(
+            &bytes,
+        ));
+    }
+    Ok(credential_state_payload(&installed.snapshot))
+}
+
 /// Snapshot and install project memory off the socket task. These payloads
 /// are connection-only and are never journaled as conversation history.
 pub(crate) async fn run_serialized_project_memory_io<T, F>(
     project_memory_io: &Arc<tokio::sync::Semaphore>,
+    cancel: &CancellationToken,
+    mutates_memory: bool,
     operation: F,
-) -> std::result::Result<Result<T>, tokio::task::JoinError>
+) -> Option<std::result::Result<Result<T>, tokio::task::JoinError>>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    // A timed-out client can abandon this future, but Tokio cannot cancel
-    // blocking filesystem work after it starts. Keep the permit inside
-    // that work so reconnects wait instead of piling more reads and fsyncs
-    // onto the degraded storage device.
-    let permit = project_memory_io
-        .clone()
-        .acquire_owned()
-        .await
-        .expect("project memory I/O semaphore is never closed");
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        operation()
-    })
-    .await
+    let permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return None,
+        permit = project_memory_io.clone().acquire_owned() => {
+            permit.expect("project memory I/O semaphore is never closed")
+        }
+    };
+    // Acquiring the semaphore admits the operation. No await separates that
+    // decision from starting its task. A stalled mutating write holding the
+    // checkpoint barrier is the true filesystem state, not something to time out.
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let span = tracing::Span::current();
+    let mut work = tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || {
+            span.in_scope(|| {
+                let _permit = permit;
+                operation()
+            })
+        })
+    });
+    if mutates_memory {
+        Some(work.await)
+    } else {
+        // A disconnected reader can leave this task running, but its permit
+        // and transfer state stay with it until its filesystem work finishes.
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                // Teardown need not wait for a read, but its completion still
+                // has an observer that reports task failures and panics.
+                tokio::spawn(async move {
+                    match work.await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => tracing::warn!(error = format!("{error:#}"), "cancelled project-memory read failed"),
+                        Err(error) => tracing::warn!(%error, "cancelled project-memory read task stopped"),
+                    }
+                }.in_current_span().with_current_subscriber());
+                None
+            },
+            result = &mut work => Some(result),
+        }
+    }
 }
 
-pub(crate) async fn project_memory_response(
+pub(super) async fn project_memory_response(
     envelope: RelayRequestEnvelope,
     endpoint: &ProjectMemoryEndpoint,
-) -> RelayResponseEnvelope {
+    transfer: &mut ConnectionProjectMemoryTransfer,
+    cancel: CancellationToken,
+) -> Option<RelayResponseEnvelope> {
     let body = match endpoint.config.as_ref() {
         None => RelayResponseBody::Error {
             error: RelayProtocolError {
@@ -323,17 +414,81 @@ pub(crate) async fn project_memory_response(
         Some(memory) => {
             let memory = memory.clone();
             let request = envelope.request.clone();
-            match run_serialized_project_memory_io(&endpoint.io, move || {
-                apply_project_memory_request(&memory, &request)
-            })
-            .await
-            {
-                Ok(Ok(payload)) => RelayResponseBody::Ok { payload },
+            let request_id = envelope.request_id.clone();
+            let protocol_version = envelope.protocol_version;
+            let mut connection_transfer = std::mem::take(transfer);
+            let mutates_memory = matches!(
+                &request,
+                RelayRequest::InstallProjectMemorySnapshot { .. }
+                    | RelayRequest::ReplaceProjectMemoryTree { .. }
+                    | RelayRequest::ProjectMemoryTransfer {
+                        action: mj_core::relay::ProjectMemoryTransferAction::CommitUpload { .. }
+                    }
+            );
+            #[cfg(test)]
+            endpoint.io_requested.notify_one();
+            #[cfg(test)]
+            let io_block = endpoint.io_block.clone();
+            let io_span = tracing::info_span!("project_memory_io", project_key = %memory.project_key, operation = request.method_name());
+            let result = run_serialized_project_memory_io(
+                &endpoint.io,
+                &cancel,
+                mutates_memory,
+                move || {
+                    #[cfg(test)]
+                    if let Some(block) = io_block {
+                        block.started.notify_one();
+                        block
+                            .release
+                            .lock()
+                            .expect("test I/O gate poisoned")
+                            .recv()
+                            .context("test I/O gate closed")??;
+                        assert!(!block.panic_after_release, "controlled read panic");
+                    }
+                    let result = match &request {
+                        RelayRequest::ProjectMemoryTransfer { action } => {
+                            apply_project_memory_transfer_request(
+                                &memory,
+                                &mut connection_transfer,
+                                action,
+                                &request_id,
+                                protocol_version,
+                            )
+                        }
+                        _ => apply_project_memory_request(&memory, &request),
+                    };
+                    if let Err(error) = &result {
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "project-memory request failed"
+                        );
+                    }
+                    Ok((result, connection_transfer))
+                },
+            )
+            .instrument(io_span)
+            .await?;
+            match result {
+                Ok(Ok((result, connection_transfer))) => {
+                    *transfer = connection_transfer;
+                    match result {
+                        Ok(payload) => RelayResponseBody::Ok { payload },
+                        Err(error) => RelayResponseBody::Error {
+                            error: RelayProtocolError {
+                                code: RelayErrorCode::InvalidRequest,
+                                message: format!("{error:#}"),
+                                retryable: false,
+                                detail: None,
+                            },
+                        },
+                    }
+                }
                 Ok(Err(error)) => RelayResponseBody::Error {
                     error: RelayProtocolError {
-                        code: RelayErrorCode::InvalidRequest,
+                        code: RelayErrorCode::Internal,
                         message: format!("{error:#}"),
-                        retryable: false,
+                        retryable: true,
                         detail: None,
                     },
                 },
@@ -348,10 +503,275 @@ pub(crate) async fn project_memory_response(
             }
         }
     };
-    RelayResponseEnvelope {
+    Some(RelayResponseEnvelope {
         request_id: envelope.request_id,
         protocol_version: envelope.protocol_version,
         body,
+    })
+}
+
+#[derive(Default)]
+pub(super) struct ConnectionProjectMemoryTransfer {
+    next_transfer_id: u64,
+    active: ActiveProjectMemoryTransfer,
+}
+
+#[derive(Default)]
+enum ActiveProjectMemoryTransfer {
+    #[default]
+    None,
+    Download {
+        transfer_id: u64,
+        bytes: Vec<u8>,
+        next_offset: u64,
+    },
+    Upload {
+        transfer_id: u64,
+        kind: mj_core::relay::ProjectMemoryUploadKind,
+        total_bytes: u64,
+        bytes: Vec<u8>,
+    },
+}
+
+impl ConnectionProjectMemoryTransfer {
+    fn allocate_id(&mut self) -> Result<u64> {
+        let id = self
+            .next_transfer_id
+            .checked_add(1)
+            .context("project-memory transfer ID space exhausted for this connection")?;
+        self.next_transfer_id = id;
+        Ok(id)
+    }
+}
+
+fn apply_project_memory_transfer_request(
+    memory: &crate::worker_runtime::ProjectMemoryLaunchConfig,
+    transfer: &mut ConnectionProjectMemoryTransfer,
+    action: &mj_core::relay::ProjectMemoryTransferAction,
+    request_id: &str,
+    protocol_version: u32,
+) -> Result<RelayResponsePayload> {
+    use base64::Engine as _;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as ResultKind,
+        ProjectMemoryUploadKind as UploadKind,
+    };
+
+    match action {
+        Action::BeginSnapshot => {
+            anyhow::ensure!(
+                matches!(&transfer.active, ActiveProjectMemoryTransfer::None),
+                "this connection already owns a project-memory transfer; abort it first"
+            );
+            let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root)
+                .snapshot()?;
+            let replica =
+                mj_core::project_memory::ProjectMemoryStore::new(&memory.root).snapshot()?;
+            let bytes = mj_core::relay::ProjectMemoryWireSnapshot::encode(
+                baseline,
+                replica,
+                protocol_version,
+            )?;
+            let total_bytes = u64::try_from(bytes.len())
+                .context("project-memory snapshot exceeds the transfer offset range")?;
+            let transfer_id = transfer.allocate_id()?;
+            transfer.active = ActiveProjectMemoryTransfer::Download {
+                transfer_id,
+                bytes,
+                next_offset: 0,
+            };
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::SnapshotStarted {
+                    transfer_id,
+                    total_bytes,
+                },
+            })
+        }
+        Action::ReadSnapshotPage {
+            transfer_id,
+            offset,
+        } => {
+            let ActiveProjectMemoryTransfer::Download {
+                transfer_id: active_id,
+                bytes,
+                next_offset,
+            } = &mut transfer.active
+            else {
+                anyhow::bail!("this connection has no project-memory snapshot transfer")
+            };
+            anyhow::ensure!(
+                transfer_id == active_id,
+                "project-memory snapshot transfer ID does not match this connection"
+            );
+            anyhow::ensure!(
+                offset == next_offset,
+                "project-memory snapshot page offset mismatch: expected {next_offset}, got {offset}"
+            );
+            let capacity = mj_core::relay::project_memory_transfer_response_chunk_bytes(
+                protocol_version,
+                request_id,
+            )?;
+            let start = usize::try_from(*offset)
+                .context("project-memory snapshot offset exceeds addressable memory")?;
+            let end = start.saturating_add(capacity).min(bytes.len());
+            let chunk = base64::engine::general_purpose::STANDARD.encode(&bytes[start..end]);
+            let next = u64::try_from(end)
+                .context("project-memory snapshot offset exceeds the transfer range")?;
+            let complete = end == bytes.len();
+            let id = *active_id;
+            *next_offset = next;
+            if complete {
+                transfer.active = ActiveProjectMemoryTransfer::None;
+            }
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::SnapshotPage {
+                    transfer_id: id,
+                    offset: *offset,
+                    next_offset: next,
+                    complete,
+                    chunk,
+                },
+            })
+        }
+        Action::BeginUpload { kind, total_bytes } => {
+            anyhow::ensure!(
+                matches!(&transfer.active, ActiveProjectMemoryTransfer::None),
+                "this connection already owns a project-memory transfer; abort it first"
+            );
+            usize::try_from(*total_bytes)
+                .context("project-memory upload exceeds addressable memory")?;
+            let transfer_id = transfer.allocate_id()?;
+            transfer.active = ActiveProjectMemoryTransfer::Upload {
+                transfer_id,
+                kind: kind.clone(),
+                total_bytes: *total_bytes,
+                bytes: Vec::new(),
+            };
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::UploadStarted { transfer_id },
+            })
+        }
+        Action::AppendUpload {
+            transfer_id,
+            offset,
+            chunk,
+        } => {
+            let ActiveProjectMemoryTransfer::Upload {
+                transfer_id: active_id,
+                total_bytes,
+                bytes,
+                ..
+            } = &mut transfer.active
+            else {
+                anyhow::bail!("this connection has no project-memory upload transfer")
+            };
+            anyhow::ensure!(
+                transfer_id == active_id,
+                "project-memory upload transfer ID does not match this connection"
+            );
+            let expected_offset = u64::try_from(bytes.len())
+                .context("project-memory upload offset exceeds the transfer range")?;
+            anyhow::ensure!(
+                *offset == expected_offset,
+                "project-memory upload offset mismatch: expected {expected_offset}, got {offset}"
+            );
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(chunk)
+                .context("decode project-memory upload chunk")?;
+            anyhow::ensure!(!decoded.is_empty(), "project-memory upload chunk is empty");
+            let new_len = bytes
+                .len()
+                .checked_add(decoded.len())
+                .context("project-memory upload length overflow")?;
+            anyhow::ensure!(
+                u64::try_from(new_len)? <= *total_bytes,
+                "project-memory upload exceeds its declared byte length"
+            );
+            bytes.extend_from_slice(&decoded);
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::UploadProgress {
+                    transfer_id: *active_id,
+                    next_offset: u64::try_from(new_len)?,
+                },
+            })
+        }
+        Action::CommitUpload { transfer_id } => {
+            let ActiveProjectMemoryTransfer::Upload {
+                transfer_id: active_id,
+                kind,
+                total_bytes,
+                bytes,
+            } = std::mem::take(&mut transfer.active)
+            else {
+                anyhow::bail!("this connection has no project-memory upload transfer")
+            };
+            if *transfer_id != active_id {
+                transfer.active = ActiveProjectMemoryTransfer::Upload {
+                    transfer_id: active_id,
+                    kind,
+                    total_bytes,
+                    bytes,
+                };
+                anyhow::bail!("project-memory upload transfer ID does not match this connection");
+            }
+            if u64::try_from(bytes.len())? != total_bytes {
+                transfer.active = ActiveProjectMemoryTransfer::Upload {
+                    transfer_id: active_id,
+                    kind,
+                    total_bytes,
+                    bytes,
+                };
+                anyhow::bail!("project-memory upload is incomplete");
+            }
+            let tree: mj_core::relay::ProjectMemoryWireTree =
+                serde_json::from_slice(&bytes).context("parse uploaded project-memory tree")?;
+            match kind {
+                UploadKind::InstallSnapshot => {
+                    apply_project_memory_request(
+                        memory,
+                        &RelayRequest::InstallProjectMemorySnapshot { snapshot: tree },
+                    )?;
+                    Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                        result: ResultKind::Installed,
+                    })
+                }
+                UploadKind::ReplaceTree { expected_replica } => {
+                    let payload = apply_project_memory_request(
+                        memory,
+                        &RelayRequest::ReplaceProjectMemoryTree {
+                            expected_replica,
+                            tree,
+                        },
+                    )?;
+                    let RelayResponsePayload::ProjectMemoryTreeReplaced { outcome } = payload
+                    else {
+                        anyhow::bail!("project-memory replacement returned an unexpected result")
+                    };
+                    Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                        result: ResultKind::Replaced { outcome },
+                    })
+                }
+            }
+        }
+        Action::Abort { transfer_id } => {
+            let active_id = match &transfer.active {
+                ActiveProjectMemoryTransfer::Download { transfer_id, .. }
+                | ActiveProjectMemoryTransfer::Upload { transfer_id, .. } => *transfer_id,
+                ActiveProjectMemoryTransfer::None => {
+                    anyhow::bail!("this connection has no project-memory transfer to abort")
+                }
+            };
+            anyhow::ensure!(
+                *transfer_id == active_id,
+                "project-memory transfer ID does not match this connection"
+            );
+            transfer.active = ActiveProjectMemoryTransfer::None;
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::Aborted {
+                    transfer_id: active_id,
+                },
+            })
+        }
     }
 }
 
@@ -427,6 +847,13 @@ pub(crate) fn apply_credential_request_at(
         RelayRequest::AwsCredentialsState => Ok(credential_state_payload(
             &mj_core::aws_credentials::state(&endpoint.home)?,
         )),
+        RelayRequest::AwsCredentialsScope => Ok(RelayResponsePayload::AwsCredentialsScope {
+            scope: mj_core::aws_credentials::scope(&endpoint.home)?,
+            profile: mj_core::aws_credentials::staged_profile(&endpoint.home)?,
+        }),
+        RelayRequest::RemoveAwsCredentials => Ok(credential_state_payload(
+            &mj_core::aws_credentials::remove(&endpoint.home)?,
+        )),
         RelayRequest::SlopcopLoginState => Ok(credential_state_payload(
             &mj_core::slopcop::read_login(&slopcop_login_path)?.0,
         )),
@@ -451,14 +878,15 @@ pub(crate) fn apply_credential_request_at(
                 &mj_core::credentials::CredentialSnapshot::absent(),
             ))
         }
-        RelayRequest::InstallAwsCredentials { data } => {
+        RelayRequest::InstallAwsCredentials { data, scope } => {
             if data.len() > MAX_CREDENTIAL_BYTES * 2 {
                 bail!("AWS credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
             }
             let bytes = BASE64
                 .decode(data.as_bytes())
                 .context("decode AWS credential payload")?;
-            let credentials = mj_core::aws_credentials::AwsCredentials::decode(&bytes)?;
+            let credentials =
+                mj_core::aws_credentials::AwsCredentials::decode(&bytes)?.with_scope(scope.clone());
             Ok(credential_state_payload(
                 &credentials.install(&endpoint.home, &endpoint.home)?,
             ))
@@ -477,6 +905,9 @@ pub(crate) fn apply_credential_request_at(
             })
         }
         RelayRequest::InstallCredentials { data } => {
+            if !endpoint.harness.keeps_logins_in_database() {
+                bail!("file credential installs must use the async destination-owned install path");
+            }
             if data.len() > MAX_CREDENTIAL_BYTES * 2 {
                 bail!("credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
             }
@@ -512,6 +943,10 @@ pub(crate) fn apply_credential_request_at(
             Ok(github_token_state_payload(&snapshot))
         }
         RelayRequest::InstallGithubToken { data } => {
+            anyhow::ensure!(
+                !endpoint.no_github_credentials,
+                "GitHub credentials are disabled for this session"
+            );
             if data.len() > MAX_GITHUB_TOKEN_BYTES * 2 {
                 bail!("GitHub token is above the {MAX_GITHUB_TOKEN_BYTES} byte limit");
             }
@@ -599,4 +1034,84 @@ pub(crate) async fn write_logged_response(
         );
     }
     write_response(writer, response).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn codex_login(refreshed: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {"access_token": format!("access-{refreshed}")},
+            "last_refresh": refreshed,
+        }))
+        .unwrap()
+    }
+
+    // Hard-won: #1485: an install used bytes captured before waiting for the harness refresh lock.
+    #[tokio::test]
+    async fn credential_install_reports_the_newer_file_found_after_waiting_for_native_lock() {
+        use base64::Engine as _;
+
+        let home = tempfile::tempdir().unwrap();
+        let marker = home.path().join("auth.json");
+        let initial = codex_login("2026-09-25T20:00:00Z");
+        let incoming = codex_login("2026-09-25T21:00:00Z");
+        let latest = codex_login("2026-09-25T22:00:00Z");
+        std::fs::write(&marker, &initial).unwrap();
+        let held = mj_core::credentials::CredentialWriteGuard::acquire(
+            mj_core::config::HarnessKind::Codex,
+            &marker,
+        )
+        .await
+        .unwrap();
+        let endpoint = CredentialEndpoint {
+            no_github_credentials: false,
+            harness: mj_core::config::HarnessKind::Codex,
+            home: home.path().to_owned(),
+            marker: marker.clone(),
+        };
+        let data = base64::engine::general_purpose::STANDARD.encode(incoming);
+        let mut install = tokio::spawn(async move {
+            credential_response(
+                RelayRequestEnvelope {
+                    request_id: "credential-lock-race".into(),
+                    protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                    request: RelayRequest::InstallCredentials { data },
+                },
+                &Ok(endpoint.clone()),
+                &endpoint.home,
+                &Default::default(),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut install)
+                .await
+                .is_err(),
+            "install must wait for the held destination lock"
+        );
+        std::fs::write(&marker, &latest).unwrap();
+        drop(held);
+
+        let response = install.await.unwrap();
+        let RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::CredentialState {
+                    fingerprint,
+                    present,
+                    ..
+                },
+        } = response.body
+        else {
+            panic!("unexpected credential install response: {response:?}");
+        };
+        assert!(present);
+        assert_eq!(
+            fingerprint,
+            mj_core::credentials::credential_fingerprint(&latest)
+        );
+        assert_eq!(std::fs::read(marker).unwrap(), latest);
+    }
 }

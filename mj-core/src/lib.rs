@@ -21,6 +21,7 @@ pub mod elicitation;
 pub mod event_outcome;
 pub mod file_lock;
 pub mod github_item;
+pub mod github_reference;
 pub mod go;
 pub mod goal;
 #[cfg(feature = "golden")]
@@ -28,18 +29,19 @@ pub mod golden;
 #[cfg(unix)]
 pub mod harness_install;
 pub mod harness_runtime;
-pub mod help_search;
 pub mod hex;
 pub mod history;
 pub mod jev;
 pub mod local_git;
 pub mod local_sockets;
+pub mod lock_wait;
 pub mod logging;
 pub mod login_environment;
 pub mod mailbox;
+pub mod model_catalog;
 pub mod move_workspace;
 pub mod native_agent;
-pub mod node;
+pub mod observe;
 pub mod path_completion;
 pub mod path_input;
 pub mod placement;
@@ -68,6 +70,7 @@ pub mod test_hooks;
 pub mod text;
 pub mod transcript;
 pub mod usage;
+pub mod work_facts;
 pub mod worker_build;
 pub mod worker_launch;
 pub mod worker_protocol;
@@ -76,3 +79,9 @@ pub mod workspace;
 pub mod continuation;
 
 pub mod cpu_usage;
+
+pub mod attention;
+
+pub mod packed_text;
+
+pub mod session_image;

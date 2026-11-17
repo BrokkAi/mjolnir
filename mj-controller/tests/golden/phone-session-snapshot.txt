@@ -66,8 +66,11 @@
 ]
 === live container session with a second workspace (1 session card) ===
 {
+  "attention": "unknown",
+  "notification_dismissal": null,
+  "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -93,6 +96,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "subagent_session_ids": [
     "child-1"
   ],
@@ -101,6 +105,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -147,6 +152,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": true,
     "run_shell": true,
     "interrupt_turn": false,
@@ -154,6 +160,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": true,
@@ -167,8 +174,11 @@
 === wire detail row for a live session (1 session row and intern table) ===
 {
   "row": {
+    "attention": "unknown",
+    "notification_dismissal": null,
+    "oracle": true,
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -193,6 +203,7 @@
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "subagent_session_ids": [
       "child-1"
     ],
@@ -201,6 +212,7 @@
     "bundle_id": "project",
     "target_id": "podman",
     "state": "running",
+    "active": true,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": true,
@@ -208,7 +220,7 @@
     "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
     "conversation_available": false,
     "prompt_images_supported": false,
-    "capabilities_ref": "c3ab2fdf6f887d5c",
+    "capabilities_ref": "6accfc3d8e1416a4",
     "project_label": "project",
     "project_key": "1c8e6dc679624037",
     "display_location": "podman",
@@ -246,12 +258,10 @@
         "argument": "status"
       }
     ],
-    "be0135ab881b9218": [
-      "podman"
-    ],
-    "c3ab2fdf6f887d5c": {
+    "6accfc3d8e1416a4": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": true,
       "run_shell": true,
       "interrupt_turn": false,
@@ -259,6 +269,7 @@
       "suspend": true,
       "destroy": true,
       "rename": true,
+      "dismiss_notification": false,
       "resume": false,
       "move_session": true,
       "set_config": true,
@@ -267,13 +278,19 @@
       "container_settings": true,
       "restart": true,
       "interrupt_all": false
-    }
+    },
+    "be0135ab881b9218": [
+      "podman"
+    ]
   }
 }
 === only workspace (1 session card) ===
 {
+  "attention": "unknown",
+  "notification_dismissal": null,
+  "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -283,6 +300,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "subagent_session_ids": [
     "child-1"
   ],
@@ -291,6 +309,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -337,6 +356,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": true,
     "run_shell": true,
     "interrupt_turn": false,
@@ -344,6 +364,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": true,
@@ -360,8 +381,11 @@
   "activity": "Checking response",
   "session": {
     "row": {
+      "attention": "unknown",
+      "notification_dismissal": null,
+      "oracle": true,
       "review_trigger": "off",
-      "review_count": 2,
+      "review_count": 0,
       "subagents": {
         "mode": "native"
       },
@@ -371,6 +395,7 @@
       "publication_state": "unknown",
       "workspace_id": "default",
       "title": "Phone launch",
+      "given_title": "Phone launch",
       "subagent_session_ids": [
         "child-1"
       ],
@@ -379,6 +404,7 @@
       "bundle_id": "project",
       "target_id": "podman",
       "state": "running",
+      "active": true,
       "created_at": "2026-08-14T00:00:00Z",
       "updated_at": "2026-08-14T00:00:00Z",
       "has_error": true,
@@ -386,7 +412,7 @@
       "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
       "conversation_available": false,
       "prompt_images_supported": false,
-      "capabilities_ref": "3f72bd38943a3575",
+      "capabilities_ref": "01a760400fccab69",
       "project_label": "project",
       "project_key": "1c8e6dc679624037",
       "display_location": "podman",
@@ -408,6 +434,27 @@
       "compatible_resume_targets_ref": "be0135ab881b9218"
     },
     "interned": {
+      "01a760400fccab69": {
+        "clear_context": false,
+        "open": false,
+        "read_history": false,
+        "prompt": true,
+        "run_shell": true,
+        "interrupt_turn": false,
+        "cancel_operation": false,
+        "suspend": true,
+        "destroy": true,
+        "rename": true,
+        "dismiss_notification": false,
+        "resume": false,
+        "move_session": true,
+        "set_config": true,
+        "set_plan_mode": false,
+        "change_workspace": false,
+        "container_settings": true,
+        "restart": true,
+        "interrupt_all": false
+      },
       "20ccb1ff18326783": [
         {
           "name": "help",
@@ -426,25 +473,6 @@
           "argument": "status"
         }
       ],
-      "3f72bd38943a3575": {
-        "clear_context": false,
-        "open": false,
-        "prompt": true,
-        "run_shell": true,
-        "interrupt_turn": false,
-        "cancel_operation": false,
-        "suspend": true,
-        "destroy": true,
-        "rename": true,
-        "resume": false,
-        "move_session": true,
-        "set_config": true,
-        "set_plan_mode": false,
-        "change_workspace": false,
-        "container_settings": true,
-        "restart": true,
-        "interrupt_all": false
-      },
       "be0135ab881b9218": [
         "podman"
       ]
@@ -457,8 +485,11 @@
   "activity": "[idle]",
   "session": {
     "row": {
+      "attention": "unknown",
+      "notification_dismissal": null,
+      "oracle": true,
       "review_trigger": "off",
-      "review_count": 2,
+      "review_count": 0,
       "subagents": {
         "mode": "native"
       },
@@ -468,6 +499,7 @@
       "publication_state": "unknown",
       "workspace_id": "default",
       "title": "Phone launch",
+      "given_title": "Phone launch",
       "subagent_session_ids": [
         "child-1"
       ],
@@ -476,6 +508,7 @@
       "bundle_id": "project",
       "target_id": "podman",
       "state": "running",
+      "active": true,
       "created_at": "2026-08-14T00:00:00Z",
       "updated_at": "2026-08-14T00:00:00Z",
       "has_error": true,
@@ -483,7 +516,7 @@
       "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
       "conversation_available": false,
       "prompt_images_supported": false,
-      "capabilities_ref": "3f72bd38943a3575",
+      "capabilities_ref": "01a760400fccab69",
       "project_label": "project",
       "project_key": "1c8e6dc679624037",
       "display_location": "podman",
@@ -505,6 +538,27 @@
       "compatible_resume_targets_ref": "be0135ab881b9218"
     },
     "interned": {
+      "01a760400fccab69": {
+        "clear_context": false,
+        "open": false,
+        "read_history": false,
+        "prompt": true,
+        "run_shell": true,
+        "interrupt_turn": false,
+        "cancel_operation": false,
+        "suspend": true,
+        "destroy": true,
+        "rename": true,
+        "dismiss_notification": false,
+        "resume": false,
+        "move_session": true,
+        "set_config": true,
+        "set_plan_mode": false,
+        "change_workspace": false,
+        "container_settings": true,
+        "restart": true,
+        "interrupt_all": false
+      },
       "20ccb1ff18326783": [
         {
           "name": "help",
@@ -523,25 +577,6 @@
           "argument": "status"
         }
       ],
-      "3f72bd38943a3575": {
-        "clear_context": false,
-        "open": false,
-        "prompt": true,
-        "run_shell": true,
-        "interrupt_turn": false,
-        "cancel_operation": false,
-        "suspend": true,
-        "destroy": true,
-        "rename": true,
-        "resume": false,
-        "move_session": true,
-        "set_config": true,
-        "set_plan_mode": false,
-        "change_workspace": false,
-        "container_settings": true,
-        "restart": true,
-        "interrupt_all": false
-      },
       "be0135ab881b9218": [
         "podman"
       ]
@@ -551,8 +586,11 @@
 === turn running in child session (2 session cards) ===
 {
   "parent": {
+    "attention": "unknown",
+    "notification_dismissal": null,
+    "oracle": true,
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -562,6 +600,7 @@
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "subagent_session_ids": [
       "child-1"
     ],
@@ -570,6 +609,7 @@
     "bundle_id": "project",
     "target_id": "podman",
     "state": "running",
+    "active": true,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": true,
@@ -616,6 +656,7 @@
     "capabilities": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": true,
       "run_shell": true,
       "interrupt_turn": false,
@@ -623,6 +664,7 @@
       "suspend": true,
       "destroy": true,
       "rename": true,
+      "dismiss_notification": false,
       "resume": false,
       "move_session": true,
       "set_config": true,
@@ -634,8 +676,11 @@
     }
   },
   "child": {
+    "attention": "unknown",
+    "notification_dismissal": null,
+    "oracle": true,
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -645,6 +690,7 @@
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "subagent_parent_id": "session-1",
     "subagent_task_name": "piece",
     "harness_kind": "codex",
@@ -652,6 +698,7 @@
     "bundle_id": "project",
     "target_id": "podman",
     "state": "running",
+    "active": true,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": true,
@@ -701,6 +748,7 @@
     "capabilities": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": true,
       "run_shell": true,
       "interrupt_turn": true,
@@ -708,6 +756,7 @@
       "suspend": true,
       "destroy": true,
       "rename": true,
+      "dismiss_notification": false,
       "resume": false,
       "move_session": true,
       "set_config": true,
@@ -721,8 +770,11 @@
 }
 === bare target (1 session card) ===
 {
+  "attention": "unknown",
+  "notification_dismissal": null,
+  "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -732,6 +784,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "subagent_session_ids": [
     "child-1"
   ],
@@ -740,6 +793,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -786,6 +840,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": true,
     "run_shell": true,
     "interrupt_turn": false,
@@ -793,6 +848,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": true,
@@ -805,8 +861,11 @@
 }
 === stopped session without recovery copy (1 session card) ===
 {
+  "attention": "unknown",
+  "notification_dismissal": null,
+  "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -832,6 +891,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "subagent_session_ids": [
     "child-1"
   ],
@@ -840,6 +900,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "suspended",
+  "active": false,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": false,
@@ -879,6 +940,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": false,
     "run_shell": false,
     "interrupt_turn": false,
@@ -886,7 +948,8 @@
     "suspend": false,
     "destroy": true,
     "rename": true,
-    "resume": true,
+    "dismiss_notification": false,
+    "resume": false,
     "move_session": false,
     "set_config": false,
     "set_plan_mode": false,
@@ -899,11 +962,14 @@
 === wire summary row for a settled suspended session (1 session row and intern table) ===
 {
   "row": {
+    "attention": "unknown",
+    "notification_dismissal": null,
     "retry_assessment_pending": false,
     "id": "session-1",
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "subagent_session_ids": [
       "child-1"
     ],
@@ -911,6 +977,7 @@
     "bundle_id": "project",
     "target_id": "podman",
     "state": "suspended",
+    "active": false,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": false,
@@ -927,12 +994,13 @@
     "pending_elicitation_count": 0,
     "detail": false,
     "queued_prompt_count": 0,
-    "capabilities_ref": "d04f8ed13d81a1cb"
+    "capabilities_ref": "bbd99780d6bb7308"
   },
   "interned": {
-    "d04f8ed13d81a1cb": {
+    "bbd99780d6bb7308": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": false,
       "run_shell": false,
       "interrupt_turn": false,
@@ -940,7 +1008,8 @@
       "suspend": false,
       "destroy": true,
       "rename": true,
-      "resume": true,
+      "dismiss_notification": false,
+      "resume": false,
       "move_session": false,
       "set_config": false,
       "set_plan_mode": false,
@@ -953,8 +1022,11 @@
 }
 === last top-level message time (1 session card) ===
 {
+  "attention": "unknown",
+  "notification_dismissal": null,
+  "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -964,11 +1036,13 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "harness_kind": "codex",
   "profile_id": "codex",
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -1011,6 +1085,7 @@
   "capabilities": {
     "clear_context": false,
     "open": true,
+    "read_history": false,
     "prompt": false,
     "run_shell": false,
     "interrupt_turn": false,
@@ -1018,6 +1093,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": false,
@@ -1031,8 +1107,11 @@
 }
 === messages without recorded times (1 session card) ===
 {
+  "attention": "unknown",
+  "notification_dismissal": null,
+  "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -1042,11 +1121,13 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "harness_kind": "codex",
   "profile_id": "codex",
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -1087,6 +1168,7 @@
   "capabilities": {
     "clear_context": false,
     "open": true,
+    "read_history": false,
     "prompt": false,
     "run_shell": false,
     "interrupt_turn": false,
@@ -1094,6 +1176,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": false,
@@ -1107,8 +1190,11 @@
 }
 === conversation not available (1 session card) ===
 {
+  "attention": "unknown",
+  "notification_dismissal": null,
+  "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -1118,11 +1204,13 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "harness_kind": "codex",
   "profile_id": "codex",
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -1159,6 +1247,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": false,
     "run_shell": false,
     "interrupt_turn": false,
@@ -1166,6 +1255,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": false,
@@ -1180,8 +1270,11 @@
 === phone launch before provisioning completes (1 session card and action) ===
 {
   "session": {
+    "attention": "unknown",
+    "notification_dismissal": null,
+    "oracle": true,
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -1191,11 +1284,13 @@
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "harness_kind": "codex",
     "profile_id": "codex",
     "bundle_id": "project",
     "target_id": "podman",
     "state": "provisioning",
+    "active": true,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": true,
@@ -1232,6 +1327,7 @@
     "capabilities": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": false,
       "run_shell": false,
       "interrupt_turn": false,
@@ -1239,6 +1335,7 @@
       "suspend": true,
       "destroy": true,
       "rename": false,
+      "dismiss_notification": false,
       "resume": false,
       "move_session": false,
       "set_config": false,
@@ -1255,11 +1352,59 @@
     "session_id": "0123456789abcdef0123456789abcdef"
   }
 }
-=== viewer quota windows (Claude, unknown Claude, and Codex profiles) ===
+=== viewer quota windows (Antigravity, Claude, unknown Claude, and Codex profiles) ===
 {
   "profiles": [
     {
+      "id": "agy",
+      "quota_pools": [
+        "Ge",
+        "Cl"
+      ],
+      "quota": {
+        "summary": "Week (Ge) 73% left · Week (Cl) 0% left",
+        "windows": [
+          {
+            "label": "Week",
+            "pool": "Ge",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "percent_used": 27,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "pool": "Ge",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 52,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "Week",
+            "pool": "Cl",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "percent_used": 100,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "pool": "Cl",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 19,
+            "projects_exhaustion_before_reset": false
+          }
+        ],
+        "stale": true,
+        "refreshed_at_epoch_seconds": 0,
+        "has_error": false
+      }
+    },
+    {
       "id": "claude",
+      "quota_pools": [],
       "quota": {
         "summary": "Week 21% left · Week (Fable) 17% left",
         "windows": [
@@ -1286,6 +1431,7 @@
     },
     {
       "id": "claude-unknown",
+      "quota_pools": [],
       "quota": {
         "summary": "Week available · Week (Fable) 17% left",
         "windows": [
@@ -1310,6 +1456,7 @@
     },
     {
       "id": "codex",
+      "quota_pools": [],
       "quota": {
         "summary": "Week 70% left",
         "windows": [

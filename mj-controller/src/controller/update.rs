@@ -989,10 +989,8 @@ fn stage_archive_binary(
         return Ok(None);
     };
     let stem = name.strip_suffix(".exe").unwrap_or(name);
-    if !matches!(
-        stem,
-        BIN_NAME | "mj-desktop" | VOICE_WORKER_NAME | "mj-worker"
-    ) && !stem.starts_with("mj-worker-")
+    if !matches!(stem, BIN_NAME | VOICE_WORKER_NAME | "mj-worker")
+        && !stem.starts_with("mj-worker-")
     {
         return Ok(None);
     }

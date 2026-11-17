@@ -13,6 +13,8 @@ use super::*;
 pub(crate) struct ContainerCapacityInput {
     pub(crate) target_ids: Vec<String>,
     pub(crate) total: mj_core::state::HostContainerSize,
+    /// `total.memory_bytes` is a boot-time pool, not host RAM: no reserve.
+    pub(crate) memory_is_pool: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,9 +78,16 @@ impl Drop for ContainerCapacityLease {
 /// What the capacity service shares with the surfaces that show capacity.
 pub(crate) struct CapacityFeed {
     pub(crate) targets: tokio::sync::watch::Receiver<Vec<crate::targets::DeploymentCapacityTarget>>,
-    pub(crate) updates: tokio::sync::broadcast::Sender<crate::pollers::CapacityPollUpdate>,
-    latest: tokio::sync::watch::Receiver<BTreeMap<String, crate::targets::DeploymentCapacityUsage>>,
+    /// The one owner of each target's last good reading, sample time, latest
+    /// failure and empty-fleet answer. The poller updates an entry in a single
+    /// `send_modify`, so every reader sees a whole entry.
+    pub(crate) states:
+        tokio::sync::watch::Receiver<BTreeMap<String, crate::targets::TargetCapacityState>>,
     refresh: tokio::sync::mpsc::Sender<()>,
+    /// Refresh requests made so far. The poller reads it when a probe starts
+    /// and reports the value with the result, so the feed owns the one
+    /// numbering of requests.
+    refresh_requests: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacityFeed {
@@ -99,7 +108,7 @@ impl CapacityFeed {
             .iter()
             .find(|target| target.target_ids.iter().any(|id| id == target_id))?
             .clone();
-        let usage = self.latest.borrow().get(&target.id)?.clone();
+        let usage = self.states.borrow().get(&target.id)?.usage.clone()?;
         Some((target, usage))
     }
 
@@ -123,12 +132,39 @@ impl CapacityFeed {
         self.reading_for_target(target_id).map(|(_, usage)| usage)
     }
 
-    /// Ask for a new reading of every host. A request that arrives while one
-    /// is queued is the same request.
-    pub(crate) fn request_refresh(&self) -> bool {
+    /// Every host and fleet with its latest reading and storage verdicts, in
+    /// the order the capacity service lists them. Reads what the service
+    /// already holds; it never probes.
+    pub(crate) fn host_rows(&self) -> Vec<crate::targets::HostCapacityRow> {
+        let storage = crate::target_storage::views();
+        let states = self.states.borrow();
+        self.targets
+            .borrow()
+            .iter()
+            .map(|target| {
+                crate::targets::HostCapacityRow::new(
+                    target,
+                    &states.get(&target.id).cloned().unwrap_or_default(),
+                    &storage,
+                )
+            })
+            .collect()
+    }
+
+    /// Ask for a new reading of every host. Returns the request's generation:
+    /// the target's `answered_refresh` reaches it once a probe that started
+    /// after this call has produced a result. A request that arrives while one
+    /// is queued is the same request. `None` means the poller has stopped.
+    pub(crate) fn request_refresh(&self) -> Option<u64> {
+        // Count first, then trigger: a probe that counts this request starts
+        // after it was made.
+        let generation = self
+            .refresh_requests
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
         match self.refresh.try_send(()) {
-            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => true,
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => false,
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => Some(generation),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => None,
         }
     }
 }
@@ -173,6 +209,7 @@ impl RuntimeState {
                 cpus: usage.logical_cores,
                 memory_bytes: usage.memory_total_bytes,
             },
+            memory_is_pool: usage.memory_pool,
         }))
     }
 
@@ -279,6 +316,31 @@ impl RuntimeState {
 
     /// One serialized decision for create, resume and Move. Create under a hard
     /// RAM limit retains the guard until registration; existing sessions
+    /// install a lease before unlock.
+    pub(crate) async fn validate_container_settings_size(
+        &self,
+        session_id: &str,
+        allocation: Option<&mj_core::state::SessionResourceAllocation>,
+    ) -> Result<()> {
+        let Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes }) =
+            allocation
+        else {
+            return Ok(());
+        };
+        let target_id = self
+            .session_record(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .target_template_id
+            .clone();
+        if let Some(input) = self.container_capacity_input(&target_id).await?
+            && (*cpus > input.total.cpus || *memory_bytes > input.total.memory_bytes)
+        {
+            bail!("container resource allocation exceeds this host's reported CPU or memory limit");
+        }
+        Ok(())
+    }
+
+    /// RAM limit retains the guard until registration;
     /// install a lease before unlock.
     pub(crate) async fn admit_container_launch(
         self: &Arc<Self>,
@@ -433,6 +495,7 @@ pub(crate) fn capacity_with_reservations_after<'a>(
     reserved_ids.extend(additionally_replaced.iter().map(String::as_str));
     let mut capacity = mj_core::state::host_container_capacity(
         input.total,
+        input.memory_is_pool,
         &input.target_ids,
         sessions
             .iter()
@@ -506,7 +569,8 @@ fn source_commitment_is_live(
         .is_some_and(|session| {
             source.target_ids.contains(&session.target_template_id)
                 && mj_core::state::session_owns_container(session)
-                && session.resource_allocation == source.allocation
+                && mj_core::state::counted_container_allocation(session)
+                    == source.allocation.as_ref()
         })
 }
 
@@ -579,7 +643,8 @@ impl ContainerCapacityProjection {
             match (self.owners.get(id), owner) {
                 (Some(before), Some(after))
                     if before.target_template_id == after.target_template_id
-                        && before.resource_allocation == after.resource_allocation => {}
+                        && mj_core::state::counted_container_allocation(before)
+                            == mj_core::state::counted_container_allocation(after) => {}
                 (_, Some(record)) => {
                     self.owners.insert(id.clone(), record.clone());
                     changed = true;
@@ -595,13 +660,13 @@ impl ContainerCapacityProjection {
         let hosts = state
             .capacity_feed()
             .map(|feed| {
-                let latest = feed.latest.borrow();
+                let states = feed.states.borrow();
                 feed.targets
                     .borrow()
                     .iter()
                     .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
                     .filter_map(|target| {
-                        let usage = latest.get(&target.id)?;
+                        let usage = states.get(&target.id)?.usage.as_ref()?;
                         Some((
                             target.id.clone(),
                             ContainerCapacityInput {
@@ -610,6 +675,7 @@ impl ContainerCapacityProjection {
                                     cpus: usage.logical_cores,
                                     memory_bytes: usage.memory_total_bytes,
                                 },
+                                memory_is_pool: usage.memory_pool,
                             },
                         ))
                     })
@@ -646,23 +712,22 @@ pub(super) fn spawn_capacity_service(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let (targets_tx, refresh, mut readings) = crate::pollers::spawn_dashboard_capacity_poller();
+    let refresh_requests = Arc::<std::sync::atomic::AtomicU64>::default();
+    let (targets_tx, refresh, mut readings) =
+        crate::pollers::spawn_daemon_capacity_poller(refresh_requests.clone());
     crate::target_storage::install_no_space_observer();
     crate::target_storage::attach_refresh(refresh.clone());
     let initial = state
         .active_controller_projection()
         .deployment_capacity_targets();
     targets_tx.send_replace(initial);
-    let (latest_tx, latest_rx) = tokio::sync::watch::channel(BTreeMap::<
-        String,
-        crate::targets::DeploymentCapacityUsage,
-    >::new());
-    let (updates, _) = tokio::sync::broadcast::channel(64);
+    let (states_tx, states_rx) =
+        tokio::sync::watch::channel(BTreeMap::<String, crate::targets::TargetCapacityState>::new());
     let feed = CapacityFeed {
         targets: targets_tx.subscribe(),
-        updates: updates.clone(),
-        latest: latest_rx,
+        states: states_rx,
         refresh,
+        refresh_requests,
     };
     if state.capacity.set(feed).is_err() {
         tracing::error!("the daemon capacity service was started twice");
@@ -686,10 +751,10 @@ pub(super) fn spawn_capacity_service(
                     let targets = state
                         .active_controller_projection()
                         .deployment_capacity_targets();
-                    latest_tx.send_if_modified(|latest| {
-                        let before = latest.len();
-                        latest.retain(|id, _| targets.iter().any(|target| target.id == *id));
-                        latest.len() != before
+                    states_tx.send_if_modified(|states| {
+                        let before = states.len();
+                        states.retain(|id, _| targets.iter().any(|target| target.id == *id));
+                        states.len() != before
                     });
                     targets_tx.send_if_modified(|current| {
                         if *current == targets {
@@ -713,20 +778,25 @@ pub(super) fn spawn_capacity_service(
                         tracing::error!("the daemon capacity poller stopped");
                         break;
                     };
+                    states_tx.send_modify(|states| {
+                        states
+                            .entry(reading.target_id.clone())
+                            .or_default()
+                            .apply(
+                                &reading.result,
+                                reading.sampled_at_epoch_seconds,
+                                reading.refresh_generation,
+                            );
+                    });
                     if let Ok(Some(usage)) = &reading.result {
                         crate::target_storage::record_samples(
                             &usage.storage,
                             reading.sampled_at_epoch_seconds,
                         );
-                        latest_tx.send_modify(|latest| {
-                            latest.insert(reading.target_id.clone(), usage.clone());
-                        });
-                        // The runtime feed carries this reservation-adjusted
-                        // headroom to terminal surfaces.
-                        state.publish_revision();
                     }
-                    // No subscriber is not an error: the web viewer may be off.
-                    let _ = updates.send(reading);
+                    // The runtime feed carries the reservation-adjusted
+                    // headroom to terminal surfaces.
+                    state.publish_revision();
                 }
             }
         }
@@ -799,6 +869,7 @@ mod tests {
     }
 
     // Hard-won: #1375: summed cgroup ceilings refused idle Podman hosts.
+    // Hard-won: ea55df324: a queued Move reserved a conflicting launch before the owning Resume.
     #[tokio::test]
     async fn shared_admission_preserves_apple_ram_and_warns_for_cgroup_overcommit() {
         use crate::controller::test_support::{IsolatedTest, test_name};
@@ -833,19 +904,21 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: mj_core::config::data_dir().join("unused-capacity-profile"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::config::data_dir().join("unused-capacity-profile"),
+                )
             },
         );
         config.save().unwrap();
-        let state = crate::daemon::tests::test_runtime_state();
+        let state = crate::daemon::tests::test_runtime_state_loading_the_store();
+        // Hard-won: 5e70f76a1: admission fixtures omitted the serving profile catalog.
+        state.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
         let target_ids = vec!["podman".into(), "apple".into()];
         let target = crate::targets::DeploymentCapacityTarget {
             id: "local".into(),
@@ -858,6 +931,7 @@ mod tests {
             probe_error: None,
         };
         let usage = crate::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(0),
             memory_used_bytes: 0,
             memory_total_bytes: 40 << 30,
@@ -866,18 +940,22 @@ mod tests {
             storage: Vec::new(),
         };
         let (targets, _) = tokio::sync::watch::channel(vec![target]);
-        let (updates, _) = tokio::sync::broadcast::channel(1);
-        let (_latest, latest) =
-            tokio::sync::watch::channel(BTreeMap::from([("local".into(), usage)]));
+        let (_states, states) = tokio::sync::watch::channel(BTreeMap::from([(
+            "local".to_owned(),
+            crate::targets::TargetCapacityState {
+                usage: Some(usage),
+                ..Default::default()
+            },
+        )]));
         let (refresh, _) = tokio::sync::mpsc::channel(1);
         assert!(
             state
                 .capacity
                 .set(CapacityFeed {
                     targets: targets.subscribe(),
-                    updates,
-                    latest,
-                    refresh
+                    states,
+                    refresh,
+                    refresh_requests: Default::default(),
                 })
                 .is_ok()
         );
@@ -987,6 +1065,79 @@ mod tests {
             Some("container-capacity-exceeded")
         );
 
+        // A later queued Move must not reserve capacity before the owning Resume.
+        let reserve_now = Arc::new(tokio::sync::Notify::new());
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+        let first = state
+            .start_or_join_lifecycle(stopped.id.clone(), LifecycleKind::Resume, {
+                let reserve_now = reserve_now.clone();
+                let finish = finish.clone();
+                let allocation = allocation(16);
+                move |state, id, _, _session_admission| async move {
+                    reserve_now.notified().await;
+                    let admitted = state
+                        .admit_container_launch(
+                            "podman",
+                            Some(allocation),
+                            Some(&id),
+                            BTreeSet::new(),
+                            None,
+                        )
+                        .await;
+                    admitted_tx
+                        .send(
+                            admitted
+                                .as_ref()
+                                .map(|_| ())
+                                .map_err(|error| format!("{error:#}")),
+                        )
+                        .unwrap();
+                    let _lease = admitted?.into_lease();
+                    finish.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .await
+            .unwrap();
+        let control = LifecycleControl::default();
+        let pending = tokio::spawn({
+            let state = state.clone();
+            let control = control.clone();
+            let request = serde_json::from_value(serde_json::json!({
+                "preparation": {
+                    "selection": {"session_id": stopped.id, "target_template_id": "apple", "resource_allocation": allocation(4)},
+                    "source_profile_id": "codex", "source_target_template_id": "podman",
+                    "cross_harness": false, "active": false, "queued_commands": [],
+                    "fingerprint": "prepared", "operation_id": "queued-capacity-move"
+                },
+                "queue": null, "acknowledge_interruption": true
+            })).unwrap();
+            async move { state.start_move_session(request, control).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !state.owner().lifecycle_intents.contains_key(&stopped.id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Move queues before the owning Resume reserves capacity");
+        reserve_now.notify_one();
+        let capacity_result = admitted_rx.await.unwrap();
+        // Always release the earlier lifecycle before asserting, so a failed
+        // regression cannot leave its executor waiting during test teardown.
+        control.request_cancel("cancel queued Move after the owning capacity decision");
+        finish.notify_one();
+        let queued_result = pending.await.unwrap();
+        let first_result = RuntimeState::wait_lifecycle_result(first).await;
+        capacity_result.expect("the later Move must not preempt the owner's capacity reservation");
+        first_result.unwrap();
+        assert!(
+            queued_result.is_err(),
+            "the cancelled queued Move does not run"
+        );
+        assert!(state.container_capacity_reservations().is_empty());
+
         let admitted = state
             .admit_container_launch(
                 "podman",
@@ -1000,7 +1151,10 @@ mod tests {
         let warning = admitted.warning.as_deref().unwrap();
         assert!(warning.contains("more CPUs"));
         assert!(warning.contains("more RAM"));
-        assert_eq!(state.notices.lock().unwrap().back().unwrap().text, warning);
+        assert_eq!(
+            state.notices.lock().unwrap().back().unwrap().notice.text,
+            warning
+        );
         let notice_count = state.notices.lock().unwrap().len();
         let joined = state
             .admit_container_launch(
@@ -1109,11 +1263,11 @@ mod tests {
             crate::controller::test_support::checkpoint_test_session("reserved-session");
         active.state = mj_core::state::SessionState::Running;
         active.target_template_id = "podman".into();
-        active.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        active.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         active.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 2,
             memory_bytes: 4 << 30,
@@ -1132,6 +1286,7 @@ mod tests {
             },
         )]);
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 4,
@@ -1158,16 +1313,17 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
         });
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1229,11 +1385,11 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
@@ -1255,6 +1411,7 @@ mod tests {
             },
         )]);
         let input = |target_id: &str| ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec![target_id.into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1283,16 +1440,17 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
         });
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1319,6 +1477,7 @@ mod tests {
     async fn joined_lease_cannot_remove_the_owning_reservation() {
         let state = crate::daemon::tests::test_runtime_state();
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 8,
@@ -1369,6 +1528,7 @@ mod tests {
             probe_error: None,
         };
         let usage = crate::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(20),
             memory_used_bytes: 8 << 30,
             memory_total_bytes: 40 << 30,
@@ -1377,22 +1537,27 @@ mod tests {
             storage: Vec::new(),
         };
         let (targets, _targets_rx) = tokio::sync::watch::channel(vec![target]);
-        let (updates, _) = tokio::sync::broadcast::channel(1);
-        let (latest, latest_rx) =
-            tokio::sync::watch::channel(BTreeMap::from([("local".to_owned(), usage)]));
+        let (latest, latest_rx) = tokio::sync::watch::channel(BTreeMap::from([(
+            "local".to_owned(),
+            crate::targets::TargetCapacityState {
+                usage: Some(usage),
+                ..Default::default()
+            },
+        )]));
         let (refresh, _) = tokio::sync::mpsc::channel(1);
         assert!(
             state
                 .capacity
                 .set(CapacityFeed {
                     targets: targets.subscribe(),
-                    updates,
-                    latest: latest_rx,
+                    states: latest_rx,
                     refresh,
+                    refresh_requests: Default::default(),
                 })
                 .is_ok()
         );
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1402,11 +1567,11 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
@@ -1460,7 +1625,15 @@ mod tests {
             mj_core::state::SessionState::Stopped;
         let stopped = publisher.project(&state, &sessions.sessions);
         assert_eq!(stopped["local"].capacity.committed.cpus, 0);
-        latest.send_modify(|readings| readings.get_mut("local").unwrap().logical_cores = 12);
+        latest.send_modify(|readings| {
+            readings
+                .get_mut("local")
+                .unwrap()
+                .usage
+                .as_mut()
+                .unwrap()
+                .logical_cores = 12
+        });
         let resized = publisher.project(&state, &sessions.sessions);
         assert_eq!(resized["local"].capacity.remaining.cpus, 12);
         targets.send_modify(|targets| targets.clear());

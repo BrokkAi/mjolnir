@@ -1,0 +1,147 @@
+{
+  "id": "W115",
+  "title": "Waiting candidate 115 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "4b1cb369d88f5fca7ffd3f8ea8e0b0ff",
+    "session_title": "s47-probe-6234",
+    "reply_position": 1989,
+    "captured_at": "2026-10-29T05:18:19.841Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:33",
+          "role": "assistant",
+          "text": "I’ll read the probe instructions and prior run procedure first, then inspect morannon’s current probe state and run the lanes in batches of at most four. I’ll keep lane worktrees untouched and collect the requested logs and result table."
+        },
+        {
+          "id": "agent:180",
+          "role": "assistant",
+          "text": "The probe script now supports `lib:<crate>` like the Series 45 runner. The first rsync attempt failed before connecting because the system SSH config is rejected for file permissions; I’m checking the project’s established host configuration and will retry through that route."
+        },
+        {
+          "id": "agent:332",
+          "role": "assistant",
+          "text": "All 15 lane worktrees and gate markers are present; the checks seen so far show clean trees, and no #6234 probe is running. Morannon is heavily loaded (load average about 241), but the request allows up to four lanes concurrently, so I’m honoring that cap and will record exact load near the separate writer reruns."
+        },
+        {
+          "id": "agent:498",
+          "role": "assistant",
+          "text": "The first four are compiling independently and contending on the shared package cache; the host load has risen to about 305. The scripts are preserving the append-and-restore trap, so each tree will be checked clean after its run. I’m holding the next batch until these four finish."
+        },
+        {
+          "id": "agent:887",
+          "role": "assistant",
+          "text": "The first batch is complete and all four worktrees restored cleanly. Results vary by lane, including assertion failures; I’ve copied those logs into the requested evidence folder. The second four lanes are still compiling under shared-cache contention."
+        },
+        {
+          "id": "agent:1181",
+          "role": "assistant",
+          "text": "The second batch also finished cleanly. The third batch is building; morannon load has been fluctuating around 400, largely alongside other validation jobs. I’m keeping only four of these lane probes active at once and will not start the last group until this group exits and restores."
+        },
+        {
+          "id": "agent:1512",
+          "role": "assistant",
+          "text": "The third batch completed with all four trees clean. Across the first three batches, every lane built and executed all four tests; the main divergence is between receiver-member resolution and the expected “incomplete” outcome. The final three lanes are now building."
+        },
+        {
+          "id": "agent:1706",
+          "role": "assistant",
+          "text": "The final three lanes are still compiling the same analyzer test binary; no compile failures have appeared. Morannon’s load has eased from above 400 to around 275, and I’ll run the two writer reruns only after these lane tests finish so their load readings reflect the quieter window."
+        },
+        {
+          "id": "agent:1989",
+          "role": "assistant",
+          "text": "All 15 Probe 1 lanes have now compiled and run the four tests, and every lane worktree is clean. Before Probe 2, I found separate #7424 probes currently using `k31max`, so I’m waiting for those lane jobs to finish; this honors the requested isolation and should also give the host more time to cool down."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "All 15 Probe 1 lanes have now compiled and run the four tests, and every lane worktree is clean. Before Probe 2, I found separate #7424 probes currently using `k31max`, so I’m waiting for those lane jobs to finish; this honors the requested isolation and should also give the host more time to cool down.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 27,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "15 Probe 1 lanes have now compiled and run the four tests, and every lane worktree is clean. Before Probe 2, I found separate #7424 probes currently using `k31max`, so I’m waiting for those lane jobs to finish; this honors the requested isolation and should also give the host more time to cool down."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-29T05:21:12.415Z",
+        "kind": "agent",
+        "text": "The unrelated #7424 probes have exited, both `k31max` and `base47` worktrees are clean, and no other Series 47 probes are active. Current load is about 247 and trending down from over 400; I’m startin"
+      },
+      {
+        "at": "2026-10-29T05:22:10.960Z",
+        "kind": "agent",
+        "text": "The writer rerun is underway on `k31max`. Its first invocation is compiling the store test dependencies; the host’s one-minute load has fallen to roughly 220. The runbook now logs a fresh load average"
+      },
+      {
+        "at": "2026-10-29T05:23:44.333Z",
+        "kind": "agent",
+        "text": "`k31max` has reached compilation of `brokk-bifrost-store`; no test result has been emitted yet. The host’s one-minute load has eased further to about 199. I’m waiting for all three repetitions to fini"
+      },
+      {
+        "at": "2026-10-29T05:24:58.916Z",
+        "kind": "agent",
+        "text": "The `k31max` store library test harness is still compiling `brokk-bifrost-store` at full CPU; the load has continued down to roughly 169. The three requested runs will execute immediately after that b"
+      },
+      {
+        "at": "2026-10-29T05:25:58.811Z",
+        "kind": "agent",
+        "text": "The `brokk-bifrost-store` test harness is a large compile and is still actively using CPU; the first test repetition has not started yet. The `k31max` log records its initial load as `233.15 282.13 27"
+      },
+      {
+        "at": "2026-10-29T05:27:34.565Z",
+        "kind": "agent",
+        "text": "All three `k31max` writer repetitions passed. `base47` is now compiling the same library test; its initial load was lower at `202.56 229.76 255.10`. The `k31max` worktree is clean after the rerun."
+      }
+    ]
+  }
+}

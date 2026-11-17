@@ -1,23 +1,26 @@
 use super::*;
 
 impl HostState {
-    /// Watches one session for the edge that arms an automatic review.
+    /// Records one session's view for reviewer-child questions and recovery.
     pub(super) async fn observe(
         &mut self,
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
-        prompt_driven: bool,
     ) {
-        let execution = snapshot
-            .as_ref()
-            .map_or(MaterializedExecutionState::Idle, |snapshot| {
-                snapshot.execution
-            });
-        let previous = self.sessions.insert(
+        if snapshot.as_ref().is_some_and(|snapshot| {
+            matches!(
+                snapshot.execution,
+                mj_core::state::MaterializedExecutionState::Closing
+                    | mj_core::state::MaterializedExecutionState::Closed
+            )
+        }) && self.reviews.contains_key(&session_id)
+            && let Err(error) = self.resolve(&session_id, Resolution::Cancelled)
+        {
+            tracing::debug!(session_id, %error, "review was already committing when the session closed");
+        }
+        self.sessions.insert(
             session_id.clone(),
             SessionWatch {
-                execution,
-                prompt_driven,
                 materialized: snapshot,
             },
         );
@@ -37,86 +40,6 @@ impl HostState {
         for parent in parents {
             self.publish(&parent);
         }
-        if self.recovery_candidates.contains(&session_id)
-            && matches!(execution, MaterializedExecutionState::Idle)
-        {
-            self.begin_recovery(&session_id);
-            return;
-        }
-        // A turn the harness starts on its own also runs and then goes idle.
-        // Reviewing that is a separate decision, so the edge that arms a
-        // review is the end of a turn that answered a prompt.
-        let finished_turn = previous.as_ref().is_some_and(|watch| {
-            watch.prompt_driven
-                && matches!(watch.execution, MaterializedExecutionState::Running { .. })
-        }) && matches!(execution, MaterializedExecutionState::Idle);
-        if !finished_turn || !(self.config)(&session_id).arms_turn_review() {
-            return;
-        }
-        if !self.startup_ready {
-            self.deferred_admissions.push(HostEvent::Start {
-                session_id,
-                manual: false,
-                reply: None,
-            });
-            return;
-        }
-        self.begin(session_id, false, None);
-    }
-
-    /// Decides whether a review can start, and prepares one if it can.
-    ///
-    /// The cheap gates are answered here; the ones that need the database or
-    /// the worker are answered in the preparation task, so this never blocks
-    /// the host's loop.
-    pub(super) fn begin(
-        &mut self,
-        session_id: String,
-        manual: bool,
-        reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
-    ) {
-        if crate::controller::move_session::move_owns_session(&session_id) {
-            answer(reply, Err(StartRefusal("session is moving".to_owned())));
-            return;
-        }
-        if let Some(refusal) = self.refuse_start(&session_id) {
-            answer(reply, Err(refusal));
-            return;
-        }
-        if self.preparing.contains_key(&session_id) {
-            answer(
-                reply,
-                Err(StartRefusal("a review is already starting".to_owned())),
-            );
-            return;
-        }
-        let config = (self.config)(&session_id);
-        let control = self.control.clone();
-        let events = self.events.clone();
-        let prepare_session = session_id.clone();
-        let environment = self.environment.clone();
-        // Admission and prompt refusal are one transition. Any prompt already
-        // ahead of the preparation's reviewer-status command is drained before
-        // `prepare` reads the actor view; every later prompt sees this hold.
-        hold_prompts(&session_id);
-        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.preparing.insert(
-            session_id.clone(),
-            PreparingOperation::Review {
-                cancelled: cancelled.clone(),
-            },
-        );
-        self.publish(&session_id);
-        tokio::spawn(async move {
-            let prepared =
-                prepare(&control, &environment, &prepare_session, config, cancelled).await;
-            let _ = events.send(HostEvent::Prepared {
-                session_id: prepare_session,
-                manual,
-                reply,
-                prepared,
-            });
-        });
     }
 
     pub(super) fn begin_push(
@@ -127,12 +50,11 @@ impl HostState {
     ) {
         let refusal = if crate::controller::move_session::move_owns_session(&session_id) {
             Some("session is moving")
-        } else if self.reviews.contains_key(&session_id)
-            || self.preparing.contains_key(&session_id)
-            || self.recovery_candidates.contains(&session_id)
-            || self.recovery_in_flight.contains(&session_id)
+        } else if self.reviews.contains_key(&session_id) || self.preparing.contains_key(&session_id)
         {
-            Some("a review is already open")
+            Some(
+                "a review is already open; wait for its verdict or cancel it before starting another",
+            )
         } else {
             None
         };
@@ -141,42 +63,59 @@ impl HostState {
             return;
         }
         let config = (self.config)(&session_id);
+        if !config.is_push() {
+            // Review is off for this session: a request is accepted without
+            // choosing reviewers, and the pushed trees are recorded so a gate
+            // installed while review was on lets the push through.
+            self.spawn_operation(
+                session_id,
+                reply,
+                "review-off",
+                move |control, _persistence, _events, owner| run_review_off(control, owner, path),
+            );
+            return;
+        }
         let control = self.control.clone();
         let environment = self.environment.clone();
         let events = self.events.clone();
-        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = tokio_util::sync::CancellationToken::new();
         self.preparing.insert(
             session_id.clone(),
             PreparingOperation::Review {
-                cancelled: cancelled.clone(),
+                cancel: cancel.clone(),
             },
         );
         self.publish(&session_id);
         tokio::spawn(async move {
-            let prepared = tokio::time::timeout(
-                std::time::Duration::from_secs(90),
-                prepare_scoped(
+            // No deadline covers preparation as a whole: most of it is waiting
+            // on the session actor, the worker or other work holding the
+            // session, and each step that does work carries its own bound
+            // (#1503). A cancellation drops whichever step is running.
+            let started = std::time::Instant::now();
+            let stages = PreparationStages::default();
+            let prepared = tokio::select! {
+                biased;
+                () = cancel.cancelled() => Err(StartRefusal(stages.cancelled())),
+                prepared = prepare(
                     &control,
                     &environment,
                     &session_id,
                     config,
-                    cancelled.clone(),
-                    mj_core::relay::CaptureScope::PushableCommits,
+                    &stages,
                     path.map(|path| vec![std::path::PathBuf::from(path)]),
-                ),
-            )
-            .await;
-            let prepared = match prepared {
-                Ok(prepared) => prepared,
-                Err(_) => {
-                    cancelled.store(true, std::sync::atomic::Ordering::Release);
-                    Err(StartRefusal(
-                        "review preparation exceeded 90 seconds; call request_review again".into(),
-                    ))
-                }
+                ) => prepared,
             };
+            tracing::info!(
+                %session_id,
+                elapsed_ms = started.elapsed().as_millis(),
+                outcome = match &prepared {
+                    Ok(_) => "prepared",
+                    Err(refusal) => refusal.0.as_str(),
+                },
+                "review preparation finished"
+            );
             let accepted = prepared.as_ref().ok().map(|prepared| {
-                let repositories: Vec<_> = prepared.captured.as_deref().unwrap_or_default().iter().map(|delta| serde_json::json!({
+                let repositories: Vec<_> = prepared.captured.iter().map(|delta| serde_json::json!({
                     "repository": delta.root, "base_commit": delta.base_commit, "base_kind": delta.base_kind,
                     "head_commit": delta.head_commit, "changed_file_count": delta.files.len()
                 })).collect();
@@ -186,9 +125,8 @@ impl HostState {
             if events
                 .send(HostEvent::Prepared {
                     session_id,
-                    manual: true,
                     reply: Some(opened),
-                    prepared,
+                    prepared: Box::new(prepared),
                 })
                 .is_err()
             {
@@ -201,128 +139,64 @@ impl HostState {
             let _ = reply.send(outcome.map(|()| accepted.expect("accepted review has a capture")));
         });
     }
+}
 
-    /// Reconciles a durable corrective handoff left by a previous daemon.
-    /// This path does not require a reviewer profile: the review already has
-    /// findings, and only the primary relay's idempotent command needs to be
-    /// observed again.
-    pub(super) fn begin_recovery(&mut self, session_id: &str) {
-        if !self.recovery_candidates.contains(session_id)
-            || self.recovery_in_flight.contains(session_id)
-            || self.reviews.contains_key(session_id)
-            || self.preparing.contains_key(session_id)
-        {
-            return;
-        }
-        let Some(watch) = self.sessions.get(session_id) else {
-            return;
+/// Accepts a review request from a session whose review is off. It performs no
+/// review; it only records the current trees as allowed to push.
+async fn run_review_off(
+    control: SessionManagerControl,
+    session_id: String,
+    path: Option<String>,
+) -> Result<serde_json::Value, StartRefusal> {
+    let protocol = control
+        .session(session_id.clone())
+        .await
+        .map_err(|error| {
+            StartRefusal(format!(
+                "{error:#}; resume the session before requesting review"
+            ))
+        })?
+        .view()
+        .snapshot
+        .and_then(|snapshot| snapshot.operational.relay_protocol_version)
+        .unwrap_or(0);
+    let repositories = path
+        .map(|path| vec![std::path::PathBuf::from(path)])
+        .filter(|_| protocol >= mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL);
+    let outcome = resolve::push_action(
+        &control,
+        &session_id,
+        ReviewerAction::CaptureDelta { repositories },
+    )
+    .await
+    .map_err(|error| StartRefusal(format!("{error:#}")))?;
+    let ReviewerOutcome::Delta { repositories } = outcome else {
+        return Err(StartRefusal("the worker did not return a capture".into()));
+    };
+    let trees: std::collections::BTreeMap<_, _> = repositories
+        .iter()
+        .filter_map(|delta| {
+            Some((
+                delta.root.clone(),
+                (delta.current_tree.clone(), delta.head_commit.clone()?),
+            ))
+        })
+        .collect();
+    if !trees.is_empty() {
+        // A worker that predates overridden records can only write the
+        // reviewed ref; with review off that moves no base anyone reads.
+        let action = if protocol < mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL {
+            ReviewerAction::RecordReviewed { trees }
+        } else {
+            ReviewerAction::RecordOverridden { trees }
         };
-        if watch
-            .materialized
-            .as_ref()
-            .is_none_or(|snapshot| !snapshot.queued_prompts.is_empty())
-        {
-            return;
-        }
-        hold_prompts(session_id);
-        self.recovery_in_flight.insert(session_id.to_owned());
-        let control = self.control.clone();
-        let environment = self.environment.clone();
-        let events = self.events.clone();
-        let session_id = session_id.to_owned();
-        tokio::spawn(async move {
-            let prepared = prepare_recovery(&control, &environment, &session_id).await;
-            let _ = events.send(HostEvent::RecoveryPrepared {
-                session_id,
-                prepared,
-            });
-        });
+        resolve::push_action(&control, &session_id, action)
+            .await
+            .map_err(|error| StartRefusal(format!("{error:#}")))?;
     }
-
-    pub(super) fn recovery_prepared(
-        &mut self,
-        session_id: String,
-        prepared: Result<Option<Prepared>, String>,
-    ) {
-        self.recovery_in_flight.remove(&session_id);
-        match prepared {
-            Ok(Some(prepared)) => {
-                self.recovery_candidates.remove(&session_id);
-                self.preparing.insert(
-                    session_id.clone(),
-                    PreparingOperation::Review {
-                        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    },
-                );
-                self.prepared(session_id, false, None, Ok(prepared));
-            }
-            Ok(None) => {
-                self.recovery_candidates.remove(&session_id);
-                release_prompts(&session_id);
-                self.record_notice(
-                    &session_id,
-                    "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes".to_owned(),
-                );
-            }
-            Err(error) => {
-                // Keep the candidate so a later connected/idle observation can
-                // retry. No success notice is emitted for an unknown outcome.
-                tracing::warn!(session_id = %session_id, %error, "could not reconcile an interrupted review handoff");
-                release_prompts(&session_id);
-            }
-        }
-    }
-
-    /// The gates that need nothing but the host's own state.
-    pub(super) fn refuse_start(&self, session_id: &str) -> Option<StartRefusal> {
-        if let Some(slot) = self.reviews.get(session_id) {
-            // Name what the open review waits for when it waits on a person,
-            // since that is what lets the next one start.
-            let question = slot.state.active_group.as_ref().and_then(|group| {
-                group
-                    .registrations
-                    .iter()
-                    .filter_map(|item| item.child_session_id.as_ref())
-                    .filter_map(|child| self.sessions.get(child))
-                    .filter_map(|watch| watch.materialized.as_ref())
-                    .flat_map(|session| session.pending_elicitations.iter())
-                    .next()
-            });
-            return Some(StartRefusal(match question {
-                Some(question) => format!(
-                    "the previous review is waiting for your answer to a question ({}); \
-                     answer or dismiss it",
-                    quoted_question(&question.message)
-                ),
-                None => "a review is already open".to_owned(),
-            }));
-        }
-        if self.recovery_candidates.contains(session_id)
-            || self.recovery_in_flight.contains(session_id)
-        {
-            return Some(StartRefusal(
-                "an interrupted review handoff is being reconciled".to_owned(),
-            ));
-        }
-        let Some(watch) = self.sessions.get(session_id) else {
-            return Some(StartRefusal("this session is not connected".to_owned()));
-        };
-        if !matches!(watch.execution, MaterializedExecutionState::Idle) {
-            return Some(StartRefusal(
-                "a review runs between turns; this one is still working".to_owned(),
-            ));
-        }
-        let queued = watch
-            .materialized
-            .as_ref()
-            .is_some_and(|materialized| !materialized.queued_prompts.is_empty());
-        if queued {
-            // Reviewing now would hold prompts the user has already sent. The
-            // review after the queue drains covers the whole batch instead.
-            return Some(StartRefusal(
-                "prompts are queued; the review waits for them".to_owned(),
-            ));
-        }
-        None
-    }
+    Ok(serde_json::json!({
+        "accepted": true,
+        "review": "off",
+        "message": "Review is off for this session: no reviewers ran. You may push.",
+    }))
 }

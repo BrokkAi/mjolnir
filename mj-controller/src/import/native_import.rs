@@ -9,6 +9,7 @@ pub struct NativeImportRequest<'a> {
     pub bundle_id: &'a str,
     pub profile_id: Option<&'a str>,
     pub title: Option<&'a str>,
+    pub daemon_project_root: Option<&'a Path>,
     pub archive_directory: &'a Path,
 }
 
@@ -31,6 +32,7 @@ pub fn import_native_session(
         profile_id,
         title,
         archive_directory,
+        daemon_project_root,
     } = request;
     let bundle = config
         .bundles
@@ -49,10 +51,36 @@ pub fn import_native_session(
     };
     let targets = session_edit_targets(transcript, harness_home)?;
     let raw_project = raw_project_import(config, &targets);
-    let repositories =
+    let recorded_root = import_project_root(transcript, &targets);
+    let remap = daemon_project_root
+        .filter(|path| *path != recorded_root.as_path())
+        .map(|destination| ImportProjectRemap::new(&recorded_root, destination, &targets.git_roots))
+        .transpose()?;
+    let mut repositories =
         collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
-    let native_artifacts =
+    let mut native_artifacts =
         collect_import_native_artifacts(harness, harness_home, native_session_id, source_path)?;
+    // Own the selected native bytes through archive publication. A harness may
+    // keep writing its source files after this import's canonical capture.
+    fs::create_dir_all(archive_directory)?;
+    let native_snapshot = tempfile::Builder::new()
+        .prefix("native-import-")
+        .tempdir_in(archive_directory)?;
+    for (index, artifact) in native_artifacts.iter_mut().enumerate() {
+        if let Some(control) = control {
+            control.check_cancelled()?;
+        }
+        let path = native_snapshot.path().join(index.to_string());
+        {
+            let mut source = CancellableRead {
+                inner: artifact.reader()?,
+                control,
+            };
+            let mut target = fs::File::create(&path)?;
+            std::io::copy(&mut source, &mut target)?;
+        }
+        artifact.data = mj_checkpoint::archive::NativeArtifactData::File(path);
+    }
     if harness == HarnessKind::Muse {
         // The preview may precede a user's confirmation by minutes. Never
         // pair its old transcript with a newer native conversation.
@@ -68,13 +96,15 @@ pub fn import_native_session(
             "native session changed after it was selected; select it again"
         );
         ensure!(
-            native_artifacts
-                == collect_import_native_artifacts(
+            native_import_artifacts_match(
+                &native_artifacts,
+                &collect_import_native_artifacts(
                     harness,
                     harness_home,
                     native_session_id,
-                    source_path
-                )?,
+                    source_path,
+                )?
+            )?,
             "native session changed while being imported; stop its harness and retry"
         );
     }
@@ -84,6 +114,21 @@ pub fn import_native_session(
     let timestamp = timestamp();
     let profile_id = import_profile_id(config, profile_id, harness, harness_home)?;
     let target_id = default_import_target_id(config);
+    let mut project = crate::project_catalog::snapshot(
+        bundle,
+        &mj_core::targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+        raw_project.is_none(),
+    )?;
+    let remapped_bundle = if let Some(remap) = remap {
+        remap.apply(&mut project, &mut repositories)?;
+        Some(project.bundle.clone())
+    } else {
+        None
+    };
+    let remapped_id = remapped_bundle
+        .as_ref()
+        .map(|_| format!("import-{session_id}"));
+    let bundle_id = remapped_id.as_deref().unwrap_or(bundle_id);
     let archive_path = archive_directory.join(format!("{session_id}.hel.zip"));
     if let Some(control) = control {
         control.report(ImportArchiveProgress::WritingArchive)?;
@@ -132,13 +177,10 @@ pub fn import_native_session(
     state.sessions.insert(
         session_id.clone(),
         SessionRecord {
-            project: Some(crate::project_catalog::snapshot(
-                bundle,
-                &mj_core::targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(
-                    15,
-                )),
-                raw_project.is_none(),
-            )?),
+            oracle_choice: None,
+            oracle: true,
+            notifications_ignored: false,
+            project: Some(project.into()),
             target_runtime: None,
             launch_base: None,
             launch_branch: None,
@@ -153,18 +195,19 @@ pub fn import_native_session(
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             id: session_id.clone(),
             title,
             harness_kind: harness,
             last_profile: profile_id,
             bundle_id: bundle_id.to_owned(),
-            project_directory: raw_project.as_ref().map(|(directory, _)| directory.clone()),
+            project_directory: raw_project
+                .as_ref()
+                .map(|(directory, _)| daemon_project_root.unwrap_or(directory).to_path_buf()),
             managed_worktree: None,
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: !config.github.session_credentials,
             target_template_id: raw_project.map_or(target_id, |(_, raw_target_id)| raw_target_id),
             resource_allocation: None,
             additional_mounts: Vec::new(),
@@ -178,8 +221,10 @@ pub fn import_native_session(
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
-            checkpoint: Some(checkpoint),
+            checkpoint: Some(Box::new(checkpoint)),
         },
     );
     Ok(ImportedClaudeSession {
@@ -189,6 +234,7 @@ pub fn import_native_session(
         source_cwd: transcript.cwd.clone(),
         bundle_id: bundle_id.to_owned(),
         archive_path,
+        remapped_bundle,
     })
 }
 
@@ -433,11 +479,7 @@ pub(super) fn import_profile_id(
     let Some(requested) = requested else {
         return Ok(default_profile(config, harness, home));
     };
-    let profile = config
-        .profiles
-        .get(requested)
-        .with_context(|| format!("unknown import profile {requested:?}"))?;
-    ensure!(profile.enabled, "import profile {requested:?} is disabled");
+    let profile = config.named_profile(requested)?;
     ensure!(
         profile.kind == harness,
         "import profile {requested:?} does not use {harness:?}"
@@ -465,8 +507,10 @@ pub(super) fn import_delta_base(path: &Path, fetch_url: &str) -> Result<String> 
             continue;
         };
         let same_source = url == fetch_url
-            || mj_core::state::ProjectSourceIdentity::git_remote(&url).is_some_and(|identity| {
-                Some(identity) == mj_core::state::ProjectSourceIdentity::git_remote(fetch_url)
+            // `url` comes from `git remote get-url`, where `owner/repo` is a
+            // relative path; `fetch_url` is a resolved source.
+            || mj_core::state::ProjectSourceIdentity::git_remote(&url, mj_core::remote_git::Shorthand::Rejected).is_some_and(|identity| {
+                Some(identity) == mj_core::state::ProjectSourceIdentity::git_remote(fetch_url, mj_core::remote_git::Shorthand::Allowed)
             });
         if !same_source {
             continue;
@@ -510,7 +554,6 @@ pub(super) fn timestamp() -> String {
 }
 
 pub fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {
-    crate::database::save_session(session)?;
     let checkpoint = session
         .checkpoint
         .as_ref()
@@ -521,5 +564,173 @@ pub fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {
         session.id.clone(),
         &canonical,
     )?;
-    crate::database::save_materialized_session(&materialized)
+    crate::database::save_imported_session(session, &materialized)
+}
+
+/// The recorded project root used by both the path prompt and archive relocation.
+///
+/// Git reports the roots as physical paths, while the transcript keeps the
+/// working directory as the harness saw it, which can run through a symlink
+/// (macOS keeps /var and /tmp behind /private). Both are compared, and the
+/// root is returned, as physical paths.
+pub fn import_project_root(transcript: &ClaudeTranscript, targets: &SessionEditTargets) -> PathBuf {
+    let cwd = super::edit_targets::canonicalize_existing_ancestor(&transcript.cwd);
+    targets
+        .git_roots
+        .iter()
+        .find(|root| cwd.starts_with(root))
+        .cloned()
+        .unwrap_or(cwd)
+}
+
+/// Relocate operational project metadata together; native history retains its provenance.
+struct ImportProjectRemap<'a> {
+    recorded: &'a Path,
+    /// `recorded` as a physical path. Every containment test is made there:
+    /// the paths being moved come spelled as configured, as Git reported them
+    /// or as the harness recorded them, and one spelling may run through a
+    /// symlink another resolved (macOS keeps /var and /tmp behind /private).
+    recorded_physical: PathBuf,
+    destination: &'a Path,
+}
+
+impl<'a> ImportProjectRemap<'a> {
+    fn new(recorded: &'a Path, destination: &'a Path, roots: &[PathBuf]) -> Result<Self> {
+        ensure!(
+            mj_core::target_path::is_absolute_on_host_or_target(destination),
+            "Enter an absolute project root on the daemon host, or keep the recorded root."
+        );
+        let remap = Self {
+            recorded,
+            recorded_physical: super::edit_targets::canonicalize_existing_ancestor(recorded),
+            destination,
+        };
+        let outside = roots
+            .iter()
+            .filter(|root| remap.within(root).is_none())
+            .collect::<Vec<_>>();
+        ensure!(
+            outside.is_empty(),
+            "cannot relocate repositories outside recorded project root {}: {}. Import one repository at a time, or record the session from their common parent and import again with --path pointing to that parent's daemon-host counterpart.",
+            recorded.display(),
+            outside
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Ok(remap)
+    }
+
+    /// `path` relative to the recorded root, or `None` when it lies outside it
+    /// or is not a filesystem path (a remote URL).
+    fn within(&self, path: &Path) -> Option<PathBuf> {
+        if !path.is_absolute() {
+            return None;
+        }
+        super::edit_targets::canonicalize_existing_ancestor(path)
+            .strip_prefix(&self.recorded_physical)
+            .ok()
+            .map(Path::to_path_buf)
+    }
+
+    fn apply(
+        &self,
+        project: &mut mj_core::repository::ProjectBundleSnapshot,
+        repositories: &mut [mj_checkpoint::archive::RepositorySnapshot],
+    ) -> Result<()> {
+        let Self {
+            recorded,
+            destination,
+            ..
+        } = *self;
+        let remap = |path: &Path| {
+            self.within(path).map(|relative| {
+                if relative.as_os_str().is_empty() {
+                    destination.to_path_buf()
+                } else {
+                    // Daemon project paths obey the POSIX session-target contract.
+                    mj_core::target_path::join(destination, &relative)
+                }
+            })
+        };
+        let remap_url = |url: &mut String| {
+            if let Some(path) = remap(Path::new(url)) {
+                *url = path.to_string_lossy().into_owned();
+            }
+        };
+        for repository in &mut project.bundle.repositories {
+            if let Some(path) = &mut repository.local {
+                *path = remap(path).with_context(|| format!("repository {} at {} is outside recorded project root {}; import one repository at a time", repository.id, path.display(), recorded.display()))?;
+            }
+        }
+        for identity in project.identities.values_mut() {
+            if let mj_core::repository::RepositoryIdentity::Local(path) = identity
+                && let Some(mapped) = remap(path)
+            {
+                *path = mapped;
+            }
+        }
+        for source in project.network_sources.values_mut() {
+            remap_url(&mut source.fetch_url);
+            for url in &mut source.push_urls {
+                remap_url(url);
+            }
+        }
+        for repository in repositories {
+            remap_url(&mut repository.metadata.origin);
+            for url in &mut repository.metadata.push_urls {
+                remap_url(url);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Compare captured contents, independently of whether bodies live in memory
+/// or private snapshot files. Reader chunk boundaries need not agree.
+fn native_import_artifacts_match(
+    captured: &[mj_checkpoint::archive::NativeArtifact],
+    current: &[mj_checkpoint::archive::NativeArtifact],
+) -> Result<bool> {
+    if captured.len() != current.len() {
+        return Ok(false);
+    }
+    for (captured, current) in captured.iter().zip(current) {
+        if captured.relative_path != current.relative_path || captured.mode != current.mode {
+            return Ok(false);
+        }
+        let mut captured = BufReader::new(captured.reader()?);
+        let mut current = BufReader::new(current.reader()?);
+        loop {
+            let left = captured.fill_buf()?;
+            let right = current.fill_buf()?;
+            if left.is_empty() && right.is_empty() {
+                break;
+            }
+            let size = left.len().min(right.len());
+            if size == 0 || left[..size] != right[..size] {
+                return Ok(false);
+            }
+            captured.consume(size);
+            current.consume(size);
+        }
+    }
+    Ok(true)
+}
+
+/// Checks import cancellation before every read, so cancelling stops a copy
+/// of an arbitrarily large native file instead of waiting for it to finish.
+struct CancellableRead<'a, 'b, R> {
+    inner: R,
+    control: Option<&'a ImportControl<'b>>,
+}
+
+impl<R: std::io::Read> std::io::Read for CancellableRead<'_, '_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(control) = self.control {
+            control.check_cancelled().map_err(std::io::Error::other)?;
+        }
+        self.inner.read(buffer)
+    }
 }

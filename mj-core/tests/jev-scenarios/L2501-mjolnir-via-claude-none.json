@@ -1,0 +1,139 @@
+{
+  "id": "L2501",
+  "title": "mjolnir via claude none",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "e965bcdb8c5c3036d6dcfbeb6120fe68",
+    "session_title": "mjolnir via claude",
+    "reply_position": 7191,
+    "captured_at": "2026-10-23T15:29:51.508Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:6402",
+          "role": "user",
+          "text": "e8566ee44d5a562c41deb74d72243980 didn't get subagent-finished delivered until i interrupted it"
+        },
+        {
+          "id": "agent:6435",
+          "role": "assistant",
+          "text": "Checking the worker's relay journal for when the stuck turn started. The daemon handed off both messages within a second. The worker then held them because it thought a turn was still running."
+        },
+        {
+          "id": "agent:6487",
+          "role": "assistant",
+          "text": "I found where the session got stuck. I'm now pulling the full record of that moment from the daemon database, because the worker's own log file was rotated while I was reading it."
+        },
+        {
+          "id": "agent:6583",
+          "role": "assistant",
+          "text": "The evidence is complete. I'm doing one last check: whether a fix landed after this session's worker was built."
+        },
+        {
+          "id": "agent:6610",
+          "role": "assistant",
+          "text": "The daemon was not at fault: it handed the message to the worker in about 60 ms. The worker held it because it wrongly believed Claude Code was still in the middle of a turn. That belief started at 13:11 UTC (08:11 your time) and lasted 94 minutes, until your interrupt ended it. I confirmed this sequence from the worker's journal.\n\n**What happened** (times in UTC)\n\n| Time | Journal ordinal | Event |\n|---|---|---|\n| 13:01:08 | 5111 | Claude Code started a turn on its own after a background-task notice. It started a background shell (tool call `…ESFfSZZK`) and ran tests. |\n| 13:11:07 | 5185 | That turn ended normally (`harness_turn_settled`, origin `task-notification`). |\n| 13:11:07 | 5187, 5188 | Within a few milliseconds, Claude Code sent a `tool_call_update` marking that background shell `failed` (\"Claude stopped this to…\"). The worker treated this as new output and opened a new turn (5187). No model work followed, so nothing ever ended that turn. |\n| 13:35:30 | 5189–5191 | The subagent-finished message arrived. The worker saw a turn as open, so it saved the message to show at the next tool call instead of waking the session. No tool call ever came. |\n| 13:44:00 | 5192–5194 | A session message was held the same way. |\n| 14:45:49–54 | 5195–5201 | You sent a prompt and a stop. Claude Code never answered the stop. After 5 seconds the worker gave up waiting, logged `Claude Code did not answer a stop of the turn it started on its own`, and closed the turn. Your prompt then carried both held messages. |\n\n**The code involved**\n- `opens_harness_turn` (`mj-worker/src/relay.rs:1262`) opens a turn on any agent output while no prompt or turn is open. `is_agent_output` (`mj-worker/src/relay/background.rs:24`) counts every `ToolCallUpdate` as output, including a late status change for a tool from a turn that has already ended.\n- `mailbox_wake_is_allowed` (`mj-worker/src/relay/commands.rs:1986`) needs `can_submit`. That stays false while a turn is open, so a message that should wake the session is only saved.\n- A turn that Claude Code started on its own ends in only two ways: a `claude_turn_result`, or a stop that goes unanswered. There is no time limit.\n\n**This is a different cause from the 2026-10-20 case.** That one was a stale `/clear` flag. Here every outbox row was accepted within about 1 second. No fix for this has reached `origin/master` since this session's worker was built.\n\n**What I could not confirm**\n- The full text of the \"failed\" update. The worker rotated its journal file while I was reading it, and I had kept only the first 400 characters of each line.\n- Why the shell was stopped: Claude Code's cleanup at the end of the turn, or the model itself stopping it.\n- That Claude Code was idle throughout. This is likely: it produced no output for 94 minutes and did not answer the stop.\n\n**Recommendation:** make `opens_harness_turn` ignore a `ToolCallUpdate` that only reports a final status (completed or failed) for a tool call that began in a turn that has already ended. New chunks and new `tool_call`s would still open a turn. This follows the existing special cases for \"Task stopped by user\" and setup notices. Add a regression test that replays the 5185→5188 sequence and checks that a mailbox event sent afterwards wakes the session.\n\nA time limit on silent turns would also have caught this. But it would be a second mechanism for the same problem, so I would not add one unless the narrow fix proves incomplete. I have not changed any code.\n\n`★ Insight ─────────────────────────────────────`\n- A message that should wake the session takes one of two routes. If the session is idle, the worker wakes it with the message as a prompt. If a turn is running, the worker saves the message and shows it at the next tool call. So if the worker wrongly thinks a turn is running, messages are held without any error.\n- Claude Code sends no explicit signal when it starts a turn on its own, so the worker infers one from the first output. This means every message type the adapter sends outside model work needs its own exception. This incident adds a third one: a late status update for a background tool.\n- The worker rotates `relay-journal/active.jsonl` at each checkpoint. Copy it as soon as you start diagnosing, or the evidence can be gone a minute later. That happened partway through this check.\n`─────────────────────────────────────────────────`\n\nI added this second cause to the memory note on missed parent notifications."
+        },
+        {
+          "id": "user:6924",
+          "role": "user",
+          "text": "yes, pls fix and push"
+        },
+        {
+          "id": "agent:6961",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- I chose a rule that keeps no state (\"a status update never opens a turn\") over a rule that tracks which tool calls have been seen. The tracking version would have to keep a set of tool call IDs that survives worker restarts. This bug does not need that.\n- The child first checks the one assumption the rule depends on: that Claude Code always announces a tool call before sending any update for it. If that assumption is wrong, the simpler rule could miss a real turn. In that case I'll switch to tracking IDs.\n`─────────────────────────────────────────────────`\n\nA child is implementing the fix and the regression test. It will not commit. When it reports back, I'll review the diff, commit, and push to `origin/master`."
+        },
+        {
+          "id": "agent:7072",
+          "role": "assistant",
+          "text": "Upstream has 10 new commits, and two of them lightly change these same files. I'll commit, rebase onto them, and rerun the affected tests before pushing."
+        },
+        {
+          "id": "agent:7090",
+          "role": "assistant",
+          "text": "The rebase was clean. Now I'm rerunning the worker crate's tests on the rebased code."
+        },
+        {
+          "id": "agent:7109",
+          "role": "assistant",
+          "text": "The worker tests are still running in the background on the rebased commit (`5e82e710e`). The build had to recompile after the 10 upstream commits. I'll push once the tests pass."
+        },
+        {
+          "id": "agent:7136",
+          "role": "assistant",
+          "text": "The library tests pass, including the new regression test. Six integration tests failed, though, which the child's run before the rebase did not show. I'm reading the panic messages."
+        },
+        {
+          "id": "agent:7177",
+          "role": "assistant",
+          "text": "Outside the sandbox, all 13 tests pass. The failures came from the sandbox, not from the fix. Pushing now."
+        },
+        {
+          "id": "agent:7191",
+          "role": "assistant",
+          "text": "I've pushed the fix to `origin/master` as `5e82e710e`.\n\n**The change:** in `opens_harness_turn` (`mj-worker/src/relay.rs`), a Claude `ToolCallUpdate` no longer opens a turn. The update is still recorded, so the tool row in the conversation still shows \"failed\". A real new model cycle still opens a turn with its first text or new tool call.\n\n**Verification:**\n- The child checked the adapter's code (claude-agent-acp 0.94.0). It always announces a tool call before it sends any update for it. So no real turn can begin with an update, and this rule cannot miss one.\n- The source of the late update is `unfinished()` in `dist/tool-calls/renderer.js`. When a cycle ends, it marks each tool call left unfinished as failed, with the text \"Claude stopped this tool call before it ran.\" That update arrives after the cycle's result.\n- New regression test: `late_claude_tool_status_preserves_the_transcript_without_opening_a_turn`. It replays this session's sequence of events. It fails without the fix and passes with it.\n- On the rebased commit, all 703 worker library tests pass. Six integration tests failed in my first run because the sandbox blocks starting a shell (`/bin/bash` \"did not answer within 10 seconds\"). Outside the sandbox, all 13 tests in those two files pass. The child also ran clippy and fmt; both are clean.\n\n**When it takes effect:** the fix is in the worker, not the daemon. Session e8566ee4 and other running sessions keep the old behaviour until a new install replaces their workers.\n\n`★ Insight ─────────────────────────────────────`\n- Mjolnir has to work out when Claude Code is busy from the order of its messages, so each message the adapter sends between cycles needs its own exception. This is the third: setup notices and \"Task stopped by user\" were the first two. Each fix has a \"Hard-won\" test built from a real session's sequence, so a later refactor cannot remove one without a test failing.\n- The two runs differed only in the sandbox. Before treating a failure as a regression, check how the passing run was run. Here, rerunning the failed test files outside the sandbox answered the question in seconds.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "yes, pls fix and push",
+    "assistant_text_tail": "t text or new tool call.\n\n**Verification:**\n- The child checked the adapter's code (claude-agent-acp 0.94.0). It always announces a tool call before it sends any update for it. So no real turn can begin with an update, and this rule cannot miss one.\n- The source of the late update is `unfinished()` in `dist/tool-calls/renderer.js`. When a cycle ends, it marks each tool call left unfinished as failed, with the text \"Claude stopped this tool call before it ran.\" That update arrives after the cycle's result.\n- New regression test: `late_claude_tool_status_preserves_the_transcript_without_opening_a_turn`. It replays this session's sequence of events. It fails without the fix and passes with it.\n- On the rebased commit, all 703 worker library tests pass. Six integration tests failed in my first run because the sandbox blocks starting a shell (`/bin/bash` \"did not answer within 10 seconds\"). Outside the sandbox, all 13 tests in those two files pass. The child also ran clippy and fmt; both are clean.\n\n**When it takes effect:** the fix is in the worker, not the daemon. Session e8566ee4 and other running sessions keep the old behaviour until a new install replaces their workers.\n\n`★ Insight ─────────────────────────────────────`\n- Mjolnir has to work out when Claude Code is busy from the order of its messages, so each message the adapter sends between cycles needs its own exception. This is the third: setup notices and \"Task stopped by user\" were the first two. Each fix has a \"Hard-won\" test built from a real session's sequence, so a later refactor cannot remove one without a test failing.\n- The two runs differed only in the sandbox. Before treating a failure as a regression, check how the passing run was run. Here, rerunning the failed test files outside the sandbox answered the question in seconds.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Still open / needs you turn-ending label",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_positions": [],
+    "user_position": 6924,
+    "input_rationale": "The user said 'yes, pls fix and push'; the fix is pushed and verified. The remaining note about running sessions keeping the old behaviour until install is informational and asks nothing.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": null
+  },
+  "context": {
+    "after": []
+  }
+}

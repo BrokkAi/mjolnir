@@ -146,12 +146,10 @@ impl HostState {
         // Never hold daemon handoff for a retry or an unavailable worker.
         self.child_closures.shutdown().await;
         self.child_closure_owners.clear();
-        // A validated override has accepted daemon-owned work. It must finish
-        // while the persistence lane and the worker connection are still live.
+        // Worker requests are repeatable user operations. Stop waiting during
+        // handoff; the persistence lane still drains each accepted local save.
         for operation in self.preparing.values_mut() {
-            if let PreparingOperation::Override { task, admitted, .. } = operation
-                && !*admitted
-            {
+            if let PreparingOperation::Override { task, .. } = operation {
                 task.abort();
             }
         }
@@ -176,7 +174,7 @@ impl HostState {
                 }
                 let response = result.try_recv().unwrap_or_else(|_| {
                     Err(StartRefusal(
-                        "push review override stopped during shutdown".into(),
+                        "push review operation stopped during shutdown; repeat the request after restart. The worker may already have applied it".into(),
                     ))
                 });
                 let _ = reply.send(response);
@@ -186,8 +184,6 @@ impl HostState {
             .preparing
             .keys()
             .chain(self.reviews.keys())
-            .chain(self.recovery_in_flight.iter())
-            .chain(self.recovery_candidates.iter())
             .cloned()
             .collect::<BTreeSet<_>>();
         for pending in std::mem::take(&mut self.pending_open).into_values() {
@@ -201,6 +197,9 @@ impl HostState {
         // No sender may survive the join below or the receiver can never
         // observe EOF.
         for slot in self.reviews.values_mut() {
+            // Recording is recoverable from the saved terminal snapshot.
+            // Stop waiting for the worker during daemon shutdown.
+            slot.delivery.cancel();
             answer(
                 slot.start_reply.take(),
                 Err(StartRefusal("the daemon is shutting down".into())),
@@ -234,7 +233,7 @@ impl HostState {
         // clearing it here made the restart silent. The baseline has not
         // advanced, so the next review covers the same changes.
         for (session_id, slot) in &self.reviews {
-            if slot.push.as_ref().is_some_and(|push| push.finishing) {
+            if slot.finishing {
                 continue;
             }
             let queued = lane
@@ -254,15 +253,14 @@ impl HostState {
             }
         }
         for operation in self.preparing.values() {
-            if let PreparingOperation::Review { cancelled } = operation {
-                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            if let PreparingOperation::Review { cancel } = operation {
+                cancel.cancel();
             }
         }
         self.preparing.clear();
         self.closing.clear();
         self.reviews.clear();
         for session_id in &session_ids {
-            release_prompts(session_id);
             self.publish(session_id);
         }
 

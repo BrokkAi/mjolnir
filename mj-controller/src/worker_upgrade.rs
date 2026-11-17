@@ -20,7 +20,8 @@ use tokio::task::JoinSet;
 use crate::controller::{Controller, HarnessPreparationFailure, WorkerUpgradeOutcome};
 use crate::recovery::{backoff_delay, elapsed_at_least};
 use crate::recovery_gate::{
-    ObservationReceiver, ObservationSender, RecoveryGate, RecoveryObserver, observation_channel,
+    BackgroundWork, ObservationReceiver, ObservationSender, RecoveryGate, RecoveryObserver,
+    observation_channel,
 };
 use crate::session_manager::SessionManagerControl;
 use crate::targets::CancellableProcessExecutor;
@@ -79,11 +80,8 @@ impl WorkerUpgradeObserver {
 pub struct WorkerUpgradeResult {
     pub session_id: String,
     pub outcome: Result<WorkerUpgradeOutcome, String>,
-    /// A failed harness preparation is a session failure, not a transient
-    /// worker-upgrade error. The daemon uses the observed revision to avoid
-    /// overwriting a newer lifecycle transition.
-    pub(crate) preparation_failure: Option<HarnessPreparationFailure>,
-    pub(crate) observed_updated_at: String,
+    /// Notice for a failure durably applied before this result was published.
+    pub(crate) applied_preparation_failure: Option<String>,
     /// The attempt was preempted by a lifecycle operation or by coordinator
     /// shutdown. It judged nothing, so it is neither a success nor a failure.
     pub cancelled: bool,
@@ -131,7 +129,7 @@ impl WorkerUpgradeCoordinator {
                         if !policy.due(&observation, Utc::now()) {
                             continue;
                         }
-                        let Some(upgrade_cancelled) = coordinator_gate.try_start(&session_id)
+                        let Ok(upgrade_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::WorkerReplacement).inspect_err(|refusal| tracing::debug!(%session_id, holders = ?refusal.holders, "worker upgrade deferred"))
                         else {
                             continue;
                         };
@@ -150,9 +148,10 @@ impl WorkerUpgradeCoordinator {
                                     config: observation.config,
                                     state,
                                 };
-                                let executor = CancellableProcessExecutor::new(cancelled)
+                                let executor = CancellableProcessExecutor::new(cancelled.cancellation())
                                     .with_deadline(WORKER_UPGRADE_TIMEOUT);
                                 let outcome = mj_core::runtime::block_on(controller.upgrade_session_worker(
+                                    &crate::recovery_gate::SessionAdmission::Background(cancelled.clone()),
                                     &task_session_id,
                                     &executor,
                                     &session_manager,
@@ -178,11 +177,31 @@ impl WorkerUpgradeCoordinator {
                                     None,
                                 ),
                             };
+                            // Keep the per-session slot through settlement: foreground
+                            // lifecycle work cancels us and waits for this slot before
+                            // changing placement or revision.
+                            let (applied_preparation_failure, admission) = if let Some(failure) = preparation_failure {
+                                let id = session_id.clone();
+                                let (settled, admission) = admission.run_blocking(move |cancelled| {
+                                    settle_preparation_failure(&id, &failure, &observed_updated_at, &cancelled)
+                                }).await;
+                                let notice = match settled {
+                                    Ok(Ok(notice)) => notice,
+                                    Ok(Err(error)) => {
+                                        tracing::warn!(%session_id, %error, "could not persist worker harness preparation failure");
+                                        None
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(%session_id, %error, "worker harness failure settlement task failed");
+                                        None
+                                    }
+                                };
+                                (notice, admission)
+                            } else { (None, admission) };
                             let result = WorkerUpgradeResult {
                                 session_id,
                                 outcome,
-                                preparation_failure,
-                                observed_updated_at,
+                                applied_preparation_failure,
                                 cancelled: task_cancelled.load(Ordering::Acquire),
                             };
                             (result, admission)
@@ -233,6 +252,38 @@ impl WorkerUpgradeCoordinator {
     pub fn try_result(&mut self) -> Option<WorkerUpgradeResult> {
         self.results.try_recv()
     }
+}
+
+/// Preparation is disposable; once failure settlement is accepted its short
+/// durable write holds daemon admission as well as the session's recovery slot.
+fn settle_preparation_failure(
+    session_id: &str,
+    failure: &HarnessPreparationFailure,
+    observed_updated_at: &str,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<Option<String>> {
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let Ok(_settling) =
+        crate::upgrade::activity_unless_draining("worker harness failure settlement")
+    else {
+        // Nothing accepted: the next daemon reobserves the unusable worker.
+        return Ok(None);
+    };
+    // This transition only reads records. Use the writer's committed snapshot
+    // so settlement never waits for unrelated configuration filesystem reads.
+    let mut controller = Controller {
+        config: Config::default(),
+        state: crate::database::load_state()?,
+    };
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let cause = failure.to_string();
+    Ok(controller
+        .fail_unready_session(session_id, &cause, observed_updated_at)?
+        .then_some(cause))
 }
 
 /// What the coordinator remembers about one session between observations.
@@ -345,6 +396,9 @@ mod tests {
 
     fn session_record(state: SessionState) -> SessionRecord {
         SessionRecord {
+            oracle_choice: None,
+            oracle: true,
+            notifications_ignored: false,
             project: None,
             target_runtime: None,
             launch_base: None,
@@ -357,8 +411,6 @@ mod tests {
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             id: "session-1".to_owned(),
             title: "work".into(),
             harness_kind: mj_core::config::HarnessKind::Codex,
@@ -369,6 +421,7 @@ mod tests {
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             target_template_id: "podman".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),
@@ -382,6 +435,8 @@ mod tests {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         }
@@ -400,8 +455,7 @@ mod tests {
         WorkerUpgradeResult {
             session_id: "session-1".into(),
             outcome: Err(detail.into()),
-            preparation_failure: None,
-            observed_updated_at: "2026-08-09T12:01:00Z".into(),
+            applied_preparation_failure: None,
             cancelled: false,
         }
     }
@@ -422,8 +476,7 @@ mod tests {
         WorkerUpgradeResult {
             session_id: "session-1".into(),
             outcome: Ok(outcome),
-            preparation_failure: None,
-            observed_updated_at: "2026-08-09T12:01:00Z".into(),
+            applied_preparation_failure: None,
             cancelled: false,
         }
     }
@@ -582,8 +635,7 @@ mod tests {
             &WorkerUpgradeResult {
                 session_id: "session-1".into(),
                 outcome: Err("operation cancelled".into()),
-                preparation_failure: None,
-                observed_updated_at: "2026-08-09T12:01:00Z".into(),
+                applied_preparation_failure: None,
                 cancelled: true,
             },
             now,
@@ -598,12 +650,20 @@ mod tests {
     #[test]
     fn the_shared_gate_keeps_an_upgrade_and_a_recovery_copy_apart() {
         let gate = Arc::new(RecoveryGate::default());
-        let recovery_copy = gate.try_start("session-1").expect("the slot starts free");
+        let recovery_copy = gate
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .expect("the slot starts free");
 
-        assert!(gate.try_start("session-1").is_none());
+        assert!(
+            gate.try_start("session-1", BackgroundWork::WorkerReplacement)
+                .is_err()
+        );
 
         drop(recovery_copy);
-        assert!(gate.try_start("session-1").is_some());
+        assert!(
+            gate.try_start("session-1", BackgroundWork::WorkerReplacement)
+                .is_ok()
+        );
     }
 
     /// Observing must hand off and return: the daemon reports from its event
@@ -619,5 +679,105 @@ mod tests {
 
         let received = std::iter::from_fn(|| queued.try_recv()).count();
         assert_eq!(received, 1);
+    }
+    // Hard-won: #1499: failure settlement escaped the coordinator's session admission.
+    #[tokio::test]
+    async fn preparation_failure_settlement_preserves_admission_and_lifecycle() {
+        const CHILD: &str = "MJ_UPGRADE_SETTLEMENT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                "worker_upgrade::tests::preparation_failure_settlement_preserves_admission_and_lifecycle",
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "upgrade-settlement-test")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        Config::default().save().unwrap();
+        let _writer = crate::database::install_isolated_test_writer();
+        let session = session_record(SessionState::Running);
+        crate::database::save_session(&session).unwrap();
+        let failure = HarnessPreparationFailure {
+            step: "prepare".into(),
+            error: "broken harness".into(),
+        };
+        let gate = Arc::new(RecoveryGate::default());
+
+        // A superseding lifecycle revision and a cancelled attempt must each
+        // suppress both the write and the applied-failure notice.
+        assert!(
+            settle_preparation_failure(&session.id, &failure, "older revision", &false.into())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            settle_preparation_failure(&session.id, &failure, &session.updated_at, &true.into())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            crate::database::load_state().unwrap().sessions[&session.id].state,
+            SessionState::Running
+        );
+
+        // Hold SQLite's real writer lock so settlement cannot finish. This
+        // exercises durable write ownership rather than a fake persistence call.
+        let lock = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let admission = gate
+            .try_start(&session.id, BackgroundWork::WorkerReplacement)
+            .unwrap();
+        let id = session.id.clone();
+        let revision = session.updated_at.clone();
+        let settling = tokio::spawn(admission.run_blocking(move |cancelled| {
+            settle_preparation_failure(&id, &failure, &revision, &cancelled)
+        }));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !crate::upgrade::blockers()
+                .iter()
+                .any(|b| b.label == "worker harness failure settlement")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(gate.is_busy(&session.id));
+        assert!(!settling.is_finished());
+        assert!(
+            gate.try_start(&session.id, BackgroundWork::WorkerReplacement)
+                .is_err()
+        );
+        let independent = gate
+            .try_start("other-session", BackgroundWork::WorkerReplacement)
+            .unwrap();
+        let (completed, independent) = independent.run_blocking(|_| 42).await;
+        assert_eq!(
+            completed.unwrap(),
+            42,
+            "unrelated attempts remain concurrent"
+        );
+        drop(independent);
+        lock.execute_batch("COMMIT").unwrap();
+        let (notice, admission) = settling.await.unwrap();
+        assert!(notice.unwrap().unwrap().is_some());
+        let durable = crate::database::read_durable_session_record(&session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable.state, SessionState::Error);
+        assert!(durable.last_error.unwrap().contains("broken harness"));
+        assert!(
+            gate.is_busy(&session.id),
+            "publication retains the attempt until supervised completion"
+        );
+        assert!(
+            !crate::upgrade::blockers()
+                .iter()
+                .any(|b| b.label == "worker harness failure settlement")
+        );
+        drop(admission);
+        assert!(!gate.is_busy(&session.id));
     }
 }

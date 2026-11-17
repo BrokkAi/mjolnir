@@ -1,9 +1,7 @@
 use super::*;
 
-/// Keep transport, protocol, and explicit relay rejections visible at the
-/// point where a request fails. Callers often turn these into a user-facing
-/// string or a retry, which otherwise loses the operation and request ID that
-/// make concurrent session failures diagnosable.
+/// Keep per-request diagnostics at debug. The session actor owns reachability
+/// transitions; logging here would warn again for every connection and retry.
 pub(super) fn log_relay_client_failure(
     client: &RelayClient,
     operation: &str,
@@ -17,7 +15,7 @@ pub(super) fn log_relay_client_failure(
     });
     let transport_dead = RelayTransportDead::marks(error);
     match rejection {
-        Some(rejection) => tracing::warn!(
+        Some(rejection) => tracing::debug!(
             session_id = %client.session_id,
             relay_version = %client.relay_version,
             %operation,
@@ -28,7 +26,7 @@ pub(super) fn log_relay_client_failure(
             error = format!("{error:#}"),
             "relay request rejected"
         ),
-        None => tracing::warn!(
+        None => tracing::debug!(
             session_id = %client.session_id,
             relay_version = %client.relay_version,
             %operation,
@@ -83,7 +81,7 @@ pub(super) fn reap_dropped_relay_proxy(mut child: proxy::ProxyChild, session_id:
         match child.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() {
-                    tracing::warn!(
+                    tracing::debug!(
                         %session_id,
                         %status,
                         "dropped relay proxy exited unsuccessfully"
@@ -211,7 +209,7 @@ pub(super) async fn read_bounded_frame_with_limit(
 }
 
 pub(super) fn clip_catch_up_page(
-    page: RelayAttachment,
+    page: RelayEventPage,
     previous: &RelayCursor,
     frontier: &RelayCursor,
 ) -> Result<RelayEventPage> {

@@ -1,0 +1,260 @@
+{
+  "id": "L3002",
+  "title": "mjolnir via claude3",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "3f925dd01070e7c65db78498efcc554c",
+    "session_title": "mjolnir via claude3",
+    "reply_position": 4926,
+    "captured_at": "2026-11-06T17:28:28.477Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "how should we fix #1450?"
+        },
+        {
+          "id": "user:660",
+          "role": "user",
+          "text": "ah fuck this is the whole claude code does weird shit over acp thing?\n\ni'm fine w your proposed solution in principle but we need to be extra sure that we don't break anything else\n\nalso before you do anything else, read AGENTS.md, its directives are binding"
+        },
+        {
+          "id": "user:2920",
+          "role": "user",
+          "text": "How should a harness-started turn relate to the prompts the parent or a waiter is asking about?\n\nCancelled"
+        },
+        {
+          "id": "user:2934",
+          "role": "user",
+          "text": "what are the pros and cons here?\n\nmy preference is to remove as many special cases for \"harness started\" as possible"
+        },
+        {
+          "id": "user:3227",
+          "role": "user",
+          "text": "A"
+        },
+        {
+          "id": "agent:3353",
+          "role": "assistant",
+          "text": "The implementer stopped where I told it to, and its finding is correct. Removing a queued prompt (`RemoveQueuedPrompt` or `ClearQueuedPrompts`) produces no outcome. Today the only thing that answers such a prompt is the reminder rule: a reminder turn counts as answering everything accepted before the reminded turn finished. Copying the previous value alone would break that.\n\nThere is a version of option A that covers this with no special cases. The projection records one fact at the moment it records any outcome, using its own state at that event: every prompt accepted before this outcome is answered unless it is still queued. That makes `answered_through = min(completed ordinal, earliest still-queued ordinal − 1)`, and never lower than the previous outcome's value.\n\nThat single rule covers:\n- prompts that are removed;\n- prompts that are steered into a turn;\n- reminder turns, which reproduces the old reminder rule exactly;\n- harness turns.\n\nThe readers still read only the field. The rule is computed once, by the one owner, from one consistent state. That is different from the reader-side inference that kept failing review, which combined several separate reads. I'll send this to the same implementer."
+        },
+        {
+          "id": "agent:3430",
+          "role": "assistant",
+          "text": "The implementer stopped at one of the checks I set, and it was right to.\n\n**What it found.** When a queued prompt is removed with `RemoveQueuedPrompt` or `ClearQueuedPrompts`, nothing is recorded as that prompt's outcome. Today the only thing that answers a removed prompt is the reminder rule: a reminder turn counts as answering everything accepted before the turn it reminds about ended. So the plan as written, where a turn with no prompt simply keeps the previous turn's value, would have changed today's behaviour. A child whose parent's newest prompt was removed would look busy forever.\n\n**What I decided.** I kept option A and changed only how the stored value is worked out. The rule now treats every kind of turn the same way. When the projection records any outcome, it reads its own state at that moment and stores `answered_through`. Every prompt accepted before this outcome counts as answered unless it is still queued, and the value never goes below the previous outcome's value.\n\nThis one rule covers:\n- prompts removed from the queue (the case the implementer found);\n- prompts steered into a turn;\n- reminder turns, where it gives the same result as today's reminder rule;\n- turns the harness started itself.\n\nReaders still read only the field. The value is worked out once, by the projection, from one consistent state. That is different from the earlier approach that kept failing review, where each reader worked it out from separate reads. I treated this as a refinement of A rather than a new direction. Tell me if you see it differently.\n\n**What I asked it to check before changing anything:**\n- Whether an outcome can ever be recorded while another of our prompts is still running. If it can, that prompt must also be counted as not yet answered.\n- What `mj wait --turn <b>` does today for a prompt that was removed. The next outcome will now answer it, so the CLI's \"later turn\" notice must still be true. That outcome's turn ID can be lower than the requested one.\n- That a prompt removed while the session is idle, with no later outcome, stays unanswered as it does today. It should report this, not fix it.\n\nIt then carries on with the rest of the plan: deleting the queue and active-turn logic, the breaking store migration, removing the new field for older v1 API clients, the tests, and the checks. It will not commit.\n\nI'm waiting for its report."
+        },
+        {
+          "id": "agent:3578",
+          "role": "assistant",
+          "text": "I'll settle all three points without a new mechanism.\n\n1. **CLI notice.** One neutral notice replaces both existing ones. The CLI shows it whenever a wait for turn N answers with an outcome that is not turn N's own, including when the answering turn's ID is lower than N.\n2. **Outcome recorded while another prompt runs.** This is the case of a queued prompt rejected while the turn before it is still running. Prompts still owed at that moment are the ones queued plus the one running, leaving out the prompt whose outcome this is. That prompt is answered because the outcome is its own: the outcome's `accepted_ordinal` equals the prompt's ordinal. So a reader asks one question of one outcome: does this outcome answer prompt T? Yes when the outcome is T's own, or when T is at or below `answered_through`.\n\n   This also fixes an older bug. Today a wait for the running prompt can end early on another prompt's rejection, because the rejected prompt has a higher ordinal.\n3. **Idle removal.** Left as it is today."
+        },
+        {
+          "id": "agent:3665",
+          "role": "assistant",
+          "text": "The implementer stopped once more, and I've sent it decisions on the three points it raised.\n\n1. **The CLI notice.** A wait for a removed prompt can now be answered by an earlier turn, whose turn ID is lower. The current notice only appears when the answering ID is higher, and its wording (\"ended after turn N\") would wrongly suggest the removed prompt ran. I replaced both existing notices with one neutral notice. It appears whenever a wait for turn N returns any outcome other than turn N's own.\n2. **An outcome can be recorded while another prompt is still running.** This happens when a queued prompt is rejected while the turn before it is running. At that moment, the prompts still owed are the ones in the queue plus the one running, leaving out the prompt whose outcome this is. Readers now ask one question of one outcome: does it answer prompt T? It does if it is T's own outcome, or if T is at or below `answered_through`. Rows written before this change get the same answers as today.\n\n   This also fixes an older bug that I asked it to cover with a test. Today `mj wait --turn A` can end on a queued prompt's rejection while A is still running, because the rejected prompt has a higher number.\n3. **A prompt removed while the session is idle stays unanswered**, as it is today.\n\nNone of these adds a rule specific to turns the harness starts itself. I told it to finish the rest of the plan without stopping again, unless it finds a new contradiction. Nothing is committed or pushed yet. I'm waiting for its report."
+        },
+        {
+          "id": "agent:3774",
+          "role": "assistant",
+          "text": "The implementer's profile ran out of quota. I'll check how much it changed before it stopped."
+        },
+        {
+          "id": "agent:3820",
+          "role": "assistant",
+          "text": "The implementer ran out of quota partway through. Most of the work is in the working tree, nothing is committed, and a replacement on another profile (`fbe58455`) is finishing it.\n\n**Already done:**\n- **New field.** Every turn outcome now stores `answered_through`. The transcript projection sets it with one rule from its own state.\n- **One reader.** All readers ask `answers()` of the outcome.\n- **Old logic removed.** The code that worked out answers from the queue and the active turn is gone.\n- **Store migration 111.** It is classified as breaking and raises the minimum compatible revision in the same step.\n- **Older clients.** The field is removed for v1 API responses and for the runtime feed to clients. Turn-ended events already list their fields one by one and never include it. The web viewer and desktop shell do not decode this type.\n- **Tests.** An earlier run of the full library suites of mj-controller, mj-core, mj-transcript and one more crate passed. That run may predate the final edits.\n\n**The replacement is doing:**\n- checking that the design is complete in the tree;\n- writing the regression tests, including the case of a removed prompt and the case of a wait that ended on another prompt's rejection;\n- tests for migration 111 and for removing the field from client responses;\n- the single CLI notice;\n- clippy, fmt, the full suites of every touched crate, and the full `mj` binary tests.\n\nThe earlier implementer also wrote an ExecPlan at `.agents/plans/1450-stored-answers.md`, as AGENTS.md requires for a change this size. I'll include it in the commit unless you'd rather not keep it.\n\nWhen the replacement reports, I'll review the result, commit it, and request review again before pushing."
+        },
+        {
+          "id": "agent:3949",
+          "role": "assistant",
+          "text": "The child was interrupted partway through validation. My memory index also now mentions a migration 112 that landed elsewhere, so this change's migration 111 may clash with upstream. I'll check the child's state and upstream's migrations."
+        },
+        {
+          "id": "agent:4009",
+          "role": "assistant",
+          "text": "Clippy and fmt pass. The library and CLI suite logs are empty, so the interruption stopped those runs before they finished. Checking which of the required tests are in the tree:"
+        },
+        {
+          "id": "agent:4047",
+          "role": "assistant",
+          "text": "The comment explaining the notice was dropped. I'll restore it, then commit."
+        },
+        {
+          "id": "agent:4101",
+          "role": "assistant",
+          "text": "The child's migration test (around line 4291) still uses 110/111, and other tests may also pin the latest revision. I'll compare with upstream to see which lines are ours."
+        },
+        {
+          "id": "agent:4140",
+          "role": "assistant",
+          "text": "The remaining 111/112 references are upstream's own migration tests. I'll run the schema tests to check them against the new revision 113."
+        },
+        {
+          "id": "agent:4166",
+          "role": "assistant",
+          "text": "Upstream's title-repair test pins the newest revision after a full migration (`revision 112`, minimum 111). After a full migration it should match the current constants, so I'll use those."
+        },
+        {
+          "id": "agent:4217",
+          "role": "assistant",
+          "text": "This golden diff is about quota-check help text, which this change never touches. I'll check whether `origin/master` itself disagrees with the golden file."
+        },
+        {
+          "id": "agent:4264",
+          "role": "assistant",
+          "text": "Everything passes except the upstream golden mismatch. I'll update the ExecPlan for the renumbered migration and the finished progress, then commit the merge."
+        },
+        {
+          "id": "agent:4289",
+          "role": "assistant",
+          "text": "Option A is committed and merged with upstream, and its checks pass apart from one failure that is already on `origin/master`. Nothing is pushed yet: I've requested review of everything from `b977694d2` to `7a13108b9` (43 files).\n\n**What happened since the last update.** The replacement implementer was interrupted while its test suites were still running. By then the code and both regression tests were done. I committed its work as `c527fe4c8` and merged `origin/master` as `7a13108b9`. I ran the checks myself after the merge, on the combined result.\n\n**Merge change.** Upstream had already used schema revisions 111 (Oracle) and 112 (session titles), so this change's migration is now 113. It is still breaking, and it raises the minimum compatible revision to 113. One upstream test (the session-title repair test) checked for revision 112 after a full migration; it now checks against the current schema constants instead.\n\n**Checks after the merge:**\n- clippy (whole workspace) and fmt are clean.\n- These test suites pass:\n\n| Tests | Passed |\n|---|---|\n| mj-core | 594 |\n| mj-transcript | 94 |\n| mj-client | 52 |\n| mj-tui | 581 |\n| mj-worker | 753 |\n| `mj` binary | 242 |\n| mj-controller | 2357 of 2358 |\n\n**The one failure is already on `origin/master`.** `settings_routes_hide_literal_secrets_and_save_through_the_shared_model` fails because the source has new help text for quota checks (`mj-client/src/settings/schema.rs:973`) but the stored expected output `mj-controller/tests/golden/viewer-settings-exchange.txt` still has the old text. That came from someone else's recent quota-check commits. I left their golden file alone rather than regenerate it inside this change.\n\n**Where the design ended up.** The projection stores `answered_through` on every turn outcome. That is the latest prompt answered so far, leaving out prompts that are still queued or still running. Readers ask one question of one outcome: `answers(ordinal)`. Nothing reads the queue or the active turn to decide this, so the last two review findings cannot happen. It also fixes an older bug: a wait for a running prompt no longer ends when a different, queued prompt is rejected.\n\nThe previous implementer wrote an ExecPlan at `.agents/plans/1450-stored-answers.md`. It is included in the commits; say if you'd rather drop it.\n\nI'm waiting for the review result."
+        },
+        {
+          "id": "agent:4453",
+          "role": "assistant",
+          "text": "I'll check the finding against the steering projection and the new helper."
+        },
+        {
+          "id": "agent:4508",
+          "role": "assistant",
+          "text": "That test only checks readers against an outcome built by hand. The defect is in the projection, so I'll extend the projection's steering test instead."
+        },
+        {
+          "id": "agent:4530",
+          "role": "assistant",
+          "text": "Now the fix and the test."
+        },
+        {
+          "id": "agent:4539",
+          "role": "assistant",
+          "text": "Passing. I'll confirm the new assertions fail on the previous helper by running them against the old version of `observation.rs`:"
+        },
+        {
+          "id": "agent:4616",
+          "role": "assistant",
+          "text": "The steering finding was real. I fixed it in `f106e9cb9` and requested review again. Nothing is pushed yet.\n\n**The bug.** When a prompt is steered into a running turn, the projection replaces that turn's `accepted_ordinal` with the steered prompt's number. Suppose another queued prompt is rejected while that turn is still running. The new rule then capped the answer just below the steered prompt. That made the original prompt, which was still running, count as answered.\n\n**The fix.** I changed only the helper that records the answer (`answered_through` in `mj-transcript/src/projection/observation.rs`):\n- **An outcome recorded while another turn runs adds nothing.** That turn's own prompt is still owed, and every earlier prompt was settled before it started. The helper no longer reads the running turn's number, so steering cannot affect the answer. The cost: a prompt removed earlier may count as answered one outcome later, when the running turn ends. It never makes running work look answered.\n- **The answer is always recorded, with 0 meaning none.** Otherwise a reader would fall back to the outcome's own acceptance number, which would bring back the same mistake.\n\n**Test.** I extended the existing steering projection test. A queued prompt is now rejected while the steered turn runs, and the test checks that this answers only that prompt. It fails at that check against the previous helper and passes now.\n\n**Checks:**\n- fmt, clippy for mj-transcript, and the mj-transcript suite (94 tests) all pass.\n- mj-controller: 2355 of 2358 pass.\n  - Two tests failed in the full run and pass alone: one copies large files with rsync, the other tests startup retries. Neither touches this code, so they are likely failures under load.\n  - The third is the settings golden mismatch that is already on `origin/master`.\n\nI'm waiting for the review result."
+        },
+        {
+          "id": "agent:4727",
+          "role": "assistant",
+          "text": "All three findings hold. Two are a new kind of problem, so before patching again I'll explain them, as my notes say to after two review rounds in a row hit state I added.\n\n**Finding 2 is a plain bug, and I'll fix it either way.** `queued_prompts` also holds queued configuration changes (`SetConfig`; entries carry a `kind`, `mj-core/src/state.rs:168`). The helper treats those as owed prompts. Configuration changes produce no turn outcome, so a wait for a removed prompt can stay open after the session goes idle. The fix is to count only prompt entries.\n\n**Findings 1 and 3 come from the design itself.** `answered_through` is one number meaning \"everything up to here is settled\". Prompts can be settled out of order. For example, a queued prompt C is rejected while A is still running, or while B is still queued ahead of C. C's own outcome answers C, but the next outcome replaces it, and one number cannot record that C was settled ahead of A or B. A wait for C then stays open until the prompts ahead of it finish. It does not hang forever: once A and B end, the number covers C. But it can wait as long as an unrelated turn takes.\n\nFor comparison, before #1450 the rule was \"the latest outcome's prompt number ≥ target\". That answered such waits at once, but it could also wrongly report a prompt that was still running as answered. The new rule never reports running work as answered, but it can be late."
+        },
+        {
+          "id": "agent:4833",
+          "role": "assistant",
+          "text": "You didn't pick an option, so I'll do the part that is the same under both: the `SetConfig` fix. The out-of-order question stays open for you."
+        },
+        {
+          "id": "agent:4854",
+          "role": "assistant",
+          "text": "Mjolnir says you are away, so I'll finish the `SetConfig` fix now and ask the question again afterwards."
+        },
+        {
+          "id": "agent:4905",
+          "role": "assistant",
+          "text": "The suite passes. I'll confirm the extended test fails without the prompt-only filter:"
+        },
+        {
+          "id": "agent:4926",
+          "role": "assistant",
+          "text": "The configuration-change fix is committed as `52e35d5b8`. Now the question that needs your answer:"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "A",
+    "assistant_text_tail": "The configuration-change fix is committed as `52e35d5b8`. Now the question that needs your answer:",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      4727,
+      4926
+    ],
+    "user_position": 3227,
+    "mjolnir": "worker Jev still-open language classification",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "The cited user request remains open.",
+    "input_rationale": "The reply commits the SetConfig fix and then hands over the open design question (how to settle prompts rejected or removed out of order), which the agent had already said stays open for the user. The agent is holding the push on that answer.",
+    "label": "required_final",
+    "kind": "blocking_decision",
+    "request_message_ids": [
+      "agent:4727",
+      "agent:4926"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T17:29:59.681Z",
+        "kind": "user",
+        "text": "How should we handle prompts that are settled out of order (a queued prompt rejected or removed while an earlier prompt still runs or is queued)?  Out-of-order: whatever is simplest, this doesn't soun"
+      },
+      {
+        "at": "2026-11-06T17:30:23.097Z",
+        "kind": "agent",
+        "text": "I've requested another review at `52e35d5b8`. Nothing is pushed yet.  **Done this round:** - **Fixed: queued configuration changes held back answers.** The prompt queue also holds queued configuration"
+      },
+      {
+        "at": "2026-11-06T17:32:55.900Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Review of commits b977694..52e35d5 in /home/jonathan/Projects/mjolnir/.mj/clones/3f925dd01070e7c65db78498efcc554c found: Independent reviewer reports may overlap. Check each findin"
+      },
+      {
+        "at": "2026-11-06T17:32:55.902Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-06T17:33:19.075Z",
+        "kind": "system",
+        "text": "Before-push review override requested by the agent. Reason: The only finding (out-of-order rejections answered late) is the documented, intended limit of storing one answered number. The user decided "
+      },
+      {
+        "at": "2026-11-06T17:33:39.571Z",
+        "kind": "agent",
+        "text": "The merge is clean, and upstream is still at schema 112 and protocol 50. Upstream changed child-session code that sits next to this change, so I'll run a compile check of all targets before pushing."
+      }
+    ]
+  }
+}

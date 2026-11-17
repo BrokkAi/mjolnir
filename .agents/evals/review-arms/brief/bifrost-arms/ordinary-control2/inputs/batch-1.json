@@ -1,0 +1,62 @@
+[
+ {
+  "intro": "fdcd0552e9a57c8dfb91ab03b26d2d0ee08df36d",
+  "base": "e5bbcdb3f4fc9b98b595d2205354a54e0b40ebe6",
+  "findings": [
+   {
+    "id": "f-e661c0e4",
+    "text": "- [P2] Avoid cloning cached support completions before polling \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:14259: When an exhausted hierarchy support read reuses an identity with a large incomplete completion, the preceding `.cloned()` now copies the entire reasons box because the cache stores owned completions. Previously it cloned only an `Rc`. This source-sized allocation and copy happens before the polling loop, so cancellation can be delayed and repeated reads incur an extra full copy; access the cached reasons by index under polling instead."
+   },
+   {
+    "id": "f-4d9e10bd",
+    "text": "- [P2] Avoid cloning cached support completions before polling \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:14259 When a hierarchy support read repeats an identity whose incomplete completion has many reasons, the existing `.cloned()` now copies the entire reason box before the comparison loop can poll cancellation; previously it cloned only an `Rc`. This also allocates and copies the source-sized box on every replay, undermining the intended cancellation granularity and the repository's guidance to minimize cloning ([AGENTS.md:87](AGENTS.md#L87)). Revisit the cached reasons by identity under polling instead."
+   },
+   {
+    "id": "f-4f1e090f",
+    "text": "- [P2] Avoid cloning cached support completions during replay \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:14259-14259. When a hierarchy support read is replayed with a large incomplete completion, the preceding `.cloned()` now copies the entire reason array because the cache owns `ResolutionCompletion` directly. Previously it cloned only an `Rc`, so this introduces a source-sized allocation and unpolled copy before the explicitly polled comparison, delaying cancellation and increasing peak memory on precisely the large inputs this path handles."
+   },
+   {
+    "id": "f-4b1490c1",
+    "text": "- [P2] Avoid cloning cached support completions without polling \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:14253-14257. When a hierarchy support identity is encountered again with a large incomplete completion, `.cloned()` now copies its entire reason array before the cancellation ledger can be polled; previously this cloned only an `Rc`. This reintroduces an unbounded cancellation latency on replay, despite the subsequent comparison polling each reason. Read the cached reasons by index under short borrows instead."
+   },
+   {
+    "id": "f-28b3789e",
+    "text": "- [P2] Avoid cloning entire cached support completions on replay \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:4677. When a hierarchy support identity is read again with a large incomplete completion, `publish_hierarchy_support_completion` still calls `.cloned()` on the cache entry before its polling comparison. This change turns that formerly cheap handle clone into an unpolled allocation and copy of every reason, followed by another full traversal and drop. Large completions can therefore delay cancellation and add substantial repeated work on cached reads; compare the retained reasons by key under polling instead."
+   },
+   {
+    "id": "f-414c539a",
+    "text": "- [P2] Avoid cloning cached support completions before polling \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:4677: When an exhausted support identity is read again with a large incomplete completion, the existing `.cloned()` in `publish_hierarchy_support_completion` now copies the entire reason box because this map owns `ResolutionCompletion` directly; previously it only cloned an `Rc`. That copy happens before the per-reason cancellation polling and creates a second source-sized allocation, so repeated reads can incur substantial extra latency and memory and delay cancellation."
+   }
+  ]
+ },
+ {
+  "intro": "27a65d69912b50de7a83fba15ebc039e347f61b8",
+  "base": "5bf1f4c11b529c720f905344656f293adb917c64",
+  "findings": [
+   {
+    "id": "f-38cd971b",
+    "text": "- [P1] Preserve cross-file definition ordering in index verification \u2014 crates/bifrost-store/src/analyzer/store/mod.rs:13098-13103. When two matching definitions in different files have the same priority, inserting text above one can reverse their order because `definition_sort_key` compares absolute `first_start_byte` before the source path. This change ignores those offsets in both files' index digests, so the recorded index read verifies even though `definitions()` can now return a different first candidate, allowing a policy unit to reuse a stale resolution. Recording only per-file declaration order cannot detect this cross-file reorder."
+   },
+   {
+    "id": "f-f23fcff0",
+    "text": "- [P1] Preserve cross-file definition ordering in index invalidation crates/bifrost-store/src/analyzer/store/mod.rs:13099-13103\n  When two matching definitions are in different files, shifting one declaration can change their relative order even though each file's declaration order and semantic fields stay the same. `definition_sort_key` orders candidates by `first_start_byte` before the file tie-breaker, so dropping the range input makes the index digest unchanged while a fresh `definitions` lookup returns the candidates in the opposite order. A reused policy unit can therefore retain a result based on the wrong definition; the read key must capture the ordering actually exposed by the lookup, or the lookup ordering must be made position-independent."
+   },
+   {
+    "id": "f-fbe1260d",
+    "text": "- [P2] Record each dispatch observation's own quality and coverage \u2014 crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/source.rs:119-128. When a source range selects multiple calls with different dispatch qualities or coverage, each recorded question is hashed with the aggregate outcome and coverage, but verification replays each call individually and hashes its individual outcome. Consequently even an unchanged workspace cannot verify at least some of these reads, causing affected policy units to be recomputed on every incremental run."
+   },
+   {
+    "id": "f-e8bc830d",
+    "text": "- [P1] Invalidate persisted dispatch reads before changing their encoding \u2014 crates/bifrost-store/src/analyzer/store/read_keys.rs:361-367. When an existing workspace contains class-set procedure surfaces or summaries written by the previous version, their ProcedureDispatch rows store distinct start and end byte offsets. The new decoder rejects those rows as corrupt, but the class-set cache identities were not changed and those caches use this same decoder independently of the policy substrate epoch. Consequently ordinary cache lookups record query failures, and existing summary rows cannot be replaced because publication first tries to decode them. Version or migrate these persisted cache entries so an upgrade treats the old encoding as a cache miss."
+   },
+   {
+    "id": "f-a3120b46",
+    "text": "- [P2] Record each call's own dispatch quality for replay crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/source.rs:119-128. When a source range selects multiple calls with different dispatch coverage or outcome quality, each recorded call is hashed using the aggregate quality and coverage of the entire source projection. Replay hashes that call's individual outcome via `one_call_dispatch_answer_digest`, so at least the calls whose individual quality differs from the aggregate fail verification even when nothing changed. This prevents reuse for ranges containing, for example, both an exhaustive and an unresolved call."
+   },
+   {
+    "id": "f-19edb72e",
+    "text": "- [P1] Invalidate persisted class-set reads before changing their encoding \u2014 crates/bifrost-store/src/analyzer/store/read_keys.rs:361-369. When an existing workspace contains a persisted procedure-dispatch read, its start and end columns contain the old distinct byte offsets, so this new decoder rejects the row as corrupt. Class-set procedure surfaces and summaries also use this decoder, but their schema/cache identity is not bumped by the policy epoch change; loading such a surface records a query failure instead of treating it as a cache miss. Existing workspaces can therefore fail analysis after upgrading until their persisted cache is cleared."
+   }
+  ]
+ }
+]

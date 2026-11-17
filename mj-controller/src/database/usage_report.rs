@@ -1,11 +1,27 @@
 //! One consistent store snapshot of parent usage and retained descendants.
 use super::*;
 use mj_core::usage::{
-    ModelUsageEstimate, SessionUsageEstimate, SessionUsageQuery, SessionUsageReport, UnknownCost,
-    UsageScope, add_cost, descending_cost,
+    AgentUsageEstimate, ModelUsageEstimate, SessionUsageEstimate, SessionUsageQuery,
+    SessionUsageReport, UnknownCost, UsageAgentRole, UsageScope, add_cost, descending_cost,
 };
 
-use mj_core::usage::{model_catalog, pricing};
+use mj_core::usage::model_catalog;
+
+// Match the expressions indexed by migration 125. Read the selected time
+// window once, regardless of how many historical descendants its roots retain.
+const REPORT_TURNS_SQL: &str =
+    "SELECT u.session_id, u.body, s.model, s.effort, s.profile FROM session_turn_usage u
+    LEFT JOIN session_turn_selections s USING(session_id, command_id)
+    WHERE json_extract(u.body, '$.completed_at_ms') >= ?1
+    AND json_extract(u.body, '$.completed_at_ms') <= ?2
+    AND (?3 IS NULL OR s.profile=?3)";
+
+const REPORT_ACTIVE_SQL: &str = "SELECT m.session_id FROM materialized_sessions m
+    LEFT JOIN session_turn_selections s ON s.session_id=m.session_id
+        AND s.command_id=json_extract(m.active_turn_json, '$.command_id')
+    WHERE m.active_turn_json IS NOT NULL
+    AND json_extract(m.active_turn_json, '$.started_at_ms') <= ?1
+    AND (?2 IS NULL OR s.profile=?2)";
 
 /// `models` is each profile's newest advertised model list, used to price
 /// model aliases.
@@ -45,16 +61,23 @@ fn load_with(
         until_ms: now_ms,
         ..Default::default()
     };
-    let mut roots = tx.prepare("SELECT session_id, COALESCE(session_title_override, acp_session_title, title), last_profile, state
+    let mut roots = tx.prepare("SELECT session_id, title, session_title_override, acp_session_title, last_profile, state
         FROM sessions s WHERE NOT EXISTS(SELECT 1 FROM subagent_accounting a WHERE a.child_session_id=s.session_id) ORDER BY session_id")?;
     let roots = roots
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
+            let id = row.get::<_, String>(0)?;
+            let title = row.get::<_, String>(1)?;
+            let title_override = row.get::<_, Option<String>>(2)?;
+            let acp_title = row.get::<_, Option<String>>(3)?;
+            // Named as the session list names it.
+            let name = mj_core::state::listed_session_title(
+                &id,
+                &title,
+                title_override.as_deref(),
+                acp_title.as_deref(),
+            )
+            .to_owned();
+            Ok((id, name, row.get::<_, String>(4)?, row.get::<_, String>(5)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut profiles = roots
@@ -69,6 +92,16 @@ fn load_with(
     }
     report.profiles = profiles.into_iter().collect();
     let wanted = query.profile.as_deref();
+    struct ReportEntry {
+        estimate: SessionUsageEstimate,
+        models: BTreeMap<Option<String>, ModelUsageEstimate>,
+    }
+    let mut entries = Vec::new();
+    // One owner per retained member, decided from the same snapshot as usage.
+    let mut owners = BTreeMap::new();
+    let mut tree = tx.prepare("WITH RECURSIVE tree(id) AS (
+        SELECT ?1 UNION SELECT a.child_session_id FROM subagent_accounting a JOIN tree t ON a.parent_session_id=t.id)
+        SELECT id FROM tree")?;
     for (session_id, title, profile, state) in roots {
         let suspended = !SessionState::from_stored(&state)
             .context("unknown usage session state")?
@@ -76,96 +109,118 @@ fn load_with(
         if suspended && !query.include_suspended {
             continue;
         }
-        let mut tree = tx.prepare("WITH RECURSIVE tree(id) AS (
-            SELECT ?1 UNION SELECT a.child_session_id FROM subagent_accounting a JOIN tree t ON a.parent_session_id=t.id)
-            SELECT id FROM tree ORDER BY id")?;
         let members = tree
             .query_map([&session_id], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut estimate = SessionUsageEstimate {
-            session_id,
-            title,
-            profile,
-            suspended,
-            subagent_count: members.len().saturating_sub(1),
-            ..Default::default()
+        let subagent_count = members.len().saturating_sub(1);
+        let index = entries.len();
+        owners.extend(members.into_iter().map(|member| (member, index)));
+        entries.push(ReportEntry {
+            estimate: SessionUsageEstimate {
+                session_id,
+                title,
+                profile,
+                suspended,
+                subagent_count,
+                ..Default::default()
+            },
+            models: BTreeMap::new(),
+        });
+    }
+    let mut role_groups = BTreeMap::from([
+        (UsageAgentRole::Primary, BTreeMap::new()),
+        (UsageAgentRole::Subagent, BTreeMap::new()),
+        (UsageAgentRole::Reviewer, BTreeMap::new()),
+    ]);
+    let mut roles = BTreeMap::new();
+    let mut kinds = tx.prepare("SELECT kind FROM subagent_accounting WHERE child_session_id=?1")?;
+    let mut turns = tx.prepare(REPORT_TURNS_SQL)?;
+    let rows = turns.query_map(params![since_ms, now_ms, wanted], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            UsageSelection {
+                model: row.get(2)?,
+                effort: row.get(3)?,
+            },
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (member, body, selection, turn_profile) = row?;
+        let Some(&index) = owners.get(&member) else {
+            continue;
         };
-        let mut groups: BTreeMap<Option<String>, ModelUsageEstimate> = BTreeMap::new();
-        for member in members {
-            let mut turns = tx.prepare(
-                "SELECT u.body, s.model, s.effort, s.profile FROM session_turn_usage u
-                LEFT JOIN session_turn_selections s USING(session_id, command_id)
-                WHERE u.session_id=?1 AND json_extract(u.body, '$.completed_at_ms') >= ?2
-                AND json_extract(u.body, '$.completed_at_ms') <= ?3
-                AND (?4 IS NULL OR s.profile=?4) ORDER BY u.completed_ordinal",
-            )?;
-            let rows = turns.query_map(params![member, since_ms, now_ms, wanted], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    UsageSelection {
-                        model: row.get(1)?,
-                        effort: row.get(2)?,
-                    },
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (body, selection, turn_profile) = row?;
-                let turn = deserialize_turn_outcome(&body)?;
-                estimate.coverage.recorded_turns += 1;
-                match turn.usage {
-                    Some(usage) if usage.scope == UsageScope::Turn => {
-                        estimate.coverage.full_turn_reports += 1;
-                        let mut attributed = BTreeMap::new();
-                        super::usage::attribute(&usage, selection, &mut attributed)?;
-                        for (mut selection, totals) in attributed {
-                            selection.model = selection
-                                .model
-                                .map(|model| catalogs.priced_model(turn_profile.as_deref(), model));
-                            // An unattributed cache counter is unknown, not zero.
-                            // Pricing the input as uncached would overstate its cost.
-                            let caches_known = (usage.cached_read_tokens.is_none()
-                                || totals.contains_key("cached_read_tokens"))
-                                && (usage.cached_write_tokens.is_none()
-                                    || totals.contains_key("cached_write_tokens"));
-                            let cost = if caches_known {
-                                pricing::estimate(selection.model.as_deref(), &totals)?
-                            } else {
-                                None
-                            };
-                            let group =
-                                groups.entry(selection.model.clone()).or_insert_with(|| {
-                                    ModelUsageEstimate {
-                                        model: selection.model,
-                                        ..Default::default()
-                                    }
-                                });
-                            group.cost_usd_ticks =
-                                add_cost(group.cost_usd_ticks, cost.ok_or(UnknownCost))
-                                    .context("model cost overflow")?;
-                            super::usage::merge_totals(&mut group.totals, &totals)?;
-                        }
+        let entry = &mut entries[index];
+        let turn = deserialize_turn_outcome(&body)?;
+        entry.estimate.coverage.recorded_turns += 1;
+        match turn.usage {
+            Some(usage) if usage.scope == UsageScope::Turn => {
+                entry.estimate.coverage.full_turn_reports += 1;
+                // Launch records can contain large prompts. Only contributing
+                // members need their role, and each is read once.
+                let role = match roles.get(&member) {
+                    Some(&role) => role,
+                    None => {
+                        let role = if member == entry.estimate.session_id {
+                            UsageAgentRole::Primary
+                        } else {
+                            let kind = kinds
+                                .query_row([&member], |row| row.get::<_, Option<String>>(0))?;
+                            match kind.as_deref() {
+                                Some("worker" | "oracle") => UsageAgentRole::Subagent,
+                                Some("reviewer") => UsageAgentRole::Reviewer,
+                                None => UsageAgentRole::UnclassifiedSubagent,
+                                Some(kind) => {
+                                    bail!("unknown usage agent kind {kind:?} for {member}")
+                                }
+                            }
+                        };
+                        roles.insert(member, role);
+                        role
                     }
-                    Some(usage) if usage.scope == UsageScope::LastRequest => {
-                        estimate.coverage.last_request_reports += 1
+                };
+                let mut attributed = BTreeMap::new();
+                super::usage::attribute(&usage, selection, &mut attributed)?;
+                for (mut selection, totals) in attributed {
+                    selection.model = selection
+                        .model
+                        .map(|model| catalogs.priced_model(turn_profile.as_deref(), model));
+                    let cost = super::usage::estimate_model_cost(
+                        &usage,
+                        selection.model.as_deref(),
+                        &totals,
+                    )?;
+                    for groups in [&mut entry.models, role_groups.entry(role).or_default()] {
+                        let group = groups.entry(selection.model.clone()).or_insert_with(|| {
+                            ModelUsageEstimate {
+                                model: selection.model.clone(),
+                                ..Default::default()
+                            }
+                        });
+                        group.cost_usd_ticks =
+                            add_cost(group.cost_usd_ticks, cost.ok_or(UnknownCost))
+                                .context("model cost overflow")?;
+                        super::usage::merge_totals(&mut group.totals, &totals)?;
                     }
-                    Some(_) => estimate.coverage.unspecified_reports += 1,
-                    None => estimate.coverage.missing_reports += 1,
                 }
             }
-            // A turn already running at the start of the window can still consume in it.
-            let unfinished: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM materialized_sessions m
-                LEFT JOIN session_turn_selections s ON s.session_id=m.session_id
-                    AND s.command_id=json_extract(m.active_turn_json, '$.command_id')
-                WHERE m.session_id=?1 AND m.active_turn_json IS NOT NULL
-                AND json_extract(m.active_turn_json, '$.started_at_ms') <= ?2
-                AND (?3 IS NULL OR s.profile=?3))",
-                params![member, now_ms, wanted],
-                |row| row.get(0),
-            )?;
-            estimate.coverage.unfinished_turns += u64::from(unfinished);
+            Some(usage) if usage.scope == UsageScope::LastRequest => {
+                entry.estimate.coverage.last_request_reports += 1
+            }
+            Some(_) => entry.estimate.coverage.unspecified_reports += 1,
+            None => entry.estimate.coverage.missing_reports += 1,
         }
+    }
+    // A turn already running at the start of the window can still consume in it.
+    let mut active = tx.prepare(REPORT_ACTIVE_SQL)?;
+    for member in active.query_map(params![now_ms, wanted], |row| row.get::<_, String>(0))? {
+        if let Some(&index) = owners.get(&member?) {
+            entries[index].estimate.coverage.unfinished_turns += 1;
+        }
+    }
+    for entry in entries {
+        let mut estimate = entry.estimate;
         // A profile selects its own parents and any parent whose tree ran a
         // turn on it in the period; only that profile's turns are counted.
         if wanted.is_some_and(|wanted| wanted != estimate.profile)
@@ -174,7 +229,7 @@ fn load_with(
         {
             continue;
         }
-        estimate.models = groups.into_values().collect();
+        estimate.models = entry.models.into_values().collect();
         estimate.models.sort_by(|a, b| {
             descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
                 .then_with(|| a.model.cmp(&b.model))
@@ -192,6 +247,22 @@ fn load_with(
         descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
+    for (role, groups) in role_groups {
+        let mut models: Vec<_> = groups.into_values().collect();
+        models.sort_by(|a, b| {
+            descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        let cost_usd_ticks = models
+            .iter()
+            .try_fold(Ok(0), |total, model| add_cost(total, model.cost_usd_ticks))
+            .context("agent role cost overflow")?;
+        report.agent_usage.push(AgentUsageEstimate {
+            role,
+            models,
+            cost_usd_ticks,
+        });
+    }
     Ok(report)
 }
 
@@ -200,6 +271,194 @@ mod tests {
     use super::*;
     use mj_core::usage::UsagePeriod;
 
+    // Hard-won: 1f8ff4afc: an hourly read scanned every historical turn body.
+    #[test]
+    fn usage_report_time_index_migration_keeps_old_writes_and_skips_history() -> Result<()> {
+        use rusqlite::StatementStatus;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage-index.sqlite");
+        save_session_to(&path, &super::super::tests::session("root", "project"))?;
+        let connection = open(&path)?;
+        // Reconstruct the previous revision, with a turn written before the index.
+        super::super::legacy_schema::ensure_session_container_override_columns(&connection)?;
+        connection.execute_batch(
+            "DROP INDEX session_turn_usage_completed_time;
+             DROP INDEX materialized_sessions_active_usage;
+             DELETE FROM schema_migrations WHERE version>=125;
+             UPDATE schema_compatibility SET minimum_compatible_version=124;
+             PRAGMA user_version=124;",
+        )?;
+        let mut turn = super::super::turn_outcome::tests::legacy_turns().remove(0);
+        turn.command_id = "recent".into();
+        turn.completed_at_ms = 1_000;
+        let body = serialize_turn_outcome(&turn)?;
+        connection.execute(
+            "INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body)
+             VALUES ('root','recent',1,?1)",
+            [&body],
+        )?;
+        schema::migrate_schema(&connection)?;
+        schema::read_schema_state(&connection)?
+            .ensure_supported_by(super::super::SCHEMA_VERSION)?;
+
+        let read = || -> Result<(Vec<String>, i32)> {
+            let mut statement = connection.prepare(REPORT_TURNS_SQL)?;
+            let bodies = statement
+                .query_map(params![1_000, 2_000, Option::<String>::None], |row| {
+                    row.get::<_, String>(1)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((bodies, statement.get_status(StatementStatus::VmStep)))
+        };
+        let (before, steps_before) = read()?;
+        assert_eq!(before.as_slice(), std::slice::from_ref(&body));
+        let read_active = || -> Result<(Vec<String>, i32)> {
+            let mut statement = connection.prepare(REPORT_ACTIVE_SQL)?;
+            let members = statement
+                .query_map(params![2_000, Option::<String>::None], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((members, statement.get_status(StatementStatus::VmStep)))
+        };
+        let active_before = read_active()?;
+        // Previous writers still use the same columns. SQLite maintains the
+        // expression index for their inserts and updates without a new writer.
+        connection.execute(
+            "WITH RECURSIVE history(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM history WHERE n<4096)
+             INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body)
+             SELECT 'root','old-' || n,n+1,json_set(?1,'$.completed_at_ms',0) FROM history",
+            [&body],
+        )?;
+        let (after, steps_after) = read()?;
+        assert_eq!(after, before);
+        assert_eq!(
+            steps_after, steps_before,
+            "hourly query work grew with old turns"
+        );
+        connection.execute_batch(
+            "CREATE TEMP TABLE idle_members AS
+                 WITH RECURSIVE history(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM history WHERE n<4096)
+                 SELECT 'idle-' || n AS id FROM history;
+             INSERT INTO session_contexts(session_id,bundle_id,created_at)
+                 SELECT id,'project','now' FROM idle_members;
+             INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
+                 SELECT id,id,'codex','codex','local','stopped','now' FROM idle_members;
+             INSERT INTO materialized_sessions(session_id) SELECT id FROM idle_members;",
+        )?;
+        assert_eq!(
+            read_active()?,
+            active_before,
+            "active-turn query work grew with inactive sessions"
+        );
+        connection.execute(
+            "UPDATE session_turn_usage SET body=json_set(body,'$.completed_at_ms',1500)
+             WHERE session_id='root' AND command_id='old-1'",
+            [],
+        )?;
+        assert_eq!(read()?.0.len(), 2);
+        connection.execute(
+            "UPDATE materialized_sessions SET active_turn_json=
+                 json_object('command_id','recent','started_at_ms',1500)
+             WHERE session_id='root'",
+            [],
+        )?;
+        assert_eq!(read_active()?.0, ["root"]);
+        Ok(())
+    }
+
+    // Hard-won: #1559: the accounting schema lost reviewer kinds on destruction.
+    #[test]
+    fn usage_kind_migration_backfills_live_children_and_preserves_legacy_writes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage-kind.sqlite");
+        for id in [
+            "root",
+            "reviewer",
+            "worker",
+            "oracle",
+            "destroyed",
+            "legacy",
+        ] {
+            save_session_to(&path, &super::super::tests::session(id, "project"))?;
+        }
+        let connection = open(&path)?;
+        connection.execute_batch(
+            "DROP TRIGGER subagent_accounting_kind_insert;
+             DROP TRIGGER subagent_accounting_kind_update;
+             ALTER TABLE subagent_accounting DROP COLUMN kind;
+             DELETE FROM schema_migrations WHERE version>134;
+             UPDATE schema_compatibility SET minimum_compatible_version=132 WHERE singleton=1;
+             PRAGMA user_version=134;
+             CREATE TRIGGER stop_before_brief_fence BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version=136 BEGIN SELECT RAISE(ABORT,'fixture boundary before brief fence'); END;
+             INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
+                 VALUES ('reviewer','root','review'),('worker','root','work'),
+                     ('oracle','root','consult'),('destroyed','root','old');
+             INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)
+                 VALUES ('reviewer','root','review','{\"kind\":\"reviewer\"}'),
+                     ('worker','root','work','{}'),
+                     ('oracle','root','consult','{\"kind\":\"oracle\"}');",
+        )?;
+        let floor = schema::read_schema_state(&connection)?.minimum_compatible;
+        // Test revision 135's compatibility before the separate brief fence.
+        let error = schema::migrate_schema(&connection).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fixture boundary before brief fence"),
+            "{error:#}"
+        );
+        connection.execute_batch("ROLLBACK;")?;
+        let at_135 = schema::read_schema_state(&connection)?;
+        assert_eq!(at_135.revision, 135);
+        assert_eq!(at_135.minimum_compatible, floor);
+        at_135.ensure_supported_by(134)?;
+        // An old daemon's conflict path must not erase the new accounting fact.
+        connection.execute_batch(
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
+                 VALUES ('reviewer','root','review') ON CONFLICT(child_session_id) DO NOTHING;
+             INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
+                 VALUES ('legacy','root','legacy');
+             INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)
+                 VALUES ('legacy','root','legacy','{\"kind\":\"reviewer\"}');
+             UPDATE subagent_sessions
+                 SET record_json=json_set(record_json, '$.noticed_turn', 3)
+                 WHERE child_session_id='reviewer';",
+        )?;
+        connection.execute_batch("DROP TRIGGER stop_before_brief_fence;")?;
+        drop(connection);
+        delete_session_from(&path, "reviewer")?;
+        delete_session_from(&path, "legacy")?;
+        let connection = open(&path)?;
+        let latest = schema::read_schema_state(&connection)?;
+        assert_eq!(latest.revision, super::super::SCHEMA_VERSION);
+        assert_eq!(
+            latest.minimum_compatible,
+            Some(schema::MINIMUM_COMPATIBLE_VERSION)
+        );
+        assert!(latest.ensure_supported_by(135).is_err());
+        let retained: Vec<(String, Option<String>)> = connection
+            .prepare(
+                "SELECT child_session_id,kind FROM subagent_accounting ORDER BY child_session_id",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(
+            retained,
+            vec![
+                ("destroyed".into(), None),
+                ("legacy".into(), Some("reviewer".into())),
+                ("oracle".into(), Some("oracle".into())),
+                ("reviewer".into(), Some("reviewer".into())),
+                ("worker".into(), Some("worker".into())),
+            ]
+        );
+        Ok(())
+    }
+
+    // Hard-won: #1559: destroying reviewers erased their cost classification.
     // Store/schema integration: retained descendants, inclusive time boundaries,
     // model switches and incomplete reports must agree with the report reader.
     #[test]
@@ -225,7 +484,38 @@ mod tests {
         }
         save_state_to(&path, &state)?;
         let connection = open(&path)?;
-        connection.execute_batch("INSERT INTO subagent_accounting VALUES ('child','root','child'),('grandchild','child','grandchild')")?;
+        connection.execute_batch("INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name) VALUES ('child','root','child'),('grandchild','child','grandchild')")?;
+        for (child, parent, kind) in [
+            ("child", "root", mj_core::subagent::SubagentKind::Worker),
+            (
+                "grandchild",
+                "child",
+                mj_core::subagent::SubagentKind::Reviewer,
+            ),
+        ] {
+            let record = mj_core::subagent::SubagentRecord {
+                kind,
+                reviewer_launch: None,
+                child_session_id: child.into(),
+                parent_session_id: parent.into(),
+                task_name: child.into(),
+                profile_id: state.sessions[child].last_profile.clone(),
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                initial_prompt: "Inspect usage".into(),
+                request_key: child.into(),
+                created_at: state.sessions[child].created_at.clone(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            };
+            connection.execute(
+                "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)
+                 VALUES (?1,?2,?3,?4)",
+                params![child, parent, kind.request_key(child), serde_json::to_string(&record)?],
+            )?;
+        }
         let insert = |session: &str,
                       seq: u64,
                       timestamp: i64,
@@ -322,6 +612,56 @@ mod tests {
             1
         );
         drop(connection);
+        let role_cost = |report: &SessionUsageReport, role| {
+            report
+                .agent_usage
+                .iter()
+                .find(|a| a.role == role)
+                .unwrap()
+                .cost_usd_ticks
+        };
+        let before_destroy = load_from(&path, &SessionUsageQuery::default(), now)?;
+        assert_eq!(
+            role_cost(&before_destroy, UsageAgentRole::Primary),
+            Ok(1_050_000_000)
+        );
+        assert_eq!(
+            role_cost(&before_destroy, UsageAgentRole::Subagent),
+            Ok(71_000_000_000)
+        );
+        assert_eq!(
+            role_cost(&before_destroy, UsageAgentRole::Reviewer),
+            Err(UnknownCost)
+        );
+        // Park/Close keep child records and their kind, even though the child
+        // itself is no longer active. Only the root controls this report filter.
+        let connection = open(&path)?;
+        connection.execute(
+            "UPDATE sessions SET state='stopped' WHERE session_id IN ('child','grandchild')",
+            [],
+        )?;
+        drop(connection);
+        assert_eq!(
+            load_from(&path, &SessionUsageQuery::default(), now)?.agent_usage,
+            before_destroy.agent_usage
+        );
+        let filtered = load_from(
+            &path,
+            &SessionUsageQuery {
+                profile: Some("codex2".into()),
+                ..Default::default()
+            },
+            now,
+        )?;
+        assert_eq!(role_cost(&filtered, UsageAgentRole::Primary), Ok(0));
+        assert_eq!(
+            role_cost(&filtered, UsageAgentRole::Subagent),
+            Ok(71_000_000_000)
+        );
+        assert_eq!(
+            role_cost(&filtered, UsageAgentRole::Reviewer),
+            Err(UnknownCost)
+        );
         delete_session_from(&path, "grandchild")?;
         delete_session_from(&path, "child")?;
 
@@ -357,6 +697,11 @@ mod tests {
         assert_eq!(root.coverage.unfinished_turns, 1);
         assert_eq!(hourly.profiles, ["claude", "codex", "codex2"]);
         assert_eq!(hourly.cost_usd_ticks, Err(UnknownCost));
+        assert_eq!(
+            role_cost(&hourly, UsageAgentRole::Primary),
+            Ok(1_050_000_000)
+        );
+        assert_eq!(hourly.agent_usage, before_destroy.agent_usage);
 
         // A profile counts the turns recorded on it anywhere in the tree, by
         // the profile at turn start, after the children are destroyed.
@@ -444,6 +789,23 @@ mod tests {
             on("codex-two", UsagePeriod::Hourly)?.sessions,
             codex2.sessions
         );
+        // A child destroyed before kind retention cannot be classified from
+        // its task name. Keep its usage without guessing that it was a worker.
+        open(&path)?.execute(
+            "UPDATE subagent_accounting SET kind=NULL WHERE child_session_id='grandchild'",
+            [],
+        )?;
+        let historical = load_from(&path, &SessionUsageQuery::default(), now)?;
+        let mut unclassified = before_destroy
+            .agent_usage
+            .iter()
+            .find(|group| group.role == UsageAgentRole::Reviewer)
+            .unwrap()
+            .clone();
+        unclassified.role = UsageAgentRole::UnclassifiedSubagent;
+        assert!(historical.agent_usage.contains(&unclassified));
+        assert_eq!(role_cost(&historical, UsageAgentRole::Reviewer), Ok(0));
+        assert_eq!(historical.sessions, hourly.sessions);
         Ok(())
     }
 

@@ -20,11 +20,140 @@ use super::super::{
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
 
+// Hard-won: 3c523cbdd: CLI callers could not retrieve cleanup warnings after Destroy removed the record.
+#[tokio::test]
+async fn cleanup_notices_are_authenticated_and_readable_after_session_removal() {
+    let (app, _actions, _snapshots, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions = Default::default();
+            snapshot.notices = vec![
+                mj_client::daemon::RuntimeNotice {
+                    id: 1,
+                    session_id: "removed".into(),
+                    text: "Cleanup failed; resources may remain.".into(),
+                },
+                mj_client::daemon::RuntimeNotice {
+                    id: 2,
+                    session_id: "other".into(),
+                    text: "Another session's notice".into(),
+                },
+            ];
+        });
+    let path = "/api/v1/sessions/removed/notices";
+    let denied = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let response = app
+        .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let notices: Vec<mj_client::daemon::RuntimeNotice> =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].session_id, "removed");
+    assert_eq!(notices[0].text, "Cleanup failed; resources may remain.");
+}
+
+// The API, CLI, and doctor must agree on the profile failure without fetching
+// the complete runtime projection or inspecting credential files themselves.
+#[tokio::test]
+async fn refused_profile_login_errors_are_authenticated_and_projected_into_sessions() {
+    let failure = mj_client::quota::refused_login_message("claude");
+    let (app, _actions, _snapshots, _bundles) = api_app(
+        Arc::new(FakeBackend {
+            login_errors: [("claude".into(), failure.clone())].into(),
+            ..Default::default()
+        }),
+        |snapshot| {
+            let ids = snapshot.sessions.0.keys().cloned().collect::<Vec<_>>();
+            for id in ids {
+                snapshot.sessions.0.get_mut(&id).unwrap().profile_id = "claude".into();
+            }
+        },
+    );
+    let path = "/api/v1/profiles/login-errors";
+    let denied = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    for path in [path, "/api/v1/sessions", "/api/v1/sessions/session-1"] {
+        let response = app
+            .clone()
+            .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let value: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        if path.ends_with("login-errors") {
+            assert_eq!(value["claude"], failure);
+        } else if let Some(sessions) = value["sessions"].as_array() {
+            assert!(!sessions.is_empty());
+            assert!(
+                sessions
+                    .iter()
+                    .all(|session| session["profile_login_error"] == failure)
+            );
+        } else {
+            assert_eq!(value["profile_login_error"], failure);
+        }
+    }
+}
+
+// A disabled profile is not in the served list, but `with_disabled` still
+// discovers it: the read answers what the harness advertises.
+#[tokio::test]
+async fn profile_config_with_disabled_discovers_profiles_the_snapshot_omits() {
+    let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let path = "/api/v1/profiles/retired/config";
+    let refused = app
+        .clone()
+        .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let answered = app
+        .oneshot(
+            bearer(Request::get(format!("{path}?with_disabled=true")))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&answered.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["model"], "kimi-code/k3");
+}
+
 // HTTP contract integration: optional All and encoded profile names must reach
 // the same store query, with authentication and no caching on the report.
 #[tokio::test]
 async fn usage_report_http_contract_preserves_filters_and_requires_authentication() {
-    let backend = Arc::new(FakeBackend::default());
+    let expected = mj_core::usage::SessionUsageReport {
+        agent_usage: vec![mj_core::usage::AgentUsageEstimate {
+            role: mj_core::usage::UsageAgentRole::Primary,
+            models: vec![mj_core::usage::ModelUsageEstimate {
+                model: Some("gpt-6.1-terra".into()),
+                cost_usd_ticks: Ok(10_000_000_000),
+                ..Default::default()
+            }],
+            cost_usd_ticks: Ok(10_000_000_000),
+        }],
+        cost_usd_ticks: Ok(10_000_000_000),
+        ..Default::default()
+    };
+    let backend = Arc::new(FakeBackend {
+        usage_result: expected.clone(),
+        ..Default::default()
+    });
     let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
     let denied = app
         .clone()
@@ -50,7 +179,13 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
         assert_eq!(response.headers()["cache-control"], "no-store");
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let report: mj_core::usage::SessionUsageReport = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(report, mj_core::usage::SessionUsageReport::default());
+        assert_eq!(report, expected);
+        // Responses from older daemons lack the additive role summary.
+        let mut legacy = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        legacy.as_object_mut().unwrap().remove("agent_usage");
+        let legacy: mj_core::usage::SessionUsageReport = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.agent_usage.is_empty());
+        assert_eq!(legacy.cost_usd_ticks, report.cost_usd_ticks);
     }
     assert_eq!(
         *backend.usage_queries.lock().unwrap(),
@@ -186,6 +321,148 @@ async fn authenticated_message_route_passes_sender_and_target_to_daemon_operatio
     assert_eq!(requests[0].text, "check the final patch");
     assert_eq!(requests[0].request_id, "request-1");
     assert!(requests[0].created_at_ms > 0);
+}
+
+/// The body limit stands in front of the prompt validator, so it must admit
+/// every prompt the worker's relay can take, however a client escapes it, and
+/// a body it refuses must say how much would have fit. `mj message` reaches
+/// this route.
+// Hard-won: #1556: a prompt the worker could take was refused as an unexplained 413
+#[tokio::test]
+async fn every_prompt_the_relay_takes_reaches_the_validator_and_refusals_name_their_limits() {
+    use super::super::{MAX_BODY_BYTES, MAX_PROMPT_TEXT_BODY_BYTES};
+    use mj_core::relay::RELAY_COMMAND_BYTE_BUDGET;
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["high"])),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+    });
+    let send = |body: String| {
+        bearer(Request::post("/api/v1/sessions/session-1/message"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let json = |request_id: &str, text: &str| {
+        serde_json::json!({"request_id": request_id, "text": text}).to_string()
+    };
+    // What a prompt of `count` copies of `unit` costs as the worker's command.
+    let command_bytes = |unit: &str, count: usize| {
+        let command = mj_core::relay::RelayCommand::Prompt {
+            prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+                agent_client_protocol::v1::schema::TextContent::new(unit.repeat(count)),
+            )],
+        };
+        serde_json::to_vec(&command).unwrap().len()
+    };
+    let largest = |unit: &str| {
+        let envelope = command_bytes(unit, 0);
+        let each = command_bytes(unit, 1) - envelope;
+        (RELAY_COMMAND_BYTE_BUDGET - envelope) / each
+    };
+
+    // A control character costs six bytes in both encodings; an emoji costs
+    // four as serde_json writes it and twelve from a client that escapes all
+    // non-ASCII, as Python's json module does by default; an ASCII letter
+    // costs one, or six from a client that escapes it.
+    let control = largest("\u{1}");
+    let body = json("control", &"\u{1}".repeat(control));
+    assert!(body.len() > MAX_BODY_BYTES);
+    let response = app.clone().oneshot(send(body)).await.unwrap();
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        json_body(response).await
+    );
+    let emoji = largest("\u{1F600}");
+    let body = format!(
+        r#"{{"request_id":"escaped","text":"{}"}}"#,
+        "\\ud83d\\ude00".repeat(emoji)
+    );
+    assert!(body.len() > 3 * RELAY_COMMAND_BYTE_BUDGET - 1024);
+    let response = app.clone().oneshot(send(body)).await.unwrap();
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        json_body(response).await
+    );
+    let letters = largest("a");
+    let body = format!(
+        r#"{{"request_id":"letters","text":"{}"}}"#,
+        "\\u0061".repeat(letters)
+    );
+    assert!(body.len() > 6 * RELAY_COMMAND_BYTE_BUDGET - 1024);
+    let response = app.clone().oneshot(send(body)).await.unwrap();
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        json_body(response).await
+    );
+    assert_eq!(backend.submissions.lock().unwrap().len(), 3);
+
+    let response = app
+        .clone()
+        .oneshot(send(json("one-more", &"\u{1}".repeat(control + 1))))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(
+        refusal.contains(&format!("maximum {RELAY_COMMAND_BYTE_BUDGET}")),
+        "{refusal}"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(send(json(
+            "too-large",
+            &"x".repeat(MAX_PROMPT_TEXT_BODY_BYTES),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(
+        refusal.contains(&format!("({MAX_PROMPT_TEXT_BODY_BYTES} bytes)")),
+        "{refusal}"
+    );
+
+    // A route without a limit of its own refuses under the general one, and
+    // keeps the header a client checks before it reads the refusal.
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b' '; MAX_BODY_BYTES + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(response.headers().contains_key(super::API_VERSION_HEADER));
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(
+        refusal.contains(&format!("({MAX_BODY_BYTES} bytes)")),
+        "{refusal}"
+    );
+
+    let response = app
+        .oneshot(send(json(&"c".repeat(65), "short")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(refusal.contains("use 1-64 ASCII letters"), "{refusal}");
+    assert_eq!(backend.submissions.lock().unwrap().len(), 3);
 }
 
 /// A message with no sender comes from the user's own shell, so it is the
@@ -364,6 +641,7 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
             false,
         )
         .unwrap()
+        .inserted()
     );
     let row = crate::database::pending_mailbox_events(10)
         .unwrap()
@@ -386,6 +664,7 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
             false,
         )
         .unwrap()
+        .inserted()
     );
     writer.shutdown().unwrap();
 }
@@ -526,15 +805,16 @@ async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness
     let relay = mj_worker::relay::DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap();
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let mut live = mj_client::session::ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
-            operational: relay.operational_state(),
+            operational: relay.operational_state().into(),
             latest_credential_sync_signal: None,
             worker_build: None,
         }),
@@ -882,6 +1162,14 @@ impl SessionHandleBackend for FakeSession {
         _bundle_id: String,
         _scope: mj_core::storage::HistoryScope,
         _query: String,
+        _after: Option<mj_core::storage::HistoryCursor>,
+        _limit: usize,
+    ) -> BoxFuture<'_, AnyResult<mj_core::storage::PromptHistoryPage>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
+
+    fn session_prompts(
+        &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -950,7 +1238,12 @@ struct CapturedSessionMessageRequest {
 
 #[derive(Default)]
 struct FakeBackend {
+    login_errors: std::collections::BTreeMap<String, String>,
+    /// When set, a history write announces itself on the first and waits
+    /// for the second before it finishes.
+    record_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     usage_queries: Mutex<Vec<mj_core::usage::SessionUsageQuery>>,
+    usage_result: mj_core::usage::SessionUsageReport,
     workspaces: FakeWorkspaces,
     /// Successive answers to `turn_state`, newest last. The final entry
     /// repeats once exhausted, so a wait loop settles rather than spinning.
@@ -978,6 +1271,7 @@ struct FakeBackend {
     diff: Option<String>,
     diff_options: Mutex<Vec<DiffOptions>>,
     file: Option<mj_checkpoint::archive::FetchedPath>,
+    file_pending: bool,
     pushed: Option<PushedBranch>,
     bundle: Option<BundleExport>,
     installation_token: Option<String>,
@@ -1021,12 +1315,15 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
+        Ok(self.login_errors.clone())
+    }
     fn usage_report(
         &self,
         query: mj_core::usage::SessionUsageQuery,
     ) -> BoxFuture<'_, AnyResult<mj_core::usage::SessionUsageReport>> {
         self.usage_queries.lock().unwrap().push(query);
-        Box::pin(async { Ok(mj_core::usage::SessionUsageReport::default()) })
+        Box::pin(async { Ok(self.usage_result.clone()) })
     }
     fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
         Box::pin(async {
@@ -1156,6 +1453,7 @@ impl SubagentBackend for FakeBackend {
                     harness: mj_core::config::HarnessKind::Codex,
                     choices,
                     quota: crate::server::api::CandidateQuota::Unknown,
+                    may_consume_credits: false,
                     unhealthy: Default::default(),
                 }],
                 unavailable: Vec::new(),
@@ -1191,6 +1489,19 @@ impl SubagentBackend for FakeBackend {
             Ok(self.prompt_ordinal)
         })
     }
+    fn record_user_prompt(
+        &self,
+        _session_id: String,
+        _command_id: String,
+        _text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if let Some((started, release)) = &self.record_gate {
+                started.notify_one();
+                release.notified().await;
+            }
+        })
+    }
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, AnyResult<String>> {
         Box::pin(async move { Ok(requested_id) })
     }
@@ -1216,6 +1527,8 @@ impl SubagentBackend for FakeBackend {
             Ok(SessionMessageResponse {
                 session_id: target_session_id,
                 via: "mailbox".into(),
+                mailbox_delivery: None,
+                note: None,
                 turn_id: None,
                 managed_child: false,
             })
@@ -1327,6 +1640,9 @@ impl SubagentBackend for FakeBackend {
     ) -> BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, ExportError>> {
         Box::pin(async move {
             self.file_paths.lock().unwrap().push((path, mode));
+            if self.file_pending {
+                std::future::pending::<()>().await;
+            }
             self.file
                 .clone()
                 .ok_or_else(|| ExportError::Refused("this session has no live target".into()))
@@ -1366,6 +1682,21 @@ impl SubagentBackend for FakeBackend {
         &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async { Ok(self.workspaces.0.lock().unwrap().clone()) })
+    }
+    fn workspace(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async move {
+            Ok(self
+                .workspaces
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|workspace| workspace.id == id)
+                .cloned())
+        })
     }
     fn create_workspace(
         &self,
@@ -1419,13 +1750,14 @@ fn live_view(model: &str, efforts: &[&str]) -> ManagedSessionView {
     ]))
     .expect("the fixture describes selects the schema accepts");
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
-            operational,
+            operational: operational.into(),
             latest_credential_sync_signal: None,
             worker_build: None,
         }),
@@ -1820,6 +2152,203 @@ fn waiting_for_its_worker(snapshot: &mut ViewerSnapshot) {
     session.capabilities.prompt = false;
 }
 
+fn lifecycle_owns_session(
+    snapshot: &mut ViewerSnapshot,
+    kind: ViewerOperationKind,
+    state: mj_core::state::SessionState,
+) {
+    let session = &mut snapshot.sessions[0];
+    session.state = state.as_str().into();
+    session.lifecycle = ViewerLifecycleCategory::of(state);
+    session.has_error = false;
+    session.transitioning = kind.transition_kind().is_some();
+    session.capabilities.prompt = false;
+    session.operation = Some(Box::new(ViewerOperation {
+        id: "lifecycle-1".into(),
+        session_id: session.id.clone(),
+        kind,
+        started_at_epoch_seconds: 0,
+        stages: Vec::new(),
+        notice: None,
+        cancellable: true,
+    }));
+}
+
+// Hard-won: #1468: HTTP prompts were refused while lifecycle work owned the session.
+#[tokio::test(start_paused = true)]
+async fn prompts_and_user_messages_wait_for_lifecycle_work_to_finish() {
+    use mj_core::state::SessionState;
+
+    for (kind, state) in [
+        (ViewerOperationKind::Move, SessionState::Running),
+        (ViewerOperationKind::Resume, SessionState::Stopped),
+        (ViewerOperationKind::Create, SessionState::Provisioning),
+        (ViewerOperationKind::Checkpoint, SessionState::Checkpointing),
+    ] {
+        for endpoint in ["prompt", "message"] {
+            let backend = Arc::new(FakeBackend {
+                live_view: Some(live_view("flash", &["high"])),
+                ..Default::default()
+            });
+            let (app, _actions, snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+                lifecycle_owns_session(snapshot, kind, state);
+            });
+            let mut body = serde_json::json!({"text": "keep this input"});
+            body[if endpoint == "prompt" {
+                "command_id"
+            } else {
+                "request_id"
+            }] = "lifecycle-prompt".into();
+            let mut response = Box::pin(
+                app.oneshot(
+                    bearer(Request::post(format!(
+                        "/api/v1/sessions/session-1/{endpoint}"
+                    )))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+                ),
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), &mut response)
+                    .await
+                    .is_err(),
+                "{endpoint} must wait for {kind:?} even when its record says {state:?}"
+            );
+            assert!(backend.submissions.lock().unwrap().is_empty());
+
+            // Restoring a session can leave it temporarily stopped or failed.
+            // The operation still owns the result until it finishes.
+            snapshots.send_modify(|snapshot| {
+                let session = &mut snapshot.sessions[0];
+                session.state = "error".into();
+                session.lifecycle = ViewerLifecycleCategory::Failed;
+                session.has_error = true;
+            });
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), &mut response)
+                    .await
+                    .is_err()
+            );
+
+            // The operation can finish before the worker's first report.
+            snapshots.send_modify(|snapshot| {
+                let session = &mut snapshot.sessions[0];
+                session.operation = None;
+                session.transitioning = false;
+                session.state = "running".into();
+                session.lifecycle = ViewerLifecycleCategory::Live;
+                session.has_error = false;
+            });
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), &mut response)
+                    .await
+                    .is_err()
+            );
+            snapshots.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(json_body(response).await["turn_id"], 1);
+            assert_eq!(
+                *backend.submissions.lock().unwrap(),
+                vec![(
+                    "lifecycle-prompt".into(),
+                    mj_core::relay::RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+                            agent_client_protocol::v1::schema::TextContent::new("keep this input"),
+                        )],
+                    },
+                )]
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_prompt_waiting_for_lifecycle_work_reports_its_terminal_result() {
+    use mj_core::state::SessionState;
+
+    for (kind, final_state, expected_status) in [
+        (
+            ViewerOperationKind::Suspend,
+            Some(SessionState::Stopped),
+            StatusCode::CONFLICT,
+        ),
+        (
+            ViewerOperationKind::Resume,
+            Some(SessionState::Error),
+            StatusCode::CONFLICT,
+        ),
+        (ViewerOperationKind::Destroy, None, StatusCode::NOT_FOUND),
+    ] {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, _actions, snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+            lifecycle_owns_session(snapshot, kind, SessionState::Running);
+        });
+        let mut response = Box::pin(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"text":"keep this input"}"#))
+                    .unwrap(),
+            ),
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut response)
+                .await
+                .is_err()
+        );
+        snapshots.send_modify(|snapshot| {
+            if let Some(state) = final_state {
+                let session = &mut snapshot.sessions[0];
+                session.operation = None;
+                session.transitioning = false;
+                session.state = state.as_str().into();
+                session.lifecycle = ViewerLifecycleCategory::of(state);
+                session.has_error = state == SessionState::Error;
+            } else {
+                snapshot.sessions = Default::default();
+            }
+        });
+        assert_eq!(response.await.unwrap().status(), expected_status);
+        assert!(backend.prompts.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_prompt_waiting_on_a_transition_keeps_the_existing_readiness_deadline() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+        lifecycle_owns_session(
+            snapshot,
+            ViewerOperationKind::Move,
+            mj_core::state::SessionState::Running,
+        );
+        // A transition can be published before the operation is registered.
+        snapshot.sessions[0].operation = None;
+    });
+    let mut response = Box::pin(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"keep this input"}"#))
+                .unwrap(),
+        ),
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(59), &mut response)
+            .await
+            .is_err()
+    );
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), response)
+        .await
+        .expect("the existing readiness deadline still bounds the request")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(json_body(response).await.to_string().contains("60 seconds"));
+    assert!(backend.prompts.lock().unwrap().is_empty());
+}
+
 // Hard-won: a583fa10: new sessions returned prompt conflicts until their worker attached.
 #[tokio::test]
 async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches() {
@@ -1856,55 +2385,119 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
 }
 
 // Hard-won: 5dafd135: a withdrawn startup prompt was still submitted after the worker attached.
+// Hard-won: 09f2862aa: an interrupt during a ready session's history write could not withdraw its prompt
 #[tokio::test]
-async fn an_interrupt_withdraws_a_prompt_held_for_a_starting_session() {
-    // R2-1: an ACP cancel sent while the prompt was held reached
-    // interrupt-turn, which refused it because there was no turn yet. The
-    // held prompt then became a turn that ran to completion.
+async fn an_interrupt_during_the_history_write_withdraws_a_ready_sessions_prompt() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
     let backend = Arc::new(FakeBackend {
         prompt_ordinal: 3,
+        record_gate: Some((started.clone(), release.clone())),
         ..FakeBackend::default()
     });
-    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
-    let held = tokio::spawn(
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+        snapshot.sessions[0].capabilities.interrupt_turn = false;
+    });
+    let prompt = tokio::spawn(
         app.clone().oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/prompt"))
                 .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"text":"first words"}"#))
+                .body(Body::from(r#"{"text":"stop me"}"#))
                 .unwrap(),
         ),
     );
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("the history write began");
 
-    let interrupted = app
-        .oneshot(
+    let interrupted = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ),
+    )
+    .await
+    .expect("the interrupt found the prompt to withdraw")
+    .unwrap();
+    assert_eq!(interrupted.status(), StatusCode::ACCEPTED);
+    release.notify_one();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), prompt)
         .await
-        .unwrap();
-    assert_eq!(
-        interrupted.status(),
-        StatusCode::ACCEPTED,
-        "withdrawing a held prompt is what interrupting a starting session does"
-    );
-    let response = tokio::time::timeout(std::time::Duration::from_secs(5), held)
-        .await
-        .expect("the held prompt answers once it is withdrawn")
+        .expect("the withdrawn prompt answers")
         .unwrap()
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = json_body(response).await;
     assert!(
-        body.to_string().contains("interrupted"),
-        "the refusal says why: {body}"
+        backend.prompts.lock().unwrap().is_empty(),
+        "a withdrawn prompt is never submitted"
     );
+}
 
-    // The session coming up later must not revive the withdrawn prompt.
-    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(backend.prompts.lock().unwrap().is_empty());
+#[tokio::test(start_paused = true)]
+async fn an_interrupt_withdraws_a_prompt_held_until_its_session_is_ready() {
+    for lifecycle_busy in [false, true] {
+        // R2-1: an ACP cancel sent while the prompt was held reached
+        // interrupt-turn, which refused it because there was no turn yet. The
+        // held prompt then became a turn that ran to completion.
+        let backend = Arc::new(FakeBackend {
+            prompt_ordinal: 3,
+            ..FakeBackend::default()
+        });
+        let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+            if lifecycle_busy {
+                lifecycle_owns_session(
+                    snapshot,
+                    ViewerOperationKind::Move,
+                    mj_core::state::SessionState::Running,
+                );
+            } else {
+                waiting_for_its_worker(snapshot);
+            }
+        });
+        let held = tokio::spawn(
+            app.clone().oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"text":"first words"}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let interrupted = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            interrupted.status(),
+            StatusCode::ACCEPTED,
+            "interrupting a session withdraws the prompt it cannot take yet"
+        );
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), held)
+            .await
+            .expect("the held prompt answers once it is withdrawn")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = json_body(response).await;
+        assert!(
+            body.to_string().contains("interrupted"),
+            "the refusal says why: {body}"
+        );
+
+        // The session coming up later must not revive the withdrawn prompt.
+        snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(backend.prompts.lock().unwrap().is_empty());
+    }
 }
 
 /// Launch finding R5-8: a prompt to a session in the `error` state was
@@ -2029,6 +2622,7 @@ fn model_candidate_with_efforts(
     SubagentCandidate {
         profile_id: profile_id.into(),
         harness: mj_core::config::HarnessKind::Codex,
+        may_consume_credits: false,
         choices: mj_core::worker_launch::ProfileConfig {
             model: Some(model.into()),
             models: vec![mj_core::acp::SessionConfigChoice {
@@ -2046,16 +2640,21 @@ fn model_candidate_with_efforts(
                 .collect(),
             observed_at: 1,
         },
-        quota: crate::server::api::CandidateQuota::Windows(vec![crate::quota::QuotaWindow {
-            label: "Week".into(),
-            remaining_percent: Some(remaining_percent),
-            duration_seconds: None,
-            model_scope: None,
-            used: None,
-            limit: None,
-            resets: None,
-            resets_at_epoch_seconds: None,
-        }]),
+        quota: crate::server::api::CandidateQuota::Subscription {
+            monthly_price_usd: None,
+            refreshed_at_epoch_seconds: 0,
+            paid_credits: None,
+            windows: vec![crate::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(remaining_percent),
+                duration_seconds: None,
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+        },
         unhealthy: Default::default(),
     }
 }
@@ -2090,6 +2689,7 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
 
                 harness_kind: "grok".into(),
 
+                quota_pools: Vec::new(),
                 quota: None,
             });
         },
@@ -2118,6 +2718,54 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
     assert_eq!(followups[0].0, "session-2");
     assert_eq!(followups[0].1.model.as_deref(), Some("grok-4.6"));
     assert_eq!(followups[0].1.effort.as_deref(), Some("high"));
+}
+
+// Hard-won: 0bb46ff94: the create API checked the enabled-only snapshot, so `mj new --profile <disabled>` was refused.
+#[tokio::test]
+async fn session_start_accepts_a_named_disabled_profile_but_not_a_disabled_saved_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences_path = directory.path().join("go.json");
+    save_global_default(&preferences_path, "gemini", "podman");
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        Arc::new(FakeBackend::default()),
+        |snapshot| {
+            snapshot.disabled_profile_ids.insert("gemini".into());
+        },
+        preferences_path,
+    );
+
+    let response = app
+        .clone()
+        .oneshot(start_request(r#"{"bundle_id":"hel"}"#.into()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body.to_string()
+            .contains(r#"the saved default names an unknown profile \"gemini\""#),
+        "{body}"
+    );
+
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"profile_id":"gemini","target_id":"podman","bundle_id":"hel"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    assert!(matches!(
+        request.action,
+        ControllerAction::New { ref profile_id, .. } if profile_id == "gemini"
+    ));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+            notice: None,
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
 }
 
 #[tokio::test]
@@ -2214,17 +2862,20 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert!(actions.try_recv().is_err());
 
     let response = tokio::spawn(app.oneshot(start_request(start_body(
-        r#","prompt":"add a README line","no_github_events":true,"remember_container_size":true"#,
+        r#","prompt":"add a README line","no_github_events":true,"no_github_credentials":true,"remember_container_size":true"#,
     ))));
     let request = actions.recv().await.unwrap();
     assert_eq!(
         request.action,
         ControllerAction::New {
+            oracle: None,
+            oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: true,
             review: None,
             no_project_memory: false,
             no_github_events: true,
+            no_github_credentials: true,
             at: None,
             branch: None,
             base: None,
@@ -2275,9 +2926,9 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
     save_global_default(&preferences, "codex-1", "podman");
     let eligible_candidates = SubagentCandidates {
         offered: vec![
-            model_candidate("codex-1", 5, "luna"),
+            model_candidate("codex-1", 0, "luna"),
             model_candidate_with_efforts("quota-wrong-effort", 99, "luna", &["low"]),
-            model_candidate("quota-winner", 92, "luna"),
+            model_candidate("quota-winner", 0, "luna"),
         ],
         unavailable: Vec::new(),
     };
@@ -2303,6 +2954,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
 
                 capabilities_key: String::new(),
 
+                quota_pools: Vec::new(),
                 quota: None,
             });
             snapshot.profiles.push(crate::server::ViewerProfile {
@@ -2311,6 +2963,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
 
                 capabilities_key: String::new(),
 
+                quota_pools: Vec::new(),
                 quota: None,
             });
         },
@@ -2393,6 +3046,7 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
             subtle: None,
         },
         mj_core::subagent::SubagentTaskType::Straightforward,
+        false,
     )
     .await
     .unwrap();
@@ -2401,7 +3055,7 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
 }
 
 #[tokio::test]
-async fn start_without_a_profile_uses_the_saved_default_to_break_quota_ties() {
+async fn start_without_a_profile_load_balances_with_and_without_explicit_effort() {
     let directory = tempfile::tempdir().unwrap();
     let preferences = directory.path().join("go.json");
     save_global_default(&preferences, "codex-1", "podman");
@@ -2415,26 +3069,137 @@ async fn start_without_a_profile_uses_the_saved_default_to_break_quota_ties() {
         }),
         ..FakeBackend::default()
     });
-    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        backend,
+        |snapshot| {
+            snapshot.profiles.push(crate::server::ViewerProfile {
+                id: "claude4".into(),
+                harness_kind: "codex".into(),
+                capabilities_key: String::new(),
+                quota_pools: Vec::new(),
+                quota: None,
+            });
+        },
+        preferences,
+    );
 
-    let response = tokio::spawn(app.oneshot(start_request(
-        r#"{"bundle_id":"hel","model":"luna"}"#.into(),
-    )));
-    let request = actions.recv().await.unwrap();
-    let ControllerAction::New { profile_id, .. } = &request.action else {
-        panic!("expected a New action, got {:?}", request.action);
-    };
-    assert_eq!(profile_id, "codex-1");
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: Some("session-2".into()),
-            notice: None,
-        })
+    for effort in ["", ",\"effort\":\"high\""] {
+        let mut selected = std::collections::BTreeSet::new();
+        // Exercise both session-selection paths through the public API. With
+        // equal weights, missing either account in 64 draws has probability 2^-63.
+        for _ in 0..64 {
+            let mut response = tokio::spawn(app.clone().oneshot(start_request(format!(
+                "{{\"bundle_id\":\"hel\",\"model\":\"luna\"{effort}}}"
+            ))));
+            let request = tokio::select! {
+                request = actions.recv() => request.unwrap(),
+                early = &mut response => panic!("start returned before its action: {:?}", early.unwrap().unwrap().status()),
+            };
+            let ControllerAction::New { profile_id, .. } = &request.action else {
+                panic!("expected a New action, got {:?}", request.action);
+            };
+            assert!(["codex-1", "claude4"].contains(&profile_id.as_str()));
+            selected.insert(profile_id.clone());
+            request
+                .reply
+                .send(ActionOutcome::Accepted {
+                    session_id: Some("session-2".into()),
+                    notice: None,
+                })
+                .unwrap();
+            assert_eq!(
+                response.await.unwrap().unwrap().status(),
+                StatusCode::CREATED
+            );
+        }
+        assert_eq!(
+            selected.len(),
+            2,
+            "model-first launches must spread across accounts, even with a saved default"
+        );
+    }
+}
+
+// Hard-won: #1534: model-first starts forwarded the request alias instead of the selected harness value.
+#[tokio::test]
+async fn model_first_sonnet_alias_uses_the_selected_profiles_launch_value() {
+    let recorded: std::collections::BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> =
+        serde_json::from_str(include_str!(
+            "../../../../mj-core/tests/fixtures/claude-antigravity-models.json"
+        ))
         .unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::CREATED
+    let mut rendered = String::new();
+    for (claude_left, gemini_left) in [(0, 100), (100, 0)] {
+        for effort in [None, Some("high")] {
+            let mut claude = model_candidate_for_harness(
+                "claude",
+                claude_left,
+                "sonnet",
+                mj_core::config::HarnessKind::Claude,
+            );
+            claude.choices.models = recorded["claude"].clone();
+            let mut gemini = model_candidate_for_harness(
+                "gemini",
+                gemini_left,
+                "claude-sonnet-5-5",
+                mj_core::config::HarnessKind::Antigravity,
+            );
+            gemini.choices.models = recorded["antigravity"].clone();
+            if let CandidateQuota::Subscription { windows, .. } = &mut gemini.quota {
+                windows[0].model_scope = Some("claude,gpt".into());
+            }
+            let backend = Arc::new(FakeBackend {
+                session_model_candidates: Some(SubagentCandidates {
+                    offered: vec![claude, gemini],
+                    unavailable: vec![],
+                }),
+                ..Default::default()
+            });
+            let (app, mut actions, _, _) = api_app(backend.clone(), |snapshot| {
+                for (id, kind) in [("claude", "claude"), ("gemini", "antigravity")] {
+                    snapshot.profiles.push(crate::server::ViewerProfile {
+                        id: id.into(),
+                        harness_kind: kind.into(),
+                        capabilities_key: String::new(),
+                        quota_pools: Vec::new(),
+                        quota: None,
+                    });
+                }
+            });
+            let mut body =
+                serde_json::json!({"bundle_id":"hel", "target_id":"podman", "model":"sonnet"});
+            if let Some(effort) = effort {
+                body["effort"] = effort.into();
+            }
+            let mut response = tokio::spawn(app.oneshot(start_request(body.to_string())));
+            let request = tokio::select! {
+                request = actions.recv() => request.unwrap(),
+                early = &mut response => panic!("start failed before creating a session: {:?}", early.unwrap().unwrap().status()),
+            };
+            let ControllerAction::New { profile_id, .. } = &request.action else {
+                panic!("expected New")
+            };
+            let profile = profile_id.clone();
+            request
+                .reply
+                .send(ActionOutcome::Accepted {
+                    session_id: Some("session-2".into()),
+                    notice: None,
+                })
+                .unwrap();
+            let response = response.await.unwrap().unwrap();
+            let status = response.status();
+            assert_eq!(status, StatusCode::CREATED);
+            let response = json_body(response).await;
+            let followups = backend.followups.lock().unwrap();
+            let followup = &followups[0].1;
+            rendered.push_str(&format!("quota Claude={claude_left}% Gemini-Claude={gemini_left}%, effort={}\nHTTP {}\n{}\nprofile={profile}, model={}, effort={}\n\n", effort.unwrap_or("default"), status.as_u16(), serde_json::to_string_pretty(&response).unwrap(), followup.model.as_deref().unwrap(), followup.effort.as_deref().unwrap_or("default")));
+        }
+    }
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "start-sonnet-model-identity",
+        &rendered,
     );
 }
 
@@ -2458,6 +3223,7 @@ async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target()
 
                 capabilities_key: String::new(),
 
+                quota_pools: Vec::new(),
                 quota: None,
             });
         }
@@ -2475,7 +3241,7 @@ async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target()
     else {
         panic!("expected a New action, got {:?}", request.action);
     };
-    assert_eq!(profile_id, "alpha", "ties without an anchor use profile id");
+    assert!(["alpha", "zeta"].contains(&profile_id.as_str()));
     assert_eq!(target_id, "podman");
     request
         .reply
@@ -3124,6 +3890,8 @@ async fn wait_for_an_earlier_turn_names_the_later_turn_it_answers_about() {
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                work_facts: None,
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "prompt-2".into(),
@@ -3171,6 +3939,7 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     })).unwrap();
     let mut turn = completed(5, "QuotaLimit");
     turn.diagnostic = Some(diagnostic.clone());
+    turn.answered_through = Some(9);
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
             execution: MaterializedExecutionState::Idle,
@@ -3204,6 +3973,11 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     assert_eq!(body["diagnostic"]["reset_at"], "23:00 UTC");
     assert_eq!(body["session"]["last_turn_diagnostic"], body["diagnostic"]);
     assert!(body["capacity_retry"].is_null());
+    assert!(
+        body["session"]["last_turn_outcome"]
+            .get("answered_through")
+            .is_none()
+    );
     assert!(
         body["session"]["last_turn_outcome"]
             .get("diagnostic")
@@ -3449,6 +4223,7 @@ fn an_unanswered_turn_reaches_wait_as_a_named_error() {
         code: Some("prompt_unanswered".into()),
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     });
     let decision = WaitDecision::from_outcome(&outcome);
     assert_eq!(decision.outcome, WaitOutcome::Error);
@@ -3465,6 +4240,8 @@ fn an_unanswered_turn_reaches_wait_as_a_named_error() {
 
 fn completed(accepted_ordinal: u64, stop_reason: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: format!("prompt-{accepted_ordinal}"),
@@ -3725,14 +4502,15 @@ fn live_observation(
     let mut session = snapshot.sessions[0].clone();
     session.capabilities.prompt = true;
     let live = ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
-            operational,
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            operational: operational.into(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             latest_credential_sync_signal: None,
             worker_build: None,
@@ -3802,6 +4580,8 @@ fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
     use mj_core::activity::{ActivityState, verdict};
     use mj_core::assessment::{Action, Status};
     let turn = MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "api-b098".into(),
@@ -3831,7 +4611,7 @@ fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
         Some(Action::Uncertain),
     );
     harness_turn.reason = "assessment_uncertain".into();
-    operational.assessment = Some(Box::new(harness_turn));
+    operational.assessment = Some(std::sync::Arc::new(harness_turn));
     let observation = live_observation(projection_with(turn), operational);
 
     assert_eq!(
@@ -4017,7 +4797,7 @@ fn a_wait_reads_jev_s_verdict_from_the_turn_s_own_assessment() {
         let mut operational = idle();
         operational.retry_assessment_pending =
             matches!(assessment.status, Status::Pending | Status::Failed);
-        operational.assessment = Some(Box::new(assessment));
+        operational.assessment = Some(std::sync::Arc::new(assessment));
         live_observation(projection_with(turn.clone()), operational)
     };
     for request in [
@@ -4109,6 +4889,8 @@ fn rejections_stopped_sessions_and_an_empty_session_each_end_the_wait() {
 
     let mut rejected = idle(None);
     rejected.last_turn_outcome = Some(MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "prompt-1".into(),
@@ -4362,6 +5144,7 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
     use mj_client::session::{ManagedSessionView, ViewError};
 
     let connected = ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         ..ManagedSessionView::default()
     };
@@ -4396,6 +5179,7 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
         // Connected plus an error is what a relay that dropped mid-turn
         // looks like; the error is the thing the caller needs.
         let view = ManagedSessionView {
+            attention: Default::default(),
             connected: true,
             error: Some(error),
             ..ManagedSessionView::default()
@@ -4410,16 +5194,21 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
     }
 }
 
+// Hard-won: #1544: normal EOF on shutdown could publish a truncated gzip download.
 #[tokio::test]
 async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_resolved_to() {
     use mj_checkpoint::archive::{FetchMode, FetchedKind, FetchedPath};
     let fetch = |kind, path: &str, bytes: &[u8]| {
         let backend = Arc::new(FakeBackend {
-            file: Some(FetchedPath {
-                kind,
-                path: path.to_owned(),
-                bytes: bytes.to_vec(),
-            }),
+            file: Some(
+                FetchedPath::from_reader(
+                    kind,
+                    path.to_owned(),
+                    bytes,
+                    tempfile::tempfile().unwrap(),
+                )
+                .unwrap(),
+            ),
             ..FakeBackend::default()
         });
         let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
@@ -4444,12 +5233,120 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
         response.headers().get(CONTENT_TYPE).unwrap(),
         "application/octet-stream"
     );
+    assert_eq!(response.headers()[axum::http::header::CONTENT_LENGTH], "10");
     assert_eq!(
         decode_fetched_path(response.headers()[FETCHED_PATH_HEADER].as_bytes()).as_deref(),
         Some("/workspace/app/README.md")
     );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), b"file bytes");
+
+    // Incompressible input keeps the gzip encoder from reading the whole
+    // artifact before emitting its first frame.
+    let mut noise = 0x2545_f491_4f6c_dd1du64;
+    let payload: Vec<_> = (0..256 * 1024)
+        .map(|_| {
+            noise ^= noise << 13;
+            noise ^= noise >> 7;
+            noise ^= noise << 17;
+            noise as u8
+        })
+        .collect();
+    let (large_app, _) = fetch(FetchedKind::File, "/tmp/large.bin", &payload);
+    let response = get(large_app, "/tmp/large.bin").await;
+    assert_eq!(
+        response.headers()[axum::http::header::CONTENT_LENGTH],
+        payload.len().to_string()
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), payload);
+
+    // A slow download must release the server on shutdown, not retain its
+    // remaining payload or keep daemon replacement waiting for a consumer.
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let streaming_backend = Arc::new(FakeBackend {
+        file: Some(
+            FetchedPath::from_reader(
+                FetchedKind::File,
+                "/tmp/large.bin".into(),
+                payload.as_slice(),
+                tempfile::tempfile().unwrap(),
+            )
+            .unwrap(),
+        ),
+        shutdown: shutdown.clone(),
+        ..FakeBackend::default()
+    });
+    let (stream_app, ..) = api_app(streaming_backend, |_| {});
+    let response = stream_app
+        .oneshot(
+            bearer(
+                Request::get("/api/v1/sessions/session-1/files?path=/tmp/large.bin")
+                    .header(axum::http::header::ACCEPT_ENCODING, "gzip"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.headers()[axum::http::header::CONTENT_ENCODING],
+        "gzip"
+    );
+    assert!(
+        !response
+            .headers()
+            .contains_key(axum::http::header::CONTENT_LENGTH)
+    );
+    let mut body = response.into_body().into_data_stream();
+    use futures::StreamExt as _;
+    let first = body.next().await.unwrap().unwrap();
+    assert!(first.len() < payload.len());
+    shutdown.cancel();
+    let failed = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(frame) = body.next().await {
+            if frame.is_err() {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap();
+    assert!(
+        failed,
+        "shutdown must fail a gzip body, not finish a partial download normally"
+    );
+
+    // Manual restart has no upgrade gate closure. An interrupted preparation
+    // still tells a CLI GET that it is safe to reconnect and repeat the read.
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let pending_backend = Arc::new(FakeBackend {
+        file_pending: true,
+        shutdown: shutdown.clone(),
+        ..FakeBackend::default()
+    });
+    let (pending_app, ..) = api_app(pending_backend, |_| {});
+    shutdown.cancel();
+    let response = get(pending_app.clone(), "/tmp/large.bin").await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["code"], DAEMON_HANDOFF_CODE);
+    let probe = pending_app
+        .oneshot(
+            Request::get("/api/v1/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(probe.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        probe.headers()[crate::server::UPGRADE_HEADER],
+        "pending",
+        "fresh unauthenticated probes must not identify a shutting-down daemon as healthy"
+    );
 
     // A `..` names a sibling repository in a multi-repo bundle, and an
     // absolute path names a report directory or scratch outside the agent's
@@ -4737,73 +5634,92 @@ async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
 }
 
+/// A backend whose store holds the fixture session's workspace, which is
+/// where a resume of that session must find it.
+fn backend_holding_the_session_workspace() -> Arc<FakeBackend> {
+    let mut workspace = FakeWorkspaces::record("default");
+    workspace.id = "default".into();
+    Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces(Mutex::new(vec![workspace])),
+        ..FakeBackend::default()
+    })
+}
+
 /// Make the fixture session look the way `mj suspend` leaves one: suspended, with
 /// resume as the thing it can do next.
 fn make_stopped(snapshot: &mut ViewerSnapshot) {
-    snapshot.workspaces.push(super::super::ViewerWorkspace {
-        id: snapshot.sessions[0].workspace_id.clone(),
-        name: "default".into(),
-    });
     let session = &mut snapshot.sessions[0];
     session.state = "stopped".into();
     session.lifecycle = ViewerLifecycleCategory::Suspended;
     session.has_checkpoint = true;
     session.capabilities.resume = true;
     session.capabilities.prompt = false;
-    session.incompatible_resume_targets.clear();
-    session.compatible_resume_targets = vec!["podman".into(), "raw".into()];
+    session.incompatible_resume_targets = Arc::from([]);
+    session.compatible_resume_targets = vec!["podman".into(), "raw".into()].into();
 }
 
+// Hard-won: 94d7 resume: an intact failed environment needs no checkpoint to repair.
 #[tokio::test]
 async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operation() {
-    let (app, mut actions, snapshot_tx, _) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
-    let mut response = tokio::spawn(
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/resume"))
-                .body(Body::empty())
-                .unwrap(),
-        ),
-    );
+    for repair in [false, true] {
+        let (app, mut actions, snapshot_tx, _) =
+            api_app(backend_holding_the_session_workspace(), |snapshot| {
+                make_stopped(snapshot);
+                if repair {
+                    let session = &mut snapshot.sessions[0];
+                    session.state = "error".into();
+                    session.lifecycle = ViewerLifecycleCategory::Failed;
+                    session.has_checkpoint = false;
+                    session.retained_target = true;
+                }
+            });
+        let mut response = tokio::spawn(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        );
 
-    let request = actions.recv().await.unwrap();
-    assert!(matches!(request.action, ControllerAction::Resume { .. }));
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: None,
-            notice: None,
-        })
-        .unwrap();
-    tokio::task::yield_now().await;
-    assert!(
-        !response.is_finished(),
-        "the accepted resume must not answer while the snapshot still says suspended"
-    );
+        let request = actions.recv().await.unwrap();
+        assert!(matches!(request.action, ControllerAction::Resume { .. }));
+        request
+            .reply
+            .send(ActionOutcome::Accepted {
+                session_id: None,
+                notice: None,
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !response.is_finished(),
+            "the accepted resume must not answer while the snapshot still says suspended"
+        );
 
-    snapshot_tx.send_modify(|snapshot| {
-        let session = &mut snapshot.sessions[0];
-        session.operation = Some(ViewerOperation {
-            id: "resume-op".into(),
-            session_id: session.id.clone(),
-            kind: ViewerOperationKind::Resume,
-            started_at_epoch_seconds: 1,
-            stages: Vec::new(),
-            notice: None,
-            cancellable: true,
+        snapshot_tx.send_modify(|snapshot| {
+            let session = &mut snapshot.sessions[0];
+            session.operation = Some(Box::new(ViewerOperation {
+                id: "resume-op".into(),
+                session_id: session.id.clone(),
+                kind: ViewerOperationKind::Resume,
+                started_at_epoch_seconds: 1,
+                stages: Vec::new(),
+                notice: None,
+                cancellable: true,
+            }));
         });
-    });
-    let response = tokio::time::timeout(Duration::from_secs(2), &mut response)
-        .await
-        .expect("operation publication releases the waiting response")
-        .unwrap()
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let body = json_body(response).await;
-    assert_eq!(body["session_id"], "session-1");
-    assert_eq!(body["workspace_id"], "default");
-    assert_eq!(body["profile_id"], "codex-1");
-    assert_eq!(body["target_id"], "podman");
+        let response = tokio::time::timeout(Duration::from_secs(2), &mut response)
+            .await
+            .expect("operation publication releases the waiting response")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = json_body(response).await;
+        assert_eq!(body["session_id"], "session-1");
+        assert_eq!(body["workspace_id"], "default");
+        assert_eq!(body["profile_id"], "codex-1");
+        assert_eq!(body["target_id"], "podman");
+    }
 }
 
 #[tokio::test]
@@ -4850,7 +5766,10 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let mut session = snapshot.sessions[0].clone();
     session.lifecycle = ViewerLifecycleCategory::Failed;
-    session.move_recovery = Some(crate::server::ViewerMoveRecovery {
+    session.move_recovery = Some(Box::new(crate::server::ViewerMoveRecovery {
+        failure_notice: None,
+        oracle: None,
+        oracle_choice: None,
         operation_id: "move-a".into(),
         source_profile_id: "destination".into(),
         source_target_template_id: "destination".into(),
@@ -4868,7 +5787,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
         destination_ready: false,
         queue_admission_started: false,
         queue_admission_finished: false,
-    });
+    }));
     let refusal = resume_refusal(&session);
     assert!(
         refusal.contains("retry the Move to fake / localhost"),
@@ -4889,11 +5808,12 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
 #[tokio::test]
 async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
     let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+        api_app(backend_holding_the_session_workspace(), |snapshot| {
             make_stopped(snapshot);
             // A launch that failed before its first checkpoint.
             let session = &mut snapshot.sessions[0];
             session.has_checkpoint = false;
+            session.retained_target = false;
             session.state = "error".into();
             session.lifecycle = ViewerLifecycleCategory::Failed;
             session.has_error = true;
@@ -4931,12 +5851,12 @@ fn a_published_session_says_whether_it_has_a_checkpoint() {
     assert!(!snapshot.sessions[0].has_checkpoint);
 
     state.sessions.get_mut("session-1").unwrap().checkpoint =
-        Some(mj_core::state::CheckpointMetadata {
+        Some(Box::new(mj_core::state::CheckpointMetadata {
             archive_path: "/private/archive.hel.zip".into(),
             sha256: "a".repeat(64),
             created_at: "now".into(),
             event_frontier: 3,
-        });
+        }));
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     assert!(snapshot.sessions[0].has_checkpoint);
     let published = serde_json::to_string(&snapshot.sessions[0]).unwrap();
@@ -4949,7 +5869,7 @@ fn a_published_session_says_whether_it_has_a_checkpoint() {
 #[tokio::test]
 async fn resuming_an_unknown_session_is_not_found() {
     let (app, _actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
+        api_app(backend_holding_the_session_workspace(), make_stopped);
     let response = app
         .oneshot(
             bearer(Request::post("/api/v1/sessions/session-404/resume"))
@@ -5076,12 +5996,12 @@ async fn suspension_rejects_destruction_flags_and_removed_routes() {
     }
 }
 
-/// Mjolnir's automatic continuation starts a new command. A session wait
+/// A quota check starts a new command. A session wait
 /// follows it; a wait on the turn before it answers, and names it as `next`.
 #[tokio::test]
-async fn only_the_session_wait_follows_automatic_continuation() {
+async fn only_the_session_wait_follows_the_quota_check() {
     let observation = WaitObservation {
-        activity: mj_core::activity::ActivityState::CheckingContinuation,
+        activity: mj_core::activity::ActivityState::CheckingQuota,
         execution: MaterializedExecutionState::Idle,
         last_turn_outcome: Some(completed(7, "end_turn")),
         ..Default::default()
@@ -5108,7 +6028,7 @@ async fn only_the_session_wait_follows_automatic_continuation() {
     .unwrap();
     assert_eq!(
         response.next,
-        Some(mj_core::activity::ActivityState::CheckingContinuation)
+        Some(mj_core::activity::ActivityState::CheckingQuota)
     );
 }
 
@@ -5120,14 +6040,15 @@ fn session_wait_uses_the_workers_published_jev_activity() {
     let mut materialized = mj_core::state::MaterializedSession::empty("session-1");
     materialized.last_turn_outcome = Some(completed(7, "end_turn"));
     let mut live = ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
-            operational: relay.operational_state(),
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            operational: relay.operational_state().into(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             latest_credential_sync_signal: None,
             worker_build: None,
@@ -5147,7 +6068,7 @@ fn session_wait_uses_the_workers_published_jev_activity() {
         ActivityState::Background {
             started_at_ms: Some(10),
         },
-        ActivityState::CheckingContinuation,
+        ActivityState::CheckingQuota,
         ActivityState::Goal,
         ActivityState::Unrecognized,
     ] {
@@ -5191,9 +6112,9 @@ fn session_wait_uses_the_workers_published_jev_activity() {
     );
     // The daemon's continuation check is published over the worker's state,
     // as the dashboard shows it; the actor's own view never carries it.
-    session.activity_state = Some(ActivityState::CheckingContinuation);
+    session.activity_state = Some(ActivityState::CheckingQuota);
     let checking = build_observation(&snapshot, &session, Some(&live), None, None);
-    assert_eq!(checking.activity, ActivityState::CheckingContinuation);
+    assert_eq!(checking.activity, ActivityState::CheckingQuota);
     assert!(resolve_wait(&checking, &WaitRequest::default()).is_none());
     assert!(resolve_wait(&checking, &explicit).is_some());
 
@@ -5331,6 +6252,9 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
             snapshot.targets.push(crate::server::ViewerTarget {
                 id: "docker".into(),
                 kind: "local-docker".into(),
+                permission_mode: None,
+                subagents_configured: false,
+                oracle_configured: false,
                 resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
                 requires_project_directory: false,
                 remembered_container_size: None,
@@ -5400,6 +6324,9 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
         snapshot.targets.push(crate::server::ViewerTarget {
             id: "docker".into(),
             kind: "local-docker".into(),
+            permission_mode: None,
+            subagents_configured: false,
+            oracle_configured: false,
             resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
             requires_project_directory: false,
             remembered_container_size: None,
@@ -5455,7 +6382,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
 // Hard-won: a95e5e66: launch admission accepted targets that could not supply a worker.
 #[tokio::test]
 async fn naming_a_target_with_no_worker_binary_is_refused_with_the_reason() {
-    let check: crate::server::WorkerSourceCheck = Arc::new(|target| {
+    let check: crate::server::WorkerSourceCheck = Arc::new(|target, _bundle| {
         (target == "podman").then(|| {
             "worker source for aarch64 (Darwin) was unavailable when the daemon started: not built"
                 .to_owned()
@@ -5660,7 +6587,16 @@ async fn earlier_history_authenticates_validates_the_cursor_and_renders_stored_m
         }),
         ..FakeBackend::default()
     });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        // A stopped sub-agent has no live conversation, but its stored history
+        // is what the viewer's `read_history` capability opens.
+        let mut stopped = snapshot.sessions.get("session-1").unwrap().clone();
+        stopped.id = "stopped-child".into();
+        stopped.subagent_parent_id = Some("session-1".into());
+        stopped.lifecycle = crate::server::ViewerLifecycleCategory::Suspended;
+        stopped.capabilities.open = false;
+        snapshot.sessions.push(stopped);
+    });
     let unauthenticated = app
         .clone()
         .oneshot(
@@ -5699,7 +6635,25 @@ async fn earlier_history_authenticates_validates_the_cursor_and_renders_stored_m
     assert_eq!(body["items"][0]["role"], "agent");
     assert_eq!(body["before"], serde_json::to_value(&cursor).unwrap());
     assert_eq!(body["frontier"], 20);
-    assert_eq!(*backend.history_cursors.lock().unwrap(), vec![Some(cursor)]);
+    assert_eq!(
+        *backend.history_cursors.lock().unwrap(),
+        vec![Some(cursor.clone())]
+    );
+    let stopped = app
+        .clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/stopped-child/history"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(stopped).await["items"][0]["text"],
+        "stored answer",
+        "a stopped child's stored history is served like a live session's"
+    );
     let missing = app
         .oneshot(
             bearer(Request::get("/api/v1/sessions/missing/history"))
@@ -5756,6 +6710,8 @@ async fn missing_target_access_returns_actionable_conflict_for_branch_and_bundle
 
 fn finished_child_turn(command_id: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: command_id.into(),
@@ -5885,6 +6841,7 @@ async fn a_session_wait_on_a_child_answers_with_its_handback() {
 /// the session's turn state from the store on every decision.
 fn actor_without_projection() -> ManagedSessionView {
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: true,
         error: None,
@@ -6173,7 +7130,7 @@ async fn review_status_reports_the_open_review_or_none() {
             .unwrap()
             .clone();
         session.review_trigger = mj_core::config::ReviewTrigger::Push;
-        session.turn_review = Some(crate::server::ViewerTurnReview {
+        session.turn_review = Some(Box::new(crate::server::ViewerTurnReview {
             child_session_id: None,
             status: "sending findings to the primary agent…".into(),
             roles: vec![crate::server::ViewerReviewRole {
@@ -6184,9 +7141,8 @@ async fn review_status_reports_the_open_review_or_none() {
             verdict: Some(crate::server::ViewerReviewVerdict {
                 kind: "findings".into(),
                 text: "[P1] src/lib.rs:1 -- unbounded retry loop".into(),
-                allowed: vec!["forward".into(), "dismiss".into(), "cancel".into()],
             }),
-        });
+        }));
         snapshot.sessions.push(session);
     });
     let body = json_body(app.clone().oneshot(get()).await.unwrap()).await;
@@ -6204,110 +7160,6 @@ async fn review_status_reports_the_open_review_or_none() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-/// Dismissing, cancelling, or forwarding sends the same controller action as
-/// the viewer's buttons. A resolution the open review does not allow, or no
-/// open review, is refused up front (400); a refusal the daemon reaches
-/// itself, such as a review that closed meanwhile, is a 409 with its reason.
-#[tokio::test]
-async fn resolving_a_review_sends_the_controller_action_or_explains_the_refusal() {
-    let (app, mut actions, snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |_| {});
-    let post = |path: &str| {
-        bearer(Request::post(path.to_owned()))
-            .body(Body::empty())
-            .unwrap()
-    };
-    async fn next(actions: &mut mpsc::Receiver<ControllerRequest>) -> ControllerRequest {
-        tokio::time::timeout(std::time::Duration::from_secs(5), actions.recv())
-            .await
-            .expect("the action reaches the controller")
-            .unwrap()
-    }
-
-    let response = app
-        .clone()
-        .oneshot(post("/api/v1/sessions/session-1/review/dismiss"))
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "no review is open"
-    );
-
-    snapshot_tx.send_modify(|snapshot| {
-        let mut session = snapshot
-            .sessions
-            .iter()
-            .find(|session| session.id == "session-1")
-            .unwrap()
-            .clone();
-        session.turn_review = Some(crate::server::ViewerTurnReview {
-            child_session_id: None,
-            status: "the review failed: relay reviewer_start timed out after 300 seconds".into(),
-            roles: Vec::new(),
-            verdict: Some(crate::server::ViewerReviewVerdict {
-                kind: "failed".into(),
-                text: "relay reviewer_start timed out after 300 seconds".into(),
-                allowed: vec!["dismiss".into(), "cancel".into()],
-            }),
-        });
-        snapshot.sessions.push(session);
-    });
-
-    let response = tokio::spawn(
-        app.clone()
-            .oneshot(post("/api/v1/sessions/session-1/review/dismiss")),
-    );
-    let request = next(&mut actions).await;
-    assert_eq!(
-        request.action,
-        ControllerAction::ResolveReview {
-            session_id: "session-1".into(),
-            resolution: "dismiss".into(),
-        }
-    );
-    request.reply.send(ActionOutcome::accepted()).unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert_eq!(json_body(response).await["resolution"], "dismiss");
-
-    let response = app
-        .clone()
-        .oneshot(post("/api/v1/sessions/session-1/review/forward"))
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "a failed review has no findings to forward"
-    );
-
-    let response = tokio::spawn(
-        app.clone()
-            .oneshot(post("/api/v1/sessions/session-1/review/cancel")),
-    );
-    let request = next(&mut actions).await;
-    request
-        .reply
-        .send(ActionOutcome::Refused(
-            mj_core::refusal::Refusal::precondition("no review is open for that session"),
-        ))
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        json_body(response).await["error"],
-        "no review is open for that session"
-    );
-
-    let response = app
-        .oneshot(post("/api/v1/sessions/session-1/review/approve"))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -6518,6 +7370,147 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
 }
 
 #[tokio::test]
+async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
+    const MARKER: &str = "MJ_TEST_FINISHED_REVIEW_API";
+    if std::env::var_os(MARKER).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "finished_review_api_returns_reviewer_output_after_the_child_is_gone",
+            ),
+        )
+        .env(MARKER, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = crate::controller::test_support::checkpoint_test_session("session-1");
+    let child = crate::controller::test_support::checkpoint_test_session("review-child-1");
+    crate::database::save_session(&parent).unwrap();
+    crate::database::save_session(&child).unwrap();
+    let database = crate::database::database_path();
+    crate::database::record_subagent_handback(
+        &child.id,
+        &mj_core::subagent::SubagentHandback {
+            command_id: "review-prompt".into(),
+            message: "The parser drops queued input.".into(),
+            recorded_at_ms: 100,
+        },
+    )
+    .unwrap();
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
+        },
+        "api-review".into(),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    let command = driver.snapshot().roles[0].command_id.clone();
+    driver.role_turn_completed(&command, &child.id, "The parser drops queued input.");
+    let state = mj_core::storage::TurnReviewState {
+        active: Some("api-review".into()),
+        active_group: Some(mj_core::storage::ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![mj_core::review::settings::ResolvedReviewSettings {
+                profile: "codex".into(),
+                main: mj_core::review::settings::ReviewModelSettings {
+                    model: Some("gpt-6-terra".into()),
+                    effort: Some("xhigh".into()),
+                    fast_mode: false,
+                },
+                autoconfigured: false,
+            }],
+            registrations: vec![mj_core::storage::ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "review-key".into(),
+                child_session_id: Some(child.id.clone()),
+            }],
+            brief_writer: None,
+        }),
+        ..Default::default()
+    };
+    crate::database::save_reviewer_outcome(
+        &parent.id,
+        &state,
+        vec![crate::database::AcceptedReport {
+            role: "reviewer-1".into(),
+            text: "The parser drops queued input.".into(),
+        }],
+    )
+    .unwrap();
+    crate::database::close_turn_review_state(
+        &parent.id,
+        &mj_core::storage::TurnReviewState {
+            active: None,
+            active_group: None,
+            ..state
+        },
+        mj_core::storage::FinishedReviewResolution::Completed,
+    )
+    .unwrap();
+    crate::database::delete_session(&child.id).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute("DELETE FROM subagent_sessions", [])
+        .unwrap();
+    connection
+        .execute("DELETE FROM subagent_handbacks", [])
+        .unwrap();
+    drop(connection);
+
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1/reviews"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(body["review"]["review_id"], "api-review");
+    assert_eq!(body["review"]["resolution"], "completed");
+    assert_eq!(body["review"]["roles"][0]["role"], "reviewer-1");
+    assert_eq!(body["review"]["roles"][0]["profile"], "codex");
+    assert_eq!(body["review"]["roles"][0]["model"], "gpt-6-terra");
+    assert_eq!(body["review"]["roles"][0]["effort"], "xhigh");
+    assert_eq!(
+        body["review"]["roles"][0]["handback"],
+        "The parser drops queued input."
+    );
+    assert_eq!(body["review"]["roles"][0]["verdict"]["verdict"], "findings");
+
+    let response = app
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/reviews?review=missing",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn session_review_api_rejects_the_legacy_on_mode() {
     let (app, actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
@@ -6529,18 +7522,61 @@ async fn session_review_api_rejects_the_legacy_on_mode() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let message = String::from_utf8_lossy(&body);
-    for value in ["inherit", "off", "turn", "push"] {
+    for value in ["inherit", "off", "push"] {
         assert!(message.contains(value), "{message}");
     }
     assert!(actions.is_empty());
 }
 
-// Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
+/// Per-turn review was removed. A public request for it is refused with the
+/// way to proceed, while a stored action that still says `turn` reads as push.
 #[tokio::test]
-async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
+async fn session_review_api_refuses_turn_and_says_what_to_use() {
+    let (app, actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(start_request(start_body(
+            r#", "review":{"mode":"turn","reviewers":[]}"#,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let message = String::from_utf8_lossy(&body);
+    assert!(message.contains("Per-turn review was removed"), "{message}");
+    assert!(message.contains("push"), "{message}");
+    assert!(actions.is_empty());
+
+    let stored: ControllerAction = serde_json::from_str(
+        r#"{"action":"new","profile_id":"codex-1","bundle_id":"project","target_id":"raw","review":{"mode":"turn"}}"#,
+    )
+    .unwrap();
+    let ControllerAction::New { review, .. } = stored else {
+        panic!("expected new-session action");
+    };
+    assert_eq!(
+        review,
+        Some(mj_core::config::SessionReview::Push { reviewers: None })
+    );
+}
+
+#[tokio::test]
+async fn session_review_api_rejects_stored_legacy_fields() {
+    let (app, actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(start_request(start_body(
+            r#", "review":{"mode":"push","model":"gpt-6-astra","count":2}"#,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(actions.is_empty());
+}
+
+#[tokio::test]
+async fn session_review_api_forwards_an_explicitly_empty_reviewer_list() {
     let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = tokio::spawn(app.oneshot(start_request(start_body(
-        r#", "review":{"mode":"inherit","count":3,"model":"gpt-6-astra","effort":"high"}"#,
+        r#", "review":{"mode":"push","reviewers":[]}"#,
     ))));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New { review, .. } = request.action else {
@@ -6548,11 +7584,8 @@ async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
     };
     assert_eq!(
         review,
-        Some(mj_core::config::SessionReview::Inherit {
-            count: std::num::NonZeroUsize::new(3),
-            model: Some("gpt-6-astra".into()),
-            effort: Some("high".into()),
-            tier: None,
+        Some(mj_core::config::SessionReview::Push {
+            reviewers: Some(Vec::new()),
         })
     );
     request
@@ -6564,5 +7597,116 @@ async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
     assert_eq!(
         response.await.unwrap().unwrap().status(),
         StatusCode::CONFLICT
+    );
+}
+
+// Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
+#[tokio::test]
+async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
+    let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = tokio::spawn(app.oneshot(start_request(start_body(
+        r#", "review":{"mode":"inherit","reviewers":[{"model":"gpt-6-astra","effort":"high"}]}"#,
+    ))));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { review, .. } = request.action else {
+        panic!("expected new-session action");
+    };
+    assert_eq!(
+        review,
+        Some(mj_core::config::SessionReview::Inherit {
+            reviewers: Some(vec![mj_core::config::SubagentChoice {
+                model: "gpt-6-astra".into(),
+                effort: Some("high".into())
+            }]),
+        })
+    );
+    request
+        .reply
+        .send(ActionOutcome::Refused(
+            mj_core::refusal::Refusal::precondition("test complete"),
+        ))
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CONFLICT
+    );
+}
+
+// Hard-won: #1450: a harness completion without an accepted ordinal reopened the first prompt wait.
+#[test]
+fn harness_completion_answers_started_prompts_but_not_queued_prompts() {
+    let mut outcome = completed(20, "end_turn");
+    outcome.command_id = mj_core::continuation::harness_turn_id(15);
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(15);
+    outcome.answered_through = Some(15);
+    let mut observation = idle(Some(outcome));
+    observation.activity = mj_core::activity::ActivityState::Idle { since_ms: None };
+    observation.start_status = Some(StartStatus::Submitted { turn_id: 7 });
+    assert!(resolve_wait(&observation, &WaitRequest::default()).is_some());
+    let request = WaitRequest {
+        turn_id: Some(7),
+        ..Default::default()
+    };
+    assert!(resolve_wait(&observation, &request).is_some());
+    observation
+        .last_turn_outcome
+        .as_mut()
+        .unwrap()
+        .answered_through = Some(6);
+    // Stored answers do not change when the queue changes.
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let durable = TurnState {
+        execution: MaterializedExecutionState::Idle,
+        active_turn: None,
+        last_turn_outcome: observation.last_turn_outcome.clone(),
+    };
+    let durable_observation =
+        build_observation(&snapshot, &snapshot.sessions[0], None, Some(&durable), None);
+    assert!(resolve_wait(&durable_observation, &request).is_none());
+    observation.queued.push("queued-prompt".into());
+    assert!(resolve_wait(&observation, &request).is_none());
+    // Hard-won: #1450 review: a queued prompt that started read as answered by the older harness turn.
+    observation.queued.clear();
+    observation.active_turn = Some(MaterializedTurn {
+        command_id: "queued-prompt".into(),
+        accepted_ordinal: Some(7),
+        turn_start_position: 21,
+        started_at_ms: 0,
+        steered_into: None,
+    });
+    assert!(resolve_wait(&observation, &request).is_none());
+}
+
+// Hard-won: #1450 review: a wait for a running prompt ended on a queued prompt's rejection
+#[test]
+fn queued_rejection_does_not_finish_the_running_prompt_wait() {
+    let mut outcome = completed(7, "error");
+    outcome.answered_through = Some(4);
+    outcome.outcome = TurnOutcomeKind::Rejected {
+        reason: None,
+        message: "transport failed".into(),
+    };
+    let observation = idle(Some(outcome));
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(5),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(7),
+                ..Default::default()
+            }
+        )
+        .is_some()
     );
 }

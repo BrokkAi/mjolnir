@@ -49,7 +49,7 @@ fn photo_queue_survives_restart_and_archive_transfer() {
     for artifact in store.archive_artifacts().unwrap() {
         assert!(
             restored
-                .restore_artifact(&artifact.relative_path, &artifact.data)
+                .restore_artifact(&artifact.relative_path, &artifact.data.bytes().unwrap())
                 .unwrap()
         );
     }

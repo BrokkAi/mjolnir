@@ -75,11 +75,11 @@ def main():
     ''')
         env = dict(os.environ, MJ_CONFIG_DIR=str(config), MJ_DATA_DIR=str(data))
         subprocess.run(
-            [str(binary), 'daemon', 'restart'], env=env, check=True,
+            [str(binary), '--instance', name, 'daemon', 'restart'], env=env, check=True,
             capture_output=True, text=True, timeout=20,
         )
         metadata = json.loads((data / 'daemon.json').read_text())
-        instance = {'data': data, 'env': env, 'pid': metadata['pid'], 'pidfd': os.pidfd_open(metadata['pid'])}
+        instance = {'data': data, 'env': env, 'pid': metadata['pid'], 'pidfd': os.pidfd_open(metadata['pid']), 'name': name}
         instances.append(instance)
         return instance
 
@@ -92,6 +92,37 @@ def main():
         owner = start('owner', port)
         first = wait_state(owner, 'Ready')
         https_get(first['viewer_url'])
+        # A client can reach authenticated HTTP with only control discovery,
+        # without the daemon's token file or any shared data-directory access.
+        # Initialize its own store: today's local connector checks its schema.
+        client = start('client', 0)
+        wait_state(client, 'Ready')
+        subprocess.run(
+            [str(binary), '--instance', client['name'], 'daemon', 'stop'],
+            env=client['env'], check=True, capture_output=True, text=True, timeout=20,
+        )
+        client_data = client['data']
+        (client_data / 'api-token').unlink()
+        shutil.copyfile(owner['data'] / 'daemon.json', client_data / 'daemon.json')
+        client_env = dict(owner['env'], MJ_DATA_DIR=str(client_data))
+        result = subprocess.run(
+            [str(binary), '--instance', owner['name'], 'sessions', '--json'],
+            env=client_env, check=False, capture_output=True, text=True, timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        json.loads(result.stdout)
+        token = subprocess.run(
+            [str(binary), '--instance', owner['name'], 'api-token'],
+            env=client_env, check=True, capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        assert token == request(owner, 'api_credential')['value']
+        info = subprocess.run(
+            [str(binary), '--instance', owner['name'], 'api-info', '--json'],
+            env=client_env, check=True, capture_output=True, text=True, timeout=20,
+        ).stdout
+        assert 'token_path' not in json.loads(info) and token not in info
+        assert not (client_data / 'api-token').exists()
+        print('PASS: separate-data client authenticates HTTP using the control credential')
         contender = start('contender', port)
         failed = wait_state(contender, 'Failed')
         assert failed['address'] == f'127.0.0.1:{port}' and failed['port_conflict']
@@ -126,7 +157,7 @@ def main():
             poller.register(instance['pidfd'], select.POLLIN)
             if not poller.poll(0):
                 result = subprocess.run(
-                    [str(binary), 'daemon', 'stop'], env=instance['env'],
+                    [str(binary), '--instance', instance['name'], 'daemon', 'stop'], env=instance['env'],
                     capture_output=True, text=True, timeout=15,
                 )
                 if result.returncode:

@@ -12,23 +12,49 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
         .collect()
 }
 
+/// The disabled Claude profiles whose sessions are live, from the credential
+/// sync's published targets (the one owner of which sessions hold which
+/// profile's copy). A session copy holds no refresh token, so the profile's
+/// grant must stay renewed while any such session runs, enabled or not.
+pub fn claude_grant_only_requests(
+    config: &mj_core::config::Config,
+    live_profile_ids: &std::collections::BTreeSet<String>,
+) -> Vec<QuotaRefreshRequest> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let runtime = crate::quota::QuotaRuntimeConfig::of(config);
+    config
+        .profiles
+        .iter()
+        .filter(|(id, profile)| {
+            !profile.enabled
+                && profile.kind == mj_core::config::HarnessKind::Claude
+                && live_profile_ids.contains(*id)
+        })
+        .map(|(id, profile)| {
+            QuotaRefreshRequest::for_profile(id, profile, cwd.clone(), runtime.clone())
+        })
+        .collect()
+}
+
 /// Reads a profile's stored report, the rebuildable copy the daemon keeps in
 /// the store. Called on a blocking thread.
 pub type QuotaCacheLoader =
     Arc<dyn Fn(&QuotaRefreshRequest) -> Option<crate::quota::ProfileQuota> + Send + Sync>;
 
 /// When a profile is next due for a probe, in epoch seconds: one interval
-/// after its last report, or the end of a rate-limit hold when that is later.
-/// A profile with no report is due at once (zero).
+/// after its last report, or the refused check's own next check
+/// (`ProfileQuota::next_check_at`) when that is later. A refused probe keeps
+/// the last good reading and its age, so a short hold must not re-probe once
+/// the old reading is past its interval. A profile with no report is due at once.
 pub(super) fn next_probe_at(report: Option<&crate::quota::ProfileQuota>) -> u64 {
     report.map_or(0, |report| {
         (report.refreshed_at_epoch_seconds + QUOTA_REFRESH_INTERVAL.as_secs())
-            .max(report.rate_limited_until_epoch_seconds.unwrap_or(0))
+            .max(report.next_check_at().unwrap_or(0))
     })
 }
 
 /// Whether a provider told this profile to wait, and the wait is not over.
-fn on_hold(report: Option<&crate::quota::ProfileQuota>, now: u64) -> bool {
+pub(super) fn on_hold(report: Option<&crate::quota::ProfileQuota>, now: u64) -> bool {
     report
         .and_then(|report| report.rate_limited_until_epoch_seconds)
         .is_some_and(|until| until > now)
@@ -46,18 +72,44 @@ pub fn spawn_quota_refresher(
     tokio::sync::watch::Sender<QuotaRefreshBatch>,
     tokio::sync::mpsc::Receiver<QuotaUpdate>,
 ) {
+    spawn_quota_refresher_with(cache, crate::claude_usage::ClaudeLauncher::Managed)
+}
+
+/// [`spawn_quota_refresher`] with the program Claude grant renewals run.
+pub(super) fn spawn_quota_refresher_with(
+    cache: QuotaCacheLoader,
+    launcher: crate::claude_usage::ClaudeLauncher,
+) -> (
+    tokio::sync::watch::Sender<QuotaRefreshBatch>,
+    tokio::sync::mpsc::Receiver<QuotaUpdate>,
+) {
     let (profiles_tx, mut profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(32);
+    // Grant renewal is its own task: a slow lock, container start or
+    // `claude auth login` must not hold up a probe, and a usage hold must
+    // not hold up a renewal.
+    spawn_claude_grant_refresher(
+        profiles_tx.subscribe(),
+        QUOTA_REFRESH_INTERVAL,
+        GrantRenewal {
+            launcher,
+            gate: crate::upgrade::gate().clone(),
+        },
+        Some(updates_tx.clone()),
+    );
     tokio::spawn(async move {
         // A daemon that stopped mid-check left its quota container running;
-        // this instance owns it, and nothing else will remove it.
-        if let Err(error) = tokio::task::spawn_blocking(|| {
-            crate::quota_runtime::sweep_quota_containers(
-                &mj_core::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
-                std::env::var_os("PATH").as_deref(),
-            )
-        })
-        .await
+        // this instance owns it, and nothing else will remove it. Unit tests
+        // start pollers too, with the instance identity of the user's real
+        // daemon, and must never reach the host's container engine.
+        if !cfg!(test)
+            && let Err(error) = tokio::task::spawn_blocking(|| {
+                crate::quota_runtime::sweep_quota_containers(
+                    &mj_core::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
+                    std::env::var_os("PATH").as_deref(),
+                )
+            })
+            .await
         {
             tracing::warn!(%error, "quota container sweep task failed");
         }
@@ -66,6 +118,13 @@ pub fn spawn_quota_refresher(
         // The cache identity each profile was last adopted under. A changed
         // identity is a changed profile, whose report no longer applies.
         let mut identities: std::collections::BTreeMap<String, String> = Default::default();
+        // One-shot extras already probed, by profile and identity. They never
+        // join the batch's schedule; a forced cycle re-probes them.
+        let mut probed_extra: std::collections::BTreeMap<String, String> = Default::default();
+        // The named forced probes this poller has answered, by profile. The
+        // batch retains its requests, so comparing sequences instead of
+        // clearing a flag survives the channel coalescing rapid publishes.
+        let mut consumed_forced: std::collections::BTreeMap<String, u64> = Default::default();
         loop {
             let now = epoch_seconds();
             let wake = batch
@@ -95,25 +154,261 @@ pub fn spawn_quota_refresher(
                     let report = quotas.report(&request.profile_id);
                     // A hold outranks even an explicit refresh: probing an
                     // endpoint that just said 429 only extends the limit.
-                    !on_hold(report, now) && (batch.refresh || next_probe_at(report) <= now)
+                    !on_hold(report, now)
+                        && (batch.refresh
+                            || batch.forced_probes.get(&request.profile_id).is_some_and(
+                                |sequence| {
+                                    consumed_forced.get(&request.profile_id) < Some(sequence)
+                                },
+                            )
+                            || next_probe_at(report) <= now)
                 })
+                .cloned()
+                .collect::<Vec<_>>();
+            let fresh_extra = batch
+                .extra
+                .iter()
+                .filter(|request| {
+                    batch.refresh
+                        || batch
+                            .forced_probes
+                            .get(&request.profile_id)
+                            .is_some_and(|sequence| {
+                                consumed_forced.get(&request.profile_id) < Some(sequence)
+                            })
+                        || probed_extra.get(&request.profile_id) != Some(&request.cache_identity())
+                })
+                .filter(|request| !on_hold(quotas.report(&request.profile_id), now))
                 .cloned()
                 .collect::<Vec<_>>();
             // A batch that only changed the profile set and finds nothing due
             // is not a cycle. A requested refresh always is, so the person's
             // notice can end.
-            if due.is_empty() && !batch.refresh {
+            if due.is_empty() && !batch.refresh && fresh_extra.is_empty() {
                 continue;
             }
             let generation = batch.generation;
+            let forced = batch.refresh;
             batch.refresh = false;
-            if !refresh_profile_quotas(&mut quotas, generation, &due, &updates_tx).await {
+            for (profile_id, sequence) in std::mem::take(&mut batch.forced_probes) {
+                consumed_forced.insert(profile_id, sequence);
+            }
+            if (!due.is_empty() || forced)
+                && !refresh_profile_quotas(&mut quotas, generation, &due, &updates_tx).await
+            {
                 break;
+            }
+            if !fresh_extra.is_empty() {
+                for request in &fresh_extra {
+                    // A changed identity is a different account: its cached
+                    // client and report belong to the old one.
+                    let identity = request.cache_identity();
+                    if probed_extra
+                        .insert(request.profile_id.clone(), identity.clone())
+                        .is_some_and(|previous| previous != identity)
+                    {
+                        quotas.forget(&request.profile_id).await;
+                    }
+                }
+                // One-shot probes report individually; they are not a cycle.
+                let updates = &updates_tx;
+                let delivered = std::sync::atomic::AtomicBool::new(true);
+                quotas
+                    .probe(fresh_extra, |quota| {
+                        let delivered = &delivered;
+                        async move {
+                            if delivered.load(std::sync::atomic::Ordering::Acquire)
+                                && updates.send(QuotaUpdate::Report(quota)).await.is_err()
+                            {
+                                tracing::debug!(
+                                    "quota update consumer closed while reporting a profile"
+                                );
+                                delivered.store(false, std::sync::atomic::Ordering::Release);
+                            }
+                        }
+                    })
+                    .await;
+                if !delivered.into_inner() {
+                    break;
+                }
             }
         }
         quotas.shutdown().await;
     });
     (profiles_tx, updates_rx)
+}
+
+/// The least a profile's renewal task waits after a check. A grant whose
+/// login is already due again after a renewal would otherwise renew in a
+/// loop. This is a back-off, not a limit: the due time otherwise decides.
+const CLAUDE_GRANT_MINIMUM_WAIT: Duration = Duration::from_secs(5);
+
+/// What a grant renewal runs, and the handoff gate it takes admission from.
+#[derive(Clone)]
+pub(super) struct GrantRenewal {
+    pub(super) launcher: crate::claude_usage::ClaudeLauncher,
+    pub(super) gate: Arc<crate::upgrade::Gate>,
+}
+
+/// Keep every Claude profile's grant renewed (#1490): the daemon is the only
+/// refresher, because session copies hold no refresh token. This task is the
+/// one owner of that decision. It follows the same batches as the quota
+/// poller (`profiles` and `grants`) and runs one task per profile request, so
+/// a slow renewal never delays another profile's. `recheck` is how long a task
+/// sleeps at most, so a login file replaced behind its back is seen within one
+/// interval. Task failures are logged.
+pub(super) fn spawn_claude_grant_refresher(
+    mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
+    recheck: Duration,
+    renewal: GrantRenewal,
+    updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
+) {
+    tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut running: std::collections::BTreeMap<tokio::task::Id, QuotaRefreshRequest> =
+            Default::default();
+        loop {
+            let batch = batches.borrow_and_update().clone();
+            for request in batch.profiles.iter().chain(&batch.grants) {
+                if running.values().any(|running| running == request) {
+                    continue;
+                }
+                let handle = tasks.spawn(renew_claude_grant_when_due(
+                    request.clone(),
+                    batches.clone(),
+                    recheck,
+                    renewal.clone(),
+                    updates.clone(),
+                ));
+                running.insert(handle.id(), request.clone());
+            }
+            tokio::select! {
+                changed = batches.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                Some(joined) = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                    match joined {
+                        // The task saw its request leave or change.
+                        Ok((id, ())) => {
+                            running.remove(&id);
+                        }
+                        // A panicked task stays listed, so it is not restarted
+                        // in a loop; its request changing replaces it.
+                        Err(error) => tracing::error!(
+                            %error,
+                            "a Claude grant renewal task failed; it is not restarted until its profile changes"
+                        ),
+                    }
+                }
+            }
+        }
+        // The feed closed: let renewals in flight finish rather than cut a
+        // refresh-token exchange short.
+        while let Some(joined) = tasks.join_next().await {
+            if let Err(error) = joined {
+                tracing::error!(%error, "a Claude grant renewal task failed");
+            }
+        }
+    });
+}
+
+/// One profile's renewal loop. Nothing is cached between wakes: each one reads
+/// the login file again through [`crate::quota::refresh_claude_grant`]. It
+/// ends when the profile leaves the batch or is configured differently.
+async fn renew_claude_grant_when_due(
+    request: QuotaRefreshRequest,
+    mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
+    recheck: Duration,
+    renewal: GrantRenewal,
+    updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
+) {
+    loop {
+        let (current, rejected_logins) = {
+            let batch = batches.borrow_and_update();
+            let current = batch
+                .profiles
+                .iter()
+                .chain(&batch.grants)
+                .find(|candidate| candidate.profile_id == request.profile_id)
+                .cloned();
+            (
+                current,
+                batch
+                    .rejected_logins
+                    .get(&request.profile_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        };
+        if current.as_ref() != Some(&request) {
+            return;
+        }
+        let now_ms = mj_core::clock::epoch_millis();
+        let check = crate::quota::refresh_claude_grant(
+            &request,
+            now_ms,
+            &renewal.launcher,
+            &renewal.gate,
+            &rejected_logins,
+        )
+        .await;
+        if let Some(updates) = &updates
+            && !matches!(
+                check,
+                crate::quota::ClaudeGrantCheck::NotApplicable
+                    | crate::quota::ClaudeGrantCheck::Deferred
+            )
+            && (!rejected_logins.is_empty()
+                || matches!(check, crate::quota::ClaudeGrantCheck::Renewed { .. }))
+            && updates
+                .send(QuotaUpdate::ClaudeGrant {
+                    request: request.clone(),
+                    check,
+                    rejected_logins: rejected_logins.clone(),
+                })
+                .await
+                .is_err()
+        {
+            return;
+        }
+        let wait = match check {
+            // Applicability follows from the request, so only a changed
+            // batch can alter it.
+            crate::quota::ClaudeGrantCheck::NotApplicable => None,
+            crate::quota::ClaudeGrantCheck::Waiting {
+                due_at_ms: Some(due_at_ms),
+            }
+            | crate::quota::ClaudeGrantCheck::Renewed {
+                due_at_ms: Some(due_at_ms),
+            } => Some(
+                Duration::from_millis(due_at_ms.saturating_sub(now_ms).max(0) as u64)
+                    .max(CLAUDE_GRANT_MINIMUM_WAIT)
+                    .min(recheck),
+            ),
+            // No login or refresh token yet, no readable expiry, or a failed
+            // renewal: look again after one interval.
+            crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: None }
+            | crate::quota::ClaudeGrantCheck::Renewed { due_at_ms: None }
+            | crate::quota::ClaudeGrantCheck::Deferred
+            | crate::quota::ClaudeGrantCheck::Failed => Some(recheck),
+        };
+        let sleep = async {
+            match wait {
+                Some(wait) => tokio::time::sleep(wait).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = sleep => {}
+            changed = batches.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Bring the manager in line with a new batch: drop profiles that left or
@@ -129,6 +424,7 @@ async fn adopt_profiles(
     let keep = batch
         .profiles
         .iter()
+        .chain(&batch.extra)
         .map(|request| request.profile_id.clone())
         .collect::<std::collections::BTreeSet<_>>();
     identities.retain(|id, _| keep.contains(id));
@@ -138,7 +434,7 @@ async fn adopt_profiles(
         if identities.get(&request.profile_id) == Some(&identity) {
             continue;
         }
-        identities.insert(request.profile_id.clone(), identity);
+        identities.insert(request.profile_id.clone(), identity.clone());
         quotas.forget(&request.profile_id).await;
         let load = cache.clone();
         let for_request = request.clone();
@@ -161,6 +457,7 @@ async fn adopt_profiles(
         );
         quotas.seed(stored.clone());
         let outcome = QuotaRefreshOutcome {
+            cache_identity: identity,
             report: stored,
             credentials_changed: false,
         };
@@ -255,6 +552,7 @@ pub enum ImageRefreshReport {
 pub fn spawn_image_refresher(
     plan: impl Fn() -> Vec<ImageRefresh> + Send + 'static,
     report: impl Fn(ImageRefreshReport) + Send + Sync + 'static,
+    apple_container_settled: tokio_util::sync::CancellationToken,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let report: Arc<dyn Fn(ImageRefreshReport) + Send + Sync> = Arc::new(report);
@@ -276,7 +574,14 @@ pub fn spawn_image_refresher(
                 biased;
                 _ = cancellation.cancelled() => return,
                 _ = interval.tick() => {
-                    refresh_images(plan(), &report, &mut last_failures, &cancellation).await;
+                    refresh_images(
+                        plan(),
+                        &report,
+                        &mut last_failures,
+                        &apple_container_settled,
+                        &cancellation,
+                    )
+                    .await;
                 }
             }
         }
@@ -327,14 +632,82 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
         ImageHost::LocalPodman | ImageHost::LocalDocker | ImageHost::AppleContainer => {
             crate::targets::program_on_path(host.engine(), path)
         }
-        ImageHost::SshPodman(_) | ImageHost::SshDocker(_) | ImageHost::SshAppleContainer(_) => true,
+        ImageHost::SshPodman(_)
+        | ImageHost::SshDocker(_)
+        | ImageHost::SshAppleContainer(_)
+        | ImageHost::SshNitro(_) => true,
     }
+}
+
+/// Whether a host's engine is up, so a background refresh may use it.
+///
+/// A refresh is a chore, not a launch: it only observes Apple's service and
+/// never starts one the user stopped. The next launch preflight starts it
+/// when a session needs it.
+pub(super) fn host_is_running(host: &ImageHost, executor: &impl CommandExecutor) -> Result<bool> {
+    match host {
+        ImageHost::AppleContainer => Ok(matches!(
+            crate::targets::apple_container_runtime_status(executor)?,
+            crate::targets::AppleContainerStatus::Running
+        )),
+        _ => Ok(true),
+    }
+}
+
+/// One host's turn in a refresh tick. Answers `None` when there is nothing to
+/// record: the host is stopped, or the daemon is leaving.
+pub(super) fn refresh_one_host(
+    refresh: ImageRefresh,
+    executor: &impl CommandExecutor,
+    report: &dyn Fn(ImageRefreshReport),
+) -> Option<(String, String, Option<String>)> {
+    let host = refresh.host.label();
+    // `None` means the host's engine is stopped: nothing to refresh.
+    let outcome = host_is_running(&refresh.host, executor).and_then(|running| {
+        if !running {
+            return Ok(None);
+        }
+        refresh_host_image(&refresh, executor, report).map(Some)
+    });
+    let error = match outcome {
+        Ok(Some(_)) => None,
+        Ok(None) => {
+            tracing::debug!(
+                host,
+                image = refresh.image,
+                "the container engine is not running; skipping the image refresh"
+            );
+            return None;
+        }
+        Err(error) if executor.cancellation_requested() => {
+            // The daemon is leaving. That is not a fault of the host,
+            // and it is not news for the user either.
+            tracing::debug!(
+                host,
+                image = refresh.image,
+                error = format!("{error:#}"),
+                "container image refresh cancelled"
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                host,
+                image = refresh.image,
+                error = format!("{error:#}"),
+                "could not refresh a container image"
+            );
+            Some(format!("{error:#}"))
+        }
+    };
+    Some((host, refresh.image, error))
 }
 
 pub(super) async fn refresh_images(
     plan: Vec<ImageRefresh>,
     report: &Arc<dyn Fn(ImageRefreshReport) + Send + Sync>,
     last_failures: &mut BTreeMap<String, String>,
+    apple_container_settled: &tokio_util::sync::CancellationToken,
     cancellation: &tokio_util::sync::CancellationToken,
 ) {
     if plan.is_empty() {
@@ -359,57 +732,14 @@ pub(super) async fn refresh_images(
             );
             continue;
         }
-        // ProcessExecutor is synchronous, and a pull is long: it belongs on a
-        // blocking thread, never on the runtime.
         let executor = CancellableProcessExecutor::new(cancelled.clone());
         let report = report.clone();
-        hosts.spawn_blocking(move || {
-            let host = refresh.host.label();
-            let ensure = if refresh.host == ImageHost::AppleContainer {
-                crate::targets::ensure_apple_container_runtime(&executor).map(|_| ())
-            } else {
-                Ok(())
-            };
-            let outcome = ensure.and_then(|()| {
-                // A launch that needs this image waits on the same lock, so it
-                // never starts a second download of what this tick is fetching.
-                let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
-                let held = crate::image_pull_gate::hold_image_pull(
-                    &lock,
-                    || executor.is_cancelled(),
-                    || {},
-                );
-                held.and_then(|guard| {
-                    let outcome = refresh_host_image(&refresh, &executor, &*report);
-                    drop(guard);
-                    outcome
-                })
-            });
-            let error = match outcome {
-                Ok(_) => None,
-                Err(error) if executor.is_cancelled() => {
-                    // The daemon is leaving. That is not a fault of the host,
-                    // and it is not news for the user either.
-                    tracing::debug!(
-                        host,
-                        image = refresh.image,
-                        error = format!("{error:#}"),
-                        "container image refresh cancelled"
-                    );
-                    return None;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        host,
-                        image = refresh.image,
-                        error = format!("{error:#}"),
-                        "could not refresh a container image"
-                    );
-                    Some(format!("{error:#}"))
-                }
-            };
-            Some((host, refresh.image, error))
-        });
+        hosts.spawn(refresh_host_after_startup(
+            refresh,
+            apple_container_settled.clone(),
+            cancellation.clone(),
+            move |refresh| refresh_one_host(refresh, &executor, &*report),
+        ));
     }
     let mut cancelling = false;
     loop {
@@ -433,9 +763,38 @@ pub(super) async fn refresh_images(
     }
 }
 
+/// One host's refresh task. The local Apple container refresh first waits
+/// for daemon startup's start of the service to finish: the refresh only looks
+/// at the service and never starts it, and a look mid-start would read
+/// "stopped" and skip the whole interval. Every other host starts at once, so
+/// a slow Apple start holds no other host's refresh.
+pub(super) async fn refresh_host_after_startup(
+    refresh: ImageRefresh,
+    apple_container_settled: tokio_util::sync::CancellationToken,
+    cancellation: tokio_util::sync::CancellationToken,
+    run: impl FnOnce(ImageRefresh) -> Option<(String, String, Option<String>)> + Send + 'static,
+) -> Option<(String, String, Option<String>)> {
+    if matches!(refresh.host, ImageHost::AppleContainer) {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return None,
+            _ = apple_container_settled.cancelled() => {}
+        }
+    }
+    // ProcessExecutor is synchronous, and a pull is long: it belongs on a
+    // blocking thread, never on the runtime.
+    match tokio::task::spawn_blocking(move || run(refresh)).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(%error, "container image refresh task failed");
+            None
+        }
+    }
+}
+
 /// What one host's refresh of one image did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ImageRefreshOutcome {
+pub enum ImageRefreshOutcome {
     /// The host already had the image and this target only wants it present,
     /// so nothing was downloaded.
     Present,
@@ -454,12 +813,28 @@ pub(crate) enum ImageRefreshOutcome {
 ///
 /// `report` is told when a download actually starts and when one leaves the
 /// host with a new image, so the user hears about the wait they are in rather
-/// than about every hourly check.
-pub(crate) fn refresh_host_image(
+/// than about every hourly check. The same gate covers background refreshes,
+/// explicit preloads, and session launches, including other mj processes.
+///
+/// A Nitro host's engine is the worker binary, which is not there until mj
+/// puts it there, and a host created for sandboxes is registered and its image
+/// preloaded before any session exists. Every refresh path comes through here,
+/// so this installs the engine before the first engine command; the install
+/// is idempotent and only writes under the SSH user's home.
+pub fn refresh_host_image(
     refresh: &ImageRefresh,
     executor: &impl CommandExecutor,
     report: &dyn Fn(ImageRefreshReport),
 ) -> Result<ImageRefreshOutcome> {
+    if let ImageHost::SshNitro(ssh) = &refresh.host {
+        crate::controller::ensure_microvm_engine(ssh, executor)?;
+    }
+    let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
+    let _guard = crate::image_pull_gate::hold_image_pull(
+        &lock,
+        || executor.cancellation_requested(),
+        || {},
+    )?;
     let host = refresh.host.label();
     let cached = image_id(&refresh.image_id, executor);
     if refresh.when == RefreshWhen::WhenAbsent && cached.is_some() {
@@ -502,9 +877,7 @@ pub(crate) fn refresh_host_image(
         );
         ImageRefreshOutcome::Unchanged
     };
-    if let Some(prune) = &refresh.prune {
-        run_refresh_command(prune, executor)?;
-    }
+    run_refresh_command(&refresh.prune, executor)?;
     Ok(outcome)
 }
 

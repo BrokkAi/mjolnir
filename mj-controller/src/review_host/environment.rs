@@ -10,13 +10,6 @@ pub trait ReviewEnvironment: Send + Sync {
     /// reviewed under `profile`.
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String>;
 
-    /// Whether this session is a Mjolnir-managed sub-agent. Its changes are
-    /// included in the parent's automatic turn review; explicit commit reviews
-    /// are still allowed. Blocking: it reads the controller's database.
-    fn is_subagent(&self, _session_id: &str) -> bool {
-        false
-    }
-
     /// Refuses a session whose project source cannot be reviewed even before
     /// asking the worker to capture a delta. Blocking: production reads the
     /// accepted project snapshot from the controller database.
@@ -24,11 +17,20 @@ pub trait ReviewEnvironment: Send + Sync {
         Ok(())
     }
 
+    /// Chooses the reviewers. A cancelled review drops the returned future.
     fn resolve<'a>(
         &'a self,
         handle: ManagedSessionHandle,
         config: ReviewConfig,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
+    >;
+
+    /// Resolves one model choice, such as the brief writer's, to a profile.
+    fn resolve_choice<'a>(
+        &'a self,
+        choice: mj_core::config::SubagentChoice,
     ) -> mj_client::session::BoxFuture<
         'a,
         Result<mj_core::review::settings::ResolvedReviewSettings, String>,
@@ -38,6 +40,7 @@ pub trait ReviewEnvironment: Send + Sync {
         &self,
         session_id: &str,
         reviewer: &ReviewerIdentity,
+        role: mj_core::worker_launch::ReviewChildRole,
         prompt: String,
         request_key: String,
         working_directory: Option<std::path::PathBuf>,
@@ -59,8 +62,35 @@ pub trait ReviewEnvironment: Send + Sync {
 
     /// Records how far this session has been reviewed. Blocking: the host
     /// routes it through its ordered persistence lane rather than calling it
-    /// on the Tokio task that owns review state.
+    /// on the Tokio task that owns review state. Newly settled findings and
+    /// their partial mailbox messages commit together while peers remain.
     fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String>;
+
+    /// Records review state together with the text the host settled roles from.
+    ///
+    /// The host owns that decision, so the store must not re-derive it: a
+    /// reviewer child's handback row can be replaced by a later command, and
+    /// reading it here would pair unrelated text with a settled verdict.
+    fn save_reviewer_outcome(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: &[crate::database::AcceptedReport],
+    ) -> Result<(), String> {
+        let _ = reports;
+        self.save_state(session_id, state)
+    }
+
+    /// Clears an active review and records its per-role output in one durable
+    /// write. The default keeps a test environment that has no store.
+    fn close_review(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        _resolution: crate::database::FinishedReviewResolution,
+    ) -> Result<(), String> {
+        self.save_state(session_id, state)
+    }
 
     /// Clears the in-flight flag of every review a restart interrupted, and
     /// reports whose they were. Baselines are deliberately left alone: the
@@ -85,9 +115,23 @@ pub trait ReviewEnvironment: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// What the store holds about one reviewer child: whether its session has
+    /// ended, and the handback it recorded, if any. Blocking: production reads
+    /// the controller's database.
+    fn reviewer_child_standing(&self, _child: &str) -> Result<ChildStanding, String> {
+        Ok(ChildStanding::default())
+    }
+
+    /// Whether the store still has this session's record. A destroyed
+    /// session has none, and nothing about its reviews can be saved again.
+    /// Blocking: production reads the controller's database.
+    fn session_exists(&self, _session_id: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+
     /// Holds the session against background work for as long as a review
     /// needs its worker: waits until no recovery copy or worker upgrade is
-    /// running (up to `deadline`), then keeps new ones from starting until
+    /// running (bounded by the caller's review preparation deadline), then keeps new ones from starting until
     /// the returned hold is dropped.
     ///
     /// A recovery copy takes the session's lease, which cancels reviewer
@@ -114,6 +158,25 @@ pub struct ReviewerChildRelation {
     pub child_session_id: String,
 }
 
+/// What the store holds about a reviewer child, read at one moment.
+#[derive(Clone, Debug, Default)]
+pub struct ChildStanding {
+    /// Why its session can no longer run, or `None` while it still can.
+    pub ended: Option<String>,
+    /// The report it handed back, whether or not the review has taken it yet.
+    pub handback: Option<mj_core::subagent::SubagentHandback>,
+}
+
+impl ChildStanding {
+    /// The handback text, when the report answers the turn `command_id`
+    /// names: the same rule delegation applies to a finished reviewer turn.
+    pub(super) fn answer_to(self, command_id: &str) -> Option<String> {
+        self.handback
+            .filter(|handback| handback.answers(command_id))
+            .map(|handback| handback.message)
+    }
+}
+
 /// Keeps background work off a session while a review needs its worker.
 /// Dropping it lets recovery copies and worker upgrades start again.
 pub type BackgroundHold = Box<dyn Send + Sync>;
@@ -129,9 +192,6 @@ pub struct ControllerEnvironment {
     /// The daemon's gate for recovery copies and worker upgrades, which a
     /// review waits behind instead of racing for the session's lease.
     pub background: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-    /// The daemon's profile catalog, once it is installed. A pinned review
-    /// model is matched against it before any profile is staged.
-    pub(crate) catalog: Option<SharedProfileCatalog>,
 }
 
 /// The daemon installs its profile catalog after the review host starts.
@@ -142,6 +202,23 @@ pub(crate) type SharedReviewerRuntime =
     Arc<std::sync::OnceLock<std::sync::Weak<crate::daemon::RuntimeState>>>;
 
 impl ControllerEnvironment {
+    /// The daemon's reviewer profile service, once it has started.
+    async fn profile_backend(&self) -> Result<Arc<crate::server_runtime::api::ApiBackend>, String> {
+        let runtime = self.runtime().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(backend) = runtime.report_backend.get() {
+                    return backend
+                        .upgrade()
+                        .ok_or_else(|| "reviewer profile service stopped".to_owned());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .map_err(|_| "reviewer profile service did not start".to_owned())?
+    }
+
     async fn runtime(&self) -> Result<Arc<crate::daemon::RuntimeState>, String> {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -202,7 +279,12 @@ impl ReviewEnvironment for ControllerEnvironment {
         event: &mj_core::mailbox::MailboxEvent,
     ) -> Result<(), String> {
         let json = serde_json::to_string(event).map_err(|error| error.to_string())?;
-        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, false)
+        // A sub-agent that handed back and parked while its review ran is
+        // woken by the verdict; a top-level session is never parked.
+        let unpark = crate::database::load_subagent(session_id)
+            .map_err(|error| format!("{error:#}"))?
+            .is_some();
+        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, unpark)
             .map(|_| ())
             .map_err(|error| format!("{error:#}"))
     }
@@ -215,13 +297,6 @@ impl ReviewEnvironment for ControllerEnvironment {
             .subagents
             .values()
             .filter(|child| child.kind == mj_core::subagent::SubagentKind::Reviewer)
-            .filter(|child| {
-                controller
-                    .state
-                    .sessions
-                    .get(&child.child_session_id)
-                    .is_some_and(|session| session.state.is_active() || session.target.is_some())
-            })
             .map(|child| ReviewerChildRelation {
                 parent_session_id: child.parent_session_id.clone(),
                 request_key: child.kind.request_key(&child.request_key),
@@ -229,10 +304,37 @@ impl ReviewEnvironment for ControllerEnvironment {
             })
             .collect())
     }
+
+    fn reviewer_child_standing(&self, child: &str) -> Result<ChildStanding, String> {
+        let ended = match crate::database::load_session_record(child)
+            .map_err(|error| format!("{error:#}"))?
+        {
+            None => Some("removed".to_owned()),
+            Some(record) if crate::session_manager::session_has_ended(record.state) => {
+                Some(match record.last_error {
+                    Some(cause) => format!("{}: {cause}", record.state.as_str()),
+                    None => record.state.as_str().to_owned(),
+                })
+            }
+            Some(_) => None,
+        };
+        let handback = crate::database::load_subagent_report(child)
+            .map_err(|error| format!("{error:#}"))?
+            .handback;
+        Ok(ChildStanding { ended, handback })
+    }
+
+    fn session_exists(&self, session_id: &str) -> Result<bool, String> {
+        crate::database::load_session_record(session_id)
+            .map(|record| record.is_some())
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn register_child(
         &self,
         session_id: &str,
         reviewer: &ReviewerIdentity,
+        role: mj_core::worker_launch::ReviewChildRole,
         prompt: String,
         request_key: String,
         working_directory: Option<std::path::PathBuf>,
@@ -241,11 +343,13 @@ impl ReviewEnvironment for ControllerEnvironment {
         let mut launch = controller
             .reviewer_launch_config(session_id, &reviewer.profile, 0, &[])
             .map_err(|e| format!("{e:#}"))?;
+        launch.role = role;
         launch.model = reviewer.main.model.clone();
         launch.effort = reviewer.main.effort.clone();
         launch.fast_mode = reviewer.main.fast_mode.then_some(true);
         controller
             .register_subagent(crate::controller::RegisterSubagentRequest {
+                no_github_credentials: false,
                 kind: mj_core::subagent::SubagentKind::Reviewer,
                 reviewer_launch: Some(launch),
                 parent_session_id: session_id.to_owned(),
@@ -282,8 +386,18 @@ impl ReviewEnvironment for ControllerEnvironment {
     ) -> mj_client::session::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let runtime = self.runtime().await?;
+            // A child that is already gone is closed; retrying an unknown
+            // session would never end.
+            if runtime.session_record(child).is_none() {
+                return Ok(());
+            }
+            // A reviewer's verdict lives in the review's own state, and its
+            // usage in the accounting table, so nothing needs the child's
+            // session once its role has an outcome. Destroying it, rather
+            // than suspending it, keeps finished reviewers from piling up as
+            // sub-agents of the session that asked for the review.
             runtime
-                .suspend_session(child.to_owned())
+                .destroy_reviewer_child(child.to_owned())
                 .await
                 .map_err(|e| format!("{e:#}"))
         })
@@ -294,12 +408,12 @@ impl ReviewEnvironment for ControllerEnvironment {
             crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
         let Some(reviewer) = controller.config.profiles.get(profile) else {
             return Err(format!(
-                "turn review needs a reviewer: [review] profile {profile:?} is not a profile in config.toml"
+                "code review needs a reviewer: [review] profile {profile:?} is not a profile in config.toml"
             ));
         };
         if !reviewer.enabled {
             return Err(format!(
-                "turn review needs an enabled reviewer: [review] profile {profile:?} is disabled"
+                "code review needs an enabled reviewer: [review] profile {profile:?} is disabled"
             ));
         }
         validate_review_profile(
@@ -309,26 +423,33 @@ impl ReviewEnvironment for ControllerEnvironment {
         )
     }
 
-    fn is_subagent(&self, session_id: &str) -> bool {
-        crate::database::load_subagent(session_id).is_ok_and(|record| record.is_some())
-    }
-
     fn resolve<'a>(
         &'a self,
         handle: ManagedSessionHandle,
         config: ReviewConfig,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
+    > {
+        Box::pin(async move {
+            let backend = self.profile_backend().await?;
+            crate::review_selection::resolve(handle, Some(config), backend)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    fn resolve_choice<'a>(
+        &'a self,
+        choice: mj_core::config::SubagentChoice,
     ) -> mj_client::session::BoxFuture<
         'a,
         Result<mj_core::review::settings::ResolvedReviewSettings, String>,
     > {
         Box::pin(async move {
-            let catalog = self
-                .catalog
-                .as_ref()
-                .and_then(|catalog| catalog.get())
-                .cloned();
-            crate::review_selection::resolve(handle, Some(config), cancelled, catalog)
+            let backend: Arc<dyn crate::server::api::SubagentBackend> =
+                self.profile_backend().await?;
+            crate::review_selection::resolve_choice(&backend, choice)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })
@@ -343,6 +464,26 @@ impl ReviewEnvironment for ControllerEnvironment {
             .map_err(|error| format!("{error:#}"))
     }
 
+    fn save_reviewer_outcome(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: &[crate::database::AcceptedReport],
+    ) -> Result<(), String> {
+        crate::database::save_reviewer_outcome(session_id, state, reports.to_vec())
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn close_review(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        resolution: crate::database::FinishedReviewResolution,
+    ) -> Result<(), String> {
+        crate::database::close_turn_review_state(session_id, state, resolution)
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn clear_interrupted(&self) -> Result<Vec<String>, String> {
         crate::database::clear_interrupted_turn_reviews().map_err(|error| format!("{error:#}"))
     }
@@ -354,13 +495,13 @@ impl ReviewEnvironment for ControllerEnvironment {
     fn hold_background_work<'a>(
         &'a self,
         session_id: &'a str,
-        deadline: tokio::time::Instant,
+        _deadline: tokio::time::Instant,
     ) -> mj_client::session::BoxFuture<'a, Option<BackgroundHold>> {
         Box::pin(async move {
             let gate = self.background.as_ref()?;
-            // A deadline that passes leaves the review to try anyway; the
-            // running work's own refusal then says what held the session.
-            let hold: BackgroundHold = Box::new(gate.reserve_when_idle(session_id, deadline).await);
+            // The caller bounds this wait by its preparation deadline. On
+            // expiry it drops the pending reservation and reports a refusal.
+            let hold: BackgroundHold = Box::new(gate.reserve_when_idle(session_id).await);
             Some(hold)
         })
     }

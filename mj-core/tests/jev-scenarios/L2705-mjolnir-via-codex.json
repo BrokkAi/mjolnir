@@ -1,0 +1,116 @@
+{
+  "id": "L2705",
+  "title": "mjolnir via codex",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "369754c04d28d33d4afde5220c7e4b17",
+    "session_title": "mjolnir via codex",
+    "reply_position": 3320,
+    "captured_at": "2026-11-04T23:36:33.938Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:3316",
+          "role": "user",
+          "text": "pls manually close the idle review sessions in my live mj that ran before the recent change that auto-closes them on completion"
+        },
+        {
+          "id": "agent:3320",
+          "role": "assistant",
+          "text": "I’ll find the completed review sessions still open in your live mj, close the idle ones, and leave any active reviews running. I’m using the mj skill for the live session controls."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "pls manually close the idle review sessions in my live mj that ran before the recent change that auto-closes them on completion",
+    "assistant_text_tail": "I’ll find the completed review sessions still open in your live mj, close the idle ones, and leave any active reviews running. I’m using the mj skill for the live session controls.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "manual Still open batch labeling",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "No unresolved user request remains in the candidate turn.",
+    "request_positions": [],
+    "user_position": 3316,
+    "input_rationale": "This is a start-of-work acknowledgement; 'still open' describes the sessions the agent will close itself. Nothing is left to the user (the user's next message only clarifies scope).",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": null
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-04T23:36:44.908Z",
+        "kind": "user",
+        "text": "this is the sessions started by request_review of course, not top-level user sessions"
+      },
+      {
+        "at": "2026-11-04T23:36:50.098Z",
+        "kind": "agent",
+        "text": "Understood—only the reviewer child sessions created by `request_review`. I’ll identify them by their review metadata."
+      },
+      {
+        "at": "2026-11-04T23:37:47.547Z",
+        "kind": "agent",
+        "text": "The automatic cleanup uses suspension, which preserves each review’s conversation. I’ll use that same operation after checking the stored reviewer relationships and current activity."
+      },
+      {
+        "at": "2026-11-04T23:38:39.656Z",
+        "kind": "agent",
+        "text": "Already cleaned up: all 470 completed `request_review` child sessions are suspended with their conversations preserved. The only two open reviewers are actively running.  No manual closures were neede"
+      },
+      {
+        "at": "2026-11-04T23:44:20.561Z",
+        "kind": "user",
+        "text": "hmm is there a presentation layer bug then? e.g. 07d292ca700ead3ba5c751211efb3228 reports 8 open reviewers"
+      },
+      {
+        "at": "2026-11-04T23:44:22.965Z",
+        "kind": "agent",
+        "text": "I’ll trace where `07d292ca700ead3ba5c751211efb3228` gets that reviewer count and compare it with the live session state."
+      }
+    ]
+  }
+}

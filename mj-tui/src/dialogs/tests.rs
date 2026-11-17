@@ -27,6 +27,8 @@ fn remote_repair_requires_confirmation_and_restores_the_previous_screen() {
         push_urls: vec!["ssh://git@example.com/repo.git".into()],
     };
     let retry = DashboardAction::CreateSession {
+        oracle: None,
+        oracle_choice: None,
         remember_container_size: false,
         subagents: None,
         review: None,
@@ -38,6 +40,7 @@ fn remote_repair_requires_confirmation_and_restores_the_previous_screen() {
         create_managed_worktree: Some(false),
         additional_mounts: Vec::new(),
         resource_allocation: None,
+        carried: Default::default(),
     };
     dashboard.show_remote_repair_confirmation("repo".into(), vec![repair.clone()], retry.clone());
     let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
@@ -472,8 +475,7 @@ fn container_editor_edits_a_listed_mount_in_place() {
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::SaveContainerSettings {
             session_id: "session-1".into(),
-            cpus: None,
-            memory: None,
+            resource_allocation: None,
             additional_mounts: vec![
                 AdditionalMount {
                     source: PathBuf::from("/srv/data"),
@@ -546,6 +548,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
             available: true,
             default_create: false,
         },
+        "/work/repo".into(),
     );
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     terminal
@@ -566,6 +569,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::ConfirmImportBundle {
+            project_root: "/work/repo".into(),
             create_managed_worktree: Some(false),
             accepted: true,
         }
@@ -579,6 +583,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
             available: true,
             default_create: false,
         },
+        "/work/repo".into(),
     );
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -611,6 +616,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::ConfirmImportBundle {
+            project_root: "/work/repo".into(),
             create_managed_worktree: Some(true),
             accepted: true,
         }
@@ -739,14 +745,14 @@ fn failed_suspension_requires_a_separate_checkpoint_discard_confirmation() {
         DashboardAction::None
     );
     assert!(
-        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::DiscardSinceCheckpoint { checkpoint: selected, .. } if selected == &checkpoint))
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::DiscardSinceCheckpoint { checkpoint: selected, .. } if *selected == *checkpoint))
     );
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::DiscardSinceCheckpoint {
             session_id: "session-1".into(),
-            checkpoint
+            checkpoint: *checkpoint
         }
     );
 }
@@ -1057,6 +1063,7 @@ fn golden_dashboard_dialogs() {
                 hourly_permille: 180,
                 hourly_covered_secs: 3600,
                 online_cpus: 8,
+                scope: mj_core::cpu_usage::CpuSampleScope::ProcessTree,
             },
         },
     );
@@ -1075,6 +1082,7 @@ fn golden_dashboard_dialogs() {
                     hourly_permille: 80 + index as u16,
                     hourly_covered_secs: 3600,
                     online_cpus: 8,
+                    scope: mj_core::cpu_usage::CpuSampleScope::ProcessTree,
                 },
             },
         );
@@ -1113,7 +1121,8 @@ fn golden_dashboard_dialogs() {
 
     // Extend the full dialog golden through the Profiles menu and real controls.
     use mj_core::usage::{
-        ModelUsageEstimate, SessionUsageEstimate, SessionUsageReport, UnknownCost, UsagePeriod,
+        AgentUsageEstimate, ModelUsageEstimate, SessionUsageEstimate, SessionUsageReport,
+        UnknownCost, UsageAgentRole, UsagePeriod,
     };
     let mut usage = dashboard_with_session(running_session());
     usage.begin_support_pane_menu(crate::SupportPane::Quota);
@@ -1134,7 +1143,7 @@ fn golden_dashboard_dialogs() {
     );
     let (first, query) = usage.session_usage_request().unwrap();
     assert_eq!(query, mj_core::usage::SessionUsageQuery::default());
-    let report = SessionUsageReport {
+    let mut report = SessionUsageReport {
         profiles: vec!["claude".into(), "codex".into()],
         cost_usd_ticks: Err(UnknownCost),
         sessions: vec![
@@ -1142,12 +1151,19 @@ fn golden_dashboard_dialogs() {
                 session_id: "session-2".into(),
                 title: "Write release notes".into(),
                 profile: "claude".into(),
-                cost_usd_ticks: Ok(62_000_000_000),
-                models: vec![ModelUsageEstimate {
-                    model: Some("claude-opus-5-5".into()),
-                    cost_usd_ticks: Ok(62_000_000_000),
-                    ..Default::default()
-                }],
+                cost_usd_ticks: Ok(82_000_000_000),
+                models: vec![
+                    ModelUsageEstimate {
+                        model: Some("claude-opus-5-5".into()),
+                        cost_usd_ticks: Ok(62_000_000_000),
+                        ..Default::default()
+                    },
+                    ModelUsageEstimate {
+                        model: Some("gpt-6.1-sol".into()),
+                        cost_usd_ticks: Ok(20_000_000_000),
+                        ..Default::default()
+                    },
+                ],
                 coverage: mj_core::storage::UsageCoverage {
                     recorded_turns: 5,
                     full_turn_reports: 3,
@@ -1163,6 +1179,16 @@ fn golden_dashboard_dialogs() {
                 subagent_count: 2,
                 cost_usd_ticks: Err(UnknownCost),
                 models: vec![
+                    ModelUsageEstimate {
+                        model: Some("gpt-6.1-sol".into()),
+                        cost_usd_ticks: Ok(30_000_000_000),
+                        ..Default::default()
+                    },
+                    ModelUsageEstimate {
+                        model: Some("gpt-6.1-terra".into()),
+                        cost_usd_ticks: Ok(10_000_000_000),
+                        ..Default::default()
+                    },
                     ModelUsageEstimate {
                         model: Some("claude-opus-5-5".into()),
                         cost_usd_ticks: Ok(71_000_000_000),
@@ -1189,6 +1215,36 @@ fn golden_dashboard_dialogs() {
         ],
         ..Default::default()
     };
+    report.agent_usage = vec![
+        AgentUsageEstimate {
+            role: UsageAgentRole::Primary,
+            models: vec![
+                report.sessions[0].models[0].clone(),
+                report.sessions[1].models[1].clone(),
+            ],
+            cost_usd_ticks: Ok(72_000_000_000),
+        },
+        AgentUsageEstimate {
+            role: UsageAgentRole::Subagent,
+            models: vec![
+                ModelUsageEstimate {
+                    model: Some("gpt-6.1-sol".into()),
+                    cost_usd_ticks: Ok(50_000_000_000),
+                    ..Default::default()
+                },
+                report.sessions[1].models[3].clone(),
+            ],
+            cost_usd_ticks: Ok(51_050_000_000),
+        },
+        AgentUsageEstimate {
+            role: UsageAgentRole::Reviewer,
+            models: vec![
+                report.sessions[1].models[2].clone(),
+                report.sessions[1].models[4].clone(),
+            ],
+            cost_usd_ticks: Err(UnknownCost),
+        },
+    ];
     usage.apply_session_usage_result(first, Ok(report.clone()));
     append_dialog_render(
         &mut output,
@@ -1197,6 +1253,34 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
+    // Hard-won: #1501: a wrapped fixed header clipped models and crowded out sessions.
+    for _ in 0..3 {
+        usage.handle_key(key(KeyCode::Tab));
+    }
+    usage.handle_key(key(KeyCode::Home));
+    for _ in 0..8 {
+        usage.handle_key(key(KeyCode::Down));
+    }
+    append_dialog_render(
+        &mut output,
+        "Usage narrow last model total",
+        70,
+        22,
+        &drawn(&mut usage, 70, 22),
+    );
+    usage.handle_key(key(KeyCode::End));
+    append_dialog_render(
+        &mut output,
+        "Usage narrow last session",
+        70,
+        22,
+        &drawn(&mut usage, 70, 22),
+    );
+    usage.handle_key(key(KeyCode::Home));
+    for _ in 0..3 {
+        usage.handle_key(key(KeyCode::BackTab));
+    }
+    drawn(&mut usage, 120, 36);
     usage.handle_key(key(KeyCode::Enter));
     append_dialog_render(
         &mut output,
@@ -1205,21 +1289,53 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
-    usage.handle_key(key(KeyCode::Down));
+    let Mode::SessionUsageReport(dialog) = &usage.mode else {
+        panic!("usage dialog closed");
+    };
+    let codex_index = dialog.profiles.iter().position(|p| p == "codex").unwrap() + 1;
+    for _ in 0..codex_index {
+        usage.handle_key(key(KeyCode::Down));
+    }
     usage.handle_key(key(KeyCode::Enter));
     let (profile_request, query) = usage.session_usage_request().unwrap();
-    assert_eq!(query.profile.as_deref(), Some("claude"));
+    assert_eq!(query.profile.as_deref(), Some("codex"));
     // The old All result cannot replace the filtered loading state.
     usage.apply_session_usage_result(first, Ok(report.clone()));
     assert!(matches!(&usage.mode,Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
-    usage.apply_session_usage_result(
-        profile_request,
-        Ok(SessionUsageReport {
-            profiles: report.profiles.clone(),
-            ..Default::default()
-        }),
+    let mut codex_report = report.clone();
+    codex_report.sessions = vec![report.sessions[1].clone()];
+    codex_report.sessions[0]
+        .models
+        .retain(|model| model.model.as_deref() != Some("claude-opus-5-5"));
+    codex_report.agent_usage = vec![
+        AgentUsageEstimate {
+            role: UsageAgentRole::Primary,
+            models: vec![codex_report.sessions[0].models[1].clone()],
+            cost_usd_ticks: Ok(10_000_000_000),
+        },
+        AgentUsageEstimate {
+            role: UsageAgentRole::Subagent,
+            models: vec![
+                codex_report.sessions[0].models[0].clone(),
+                codex_report.sessions[0].models[2].clone(),
+            ],
+            cost_usd_ticks: Ok(31_050_000_000),
+        },
+        AgentUsageEstimate {
+            role: UsageAgentRole::Reviewer,
+            models: vec![codex_report.sessions[0].models[3].clone()],
+            cost_usd_ticks: Err(UnknownCost),
+        },
+    ];
+    usage.apply_session_usage_result(profile_request, Ok(codex_report.clone()));
+    // Hard-won: #1501: unknown totals hid the known per-model sums in both views.
+    append_dialog_render(
+        &mut output,
+        "Usage Codex with model totals",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
     );
-    drawn(&mut usage, 120, 36);
     usage.handle_key(key(KeyCode::Tab));
     usage.handle_key(key(KeyCode::Enter));
     append_dialog_render(
@@ -1236,7 +1352,7 @@ fn golden_dashboard_dialogs() {
         UsagePeriod::Daily
     );
     let (daily_request, _) = usage.session_usage_request().unwrap();
-    usage.apply_session_usage_result(daily_request, Ok(report.clone()));
+    usage.apply_session_usage_result(daily_request, Ok(codex_report.clone()));
     append_dialog_render(
         &mut output,
         "Usage daily",
@@ -1257,7 +1373,7 @@ fn golden_dashboard_dialogs() {
     usage.handle_key(key(KeyCode::Char(' ')));
     let (weekly_request, query) = usage.session_usage_request().unwrap();
     assert!(query.include_suspended);
-    let mut suspended = report.clone();
+    let mut suspended = codex_report;
     suspended.sessions[0].suspended = true;
     usage.apply_session_usage_result(weekly_request, Ok(suspended));
     append_dialog_render(
@@ -1482,6 +1598,11 @@ fn golden_tui_container_editor_details() {
     let mut output = String::new();
 
     let mut cached_session = running_session();
+    cached_session.resource_allocation =
+        Some(mj_core::state::SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 8 << 30,
+        });
     cached_session.build_cache = Some(mj_core::state::SessionBuildCache {
         host: "ssh:morannon".into(),
         directory: PathBuf::from("/mnt/nvme/mbx"),
@@ -1493,6 +1614,21 @@ fn golden_tui_container_editor_details() {
     append_dialog_render(
         &mut output,
         "session build cache",
+        120,
+        40,
+        &drawn(&mut cached, 120, 40),
+    );
+
+    if let Mode::EditContainer(editor) = &mut cached.mode {
+        editor.cpus = "1.5".into();
+    }
+    while container_editor(&cached).focused() != ContainerEditFocus::Save {
+        cached.handle_key(key(KeyCode::Tab));
+    }
+    cached.handle_key(key(KeyCode::Enter));
+    append_dialog_render(
+        &mut output,
+        "invalid fractional CPUs",
         120,
         40,
         &drawn(&mut cached, 120, 40),
@@ -1605,6 +1741,7 @@ fn golden_tui_import_confirmation() {
             available: true,
             default_create: true,
         },
+        "/work/repo".into(),
     );
     let lines = drawn(&mut dashboard, 120, 30);
     let mut output = String::new();
@@ -1615,6 +1752,32 @@ fn golden_tui_import_confirmation() {
         30,
         &lines,
     );
+    dashboard.show_import_progress("Imported session".into());
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.show_import_registration();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Importing(_)));
+    append_dialog_render(
+        &mut output,
+        "daemon registration cannot be cancelled",
+        120,
+        30,
+        &drawn(&mut dashboard, 120, 30),
+    );
+    dashboard.show_import_upload();
+    assert!(matches!(&dashboard.mode, Mode::Importing(progress) if progress.cancellable));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.show_import_registration();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(&dashboard.mode, Mode::Importing(progress) if !progress.cancellable));
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "tui-import-confirmation",
@@ -1838,6 +2001,8 @@ fn the_notice_log_age_column_keeps_messages_aligned_past_one_minute() {
 fn launch_failure_survives_notices_and_retries_original_settings_once() {
     let mut dashboard = dashboard_with_session(stopped_session());
     let retry = DashboardAction::CreateSession {
+        oracle: None,
+        oracle_choice: None,
         remember_container_size: false,
         subagents: None,
         review: None,
@@ -1849,6 +2014,7 @@ fn launch_failure_survives_notices_and_retries_original_settings_once() {
         target_template_id: "docker".into(),
         additional_mounts: Vec::new(),
         resource_allocation: None,
+        carried: Default::default(),
     };
     dashboard.show_launch_failure("upload failed", Some(retry.clone()));
     dashboard.set_notice("Quota refreshed");

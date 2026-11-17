@@ -402,7 +402,7 @@ fn render_combined_with_theme_and_symbols(
     selected_theme: theme::UiTheme,
     symbols: theme::SymbolSet,
 ) -> Vec<String> {
-    dashboard.drawn_failures.clear();
+    dashboard.rendered_failure_dismissals.clear();
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
             let drawn =
@@ -651,7 +651,7 @@ fn render_combined_themed(
             SupportPane::Quota,
             PaneDimensions {
                 minimized: SUMMARY_ROW,
-                full: table_height(dashboard.config.enabled_profiles().count()),
+                full: table_height(dashboard.quota_profile_rows().len()),
                 standard_cap: area.height / 4,
             },
         ),
@@ -725,7 +725,18 @@ fn render_combined_themed(
     let workspace_height = if narrow {
         sidebar_height.saturating_sub(dimensions[0].1.minimized)
     } else {
-        workspace_target.min(sidebar_height.saturating_sub(PANE_MINIMUM))
+        // Sessions keeps its minimum frame plus one row for a session below
+        // the Create/Open/Filter controls. The workspace pane gives up rows
+        // for that row, but never shrinks below its own minimum, and
+        // Sessions' minimum frame always wins.
+        let sessions_floor = PANE_MINIMUM + 1;
+        workspace_target
+            .min(
+                sidebar_height
+                    .saturating_sub(sessions_floor)
+                    .max(PANE_MINIMUM),
+            )
+            .min(sidebar_height.saturating_sub(PANE_MINIMUM))
     };
     let workspace_area = Rect::new(
         sidebar_area.x,
@@ -1175,7 +1186,10 @@ fn render_combined_themed(
                         let failed = (!opening)
                             .then(|| selected_session_id.clone())
                             .flatten()
-                            .filter(|session_id| dashboard.session_failed(session_id));
+                            .filter(|session_id| {
+                                dashboard.session_failed(session_id)
+                                    || dashboard.stopped_notification_row(session_id)
+                            });
                         let reason = if opening {
                             EmptyConversation::Opening
                         } else if failed.is_some() {
@@ -1187,6 +1201,7 @@ fn render_combined_themed(
                         };
                         if let Some(session_id) = failed.as_deref()
                             && transcript_area.height > 3
+                            && !dashboard.stopped_notification_row(session_id)
                         {
                             dashboard.failure_drawn(session_id);
                         }
@@ -1502,6 +1517,16 @@ fn render_empty_prompt_advice(
                 }
             }],
         ),
+        EmptyConversation::Failed
+            if let Some(id) = dashboard
+                .selected_session_id()
+                .filter(|id| dashboard.stopped_notification_row(id)) =>
+        {
+            (
+                " Session stopped ",
+                [dashboard.stopped_failure_guidance(id), String::new()],
+            )
+        }
         EmptyConversation::Failed => (
             " Session failed ",
             [
@@ -2253,21 +2278,7 @@ mod tests {
             .draw(|frame| crate::render::render(frame, dashboard))
             .unwrap();
         let mut lines = buffer_lines(terminal.backend().buffer());
-        // Transition spinners use a process-wide clock, so pin their glyph.
-        for line in &mut lines {
-            if line.contains("Transition ·") {
-                *line = line
-                    .chars()
-                    .map(|character| {
-                        if matches!(character, '⠁' | '⠂' | '⠄' | '⡀') {
-                            '?'
-                        } else {
-                            character
-                        }
-                    })
-                    .collect();
-            }
-        }
+        crate::test_support::pin_spinner_glyphs(&mut lines);
         lines
     }
 
@@ -2488,14 +2499,9 @@ mod tests {
         for (width, height) in [(70, 22), (80, 13), (160, 13)] {
             let mut dashboard = dashboard_with_session(running_session());
             dashboard.set_workspace_names(
-                (0..24)
+                (0..48)
                     .map(|index| (format!("workspace-{index}"), format!("Project {index:02}")))
                     .collect(),
-            );
-            dashboard.order_workspaces(
-                &(0..24)
-                    .map(|index| format!("workspace-{index}"))
-                    .collect::<Vec<_>>(),
             );
             dashboard.set_active_workspace(Some("workspace-0".into()));
             let lines = render_combined_golden(&mut dashboard, width, height);
@@ -2589,6 +2595,10 @@ mod tests {
         failed_session.last_error = Some("Podman exited before the workspace was removed".into());
         let failed_session_id = failed_session.id.clone();
         let mut failed = dashboard_with_session(failed_session);
+        failed.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([(
+            failed_session_id.clone(),
+            mj_core::attention::SessionAttention::Failed,
+        )]));
         // The shared fixture resets updated_at, so pin the clock after building the dashboard.
         failed
             .state

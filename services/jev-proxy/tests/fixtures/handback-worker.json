@@ -1,0 +1,33 @@
+{
+  "authorization": {
+    "messages": [
+      {
+        "id": "user:subagent-spawn-first",
+        "role": "user",
+        "text": "Implement and validate the requested change."
+      },
+      {
+        "id": "handback-report",
+        "role": "assistant",
+        "text": "Implementation is ready; validation remains."
+      }
+    ],
+    "authorization_complete": true,
+    "assistant_history_omitted": false,
+    "open_assistant_id": "handback-report",
+    "final_reply_omitted": false
+  },
+  "harness": "codex",
+  "phase": "replied",
+  "silent_for_s": 0,
+  "tools_in_flight": [],
+  "transcript_summary": "",
+  "background_commands": 0,
+  "queued_commands": 0,
+  "user_prompt_tail": "",
+  "assistant_text_tail": "Implementation is ready; validation remains.",
+  "completion": {
+    "stop_reason": "end_turn",
+    "diagnostic": null
+  }
+}

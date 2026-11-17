@@ -11,15 +11,30 @@ impl HostState {
             return Err(format!("{session_id}: missing active review group"));
         };
         let snapshot = group.driver.clone();
+        if group.reviewers.len() != snapshot.roles.len() {
+            return Err(format!(
+                "{session_id}: stored review group has inconsistent reviewer slots"
+            ));
+        }
         let roles: BTreeSet<_> = snapshot
             .roles
             .iter()
             .map(|slot| slot.role.as_str())
             .collect();
+        // The brief writer is registered beside the reviewers, never as one.
+        let writer = mj_core::review::driver::BRIEF_WRITER_ROLE;
+        if group.brief_writer.is_some()
+            != group.registrations.iter().any(|item| item.role == writer)
+        {
+            return Err(format!(
+                "{session_id}: stored review group has inconsistent brief writer registration"
+            ));
+        }
         let registrations: BTreeSet<_> = group
             .registrations
             .iter()
             .map(|item| item.role.as_str())
+            .filter(|role| *role != writer)
             .collect();
         let keys: BTreeSet<_> = group
             .registrations
@@ -53,27 +68,21 @@ impl HostState {
         }
         let requests = driver.recovery_requests();
         self.next_epoch = self.next_epoch.saturating_add(1);
-        let push =
-            (group.scope == mj_core::relay::CaptureScope::PushableCommits).then(|| PushReview {
-                deltas: snapshot.deltas,
-                finishing: false,
-                retry_delay: std::time::Duration::from_secs(1),
-            });
-        if push.is_none() && state.active.is_some() {
-            hold_prompts(&session_id);
-        }
         self.reviews.insert(
             session_id.clone(),
             ReviewSlot {
                 epoch: self.next_epoch,
                 driver,
-                reviewer: group.reviewer.clone(),
+                reviewers: group.reviewers.clone(),
                 state,
                 _background: None,
-                push,
+                finishing: false,
+                delivery: Arc::new(super::resolve::Delivery::default()),
+                retry_delay: std::time::Duration::from_secs(1),
                 start_reply: None,
                 pending_outcome: None,
                 queued_outcomes: Vec::new(),
+                ended_while_queued: BTreeMap::new(),
             },
         );
         self.run(&session_id, requests);

@@ -22,6 +22,14 @@ pub(crate) fn current_background_session(
     }))
 }
 
+/// Resolves once an admission's cancellation flag is set. Admitted work that
+/// cannot be cancelled by being dropped polls this instead.
+pub(crate) async fn wait_until_cancelled(flag: &AtomicBool) {
+    while !flag.load(Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
 /// Reports session activity to the recovery coordinator.
 ///
 /// Reporting retains only the newest observation per session. Completed-turn
@@ -48,27 +56,122 @@ pub(crate) struct PendingRecoveryObservation {
 /// A per-session reservation held by a foreground lifecycle operation. The
 /// coordinator cannot start another recovery copy until this value is dropped.
 pub struct RecoveryReservation {
+    _admission: ForegroundAdmission,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleOrigin {
+    Person,
+    Automatic,
+}
+
+#[derive(Clone)]
+pub struct ForegroundAdmission(Arc<ForegroundHolder>);
+
+struct ForegroundHolder {
+    label: &'static str,
+    origin: LifecycleOrigin,
+    identity: Arc<()>,
     session_id: String,
     gate: Arc<RecoveryGate>,
 }
 
-impl Drop for RecoveryReservation {
+impl Drop for ForegroundHolder {
     fn drop(&mut self) {
-        self.gate.release(&self.session_id);
+        self.gate
+            .release(&self.session_id, &self.identity, self.origin);
     }
 }
 
-/// The one slot per session that background work has to hold.
+/// What a background admission is for. The gate admits a kind only beside
+/// holders it can share the session with (see [`BackgroundWork::runs_beside`]),
+/// and a foreground lifecycle operation preempts every holder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundWork {
+    /// Stops and replaces the worker, so it shares the session with nothing.
+    WorkerReplacement,
+    /// Copies the session's state from the running worker. A large remote
+    /// copy takes minutes and the next one is due soon after (#1564).
+    RecoveryCopyCapturing,
+    RecoveryCopyTransferring,
+    RecoveryCopyAbandoning,
+    DelegationDelivery,
+    QuotaScheduling,
+    /// Reconciles the session's logins (harness, AWS, GitHub, skills) with a
+    /// few relay requests.
+    CredentialSync,
+}
+
+impl BackgroundWork {
+    /// Whether this work may start while `other` holds the session.
+    ///
+    /// A credential sync runs beside a recovery copy: the worker serves its
+    /// requests on the live relay connection whatever ACP dispatch or a
+    /// checkpoint barrier is doing, and archives leave login files out. If
+    /// it had to wait, back-to-back copies of a large session would keep a
+    /// renewed login, which revokes the old one, from ever reaching it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WorkerReplacement => "worker upgrade",
+            Self::RecoveryCopyCapturing => "recovery copy",
+            Self::RecoveryCopyTransferring => "recovery copy transfer",
+            Self::RecoveryCopyAbandoning => "recovery copy cleanup",
+            Self::DelegationDelivery => "delegation delivery",
+            Self::QuotaScheduling => "quota scheduling",
+            Self::CredentialSync => "credential sync",
+        }
+    }
+
+    /// Needs exclusivity with connection holders. Quota scheduling uses
+    /// actor exchanges directly, but must exclude every competing lease.
+    pub fn needs_lease(self) -> bool {
+        !matches!(self, Self::CredentialSync | Self::RecoveryCopyTransferring)
+    }
+
+    fn runs_beside(self, other: Self) -> bool {
+        use BackgroundWork::*;
+        matches!(
+            (self, other),
+            (
+                CredentialSync,
+                RecoveryCopyCapturing
+                    | RecoveryCopyTransferring
+                    | RecoveryCopyAbandoning
+                    | DelegationDelivery
+                    | QuotaScheduling
+            ) | (
+                RecoveryCopyCapturing
+                    | RecoveryCopyTransferring
+                    | RecoveryCopyAbandoning
+                    | DelegationDelivery
+                    | QuotaScheduling,
+                CredentialSync
+            ) | (RecoveryCopyTransferring, DelegationDelivery)
+                | (DelegationDelivery, RecoveryCopyTransferring)
+                | (QuotaScheduling, RecoveryCopyTransferring)
+                | (RecoveryCopyTransferring, QuotaScheduling)
+        )
+    }
+}
+
+/// Admission for the background work that acts on a session's live worker.
 ///
-/// It is shared rather than per-coordinator: a recovery copy and a worker
-/// upgrade both act on a session's live worker, so only one of them may run at
-/// a time, and a foreground lifecycle operation preempts whichever it is.
+/// It is shared rather than per-coordinator so that one place decides which
+/// kinds of work may run together on a session, and a foreground lifecycle
+/// operation preempts all of them.
+#[derive(Debug)]
+pub struct Refusal {
+    pub holders: Vec<&'static str>,
+}
+
 pub struct RecoveryGate {
     state: Mutex<RecoveryGateState>,
     closed: Notify,
     /// Which sessions are busy, for waiters. Published from inside the gate so
     /// every holder updates it, whatever started the work.
     busy: watch::Sender<BTreeSet<String>>,
+    credential_wakes: watch::Sender<BTreeSet<String>>,
+    foreground_releases: watch::Sender<BTreeMap<String, LifecycleOrigin>>,
 }
 
 impl Default for RecoveryGate {
@@ -77,6 +180,8 @@ impl Default for RecoveryGate {
             state: Mutex::default(),
             closed: Notify::new(),
             busy: watch::channel(BTreeSet::new()).0,
+            credential_wakes: watch::channel(BTreeSet::new()).0,
+            foreground_releases: watch::channel(BTreeMap::new()).0,
         }
     }
 }
@@ -84,125 +189,349 @@ impl Default for RecoveryGate {
 #[derive(Default)]
 struct RecoveryGateState {
     closed: bool,
-    /// In-flight copies, each with the cancel flag its executor watches, so a
-    /// foreground lifecycle operation can preempt one instead of waiting.
-    busy: BTreeMap<String, Arc<AtomicBool>>,
-    reservations: BTreeMap<String, usize>,
+    /// In-flight work per session, each holder with the cancel flag its
+    /// executor watches, so a foreground lifecycle operation can preempt it
+    /// instead of waiting. A session's entry is never empty.
+    busy: BTreeMap<String, Vec<BackgroundHolder>>,
+    reservations: BTreeMap<String, Vec<Reservation>>,
+    leases: BTreeMap<String, &'static str>,
+    deferred_credentials: BTreeSet<String>,
+}
+
+/// Reviews exclude automatic work except accepted replies, but cannot hold
+/// up a person's lifecycle or daemon handoff. Their worker work survives it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReservationKind {
+    Foreground,
+    ForegroundDelegationDrain,
+    Review,
+}
+impl ReservationKind {
+    fn runs_beside(self, other: Self) -> bool {
+        self == Self::Review || other == Self::Review
+    }
+}
+struct Reservation {
+    identity: Arc<()>,
+    label: &'static str,
+    kind: ReservationKind,
+}
+
+struct BackgroundHolder {
+    work: BackgroundWork,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl RecoveryGate {
-    /// Run disposable background work under the same admission as recovery
-    /// and worker replacement. Lifecycle reservations preempt it before they
-    /// touch the worker. Dropping the future also releases admission.
+    /// Run disposable background work under the session's background
+    /// admission. Lifecycle reservations preempt it before they touch the
+    /// worker. Dropping the future also releases admission.
     pub async fn run_background<T>(
         self: &Arc<Self>,
         session_id: &str,
+        kind: BackgroundWork,
         work: impl std::future::Future<Output = T>,
     ) -> Option<T> {
-        let admission = self.try_start(session_id)?;
-        let cancelled = admission.cancellation();
-        let cancellation = async {
-            while !cancelled.load(Ordering::Acquire) {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        self.run_background_owned(session_id, kind, |_| work).await
+    }
+
+    /// `run_background` for work that outlives the future awaiting it, such as
+    /// a job queued on a session actor: `work` receives the admission and may
+    /// hand it to that job, which then holds the slot until it has finished or
+    /// been dropped, whether or not the awaiting future is still there.
+    pub async fn run_background_owned<T, F: std::future::Future<Output = T>>(
+        self: &Arc<Self>,
+        session_id: &str,
+        kind: BackgroundWork,
+        work: impl FnOnce(RecoveryAttempt) -> F,
+    ) -> Option<T> {
+        let admission = match self.try_start(session_id, kind) {
+            Ok(admission) => admission,
+            Err(refusal) => {
+                tracing::debug!(session_id, holders = ?refusal.holders, "background work deferred");
+                return None;
             }
         };
+        let cancelled = admission.cancellation();
+        // Held here as well, so work that ignores the admission still runs
+        // under it for as long as this future lives.
+        let _admission = admission.clone();
+        let work = work(admission);
         tokio::select! {
             biased;
-            _ = cancellation => None,
+            () = wait_until_cancelled(&cancelled) => None,
             result = work => Some(result),
         }
     }
 
     pub fn reserve(self: &Arc<Self>, session_id: &str) -> RecoveryReservation {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        *state.reservations.entry(session_id.to_owned()).or_default() += 1;
         RecoveryReservation {
-            session_id: session_id.to_owned(),
-            gate: self.clone(),
+            _admission: self.reserve_labelled(session_id, "foreground operation"),
         }
     }
 
-    /// Reserves the session for foreground work that needs its worker to
-    /// itself for a while, such as a turn review, once no background work
-    /// holds it.
-    ///
-    /// Unlike [`Self::reserve`], it does not preempt work already running:
-    /// a recovery copy protects the session's work and finishes in seconds,
-    /// so this waits for it, up to `deadline`. The check and the reservation
-    /// happen under one lock, so no copy or upgrade can start between them.
-    /// Work that is still running at `deadline` is left to finish; the
-    /// reservation is taken anyway, and the caller meets that work's own
-    /// refusal. Background work turned away meanwhile is offered again by the
-    /// daemon's periodic refresh once the reservation is dropped.
-    pub async fn reserve_when_idle(
+    fn reserve_labelled(
         self: &Arc<Self>,
         session_id: &str,
-        deadline: tokio::time::Instant,
-    ) -> RecoveryReservation {
-        // Subscribing before the first check means a holder that finishes
-        // between the check and the wait still wakes this waiter.
+        label: &'static str,
+    ) -> ForegroundAdmission {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.reserve_locked(
+            &mut state,
+            session_id,
+            label,
+            ReservationKind::Foreground,
+            LifecycleOrigin::Person,
+        )
+    }
+
+    fn reserve_locked(
+        self: &Arc<Self>,
+        state: &mut RecoveryGateState,
+        session_id: &str,
+        label: &'static str,
+        kind: ReservationKind,
+        origin: LifecycleOrigin,
+    ) -> ForegroundAdmission {
+        let identity = Arc::new(());
+        state
+            .reservations
+            .entry(session_id.to_owned())
+            .or_default()
+            .push(Reservation {
+                identity: identity.clone(),
+                label,
+                kind,
+            });
+        ForegroundAdmission(Arc::new(ForegroundHolder {
+            label,
+            origin,
+            identity,
+            session_id: session_id.to_owned(),
+            gate: self.clone(),
+        }))
+    }
+
+    pub async fn enter_foreground(
+        self: &Arc<Self>,
+        session_id: &str,
+        label: &'static str,
+        origin: LifecycleOrigin,
+        cancelled: &AtomicBool,
+        notices: &(impl mj_core::targets::CommandExecutor + Sync),
+    ) -> anyhow::Result<ForegroundAdmission> {
+        self.enter(
+            session_id,
+            label,
+            cancelled,
+            notices,
+            ReservationKind::Foreground,
+            origin,
+        )
+        .await
+    }
+
+    /// Reviews exclude background work except delegation replies without preempting it. They share
+    /// the session with foreground lifecycles, whose worker actions already
+    /// cancel or refuse overlapping review capture/selection requests.
+    pub async fn reserve_when_idle(self: &Arc<Self>, session_id: &str) -> RecoveryReservation {
+        let admission = self
+            .enter(
+                session_id,
+                "turn review",
+                &AtomicBool::new(false),
+                &mj_core::targets::ProcessExecutor,
+                ReservationKind::Review,
+                LifecycleOrigin::Automatic,
+            )
+            .await
+            .expect("an uncancelled review admission retains its publication");
+        RecoveryReservation {
+            _admission: admission,
+        }
+    }
+
+    async fn enter(
+        self: &Arc<Self>,
+        session_id: &str,
+        label: &'static str,
+        cancelled: &AtomicBool,
+        notices: &(impl mj_core::targets::CommandExecutor + Sync),
+        kind: ReservationKind,
+        origin: LifecycleOrigin,
+    ) -> anyhow::Result<ForegroundAdmission> {
         let mut busy = self.subscribe();
+        let mut reservation = None;
+        let mut previous = Vec::new();
         loop {
-            {
+            anyhow::ensure!(
+                !cancelled.load(Ordering::Acquire),
+                "operation cancelled while waiting for session admission"
+            );
+            let holders = {
                 let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if !state.busy.contains_key(session_id) || tokio::time::Instant::now() >= deadline {
-                    *state.reservations.entry(session_id.to_owned()).or_default() += 1;
-                    return RecoveryReservation {
-                        session_id: session_id.to_owned(),
-                        gate: self.clone(),
-                    };
+                if reservation.is_none()
+                    // A waiting review does not preempt background work, so
+                    // compatible work (notably credential sync beside a copy)
+                    // must remain admissible until the review can start.
+                    && (kind == ReservationKind::Foreground || !state.busy.contains_key(session_id))
+                    && !state
+                        .reservations
+                        .get(session_id)
+                        .into_iter()
+                        .flatten()
+                        .any(|holder| !kind.runs_beside(holder.kind))
+                {
+                    reservation =
+                        Some(self.reserve_locked(&mut state, session_id, label, kind, origin));
+                    if kind == ReservationKind::Foreground
+                        && let Some(holders) = state.busy.get(session_id)
+                    {
+                        for holder in holders {
+                            holder.cancelled.store(true, Ordering::Release);
+                        }
+                    }
                 }
-            }
-            if tokio::time::timeout_at(deadline, busy.changed())
-                .await
-                .is_ok_and(|changed| changed.is_err())
+                let mut holders = state
+                    .busy
+                    .get(session_id)
+                    .into_iter()
+                    .flatten()
+                    .map(|holder| holder.work.label())
+                    .collect::<Vec<_>>();
+                if reservation.is_none() {
+                    holders.extend(
+                        state
+                            .reservations
+                            .get(session_id)
+                            .into_iter()
+                            .flatten()
+                            .filter(|holder| !kind.runs_beside(holder.kind))
+                            .map(|holder| holder.label),
+                    );
+                }
+                holders
+            };
+            if holders.is_empty()
+                && let Some(reservation) = reservation.take()
             {
-                // The gate owns the sender, so this only happens while the
-                // gate is being torn down; stop waiting.
-                tokio::time::sleep_until(deadline).await;
+                return Ok(reservation);
+            }
+            if holders != previous {
+                notices.notify_notice(&format!("Waiting for {} to stop", holders.join(" and ")));
+                previous = holders;
+            }
+            tokio::select! {
+                result = busy.changed() => { result?; }
+                () = wait_until_cancelled(cancelled) => {}
             }
         }
     }
 
-    fn release(&self, session_id: &str) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let Some(count) = state.reservations.get_mut(session_id) else {
-            return;
-        };
-        *count -= 1;
-        if *count == 0 {
-            state.reservations.remove(session_id);
+    fn release(&self, session_id: &str, identity: &Arc<()>, origin: LifecycleOrigin) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(holders) = state.reservations.get_mut(session_id) {
+            holders.retain(|holder| !Arc::ptr_eq(&holder.identity, identity));
+            if holders.is_empty() {
+                state.reservations.remove(session_id);
+            }
+            self.publish_busy(&state);
+            self.foreground_releases.send_modify(|released| {
+                released
+                    .entry(session_id.to_owned())
+                    .and_modify(|previous| {
+                        if origin == LifecycleOrigin::Person {
+                            *previous = origin;
+                        }
+                    })
+                    .or_insert(origin);
+            });
         }
     }
 
-    /// Claims the session with an identity-bearing guard whose cancellation
-    /// flag the executor watches, or `None` when work or a reservation already
-    /// holds it, or a daemon upgrade is waiting.
+    /// Claims the session for `kind` with an identity-bearing guard whose
+    /// cancellation flag the executor watches, or a labelled refusal when work that `kind`
+    /// cannot run beside or a reservation already holds it, or a daemon
+    /// upgrade is waiting.
     ///
     /// The work does not hold up a daemon upgrade: it is cancelled when the
     /// daemon exits, and the next daemon starts it again. Starting it while a
     /// handoff waits would only waste it.
-    pub fn try_start(self: &Arc<Self>, session_id: &str) -> Option<RecoveryAttempt> {
+    pub fn try_start(
+        self: &Arc<Self>,
+        session_id: &str,
+        kind: BackgroundWork,
+    ) -> Result<RecoveryAttempt, Refusal> {
         if crate::upgrade::is_draining() {
-            return None;
+            return Err(Refusal {
+                holders: vec!["daemon handoff"],
+            });
         }
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Replies finish the work a review accepted and the work a foreground
+        // Move explicitly yields to while draining. Neither reservation can
+        // defer these completions for the lifetime of the review/drain.
         if state.closed
-            || state.busy.contains_key(session_id)
-            || state.reservations.contains_key(session_id)
+            || (kind.needs_lease() && state.leases.contains_key(session_id))
+            || state
+                .reservations
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .any(|holder| match holder.kind {
+                    ReservationKind::Foreground => true,
+                    ReservationKind::Review | ReservationKind::ForegroundDelegationDrain => {
+                        kind != BackgroundWork::DelegationDelivery
+                    }
+                })
+            || state
+                .busy
+                .get(session_id)
+                .is_some_and(|holders| holders.iter().any(|holder| !kind.runs_beside(holder.work)))
         {
-            return None;
+            let mut holders = state
+                .busy
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .map(|holder| holder.work.label())
+                .collect::<Vec<_>>();
+            holders.extend(
+                state
+                    .reservations
+                    .get(session_id)
+                    .into_iter()
+                    .flatten()
+                    .map(|holder| holder.label),
+            );
+            if state.closed {
+                holders.push("daemon shutdown");
+            }
+            return Err(Refusal { holders });
         }
         let cancelled = Arc::new(AtomicBool::new(false));
-        state.busy.insert(session_id.to_owned(), cancelled.clone());
+        state
+            .busy
+            .entry(session_id.to_owned())
+            .or_default()
+            .push(BackgroundHolder {
+                work: kind,
+                cancelled: cancelled.clone(),
+            });
         self.publish_busy(&state);
-        Some(RecoveryAttempt(Arc::new(RecoveryAdmission {
+        Ok(RecoveryAttempt(Arc::new(RecoveryAdmission {
             gate: self.clone(),
             session_id: session_id.to_owned(),
             cancelled,
@@ -214,14 +543,18 @@ impl RecoveryGate {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state
-            .busy
-            .get(session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, identity))
-        {
-            state.busy.remove(session_id);
-            self.publish_busy(&state);
+        let Some(holders) = state.busy.get_mut(session_id) else {
+            return;
+        };
+        let before = holders.len();
+        holders.retain(|holder| !Arc::ptr_eq(&holder.cancelled, identity));
+        if holders.len() == before {
+            return;
         }
+        if holders.is_empty() {
+            state.busy.remove(session_id);
+        }
+        self.publish_busy(&state);
     }
 
     fn publish_busy(&self, state: &RecoveryGateState) {
@@ -257,20 +590,22 @@ impl RecoveryGate {
             .contains_key(session_id)
     }
 
-    /// Asks the in-flight copy for this session, if any, to stop.
+    /// Asks all in-flight work for this session, if any, to stop.
     pub fn cancel_busy(&self, session_id: &str) {
-        if let Some(cancelled) = self
+        if let Some(holders) = self
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .busy
             .get(session_id)
         {
-            cancelled.store(true, Ordering::Release);
+            for holder in holders {
+                holder.cancelled.store(true, Ordering::Release);
+            }
         }
     }
 
-    /// Close admission and cancel every admitted attempt in one transition.
+    /// Close background admission and cancel every admitted attempt in one transition.
     /// Existing guards retain ownership until their executors have settled.
     pub fn close(&self) {
         let mut state = self
@@ -278,9 +613,10 @@ impl RecoveryGate {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.closed = true;
-        for cancelled in state.busy.values() {
-            cancelled.store(true, Ordering::Release);
+        for holder in state.busy.values().flatten() {
+            holder.cancelled.store(true, Ordering::Release);
         }
+        self.publish_busy(&state);
         self.closed.notify_waiters();
     }
 
@@ -316,10 +652,10 @@ impl RecoveryAttempt {
     /// its slot before the supervisor applies the failure outcome.
     pub(crate) async fn run_blocking<T: Send + 'static>(
         self,
-        work: impl FnOnce(Arc<AtomicBool>) -> T + Send + 'static,
+        work: impl FnOnce(RecoveryAttempt) -> T + Send + 'static,
     ) -> (Result<T, tokio::task::JoinError>, Self) {
         let executing = self.clone();
-        let result = tokio::task::spawn_blocking(move || work(executing.cancellation())).await;
+        let result = tokio::task::spawn_blocking(move || work(executing)).await;
         (result, self)
     }
 }
@@ -334,6 +670,330 @@ impl std::ops::Deref for RecoveryAttempt {
 impl Drop for RecoveryAdmission {
     fn drop(&mut self) {
         self.gate.finish(&self.session_id, &self.cancelled);
+    }
+}
+
+/// An admitted operation, explicitly carried across executor boundaries.
+#[derive(Clone)]
+pub enum SessionAdmission {
+    Foreground(ForegroundAdmission),
+    Background(RecoveryAttempt),
+}
+
+pub trait HoldsSession: Send + Sync {
+    fn admission(&self) -> SessionAdmission;
+}
+impl HoldsSession for ForegroundAdmission {
+    fn admission(&self) -> SessionAdmission {
+        SessionAdmission::Foreground(self.clone())
+    }
+}
+impl HoldsSession for RecoveryAttempt {
+    fn admission(&self) -> SessionAdmission {
+        SessionAdmission::Background(self.clone())
+    }
+}
+impl HoldsSession for SessionAdmission {
+    fn admission(&self) -> SessionAdmission {
+        self.clone()
+    }
+}
+impl SessionAdmission {
+    fn gate_and_session(&self) -> (&Arc<RecoveryGate>, &str) {
+        match self {
+            Self::Foreground(a) => (&a.0.gate, &a.0.session_id),
+            Self::Background(a) => (&a.0.gate, &a.0.session_id),
+        }
+    }
+    pub(crate) fn drain_delegation(&self) -> anyhow::Result<ForegroundDelegationDrain> {
+        let Self::Foreground(admission) = self else {
+            anyhow::bail!("delegation drain requires foreground ownership");
+        };
+        let mut state = admission
+            .0
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let holder = state
+            .reservations
+            .get_mut(&admission.0.session_id)
+            .into_iter()
+            .flatten()
+            .find(|holder| Arc::ptr_eq(&holder.identity, &admission.0.identity))
+            .ok_or_else(|| anyhow::anyhow!("foreground admission has ended"))?;
+        anyhow::ensure!(
+            holder.kind == ReservationKind::Foreground,
+            "foreground is already draining delegation"
+        );
+        holder.kind = ReservationKind::ForegroundDelegationDrain;
+        admission.0.gate.publish_busy(&state);
+        Ok(ForegroundDelegationDrain(admission.clone()))
+    }
+
+    pub fn narrow_copy(&self) -> anyhow::Result<()> {
+        if let Self::Background(a) = self {
+            a.narrow(BackgroundWork::RecoveryCopyTransferring)?;
+        }
+        Ok(())
+    }
+    pub async fn abandon_copy(&self) -> anyhow::Result<()> {
+        if let Self::Background(a) = self {
+            // A failure before the latch still owns its capture capability.
+            let capturing = {
+                let state =
+                    a.0.gate
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state
+                    .busy
+                    .get(&a.0.session_id)
+                    .into_iter()
+                    .flatten()
+                    .any(|holder| {
+                        Arc::ptr_eq(&holder.cancelled, &a.0.cancelled)
+                            && holder.work == BackgroundWork::RecoveryCopyCapturing
+                    })
+            };
+            if !capturing {
+                a.abandon().await?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) async fn lease(&self, session_id: &str) -> anyhow::Result<RelayLeaseAdmission> {
+        let (gate, admitted_session) = self.gate_and_session();
+        anyhow::ensure!(
+            session_id == admitted_session,
+            "relay lease admission belongs to another session"
+        );
+        let mut changed = gate.subscribe();
+        loop {
+            {
+                let mut state = gate
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let label = match self {
+                    Self::Foreground(a) => {
+                        let holder = state
+                            .reservations
+                            .get(session_id)
+                            .into_iter()
+                            .flatten()
+                            .find(|holder| Arc::ptr_eq(&holder.identity, &a.0.identity))
+                            .ok_or_else(|| anyhow::anyhow!("foreground admission has ended"))?;
+                        anyhow::ensure!(
+                            holder.kind == ReservationKind::Foreground,
+                            "foreground relay ownership is yielded to delegation drain"
+                        );
+                        a.0.label
+                    }
+                    Self::Background(a) => {
+                        let holder = state
+                            .busy
+                            .get(session_id)
+                            .into_iter()
+                            .flatten()
+                            .find(|h| Arc::ptr_eq(&h.cancelled, &a.0.cancelled))
+                            .ok_or_else(|| anyhow::anyhow!("relay lease admission has ended"))?;
+                        anyhow::ensure!(
+                            holder.work == BackgroundWork::RecoveryCopyAbandoning
+                                || !holder.cancelled.load(Ordering::Acquire),
+                            "{} was cancelled before taking its relay lease",
+                            holder.work.label()
+                        );
+                        anyhow::ensure!(
+                            holder.work.needs_lease(),
+                            "{} cannot take a relay lease",
+                            holder.work.label()
+                        );
+                        holder.work.label()
+                    }
+                };
+                if !state.leases.contains_key(session_id)
+                    && (!matches!(self, Self::Foreground(_))
+                        || !state.busy.contains_key(session_id))
+                {
+                    state.leases.insert(session_id.to_owned(), label);
+                    return Ok(RelayLeaseAdmission {
+                        admission: self.clone(),
+                        label,
+                    });
+                }
+            }
+            changed.changed().await?;
+        }
+    }
+}
+
+/// A temporary phase of the same foreground identity. Closing it refuses new
+/// delivery and preempts admitted delivery; source reacquisition waits for its
+/// holders and leases to return. Drop also closes it on cancellation or unwind.
+pub(crate) struct ForegroundDelegationDrain(ForegroundAdmission);
+impl Drop for ForegroundDelegationDrain {
+    fn drop(&mut self) {
+        let admission = &self.0.0;
+        let mut state = admission
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(holder) = state
+            .reservations
+            .get_mut(&admission.session_id)
+            .into_iter()
+            .flatten()
+            .find(|holder| Arc::ptr_eq(&holder.identity, &admission.identity))
+        {
+            holder.kind = ReservationKind::Foreground;
+        }
+        for holder in state.busy.get(&admission.session_id).into_iter().flatten() {
+            holder.cancelled.store(true, Ordering::Release);
+        }
+        admission.gate.publish_busy(&state);
+    }
+}
+
+/// Retained by the actor until it has applied the lease return. Admission
+/// cannot end or wake deferred credential work before the relay is available.
+pub struct RelayLeaseAdmission {
+    admission: SessionAdmission,
+    pub(crate) label: &'static str,
+}
+impl RelayLeaseAdmission {
+    pub(crate) fn defer_credentials(&self) {
+        let (gate, session) = self.admission.gate_and_session();
+        gate.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deferred_credentials
+            .insert(session.to_owned());
+    }
+}
+impl Drop for RelayLeaseAdmission {
+    fn drop(&mut self) {
+        let (gate, session) = self.admission.gate_and_session();
+        let mut state = gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.leases.remove(session);
+        if state.deferred_credentials.remove(session) {
+            gate.credential_wakes.send_modify(|sessions| {
+                sessions.insert(session.to_owned());
+            });
+        }
+        gate.publish_busy(&state);
+    }
+}
+impl RecoveryGate {
+    // Its one caller is a Unix-only test.
+    #[cfg(all(test, unix))]
+    pub(crate) fn credentials_deferred_for_test(&self, session_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deferred_credentials
+            .contains(session_id)
+    }
+
+    pub(crate) fn foreground_releases(&self) -> watch::Receiver<BTreeMap<String, LifecycleOrigin>> {
+        let mut releases = self.foreground_releases.subscribe();
+        releases.mark_changed();
+        releases
+    }
+    pub(crate) fn take_foreground_releases(&self) -> BTreeMap<String, LifecycleOrigin> {
+        let mut ready = BTreeMap::new();
+        self.foreground_releases.send_if_modified(|releases| {
+            ready = std::mem::take(releases);
+            false
+        });
+        ready
+    }
+
+    pub(crate) fn credential_wakes(&self) -> watch::Receiver<BTreeSet<String>> {
+        let mut wakes = self.credential_wakes.subscribe();
+        wakes.mark_changed();
+        wakes
+    }
+    pub(crate) fn take_credential_wakes(&self) -> BTreeSet<String> {
+        let mut ready = BTreeSet::new();
+        self.credential_wakes.send_if_modified(|sessions| {
+            ready = std::mem::take(sessions);
+            false
+        });
+        ready
+    }
+}
+impl RecoveryAttempt {
+    pub fn narrow(&self, kind: BackgroundWork) -> anyhow::Result<()> {
+        let mut state = self
+            .0
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let holder = state
+            .busy
+            .get_mut(&self.0.session_id)
+            .into_iter()
+            .flatten()
+            .find(|h| Arc::ptr_eq(&h.cancelled, &self.0.cancelled))
+            .ok_or_else(|| anyhow::anyhow!("copy admission has ended"))?;
+        anyhow::ensure!(
+            holder.work == BackgroundWork::RecoveryCopyCapturing
+                && kind == BackgroundWork::RecoveryCopyTransferring,
+            "invalid recovery copy transition"
+        );
+        holder.work = kind;
+        self.0.gate.publish_busy(&state);
+        Ok(())
+    }
+    pub async fn abandon(&self) -> anyhow::Result<()> {
+        let mut changed = self.0.gate.subscribe();
+        loop {
+            {
+                let mut state = self
+                    .0
+                    .gate
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let holders = state
+                    .busy
+                    .get_mut(&self.0.session_id)
+                    .ok_or_else(|| anyhow::anyhow!("copy admission has ended"))?;
+                let own = holders
+                    .iter()
+                    .position(|h| Arc::ptr_eq(&h.cancelled, &self.0.cancelled))
+                    .ok_or_else(|| anyhow::anyhow!("copy admission has ended"))?;
+                anyhow::ensure!(
+                    matches!(
+                        holders[own].work,
+                        BackgroundWork::RecoveryCopyTransferring
+                            | BackgroundWork::RecoveryCopyAbandoning
+                    ),
+                    "only a transferring copy can abandon"
+                );
+                // Publish the stronger kind before waiting, so another delivery
+                // cannot overtake cleanup while the existing delivery stops.
+                holders[own].work = BackgroundWork::RecoveryCopyAbandoning;
+                let mut delivery = false;
+                for h in holders.iter() {
+                    if h.work == BackgroundWork::DelegationDelivery {
+                        h.cancelled.store(true, Ordering::Release);
+                        delivery = true;
+                    }
+                }
+                if !delivery && !state.leases.contains_key(&self.0.session_id) {
+                    self.0.gate.publish_busy(&state);
+                    return Ok(());
+                }
+            }
+            changed.changed().await?;
+        }
     }
 }
 
@@ -469,7 +1129,7 @@ mod tests {
         let task = tokio::spawn({
             let gate = gate.clone();
             async move {
-                gate.run_background("child", async {
+                gate.run_background("child", BackgroundWork::CredentialSync, async {
                     started_tx.send(()).unwrap();
                     std::future::pending::<()>().await;
                 })
@@ -489,13 +1149,48 @@ mod tests {
         );
         assert!(!gate.is_busy("child"));
         assert!(
-            gate.run_background("child", async { panic!("reserved worker accessed") })
-                .await
-                .is_none()
+            gate.run_background("child", BackgroundWork::CredentialSync, async {
+                panic!("reserved worker accessed")
+            })
+            .await
+            .is_none()
         );
-        assert_eq!(gate.run_background("other", async { 7 }).await, Some(7));
+        assert_eq!(
+            gate.run_background("other", BackgroundWork::CredentialSync, async { 7 })
+                .await,
+            Some(7)
+        );
         drop(reservation);
-        assert_eq!(gate.run_background("child", async { 9 }).await, Some(9));
+        assert_eq!(
+            gate.run_background("child", BackgroundWork::CredentialSync, async { 9 })
+                .await,
+            Some(9)
+        );
+    }
+
+    /// With a copy and a sync holding one session, a lifecycle operation must
+    /// stop both and still find the session busy until the last one is gone.
+    #[test]
+    fn lifecycle_reservation_waits_for_every_holder_it_preempts() {
+        let gate = Arc::new(RecoveryGate::default());
+        let copy = gate
+            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        let sync = gate
+            .try_start("session", BackgroundWork::CredentialSync)
+            .unwrap();
+        let reservation = gate.reserve("session");
+        gate.cancel_busy("session");
+        assert!(copy.load(Ordering::Acquire) && sync.load(Ordering::Acquire));
+        drop(copy);
+        assert!(gate.is_busy("session"), "the running sync was forgotten");
+        assert!(
+            gate.try_start("session", BackgroundWork::CredentialSync)
+                .is_err()
+        );
+        drop(sync);
+        assert!(gate.busy_sessions().is_empty());
+        drop(reservation);
     }
 
     #[tokio::test]
@@ -505,7 +1200,7 @@ mod tests {
         let task = tokio::spawn({
             let gate = gate.clone();
             async move {
-                gate.run_background("child", async {
+                gate.run_background("child", BackgroundWork::CredentialSync, async {
                     started_tx.send(()).unwrap();
                     std::future::pending::<()>().await;
                 })
@@ -513,24 +1208,37 @@ mod tests {
             }
         });
         started_rx.await.unwrap();
-        assert!(gate.run_background("child", async { 1 }).await.is_none());
+        assert!(
+            gate.run_background("child", BackgroundWork::CredentialSync, async { 1 })
+                .await
+                .is_none()
+        );
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert_eq!(gate.run_background("child", async { 2 }).await, Some(2));
+        assert_eq!(
+            gate.run_background("child", BackgroundWork::CredentialSync, async { 2 })
+                .await,
+            Some(2)
+        );
     }
     #[test]
     fn closing_gate_cancels_admitted_work_and_refuses_late_admission() {
         for _ in 0..100 {
             let gate = Arc::new(RecoveryGate::default());
             let worker_gate = gate.clone();
-            let worker = std::thread::spawn(move || worker_gate.try_start("session"));
+            let worker = std::thread::spawn(move || {
+                worker_gate.try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            });
             gate.close();
-            if let Some(attempt) = worker.join().unwrap() {
+            if let Ok(attempt) = worker.join().unwrap() {
                 assert!(attempt.load(Ordering::Acquire));
                 assert!(gate.is_busy("session"));
                 drop(attempt);
             }
-            assert!(gate.try_start("late").is_none());
+            assert!(
+                gate.try_start("late", BackgroundWork::RecoveryCopyCapturing)
+                    .is_err()
+            );
             assert!(gate.busy_sessions().is_empty());
         }
     }
@@ -538,10 +1246,14 @@ mod tests {
     #[test]
     fn old_attempt_identity_cannot_release_a_replacement() {
         let gate = Arc::new(RecoveryGate::default());
-        let old = gate.try_start("session").unwrap();
+        let old = gate
+            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
         let identity = old.cancellation();
         drop(old);
-        let replacement = gate.try_start("session").unwrap();
+        let replacement = gate
+            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
         gate.finish("session", &identity);
         assert!(gate.is_busy("session"));
         drop(replacement);
@@ -557,7 +1269,13 @@ mod tests {
                 let gate = gate.clone();
                 scope.spawn(move || {
                     for _ in 0..1000 {
-                        drop(gate.try_start(&session.to_string()).unwrap());
+                        drop(
+                            gate.try_start(
+                                &session.to_string(),
+                                BackgroundWork::RecoveryCopyCapturing,
+                            )
+                            .unwrap(),
+                        );
                     }
                 });
             }
@@ -569,7 +1287,9 @@ mod tests {
     #[tokio::test]
     async fn aborting_a_blocking_waiter_keeps_admission_until_executor_settles() {
         let gate = Arc::new(RecoveryGate::default());
-        let attempt = gate.try_start("session").unwrap();
+        let attempt = gate
+            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
         let waiter = tokio::spawn(attempt.run_blocking(move |_| {
@@ -595,14 +1315,22 @@ mod tests {
     #[tokio::test]
     async fn panicking_executor_retains_admission_until_failure_is_settled() {
         let gate = Arc::new(RecoveryGate::default());
-        let attempt = gate.try_start("session").unwrap();
+        let attempt = gate
+            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
         let (result, settlement) = attempt
             .run_blocking::<()>(|_| panic!("executor failed"))
             .await;
         assert!(result.unwrap_err().is_panic());
-        assert!(gate.try_start("session").is_none());
+        assert!(
+            gate.try_start("session", BackgroundWork::RecoveryCopyCapturing)
+                .is_err()
+        );
         drop(settlement);
-        assert!(gate.try_start("session").is_some());
+        assert!(
+            gate.try_start("session", BackgroundWork::RecoveryCopyCapturing)
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -623,59 +1351,257 @@ mod tests {
 
     /// A review waits for a recovery copy already running, then holds the
     /// session so no copy or worker upgrade can start until it is done.
+    // Hard-won: 352a87453: a review hold blocked foreground work and daemon handoff.
+    // Hard-won: 373784672: a waiting review blocked credential sync beside a recovery copy.
     #[tokio::test]
     async fn reserving_when_idle_waits_for_running_work_then_blocks_new_work() {
         let gate = Arc::new(RecoveryGate::default());
-        let copy = gate.try_start("session-1").expect("the slot starts free");
-        let waiter = tokio::spawn({
-            let gate = gate.clone();
-            async move {
-                gate.reserve_when_idle(
-                    "session-1",
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-                )
-                .await
-            }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!waiter.is_finished(), "the running copy is not preempted");
+        let copy = gate
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .expect("the slot starts free");
+        let mut waiter = Box::pin(gate.reserve_when_idle("session-1"));
+        assert!(futures::poll!(&mut waiter).is_pending());
+        let sync = gate
+            .try_start("session-1", BackgroundWork::CredentialSync)
+            .expect("a waiting review must allow credentials through beside the running copy");
+        assert!(!copy.cancellation().load(Ordering::Acquire));
         drop(copy);
+        assert!(futures::poll!(&mut waiter).is_pending());
+        assert!(!sync.cancellation().load(Ordering::Acquire));
+        drop(sync);
         let reservation = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
             .await
-            .expect("the reservation follows the copy")
-            .unwrap();
+            .expect("the reservation follows all background holders");
         assert!(
-            gate.try_start("session-1").is_none(),
+            gate.try_start("session-1", BackgroundWork::CredentialSync)
+                .is_err(),
+            "an admitted review excludes new background work"
+        );
+        assert!(
+            gate.try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+                .is_err(),
             "no copy or upgrade starts while the review holds the session"
         );
         assert!(
-            gate.try_start("session-2").is_some(),
+            gate.try_start("session-2", BackgroundWork::RecoveryCopyCapturing)
+                .is_ok(),
             "other sessions are free"
         );
+        let foreground = gate
+            .enter_foreground(
+                "session-1",
+                "Move",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &AtomicBool::new(false),
+                &mj_core::targets::ProcessExecutor,
+            )
+            .await
+            .unwrap();
         drop(reservation);
-        assert!(gate.try_start("session-1").is_some());
+        let refusal = gate
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .err()
+            .unwrap();
+        assert_eq!(
+            refusal.holders,
+            vec!["Move"],
+            "dropping the review must retain the foreground holder's identity"
+        );
+        drop(foreground);
+        assert!(
+            gate.try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+                .is_ok()
+        );
     }
 
-    /// Work still running at the deadline is not waited for any longer.
+    #[derive(Default)]
+    struct Notices(Mutex<Vec<String>>);
+    impl mj_core::targets::CommandExecutor for Notices {
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            _: &mj_core::targets::CommandSpec,
+            _: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            panic!("admission must not execute a process");
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+        fn execute(
+            &self,
+            _: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            panic!("admission must not execute a process");
+        }
+        fn notify_notice(&self, notice: &str) {
+            self.0.lock().unwrap().push(notice.to_owned());
+        }
+    }
+
     #[tokio::test]
-    async fn reserving_when_idle_stops_waiting_at_the_deadline() {
+    async fn foreground_admission_names_and_waits_for_all_holders_and_releases_cancelled_intents() {
         let gate = Arc::new(RecoveryGate::default());
-        let _copy = gate.try_start("session-1").unwrap();
-        let reservation = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            gate.reserve_when_idle(
-                "session-1",
-                tokio::time::Instant::now() + std::time::Duration::from_millis(50),
-            ),
-        )
-        .await
-        .expect("the deadline ends the wait");
-        drop(_copy);
+        let notices = Notices::default();
+        let copy = gate
+            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        let sync = gate
+            .try_start("session", BackgroundWork::CredentialSync)
+            .unwrap();
+        let cancelled = AtomicBool::new(true);
         assert!(
-            gate.try_start("session-1").is_none(),
-            "the reservation holds"
+            gate.enter_foreground(
+                "session",
+                "Move",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &cancelled,
+                &notices
+            )
+            .await
+            .is_err()
         );
-        drop(reservation);
-        assert!(gate.try_start("session-1").is_some());
+        assert!(!copy.load(Ordering::Acquire));
+        assert!(!sync.load(Ordering::Acquire));
+        cancelled.store(false, Ordering::Release);
+        let mut waiting = Box::pin(gate.enter_foreground(
+            "session",
+            "Move",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &cancelled,
+            &notices,
+        ));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        let refusal = gate
+            .try_start("session", BackgroundWork::WorkerReplacement)
+            .err()
+            .unwrap();
+        assert_eq!(
+            notices.0.lock().unwrap().as_slice(),
+            &["Waiting for recovery copy and credential sync to stop"]
+        );
+        assert_eq!(
+            refusal.holders,
+            vec!["recovery copy", "credential sync", "Move"]
+        );
+        assert!(copy.load(Ordering::Acquire));
+        assert!(sync.load(Ordering::Acquire));
+        drop(copy);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(sync);
+        let admission = waiting.await.unwrap();
+        let mut second = Box::pin(gate.enter_foreground(
+            "session",
+            "close",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &cancelled,
+            &notices,
+        ));
+        assert!(futures::poll!(&mut second).is_pending());
+        drop(admission);
+        let second = second.await.unwrap();
+        assert!(
+            gate.try_start("session", BackgroundWork::WorkerReplacement)
+                .is_err()
+        );
+        drop(second);
+        let copy = gate
+            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        let mut waiting = Box::pin(gate.enter_foreground(
+            "session",
+            "Move",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &cancelled,
+            &notices,
+        ));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        cancelled.store(true, Ordering::Release);
+        assert!(waiting.await.is_err());
+        drop(copy);
+        assert!(
+            gate.try_start("session", BackgroundWork::WorkerReplacement)
+                .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod copy_transition_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_transferring_copy_admits_delegation_and_abandonment_preempts_it() {
+        let gate = Arc::new(RecoveryGate::default());
+        let copy = gate
+            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        assert!(
+            gate.try_start("session", BackgroundWork::DelegationDelivery)
+                .is_err()
+        );
+        let sync = gate
+            .try_start("session", BackgroundWork::CredentialSync)
+            .unwrap();
+        drop(sync);
+        copy.narrow(BackgroundWork::RecoveryCopyTransferring)
+            .unwrap();
+        assert!(copy.narrow(BackgroundWork::RecoveryCopyCapturing).is_err());
+        let sync = gate
+            .try_start("session", BackgroundWork::CredentialSync)
+            .unwrap();
+        drop(sync);
+        let delivery = gate
+            .try_start("session", BackgroundWork::DelegationDelivery)
+            .unwrap();
+        let delivery_lease = delivery.admission().lease("session").await.unwrap();
+        let mut abandoning = Box::pin(copy.abandon());
+        assert!(futures::poll!(&mut abandoning).is_pending());
+        assert!(delivery.load(Ordering::Acquire));
+        let cancelled = AtomicBool::new(false);
+        let mut foreground = Box::pin(gate.enter_foreground(
+            "session",
+            "Move",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &cancelled,
+            &mj_core::targets::ProcessExecutor,
+        ));
+        assert!(futures::poll!(&mut foreground).is_pending());
+        drop(delivery);
+        assert!(futures::poll!(&mut abandoning).is_pending());
+        drop(delivery_lease);
+        tokio::time::timeout(std::time::Duration::from_secs(1), abandoning)
+            .await
+            .unwrap()
+            .unwrap();
+        let cleanup = copy.admission().lease("session").await.unwrap();
+        assert!(futures::poll!(&mut foreground).is_pending());
+        drop(cleanup);
+        drop(copy);
+        let foreground = foreground.await.unwrap();
+        drop(foreground);
+        // Without a pending foreground, cleanup still permits credentials.
+        let copy = gate
+            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        copy.narrow(BackgroundWork::RecoveryCopyTransferring)
+            .unwrap();
+        copy.abandon().await.unwrap();
+        assert!(
+            gate.try_start("session", BackgroundWork::CredentialSync)
+                .is_ok()
+        );
+        assert!(
+            gate.try_start("session", BackgroundWork::DelegationDelivery)
+                .is_err()
+        );
     }
 }

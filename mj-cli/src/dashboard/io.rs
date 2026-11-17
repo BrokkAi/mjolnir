@@ -22,11 +22,9 @@ use mj_core::state::{
 
 use mj_controller::controller::Controller;
 use mj_controller::controller::ResumeRepositorySourcePreflight;
-use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::{
     DashboardAction, DetectScope, PreparedMaterializedSessionDetail,
-    PreparedMaterializedSessionSummary, RejectedRuntime, RemoteRepositoryPreview,
-    ReviewSettingsChoices, ReviewSettingsDiscoveryResult, SessionOperationKind, SetupDetection,
+    PreparedMaterializedSessionSummary, RemoteRepositoryPreview, SessionOperationKind,
     WebViewerAccess,
 };
 use mj_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
@@ -35,9 +33,8 @@ use tokio::task::{JoinError, JoinHandle};
 
 use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
-use crate::import::{DashboardImportSuccess, PendingDashboardImport, persist_imported_session};
-use crate::pollers::{DashboardLifecycleUpdate, LifecycleSuccess};
-use crate::short_id;
+use crate::import::{DashboardImportSuccess, PendingDashboardImport};
+use crate::pollers::{DashboardLifecycleFailure, DashboardLifecycleUpdate, LifecycleSuccess};
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
@@ -88,10 +85,18 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<Box<PreparedMaterializedSessionDetail>, String>,
     },
-    QuestionDismissed {
+    NotificationDismissed {
         session_id: String,
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
         result: std::result::Result<u64, String>,
+    },
+    /// Every result of one workspace "Clear notifications".
+    NotificationsDismissed {
+        results: Vec<(
+            String,
+            mj_core::attention::NotificationDismissal,
+            std::result::Result<u64, String>,
+        )>,
     },
     /// A bounded tail of a resumed session's stored transcript, loaded off the
     /// event loop so the conversation is not blank while the poller catches up.
@@ -171,6 +176,13 @@ pub(crate) enum DashboardIoUpdate {
         title: String,
         result: std::result::Result<String, String>,
     },
+    NotificationsIgnored {
+        ignored: bool,
+        result: std::result::Result<(), String>,
+    },
+    QuotaPreferencesSaved {
+        result: std::result::Result<(), String>,
+    },
     ChangeWorkspace {
         session_id: String,
         workspace_name: String,
@@ -233,6 +245,12 @@ pub(crate) enum DashboardIoUpdate {
     /// The daemon's answer to a Refresh: it accepted the request, or it could
     /// not be reached.
     QuotaRefreshRequested(std::result::Result<(), String>),
+    /// The daemon's answer to a single profile's Refresh: it accepted the
+    /// probe, or it could not be reached.
+    QuotaProbeRequested {
+        profile_id: String,
+        result: std::result::Result<(), String>,
+    },
     /// The host's global Git author identity, read before the first new
     /// session of this run.
     GitIdentityChecked(std::result::Result<mj_client::daemon::GitIdentity, String>),
@@ -330,23 +348,12 @@ pub(crate) enum DashboardIoUpdate {
         older_than_days: Option<u32>,
         result: std::result::Result<mj_core::state::ArchiveSpacePreview, String>,
     },
-    ReviewSettingsDiscovered {
-        generation: u64,
-        profile_id: String,
-        model: Option<String>,
-        result: std::result::Result<ReviewSettingsDiscoveryResult, String>,
-    },
-    ReviewSettingsChoices {
-        generation: u64,
-        profile_id: String,
-        model: Option<String>,
-        choices: mj_controller::review_settings::ReviewCapabilityChoices,
-    },
     SpinnerStyleSaved {
         result: std::result::Result<Config, String>,
     },
-    DetachedSessionState {
+    TerminalDraft {
         session_id: String,
+        revision: u64,
         result: std::result::Result<(), String>,
     },
     ReadReceipt {
@@ -384,7 +391,7 @@ pub(crate) enum DashboardIoUpdate {
     CheckpointArchiveSizes {
         generation: u64,
         targets: BTreeMap<String, std::path::PathBuf>,
-        sizes: BTreeMap<String, Option<u64>>,
+        sizes: BTreeMap<String, Result<Option<u64>, String>>,
     },
     WorkerDiagnosis {
         session_id: String,
@@ -465,6 +472,9 @@ pub(crate) struct WorkspaceManagementResult {
     pub(crate) entries: Vec<WorkspaceManagementEntry>,
     pub(crate) select_workspace: Option<String>,
     pub(crate) deleted_workspace_id: Option<String>,
+    /// The entries carry the workspace list ahead of their drafts: the dialog
+    /// shows them at once and keeps mutations off until the details answer.
+    pub(crate) details_pending: bool,
 }
 
 pub(crate) struct RegisteredDashboardSession {
@@ -518,8 +528,8 @@ pub(crate) struct LifecycleReloaded {
     result: std::result::Result<DashboardMetadata, String>,
 }
 
-impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOutcome {
-    fn from(result: mj_controller::controller::NewSessionPreflight) -> Self {
+impl From<mj_client::daemon::PreflightNew> for RemotePreflightOutcome {
+    fn from(result: mj_client::daemon::PreflightNew) -> Self {
         if !result.remote_repairs.is_empty() {
             return Self::Repair(result.remote_repairs);
         }
@@ -710,6 +720,7 @@ impl DashboardContext {
                     entries: self.dashboard.workspace_entries_without(&workspace_id),
                     select_workspace: None,
                     deleted_workspace_id: Some(workspace_id),
+                    details_pending: false,
                 });
                 self.apply_dashboard_io_update(DashboardIoUpdate::WorkspaceManagement {
                     generation,
@@ -734,6 +745,7 @@ impl DashboardContext {
                         entries,
                         select_workspace,
                         deleted_workspace_id,
+                        details_pending,
                     } = result;
                     // The runtime feed alone owns tab names, layouts and the
                     // active tab. A deletion owns only the composers, because
@@ -751,7 +763,7 @@ impl DashboardContext {
                     // manager, so a late create cannot switch another tab.
                     let outcome = self
                         .dashboard
-                        .finish_workspace_management(generation, Ok(entries));
+                        .finish_workspace_management(generation, Ok(entries), details_pending);
                     let foreground = outcome.foreground;
                     if let DashboardAction::CloseWorkspace {
                         generation,
@@ -777,7 +789,7 @@ impl DashboardContext {
                 Err(error) => {
                     if !self
                         .dashboard
-                        .finish_workspace_management(generation, Err(error.clone()))
+                        .finish_workspace_management(generation, Err(error.clone()), false)
                         .foreground
                     {
                         self.dashboard
@@ -817,8 +829,11 @@ impl DashboardContext {
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {
                 self.finish_materialized_projection(session_id, result);
             }
-            DashboardIoUpdate::QuestionDismissed { session_id, question, result } => {
-                self.dashboard.question_dismissal_finished(&session_id, question, result);
+            DashboardIoUpdate::NotificationDismissed { session_id, target, result } => {
+                self.dashboard.notification_dismissal_finished(&session_id, target, result);
+            }
+            DashboardIoUpdate::NotificationsDismissed { results } => {
+                self.dashboard.notifications_dismissed(results);
             }
             DashboardIoUpdate::TranscriptTailSeed { materialized } => {
                 let viewed_through_event_ordinal = self
@@ -917,12 +932,28 @@ impl DashboardContext {
                             if let Some(draft) = self.composer_drafts.get(&session_id) { chat.with_draft(draft.text.clone()) } else { chat }
                         } else { chat };
                         let mut chat = chat.open();
+                        super::drains::apply_policy_config_key(
+                            &mut chat,
+                            &self.runtime_sessions,
+                        );
                         if let Some(composer) = composer { chat.adopt_live_composer(composer); }
-                        if let Some(position) = self.transcript_positions.get(&session_id) {
-                            chat.restore_transcript_position(position.clone());
+                        // Only a newly opened chat may receive a locator jump. A warm
+                        // chat retains the reader's current position.
+                        let target = (!self.chats.contains_key(&session_id))
+                            .then(|| self.dashboard.question_message(&session_id))
+                            .flatten()
+                            .map(str::to_owned);
+                        let position = target.and_then(|id| {
+                            let seen = self.question_targets_seen
+                                .entry(session_id.clone()).or_default();
+                            seen.insert(id.clone())
+                                .then(|| mj_chat::chat::TranscriptPosition::at_stable_id(id))
+                        }).or_else(|| self.transcript_positions.get(&session_id).cloned());
+                        if let Some(position) = position {
+                            chat.restore_transcript_position(position);
                         }
                         self.restore_question_draft(&session_id, &mut chat);
-                        for (prompt,inherited_draft) in chat.startup_retry_prompts() {self.startup_prompts.resume(session_id.clone(),prompt,inherited_draft,self.dashboard_io_tx.clone(),self.critical_operations.clone());}
+                        for (prompt,inherited_draft) in chat.startup_retry_prompts() {self.startup_prompts.resume(NamedSession { name: session_notice_name(&self.controller.state, &session_id), id: session_id.clone() },prompt,inherited_draft,self.dashboard_io_tx.clone(),self.critical_operations.clone());}
                         self.chats.insert(session_id.clone(), chat);
                         // The context travelled with the attach, which is
                         // asynchronous; anything the surface learned while it
@@ -1092,6 +1123,20 @@ impl DashboardContext {
                     ));
                 }
             },
+            DashboardIoUpdate::NotificationsIgnored { ignored, result } => {
+                if let Err(error) = result {
+                    self.dashboard.set_notice(format!(
+                        "Could not {} notifications: {error}",
+                        if ignored { "ignore" } else { "unignore" }
+                    ));
+                }
+            }
+            DashboardIoUpdate::QuotaPreferencesSaved { result } => {
+                if let Err(error) = result {
+                    self.dashboard
+                        .set_notice(format!("Could not save load-balancing preferences: {error}"));
+                }
+            }
             DashboardIoUpdate::ChangeWorkspace {
                 session_id,
                 workspace_name,
@@ -1199,6 +1244,15 @@ impl DashboardContext {
                 self.dashboard
                     .set_notice(format!("Could not refresh quota: {error}"));
             }
+            DashboardIoUpdate::QuotaProbeRequested {
+                profile_id,
+                result,
+            } => {
+                if let Err(error) = result {
+                    self.dashboard
+                        .set_notice(format!("Could not refresh {profile_id}'s quota: {error}"));
+                }
+            }
             DashboardIoUpdate::WebAccess { generation, access } => {
                 if generation == self.web_request_generation {
                     self.dashboard.apply_web_access(access);
@@ -1219,9 +1273,6 @@ impl DashboardContext {
             DashboardIoUpdate::ResumeRecord { session_id, result } => {
                 match self.dashboard.apply_resume_record(&session_id, *result) {
                     DashboardAction::None => {}
-                    DashboardAction::ResolveAwsResourceOptions {
-                        target_template_ids,
-                    } => self.resolve_aws_resource_options(target_template_ids),
                     action => tracing::warn!(
                         ?action,
                         "the resume wizard asked for an action its record loader cannot run"
@@ -1358,34 +1409,6 @@ impl DashboardContext {
                     self.dashboard.queue_setup_login(generation, profile_id);
                 }
             }
-            DashboardIoUpdate::ReviewSettingsChoices {
-                generation,
-                profile_id,
-                model,
-                choices,
-            } => {
-                self.dashboard.apply_review_settings_choices(
-                    generation,
-                    &profile_id,
-                    model.as_deref(),
-                    review_settings_choices(choices),
-                );
-            }
-            DashboardIoUpdate::ReviewSettingsDiscovered {
-                generation,
-                profile_id,
-                model,
-                result,
-            } => {
-                if self.dashboard.apply_review_settings_discovery(
-                    generation,
-                    &profile_id,
-                    model.as_deref(),
-                    result,
-                ) {
-                    self.review_discovery_cancel = None;
-                }
-            }
             DashboardIoUpdate::SpinnerStyleSaved { result } => match result {
                 Ok(config) => {
                     let style = config.spinner;
@@ -1419,33 +1442,25 @@ impl DashboardContext {
                     Err(error) => self.dashboard.set_notice(format!("Paste failed: {error}")),
                 }
             }
-            DashboardIoUpdate::DetachedSessionState { session_id, result } => match result {
-                Ok(()) => {
-                    self.draft_save_failures.remove(&session_id);
+            DashboardIoUpdate::TerminalDraft { session_id, revision, result } => {
+                self.composer_drafts.complete(&session_id, revision, result.is_ok());
+                match result {
+                    Ok(()) => { self.draft_save_failures.remove(&session_id); }
+                    Err(error) => {
+                        let message = format!("Could not confirm saved draft for {}: {error}", self.session_notice_name(&session_id));
+                        self.draft_save_failures.insert(session_id.clone(), message.clone());
+                        self.dashboard.set_notice(message);
+                    }
                 }
-                Err(error) => {
-                    let message = format!(
-                        "Could not confirm saved draft and read status for {}: {error}",
-                        self.session_notice_name(&session_id)
-                    );
-                    self.draft_save_failures.insert(session_id, message.clone());
-                    self.dashboard.set_notice(message);
-                }
-            },
+                self.flush_composer_draft(&session_id, false);
+            }
             DashboardIoUpdate::ReadReceipt { session_id, result } => {
                 self.finish_read_receipt(session_id, result);
             }
             DashboardIoUpdate::CreatedBundle { result } => match *result {
                 Ok(created) => {
-                    let followup = self
-                        .dashboard
+                    self.dashboard
                         .apply_created_bundle(self.controller.config.clone(), &created.bundle_id);
-                    if let DashboardAction::ResolveAwsResourceOptions {
-                        target_template_ids,
-                    } = followup
-                    {
-                        self.resolve_aws_resource_options(target_template_ids);
-                    }
                 }
                 Err(error) => {
                     self.dashboard.fail_bundle_creation(&error);
@@ -1472,12 +1487,8 @@ impl DashboardContext {
                     // Import completion can arrive after a tab switch. Keep
                     // the imported record globally visible, but only open
                     // the resume modal in the workspace that owns it.
-                    if self.session_in_active_workspace(&session_id)
-                        && let DashboardAction::ResolveAwsResourceOptions {
-                            target_template_ids,
-                        } = self.dashboard.begin_resume_for(&session_id)
-                    {
-                        self.resolve_aws_resource_options(target_template_ids);
+                    if self.session_in_active_workspace(&session_id) {
+                        self.dashboard.begin_resume_for(&session_id);
                     }
                 }
                 Err(error) => {
@@ -1526,15 +1537,32 @@ impl DashboardContext {
                 targets,
                 sizes,
             } => {
-                self.dashboard.patch_checkpoint_archive_sizes(
-                    sizes
-                        .into_iter()
-                        .filter(|(id, _)| {
-                            targets.get(id) == self.checkpoint_archive_targets_seen.get(id)
-                                && self.checkpoint_archive_pending.get(id) == Some(&generation)
-                        })
-                        .collect(),
-                );
+                let mut answered = BTreeMap::new();
+                let mut errors = Vec::new();
+                for (id, result) in sizes {
+                    if self.checkpoint_archive_pending.get(&id) != Some(&generation)
+                        || targets.get(&id) != self.checkpoint_archive_records.get(&id)
+                    {
+                        continue;
+                    }
+                    self.checkpoint_archive_pending.remove(&id);
+                    match result {
+                        Ok(size) => {
+                            if let Some(path) = targets.get(&id) {
+                                self.checkpoint_archive_targets_seen.insert(id.clone(), path.clone());
+                            }
+                            answered.insert(id, size);
+                        }
+                        Err(error) => errors.push(format!("{id}: {error}")),
+                    }
+                }
+                self.dashboard.patch_checkpoint_archive_sizes(answered);
+                if !errors.is_empty() {
+                    self.dashboard.set_notice(format!(
+                        "Could not read checkpoint archive sizes: {}. Use Refresh to retry.",
+                        errors.join("; ")
+                    ));
+                }
             }
             DashboardIoUpdate::WorkerDiagnosis {
                 session_id,
@@ -1744,8 +1772,11 @@ impl DashboardContext {
                     );
                 }
                 let notice_name = self.session_notice_name(&session_id);
-                self.dashboard
-                    .set_notice(format!("Launching {notice_name}…"));
+                self.dashboard.set_notice(
+                    registered
+                        .retry_launch
+                        .annotate_launch_notice(format!("Launching {notice_name}…")),
+                );
                 if still_launching {
                     self.lifecycle_operations.insert(
                         session_id,
@@ -1792,6 +1823,28 @@ impl DashboardContext {
                 .as_ref()
                 .map(|operation| operation.notice_name.as_str()),
         );
+        if matches!(
+            update.result,
+            Err(DashboardLifecycleFailure::ObservationUnavailable
+                | DashboardLifecycleFailure::AdmissionUnconfirmed)
+        ) {
+            match reloaded.result {
+                Ok(loaded) => {
+                    self.apply_controller_metadata(loaded);
+                    self.dashboard.set_state(self.controller.state.clone());
+                    self.resolve_project_sources();
+                }
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "could not reload lifecycle observation");
+                }
+            }
+            self.dashboard.set_notice(if matches!(update.result, Err(DashboardLifecycleFailure::AdmissionUnconfirmed)) {
+                format!("Could not confirm daemon acceptance for {name}; check session status before retrying")
+            } else {
+                format!("The daemon accepted the operation for {name}; check session status for its result")
+            });
+            return;
+        }
         if operation
             .as_ref()
             .is_some_and(|operation| operation.kind == SessionOperationKind::Moving)
@@ -1885,6 +1938,7 @@ impl DashboardContext {
                 .dashboard
                 .set_notice(format!("Permanently destroyed session {}", name)),
             Err(error) => {
+                let error = error.to_string();
                 if operation
                     .as_ref()
                     .is_some_and(|operation| operation.kind == SessionOperationKind::Suspending)
@@ -1988,6 +2042,132 @@ mod tests {
     use super::*;
     use mj_controller::controller::create_quick_bundle_in_config as create_quick_bundle;
     use mj_core::config::{HarnessKind, ProjectRepository};
+
+    // Hard-won: #1507: quit waited for checkpoint completion and cancelled accepted lifecycle work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_quit_protects_submission_but_not_daemon_completion() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = daemon::DaemonMetadata {
+            protocol_version: daemon::PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "lifecycle-acceptance-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: "lifecycle-acceptance-test".into(),
+            placement: daemon::DaemonPlacement::Host,
+        };
+        let session_id = "0123456789abcdef0123456789abcdef".to_owned();
+        let receipt = daemon::LifecycleReceipt {
+            session_id: session_id.clone(),
+            operation_id: "accepted-suspension".into(),
+        };
+        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+        let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
+            assert!(matches!(
+                request.action,
+                daemon::DaemonAction::StartSessionLifecycle(
+                    daemon::SessionLifecycleRequest::Suspend { .. }
+                )
+            ));
+            submitted_tx.send(()).unwrap();
+            accept_rx.await.unwrap();
+            daemon::write_frame(
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(daemon::DaemonReply::LifecycleAccepted(receipt.clone())),
+                },
+            )
+            .await
+            .unwrap();
+            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
+            assert!(
+                matches!(request.action, daemon::DaemonAction::WaitSessionLifecycle(ref actual) if actual == &receipt)
+            );
+            waiting_tx.send(()).unwrap();
+            complete_rx.await.unwrap();
+            daemon::write_frame(
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(daemon::DaemonReply::Done),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let (tracker, _) = CriticalOperationTracker::new();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+        spawn_lifecycle_operation(
+            LifecycleOperationRequest {
+                session_id: session_id.clone(),
+                session_name: "held suspend".into(),
+                kind: SessionOperationKind::Suspending,
+                cancelled: cancelled.clone(),
+                updates,
+            },
+            tracker.clone(),
+            move |_cancelled, admission| {
+                mj_core::runtime::block_on(async move {
+                    let mut client = daemon::DaemonClient::connect(metadata).await?;
+                    let receipt = admission
+                        .submit(
+                            &mut client,
+                            daemon::SessionLifecycleRequest::Suspend {
+                                session_id,
+                                acknowledge_unpublished_work: true,
+                                ignore_nested_repositories: false,
+                            },
+                        )
+                        .await?;
+                    client.wait_session_lifecycle(receipt).await?;
+                    Ok(LifecycleSuccess::Closed)
+                })?
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(30), submitted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !tracker.blockers().is_empty(),
+            "quit must retain an unaccepted request"
+        );
+        tracker.cancel_all();
+        assert!(
+            !cancelled.load(Ordering::Acquire),
+            "quitting must not cancel the lifecycle"
+        );
+        accept_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), waiting_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tracker.blockers().is_empty(),
+            "daemon completion must not hold quit"
+        );
+        assert!(
+            results.try_recv().is_err(),
+            "the operation is still executing"
+        );
+        complete_tx.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(30), results.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result.result, Ok(LifecycleSuccess::Closed)));
+        server.await.unwrap();
+    }
 
     #[test]
     fn saved_bundle_waits_for_runtime_identity_without_installing_old_config() {
@@ -2394,7 +2574,10 @@ mod tests {
             .contains("another client")
         );
         let mut invalid = original.clone();
-        invalid.review.profile = Some("missing".into());
+        invalid.review.reviewers = vec![mj_core::config::SubagentChoice {
+            model: String::new(),
+            effort: None,
+        }];
         assert!(
             save_setup_at(
                 &path,
@@ -2408,6 +2591,7 @@ mod tests {
     }
 
     // Hard-won: 0bd61a289: summary hydration exhausted the blocking pool while awaiting nested metadata reads.
+    // Hard-won: 99572842f: an unowned daemon fixture took the slow Windows stale-record path.
     #[test]
     fn stored_summary_bursts_leave_the_blocking_pool_available() {
         const CHILD: &str = "MJ_TEST_SUMMARY_BLOCKING_POOL";
@@ -2416,6 +2600,9 @@ mod tests {
         if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
             return;
         }
+        // A running daemon owns its store. Without that ownership, startup
+        // probes this record's process and endpoint before refusing it.
+        let _store_guard = mj_controller::controller::ControllerStoreGuard::acquire().unwrap();
         // Refuse before startup can launch anything. Even this refusal needs
         // connection metadata, just as successful summary reads do.
         let metadata = daemon::DaemonMetadata {
@@ -2458,7 +2645,13 @@ mod tests {
                     else {
                         panic!("expected a summary result")
                     };
-                    assert!(result.is_err(), "the newer daemon must be refused");
+                    assert!(
+                        result
+                            .err()
+                            .expect("the newer daemon must be refused")
+                            .contains("the daemon uses a newer protocol"),
+                        "the refusal must come from the recorded daemon's protocol"
+                    );
                 }
                 // Attachment renewal and chat preparation need this pool too.
                 tokio::task::spawn_blocking(|| ()).await.unwrap();
@@ -2503,8 +2696,9 @@ mod tests {
                         released.await;
                         Ok(())
                     },
-                    move |result| DashboardIoUpdate::DetachedSessionState {
+                    move |result| DashboardIoUpdate::TerminalDraft {
                         session_id: id.to_string(),
+                        revision: 1,
                         result,
                     },
                 ));
@@ -2528,7 +2722,7 @@ mod tests {
             for _ in 0..64 {
                 assert!(matches!(
                     results.recv().await,
-                    Some(DashboardIoUpdate::DetachedSessionState { result: Ok(()), .. })
+                    Some(DashboardIoUpdate::TerminalDraft { result: Ok(()), .. })
                 ));
             }
             assert!(
@@ -2549,8 +2743,9 @@ mod tests {
             updates,
             Duration::from_millis(20),
             std::future::pending::<Result<()>>(),
-            |result| DashboardIoUpdate::DetachedSessionState {
+            |result| DashboardIoUpdate::TerminalDraft {
                 session_id: "muse".into(),
+                revision: 1,
                 result,
             },
         );
@@ -2559,7 +2754,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let Some(DashboardIoUpdate::DetachedSessionState {
+        let Some(DashboardIoUpdate::TerminalDraft {
             result: Err(error), ..
         }) = results.recv().await
         else {
@@ -2670,6 +2865,9 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            oracle_choice: None,
+            oracle: true,
+            notifications_ignored: false,
             project: None,
             target_runtime: None,
             launch_base: None,
@@ -2682,8 +2880,6 @@ mod tests {
             create_managed_worktree: None,
             workspace_id: workspace_id.to_owned(),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             id: id.into(),
             title: id.into(),
             harness_kind: HarnessKind::Codex,
@@ -2694,6 +2890,7 @@ mod tests {
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             target_template_id: "podman".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),
@@ -2707,6 +2904,8 @@ mod tests {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         }

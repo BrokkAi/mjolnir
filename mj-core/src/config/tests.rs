@@ -17,7 +17,7 @@ fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys()
         else {
             panic!("{kind} changed kind")
         };
-        assert_eq!(container.image, DEFAULT_CONTAINER_IMAGE);
+        assert_eq!(container.image, DEFAULT_SESSION_IMAGE);
     }
 
     let table = serde_json::json!({
@@ -99,9 +99,13 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         home: home.to_path_buf(),
         environment: environment.into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
+        claude_permission_mode: None,
+        aws: None,
         codex_profile: None,
     }
 }
@@ -126,14 +130,17 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
     };
     let profile = |kind: HarnessKind, home: &Path| HarnessProfile {
         enabled: true,
-        kind,
-        home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
+        claude_permission_mode: None,
+        aws: None,
         codex_profile: None,
+        ..HarnessProfile::new(kind, home.to_path_buf())
     };
     let every_name = CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned).to_vec();
 
@@ -252,15 +259,8 @@ fn a_bedrock_codex_profile_uses_the_aws_chain_without_an_api_key_or_login_file()
     )
     .expect("write Codex configuration");
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        muse_auto_review: None,
-        codex_profile: None,
+        ..HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     profile
@@ -297,15 +297,8 @@ fn an_inline_token_codex_profile_is_authenticated_without_a_login_file() {
     )
     .expect("write Codex configuration");
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        muse_auto_review: None,
-        codex_profile: None,
+        ..HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     profile
@@ -825,6 +818,7 @@ fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
 
 fn sample_config() -> Config {
     Config {
+        images: ImagesConfig::default(),
         version: CONFIG_VERSION,
         keys: Default::default(),
         sessions_side: Default::default(),
@@ -836,7 +830,6 @@ fn sample_config() -> Config {
         phone: PhoneConfig::default(),
         daemon: Default::default(),
         github: GithubConfig::default(),
-        continuation: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -849,15 +842,8 @@ fn sample_config() -> Config {
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/home/test/.codex-one"),
                 environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]).into(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/home/test/.codex-one"))
             },
         )]),
         bundles: BTreeMap::from([(
@@ -1066,62 +1052,38 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
     }
 }
 
-/// Unconstrained Muse runs without permission checks by default, like
-/// OpenCode's `permission = "allow"`. A Muse profile opts back into
-/// auto-review with `muse_auto_review = true`; guardian targets always
-/// review, so the toggle changes nothing there.
+/// A config file written while Muse profiles could opt back into review on
+/// unconstrained targets (`muse_auto_review`, 2.60 to 2.71) still loads on any
+/// profile kind. The key is ignored and dropped when the file is saved: Muse
+/// follows its runtime's policy like every harness, running unconstrained
+/// sessions without permission checks and guardian ones with auto-review.
 #[test]
-fn muse_auto_review_defaults_off_and_opts_back_into_review() {
-    let mut muse = sample_config().profiles["codex-1"].clone();
-    muse.kind = HarnessKind::Muse;
-    muse.home = PathBuf::from("/home/test/.config/muse");
-    muse.codex_profile = None;
-    muse.guardian_review_model = None;
+fn a_stored_muse_auto_review_still_loads_and_no_longer_changes_review() {
+    for (kind, home) in [
+        ("muse", "/home/test/.config/muse"),
+        ("codex", "/home/test/.codex"),
+    ] {
+        let text = format!(
+            "version = {CONFIG_VERSION}\n[profiles.p]\nkind = \"{kind}\"\n\
+             home = \"{home}\"\nmuse_auto_review = true\n"
+        );
+        let config: Config = toml::from_str(&text).expect("read the stored profile");
+        config.validate().expect("the legacy key is accepted");
+        let saved = toml::to_string(&config).unwrap();
+        assert!(!saved.contains("muse_auto_review"), "{saved}");
+    }
 
-    // Default: no permission checks in isolated targets.
-    assert_eq!(muse.muse_auto_review, None);
+    let text = format!(
+        "version = {CONFIG_VERSION}\n[profiles.muse]\nkind = \"muse\"\n\
+         home = \"/home/test/.config/muse\"\nmuse_auto_review = true\n"
+    );
+    let config: Config = toml::from_str(&text).unwrap();
+    let muse = &config.profiles["muse"];
     let enforcement = muse
         .execution_enforcement(ExecutionPolicy::Unconstrained)
         .expect("Muse enforces an execution policy");
     assert_eq!(enforcement.acp_mode(), Some("allowAll"));
     assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
-    assert_eq!(
-        enforcement.label(),
-        "allowAll / no-review / sandbox-off / :ask-me"
-    );
-    assert_eq!(
-        enforcement.launch_environment(),
-        Some(("MUSE_APPROVAL_MODE", "allowAll"))
-    );
-
-    // Explicit false matches the default.
-    muse.muse_auto_review = Some(false);
-    let enforcement = muse
-        .execution_enforcement(ExecutionPolicy::Unconstrained)
-        .expect("Muse enforces an execution policy");
-    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
-    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
-
-    // Opt-in restores the reviewer inside the container boundary.
-    muse.muse_auto_review = Some(true);
-    assert!(muse.muse_auto_review_unconstrained());
-    let enforcement = muse
-        .execution_enforcement(ExecutionPolicy::Unconstrained)
-        .expect("Muse enforces an execution policy");
-    assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
-    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
-    assert_eq!(
-        enforcement.label(),
-        "promptUnmatched / auto-review / sandbox-off / :ask-me"
-    );
-    assert_eq!(
-        enforcement.launch_environment(),
-        Some(("MUSE_APPROVAL_MODE", "promptUnmatched"))
-    );
-
-    // The launch environment follows the toggle; only the sandbox is ever
-    // disabled.
-    muse.muse_auto_review = None;
     let mut environment = BTreeMap::new();
     muse.configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
         .unwrap();
@@ -1129,51 +1091,11 @@ fn muse_auto_review_defaults_off_and_opts_back_into_review() {
         environment.get("MUSE_APPROVAL_MODE").map(String::as_str),
         Some("allowAll")
     );
-    assert_eq!(
-        environment.get("MUSE_SERVE_ARGS").map(String::as_str),
-        Some("--disable-sandbox")
-    );
-    muse.muse_auto_review = Some(true);
-    let mut environment = BTreeMap::new();
-    muse.configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
-        .unwrap();
-    assert_eq!(
-        environment.get("MUSE_APPROVAL_MODE").map(String::as_str),
-        Some("promptUnmatched")
-    );
-
-    // Guardian targets always review, whatever the toggle says.
-    for review in [None, Some(true), Some(false)] {
-        muse.muse_auto_review = review;
-        let enforcement = muse
-            .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
-            .expect("Muse guardian enforces an execution policy");
-        assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
-        assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
-    }
-}
-
-/// `muse_auto_review` is a Muse-only setting: any other harness rejects it
-/// when the configuration loads.
-#[test]
-fn muse_auto_review_applies_only_to_a_muse_profile() {
-    let text = format!(
-        "version = {CONFIG_VERSION}\n[profiles.muse]\nkind = \"muse\"\n\
-         home = \"/home/test/.config/muse\"\nmuse_auto_review = true\n"
-    );
-    let config: Config = toml::from_str(&text).expect("read the Muse profile");
-    assert_eq!(config.profiles["muse"].muse_auto_review, Some(true));
-    config.validate().expect("Muse accepts the toggle");
-
-    let text = text.replace("kind = \"muse\"", "kind = \"codex\"");
-    let config: Config = toml::from_str(&text).expect("read the Codex profile");
-    assert!(
-        config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("applies only to a Muse profile")
-    );
+    let guardian = muse
+        .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
+        .expect("Muse guardian enforces an execution policy");
+    assert_eq!(guardian.acp_mode(), Some("promptUnmatched"));
+    assert_eq!(guardian.acp_setting(), Some(("auto_review", "on")));
 }
 
 // Hard-won: #1278: guardian Muse kept a stale --disable-sandbox in MUSE_SERVE_ARGS
@@ -1295,6 +1217,27 @@ fn bundle_rejects_non_github_sources() {
     );
 }
 
+/// A rejected `github` value fails the whole configuration, so every value
+/// that loaded before the shared GitHub parser must keep loading, including
+/// ones the parser does not call GitHub (the last three).
+#[test]
+fn bundle_keeps_loading_github_values_accepted_before_the_shared_parser() {
+    for source in [
+        "BrokkAi/hel",
+        "https://github.com/BrokkAi/hel.git",
+        "ssh://git@github.com/BrokkAi/hel.git",
+        "git@gitlab.example:BrokkAi/hel.git",
+        "BrokkAi/hel+fork",
+        "https://github.com/BrokkAi/hel?ref=main",
+    ] {
+        let mut config = sample_config();
+        config.bundles.get_mut("hel").unwrap().repositories[0].github = Some(source.into());
+        config
+            .validate()
+            .unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
+}
+
 #[test]
 fn bundle_accepts_one_absolute_local_source() {
     let mut config = sample_config();
@@ -1337,7 +1280,42 @@ fn config_toml_round_trip_is_atomic() {
     let path = directory.path().join("nested/config.toml");
     let mut config = sample_config();
     config.sidebar_size = crate::workspace::PaneSize::Minimized;
+    config.images.repository = Some("localhost:5000/projects".into());
+    config
+        .images
+        .bundles
+        .entry("hel".into())
+        .or_default()
+        .insert(
+            "linux/amd64".into(),
+            "localhost:5000/projects/hel:recipe".into(),
+        );
+    config.images.bundles.insert(
+        "retired".into(),
+        BTreeMap::from([(
+            "linux/amd64".into(),
+            "localhost:5000/projects/retired:recipe".into(),
+        )]),
+    );
     config.save_to(&path).unwrap();
+    let loaded = Config::load_from(&path).unwrap();
+    assert_eq!(
+        loaded.session_image(Some("retired"), "podman-default", "linux/amd64"),
+        Some("ubuntu:24.04")
+    );
+    assert!(loaded.images.bundles.contains_key("retired"));
+    assert_eq!(
+        loaded.session_image(Some("hel"), "podman-default", "linux/amd64"),
+        Some("localhost:5000/projects/hel:recipe")
+    );
+    assert_eq!(
+        loaded.session_image(Some("hel"), "podman-default", "linux/arm64"),
+        Some("ubuntu:24.04")
+    );
+    assert_eq!(
+        loaded.session_image(None, "podman-default", "linux/amd64"),
+        Some("ubuntu:24.04")
+    );
     assert_eq!(Config::load_from(&path).unwrap(), config);
     assert!(!fs::read_to_string(&path).unwrap().contains("pull_policy"));
     assert_eq!(
@@ -1387,13 +1365,17 @@ fn github_app_configuration_is_optional_and_round_trips() {
         )])),
     });
     configured.github.session_token_path = Some(PathBuf::from("~/.secrets/gh_agents_pat"));
+    configured.github.session_credentials = false;
     configured.github.watch.interval_seconds = 30;
     configured.github.watch.api_base = "http://127.0.0.1:9411".into();
     configured.github.watch.enabled = false;
+    configured.github.watch.local_inference = true;
+    configured.github.watch.use_gpu = false;
     assert!(!configured.github_events_enabled());
     configured.save_to(&path).unwrap();
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("[github.app]"), "{body}");
+    assert!(body.contains("session_credentials = false"), "{body}");
     assert!(body.contains("[github.app.installations]"), "{body}");
     assert!(body.contains("[github.app.session_permissions]"), "{body}");
     assert!(body.contains("[github.app.token_permissions]"), "{body}");
@@ -1418,7 +1400,8 @@ fn github_app_configuration_is_optional_and_round_trips() {
         (Some(true), Some(false), false),
         (Some(true), Some(true), true),
     ] {
-        let mut body = "version = 17\n".to_owned();
+        // Automatic continuation was removed (#1532); its section still loads.
+        let mut body = "version = 17\n[continuation]\nenabled = false\n".to_owned();
         if let Some(enabled) = legacy {
             body.push_str(&format!("[mailbox]\nenabled = {enabled}\n"));
         }
@@ -1431,6 +1414,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
         loaded.save_to(&path).unwrap();
         let saved = fs::read_to_string(&path).unwrap();
         assert!(!saved.contains("[mailbox]"), "{saved}");
+        assert!(!saved.contains("[continuation]"), "{saved}");
         assert_eq!(
             Config::load_from(&path).unwrap().github.watch.enabled,
             expected
@@ -1483,17 +1467,25 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
     .unwrap();
 
     let review = ReviewConfig {
-        trigger: ReviewTrigger::Turn,
-        count: std::num::NonZeroUsize::new(3).unwrap(),
-        tier: None,
-        profile: Some("codex-1".into()),
-        model: Some("review-model".into()),
-        effort: Some("high".into()),
+        legacy: None,
+        disabled: false,
+        reviewers: vec![
+            SubagentChoice {
+                model: "review-model".into(),
+                effort: Some("high".into())
+            };
+            3
+        ],
+        brief_writer: Some(BriefWriterConfig {
+            enabled: true,
+            model: "brief-model".into(),
+            effort: Some("high".into()),
+        }),
     };
     let saved = Config::save_review_to(&path, review.clone()).unwrap();
     assert_eq!(saved.version, CONFIG_VERSION);
     assert_eq!(saved.review, review);
-    assert_eq!(saved.review.count.get(), 3);
+    assert_eq!(saved.review.reviewers.len(), 3);
     assert_eq!(saved.daemon, latest.daemon);
     assert!(!saved.phone.enabled);
     assert_eq!(
@@ -1681,6 +1673,7 @@ fn version_one_podman_config_upgrades_to_isolated_workspace_storage() {
     .unwrap();
 
     let config = Config::load_from(&path).unwrap();
+
     assert_eq!(config.version, CONFIG_VERSION);
     let TargetTemplate::LocalPodman { container } = &config.targets["podman"] else {
         panic!("version-one Podman target changed kind")
@@ -2217,6 +2210,8 @@ fn saving_can_reenable_one_machine_during_global_cache_migration() {
 
 #[test]
 fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
     for legacy in [
         serde_json::json!({"max_size": "500GiB", "target_max_size": "250GiB"}),
         serde_json::json!({"max_size": [false], "target_max_size": {"invalid": true}}),
@@ -2236,7 +2231,8 @@ fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
             }}
         }))
         .unwrap();
-        let config: Config = toml::from_str(&source).unwrap();
+        fs::write(&path, &source).unwrap();
+        let config = Config::load_from(&path).unwrap();
         assert_eq!(config.machines["builder"].build_cache(), Some(&cache));
         let serialized = serde_json::to_value(&cache).unwrap();
         assert!(serialized.get("max_size").is_none());
@@ -2245,10 +2241,45 @@ fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
         let reset: TargetBuildCache = serde_json::from_value(settings).unwrap();
         assert_eq!(reset.max_total_size.as_deref(), Some("2TB"));
     }
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[machines.builder]\nkind = \"ssh\"\n\
+             host = \"builder.example.com\"\n[machines.builder.build_cache]\n\
+             max_totl_size = \"2TB\"\n"
+        ),
+    )
+    .unwrap();
+    let refusal = format!("{:#}", Config::load_from(&path).unwrap_err());
     assert!(
-        serde_json::from_value::<TargetBuildCache>(serde_json::json!({"max_totl_size": "2TB"}))
-            .is_err()
+        refusal.contains("`machines.builder.build_cache.max_totl_size`"),
+        "{refusal}"
     );
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[targets.cached]\nkind = \"podman\"\n\
+             [targets.cached.build_cache]\nenabeld = true\n"
+        ),
+    )
+    .unwrap();
+    let refusal = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        refusal.contains("`targets.cached.build_cache.enabeld`"),
+        "{refusal}"
+    );
+    // A kind without the setting never read the table, so it still loads.
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[machines.ec2]\nkind = \"aws-ec2\"\n\
+             region = \"us-east-1\"\nlaunch_template = \"lt\"\nssh_user = \"ubuntu\"\n\
+             [machines.ec2.build_cache]\nold_knob = 1\n\
+             [targets.plain]\nkind = \"bare\"\n[targets.plain.build_cache]\nold_knob = 1\n"
+        ),
+    )
+    .unwrap();
+    Config::load_from(&path).unwrap();
 }
 
 #[test]
@@ -2281,142 +2312,83 @@ fn a_disabled_profile_loads_instead_of_failing() {
 }
 
 #[test]
-fn a_session_review_choice_is_stored_in_a_stable_shape() {
-    // Stored in `sessions.review_json`; older and newer releases read it.
-    let inherit = SessionReview::Inherit {
-        count: std::num::NonZeroUsize::new(2),
-        model: Some("gpt-6-astra".into()),
-        effort: Some("high".into()),
-        tier: None,
-    };
-    assert_eq!(
-        serde_json::to_string(&inherit).unwrap(),
-        r#"{"mode":"inherit","count":2,"model":"gpt-6-astra","effort":"high"}"#
-    );
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(
-            r#"{"mode":"inherit","count":2,"model":"gpt-6-astra","effort":"high"}"#
-        )
-        .unwrap(),
-        inherit
-    );
-    let inherited_tier = SessionReview::Inherit {
-        count: None,
-        model: None,
-        effort: None,
-        tier: Some("extended".into()),
-    };
-    assert_eq!(
-        serde_json::to_string(&inherited_tier).unwrap(),
-        r#"{"mode":"inherit"}"#
-    );
-    let on = SessionReview::Turn {
-        count: None,
-        model: Some("gpt-6-astra".into()),
-        effort: None,
-        tier: None,
-    };
-    assert_eq!(
-        serde_json::to_string(&on).unwrap(),
-        r#"{"mode":"turn","model":"gpt-6-astra"}"#
-    );
-    assert_eq!(
-        serde_json::to_string(&SessionReview::Off).unwrap(),
-        r#"{"mode":"off"}"#
-    );
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
-        SessionReview::Turn {
-            count: None,
-            model: None,
-            effort: None,
-            tier: None,
-        }
-    );
-    // Existing records may include a deprecated tier and remain readable.
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(
-            r#"{"mode":"on","model":"gpt-6-luna","effort":"max"}"#
-        )
-        .unwrap(),
-        SessionReview::Turn {
-            count: None,
-            model: Some("gpt-6-luna".into()),
-            effort: Some("max".into()),
-            tier: None,
-        }
-    );
-    let extended = SessionReview::Turn {
-        count: None,
-        model: None,
-        effort: None,
-        tier: Some("extended".into()),
-    };
-    assert_eq!(
-        serde_json::to_string(&extended).unwrap(),
-        r#"{"mode":"turn"}"#
-    );
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(r#"{"mode":"on","tier":"extended"}"#).unwrap(),
-        extended
-    );
-    for trigger in ["turn", "push"] {
-        let value = format!(r#"{{"mode":"{trigger}","model":"astra","effort":"high"}}"#);
-        let choice: SessionReview = serde_json::from_str(&value).unwrap();
-        assert_eq!(serde_json::to_string(&choice).unwrap(), value);
-        assert_eq!(
-            ReviewConfig::default().for_session(Some(&choice)).trigger,
-            choice.trigger().unwrap()
-        );
-        let global = ReviewConfig {
-            count: std::num::NonZeroUsize::new(4).unwrap(),
-            ..Default::default()
-        };
-        assert_eq!(global.for_session(Some(&choice)).count, global.count);
-        let explicit =
-            format!(r#"{{"mode":"{trigger}","count":3,"model":"astra","effort":"high"}}"#);
-        let counted: SessionReview = serde_json::from_str(&explicit).unwrap();
-        assert_eq!(serde_json::to_string(&counted).unwrap(), explicit);
-        assert_eq!(global.for_session(Some(&counted)).count.get(), 3);
-    }
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(r#"{"mode":"off"}"#).unwrap(),
-        SessionReview::Off
-    );
-
-    // Session-only model/count overrides must preserve each live global trigger.
-    for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
-        let global = ReviewConfig {
-            trigger,
-            count: std::num::NonZeroUsize::new(4).unwrap(),
-            ..Default::default()
-        };
-        let effective = global.for_session(Some(&inherit));
-        assert_eq!(effective.trigger, trigger);
-        assert_eq!(effective.model.as_deref(), Some("gpt-6-astra"));
-        assert_eq!(effective.count.get(), 2);
-        assert_eq!(effective.effort.as_deref(), Some("high"));
-        assert_eq!(inherit.trigger(), None);
-    }
-}
-
-#[test]
-fn deprecated_review_tier_is_accepted_but_omitted_from_serialization() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        format!(
-            "version = {CONFIG_VERSION}\n\n[profiles.reviewer]\nkind = \"claude\"\nhome = \"/profiles/reviewer\"\n\n[review]\nenabled = true\ntier = \"extended\"\nprofile = \"reviewer\"\n"
-        ),
+fn legacy_review_keys_and_session_records_preserve_partial_overrides() {
+    let legacy: ReviewConfig = toml::from_str(
+        "trigger = 'turn'\ncount = 4\nprofile = 'old'\nmodel = 'gpt-6-terra'\neffort = 'high'\n",
     )
     .unwrap();
-
-    let config = Config::load_from(&path).unwrap();
-    assert_eq!(config.review.tier.as_deref(), Some("extended"));
-
-    let serialized = toml::to_string_pretty(&config).unwrap();
-    assert!(!serialized.contains("tier"), "{serialized}");
+    assert_eq!(legacy.reviewers.len(), MAX_REVIEWERS);
+    assert!(!toml::to_string(&legacy).unwrap().contains("profile"));
+    let session: SessionReview = serde_json::from_str(
+        r#"{"mode":"turn","count":3,"model":"gpt-6-terra","effort":"high","tier":"old"}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.for_session(Some(&session)).reviewers.len(), 3);
+    let saved = serde_json::to_string(&session).unwrap();
+    assert!(!saved.contains("reviewers"));
+    assert!(saved.contains("count"));
+    assert!(!saved.contains("tier"));
+    let count_only: SessionReview = serde_json::from_str(r#"{"mode":"turn","count":1}"#).unwrap();
+    assert_eq!(legacy.for_session(Some(&count_only)).reviewers.len(), 1);
+    let effort_only: SessionReview =
+        serde_json::from_str(r#"{"mode":"turn","effort":"low"}"#).unwrap();
+    assert!(
+        legacy
+            .for_session(Some(&effort_only))
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.effort.as_deref() == Some("low"))
+    );
+    let model_only: SessionReview =
+        serde_json::from_str(r#"{"mode":"turn","model":"other"}"#).unwrap();
+    assert!(
+        legacy
+            .for_session(Some(&model_only))
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.model == "other")
+    );
+    assert!(
+        legacy
+            .for_session(Some(&model_only))
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.effort.as_deref() == Some("high"))
+    );
+    let auto_config = ReviewConfig::legacy_default();
+    let effective = auto_config.for_session(Some(&model_only));
+    assert!(!effective.is_legacy());
+    assert_eq!(effective.reviewers.len(), 2);
+    let pending = vec![
+        SubagentChoice {
+            model: "default".into(),
+            effort: None
+        };
+        2
+    ];
+    assert_eq!(
+        apply_legacy_override(
+            &pending,
+            Some(std::num::NonZeroUsize::new(1).unwrap()),
+            None,
+            None,
+            &auto_config
+        )
+        .len(),
+        1
+    );
+    assert!(
+        apply_legacy_override(&pending, None, None, Some(&"high".into()), &auto_config)
+            .iter()
+            .all(|choice| choice.effort.as_deref() == Some("high"))
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&count_only).unwrap())
+            .unwrap(),
+        serde_json::json!({"mode":"push","count":1})
+    );
+    let auto: ReviewConfig = toml::from_str("enabled = true\ncount = 2\n").unwrap();
+    assert!(auto.reviewers.is_empty());
 }
 
 #[test]
@@ -2453,7 +2425,65 @@ fn empty_config_uses_clean_v1_defaults() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     fs::write(&path, "\n\t").unwrap();
-    assert_eq!(Config::load_from(&path).unwrap(), Config::default());
+    let loaded = Config::load_from(&path).unwrap();
+    assert!(!loaded.review.is_legacy());
+    assert_eq!(loaded.review.trigger(), ReviewTrigger::Off);
+}
+
+#[test]
+fn legacy_auto_survives_unrelated_saves_and_json_drafts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!("version = {}\n[review]\ntrigger = 'turn'\n", CONFIG_VERSION),
+    )
+    .unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    assert!(config.review.is_legacy());
+    config.phone.enabled = false;
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("reviewers"), "{saved}");
+    let json = serde_json::to_string(&config).unwrap();
+    assert!(!json.contains("reviewers"), "{json}");
+    assert!(
+        serde_json::from_str::<Config>(&json)
+            .unwrap()
+            .review
+            .is_legacy()
+    );
+    config.review.clear_legacy();
+    config.save_to(&path).unwrap();
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("reviewers = []")
+    );
+    assert!(!Config::load_from(&path).unwrap().review.is_legacy());
+}
+
+#[test]
+fn legacy_profile_count_and_effort_survive_unrelated_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[review]\ntrigger = 'push'\ncount = 3\nprofile = 'claude'\neffort = 'high'\n"
+        ),
+    )
+    .unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    assert!(config.review.is_legacy());
+    config.phone.enabled = false;
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("count = 3"));
+    assert!(saved.contains("profile = "));
+    assert!(saved.contains("effort = "));
+    assert!(!saved.contains("reviewers"));
+    assert_eq!(Config::load_from(&path).unwrap().review, config.review);
 }
 
 #[test]
@@ -2543,7 +2573,7 @@ fn removed_profile_overrides_have_an_actionable_error() {
 
 /// A config an earlier release wrote can hold a MiMo Code profile, possibly
 /// chosen as the reviewer. The file must still load with every other
-/// profile, review falls back to Auto, and the next save drops the profile.
+/// profile; the reviewer model remains usable through another enabled profile.
 #[test]
 fn a_profile_for_a_removed_harness_is_dropped_without_failing_the_config() {
     let directory = tempfile::tempdir().unwrap();
@@ -2561,12 +2591,13 @@ fn a_profile_for_a_removed_harness_is_dropped_without_failing_the_config() {
 
     let loaded = Config::load_from(&path).expect("the config must still load");
     assert_eq!(loaded.profiles.keys().collect::<Vec<_>>(), ["codex"]);
-    assert_eq!(loaded.review.trigger, ReviewTrigger::Turn);
-    assert_eq!(loaded.review.profile, None);
-    assert_eq!(loaded.review.model, None);
+    assert_eq!(loaded.review.trigger(), ReviewTrigger::Push);
+    assert_eq!(loaded.review.reviewers[0].model, "mimo-v2");
 
     loaded.save_to(&path).unwrap();
-    assert!(!fs::read_to_string(&path).unwrap().contains("mimo"));
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("mimo-v2"));
+    assert!(!saved.contains("profile = \"mimo\""));
 }
 
 #[test]
@@ -2827,6 +2858,15 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
     fs::write(&path, VERSION_TEN_CONFIG).unwrap();
 
     let config = Config::load_from(&path).unwrap();
+    assert!(config.enabled_target("aws").is_none());
+    assert!(!config.enabled_targets().any(|(id, _)| id == "aws"));
+    assert!(
+        config
+            .ensure_target_enabled("aws")
+            .unwrap_err()
+            .to_string()
+            .contains(LEGACY_EC2_TARGET_NOTICE)
+    );
     assert_eq!(config.version, CONFIG_VERSION);
     assert_eq!(
         config.machines.keys().collect::<Vec<_>>(),
@@ -2908,10 +2948,42 @@ host = "mac.example.com"
 kind = "apple-container"
 machine = "mac"
 image = "example.invalid/agent:latest"
+[machines.ec2]
+kind = "ssh"
+host = "ec2.example.com"
+[targets.ec2-nitro]
+kind = "nitro"
+machine = "ec2"
 "#
     );
     fs::write(&path, &source).unwrap();
     let config = Config::load_from(&path).unwrap();
+    // A Nitro sandbox is the same shape: a stored `nitro` runtime on an SSH
+    // machine fuses into the remote kind, and a saved file never mentions it.
+    let TargetTemplate::SshNitro { ssh, container } = &config.targets["ec2-nitro"] else {
+        panic!("nitro on an ssh machine must fuse into the remote kind");
+    };
+    assert_eq!(ssh.host, "ec2.example.com");
+    assert_eq!(container.image, DEFAULT_SESSION_IMAGE);
+    assert_eq!(runtime_kind_name(&config.targets["ec2-nitro"]), "nitro");
+    assert_eq!(config.targets["ec2-nitro"].kind_name(), "ssh-nitro");
+    assert!(config.targets["ec2-nitro"].execution_policy() == ExecutionPolicy::Unconstrained);
+    assert!(super::container_memory_is_hard_limit(
+        &config.targets["ec2-nitro"]
+    ));
+    // No machine can host a sandbox but an SSH one.
+    fs::write(
+        directory.path().join("local.toml"),
+        format!(
+            "version = {CONFIG_VERSION}\n[targets.here]\nkind = \"nitro\"\nmachine = \"local\"\n"
+        ),
+    )
+    .unwrap();
+    let error = Config::load_from(&directory.path().join("local.toml")).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("runs on an SSH machine"),
+        "{error:#}"
+    );
     let TargetTemplate::SshAppleContainer { ssh, container } = &config.targets["mac-apple"] else {
         panic!("apple-container on an ssh machine must fuse into the remote kind");
     };
@@ -2928,6 +3000,8 @@ image = "example.invalid/agent:latest"
     assert!(saved.contains("kind = \"apple-container\""), "{saved}");
     assert!(saved.contains("machine = \"mac\""), "{saved}");
     assert!(!saved.contains("ssh-apple-container"), "{saved}");
+    assert!(saved.contains("kind = \"nitro\""), "{saved}");
+    assert!(!saved.contains("ssh-nitro"), "{saved}");
     assert_eq!(Config::load_from(&path).unwrap().targets, config.targets);
 }
 
@@ -3001,10 +3075,10 @@ fn the_current_version_refuses_the_old_fused_kinds() {
 /// A single `build.rs` run compiles one channel, so the rule both channels
 /// follow is checked directly here, and the baked value is checked against it.
 #[test]
-fn the_baked_default_image_agrees_with_the_channel_rule() {
+fn the_baked_release_image_agrees_with_the_channel_rule() {
     let release = env!("MJ_AGENT_DEV_IMAGE_RELEASE") == "1";
     assert_eq!(
-        DEFAULT_CONTAINER_IMAGE,
+        RELEASE_CONTAINER_IMAGE,
         container_image_for(env!("CARGO_PKG_VERSION"), release)
     );
 }
@@ -3039,13 +3113,13 @@ fn container_target(image: &str) -> TargetTemplate {
 
 #[test]
 fn migrating_the_legacy_default_image_rewrites_only_the_default() {
-    let release_default = "ghcr.io/brokkai/mjolnir/agent-dev:9.9.9";
+    let session_default = DEFAULT_SESSION_IMAGE;
     let mut default = container_target(LEGACY_DEFAULT_CONTAINER_IMAGE);
-    migrate_legacy_default_image(&mut default, release_default);
-    assert_eq!(default.container().unwrap().image, release_default);
+    migrate_legacy_default_image(&mut default, session_default);
+    assert_eq!(default.container().unwrap().image, session_default);
 
     let mut custom = container_target("example.invalid/agent:1");
-    migrate_legacy_default_image(&mut custom, release_default);
+    migrate_legacy_default_image(&mut custom, session_default);
     assert_eq!(custom.container().unwrap().image, "example.invalid/agent:1");
 }
 
@@ -3068,7 +3142,7 @@ fn a_version_14_file_follows_the_running_builds_default_image() {
     assert_eq!(config.version, CONFIG_VERSION);
     assert_eq!(
         config.targets["podman"].container().unwrap().image,
-        DEFAULT_CONTAINER_IMAGE
+        DEFAULT_SESSION_IMAGE
     );
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
@@ -3090,7 +3164,7 @@ fn legacy_profile_subagents_load_without_migration_and_disappear_on_save() {
     let path = root.path().join("config.toml");
     std::fs::write(&path, format!("version = {CONFIG_VERSION}\n[profiles.legacy]\nkind = \"codex\"\nhome = {:?}\nsubagents = {{ mode = \"single_model\", model = \"old\", effort = \"adaptive\" }}\n", root.path().to_string_lossy())).unwrap();
     let config = Config::load_from(&path).unwrap();
-    assert!(!config.subagents.is_configured());
+    assert!(!config.subagents.is_configured_for(false));
     config.save_to(&path).unwrap();
     assert!(
         !std::fs::read_to_string(&path)
@@ -3119,28 +3193,140 @@ fn subtle_subagents_are_optional_but_never_configured_alone() {
     let mut config = Config::default();
     config.subagents.straightforward = Some(choice("plain"));
     config.validate().unwrap();
-    assert!(config.subagents.is_configured());
+    assert!(config.subagents.is_configured_for(false));
     let policy = SubagentPolicy::Mjolnir {
         straightforward: None,
         subtle: None,
     };
-    assert!(!config.subagents.offers_subtle(&policy));
+    assert!(!config.subagents.offers_subtle_for(&policy, false));
     // A session override can add the subtle type for one session.
     let with_subtle = SubagentPolicy::Mjolnir {
         straightforward: None,
         subtle: Some(Box::new(choice("smart"))),
     };
-    assert!(config.subagents.offers_subtle(&with_subtle));
+    assert!(config.subagents.offers_subtle_for(&with_subtle, false));
     config.subagents.subtle = Some(choice("smart"));
     config.validate().unwrap();
-    assert!(config.subagents.offers_subtle(&policy));
+    assert!(config.subagents.offers_subtle_for(&policy, false));
 
     config.subagents.straightforward = None;
-    assert!(!config.subagents.is_configured());
+    assert!(!config.subagents.is_configured_for(false));
     let error = config.validate().unwrap_err().to_string();
     assert!(
         error.contains("[subagents.subtle] requires [subagents.straightforward]"),
         "{error}"
+    );
+}
+
+#[test]
+fn yolo_subagent_choices_are_ignored_while_shared_but_kept_for_later() {
+    let choice = |model: &str| SubagentChoice {
+        model: model.into(),
+        effort: None,
+    };
+    let mut config = Config::default();
+    config.subagents.straightforward = Some(choice("shared"));
+    config.subagents.yolo.straightforward = Some(choice("yolo"));
+    config.subagents.yolo.subtle = Some(choice("yolo-smart"));
+    config.validate().unwrap();
+    // Checked: the YOLO values do nothing, including their subtle rule.
+    assert_eq!(
+        config
+            .subagents
+            .choice_for(crate::subagent::SubagentTaskType::Straightforward, true)
+            .unwrap()
+            .model,
+        "shared"
+    );
+    config.subagents.yolo.straightforward = None;
+    config.validate().unwrap();
+    assert_eq!(
+        config
+            .subagents
+            .choice_for(crate::subagent::SubagentTaskType::Straightforward, true)
+            .unwrap()
+            .model,
+        "shared"
+    );
+
+    // Unchecked: the retained YOLO values become active and are validated.
+    config.subagents.use_same_on_all_targets = false;
+    config.subagents.yolo.straightforward = Some(choice("yolo"));
+    assert!(config.validate().is_ok());
+    assert_eq!(
+        config
+            .subagents
+            .choice_for(crate::subagent::SubagentTaskType::Straightforward, true)
+            .unwrap()
+            .model,
+        "yolo"
+    );
+    assert_eq!(
+        config
+            .subagents
+            .choice_for(crate::subagent::SubagentTaskType::Straightforward, false)
+            .unwrap()
+            .model,
+        "shared"
+    );
+    config.subagents.yolo.straightforward = None;
+    let error = config.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("[subagents.yolo.subtle] requires [subagents.yolo.straightforward]"),
+        "{error}"
+    );
+}
+
+#[test]
+fn inactive_yolo_choices_survive_a_save_and_reload() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    let mut config = Config::default();
+    config.subagents.yolo.straightforward = Some(SubagentChoice {
+        model: "yolo".into(),
+        effort: Some("high".into()),
+    });
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(
+        saved.contains("[subagents.yolo.straightforward]"),
+        "{saved}"
+    );
+    assert!(!saved.contains("use_same_on_all_targets"), "{saved}");
+    let loaded = Config::load_from(&path).unwrap();
+    assert!(loaded.subagents.use_same_on_all_targets);
+    assert_eq!(
+        loaded
+            .subagents
+            .yolo
+            .straightforward
+            .as_ref()
+            .unwrap()
+            .model,
+        "yolo"
+    );
+}
+
+#[test]
+fn oracle_configuration_is_independent_and_rejects_adaptive_effort() {
+    let mut config = Config::default();
+    config.subagents.oracle = Some(SubagentChoice {
+        model: "advisor".into(),
+        effort: Some("high".into()),
+    });
+    config.validate().unwrap();
+    assert!(config.subagents.oracle_configured_for(false));
+    let encoded = serde_json::to_value(&config).unwrap();
+    assert_eq!(encoded["subagents"]["oracle"]["model"], "advisor");
+    let decoded: Config = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded.subagents.oracle, config.subagents.oracle);
+    config.subagents.oracle.as_mut().unwrap().effort = Some("adaptive".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("[subagents.oracle]")
     );
 }
 
@@ -3180,14 +3366,17 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
     .expect("write Codex configuration");
     let profile = |kind: HarnessKind, home: &Path, codex_profile: Option<&str>| HarnessProfile {
         enabled: true,
-        kind,
-        home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
+        load_balancing_may_consume_credits: false,
+        claude_permission_mode: None,
+        aws: None,
         codex_profile: codex_profile.map(str::to_owned),
+        ..HarnessProfile::new(kind, home.to_path_buf())
     };
     let mut config = Config::default();
     for (id, profile) in [
@@ -3221,17 +3410,34 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
     assert!(continues(HarnessKind::Claude, "removed", "claude2"));
 }
 
+/// The removed `trigger` and `enabled` keys load with any value. A table that
+/// names no reviewers keeps asking for automatic ones only if it asked for
+/// review, and the key is written only while that is still pending.
 #[test]
-fn review_trigger_loads_legacy_settings_and_saves_only_the_trigger() {
+fn removed_review_keys_load_and_only_pending_automatic_reviewers_keep_the_trigger() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    for (settings, expected) in [
-        ("", ReviewTrigger::Off),
-        ("enabled = true", ReviewTrigger::Turn),
-        ("enabled = false", ReviewTrigger::Off),
-        ("enabled = true\ntrigger = \"off\"", ReviewTrigger::Off),
-        ("enabled = false\ntrigger = \"turn\"", ReviewTrigger::Turn),
-        ("enabled = true\ntrigger = \"push\"", ReviewTrigger::Push),
+    for (settings, expected, pending) in [
+        ("", ReviewTrigger::Off, false),
+        ("enabled = true", ReviewTrigger::Push, true),
+        ("enabled = false", ReviewTrigger::Off, false),
+        (
+            "enabled = true\ntrigger = \"off\"",
+            ReviewTrigger::Off,
+            false,
+        ),
+        (
+            "enabled = false\ntrigger = \"turn\"",
+            ReviewTrigger::Push,
+            true,
+        ),
+        (
+            "enabled = true\ntrigger = \"push\"",
+            ReviewTrigger::Push,
+            true,
+        ),
+        ("trigger = \"sometimes\"", ReviewTrigger::Off, false),
+        ("trigger = 7", ReviewTrigger::Off, false),
     ] {
         fs::write(
             &path,
@@ -3239,15 +3445,127 @@ fn review_trigger_loads_legacy_settings_and_saves_only_the_trigger() {
         )
         .unwrap();
         let config = Config::load_from(&path).unwrap();
-        assert_eq!(config.review.trigger, expected, "{settings}");
+        assert_eq!(config.review.trigger(), expected, "{settings}");
+        assert_eq!(config.review.is_legacy(), pending, "{settings}");
         config.save_to(&path).unwrap();
         let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(saved["review"].get("enabled").is_none());
+        let review = saved.get("review");
+        assert!(review.is_none_or(|review| review.get("enabled").is_none()));
         assert_eq!(
-            saved["review"]["trigger"].as_str(),
-            serde_json::to_value(expected).unwrap().as_str()
+            review.and_then(|review| review.get("trigger")?.as_str()),
+            pending.then_some("push"),
+            "{settings}"
         );
     }
+}
+
+/// Review is on exactly when reviewers are configured, whatever the removed
+/// `trigger` key said, and the next save drops the key.
+#[test]
+fn review_is_on_exactly_when_reviewers_are_configured_and_the_trigger_is_dropped() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let reviewers = "reviewers = [{ model = \"gpt-6-terra\" }]";
+    for trigger in [None, Some("off"), Some("push"), Some("turn")] {
+        for (list, expected) in [
+            (reviewers, ReviewTrigger::Push),
+            ("reviewers = []", ReviewTrigger::Off),
+        ] {
+            let line = trigger.map_or(String::new(), |trigger| {
+                format!("trigger = \"{trigger}\"\n")
+            });
+            fs::write(
+                &path,
+                format!("version = {CONFIG_VERSION}\n# kept\n[review]\n{line}{list}\n"),
+            )
+            .unwrap();
+            let mut config = Config::load_from(&path).unwrap();
+            assert_eq!(config.review.trigger(), expected, "{trigger:?} {list}");
+            config.phone.enabled = false;
+            config.save_to(&path).unwrap();
+            let saved = fs::read_to_string(&path).unwrap();
+            assert!(!saved.contains("trigger"), "{saved}");
+            assert!(saved.contains("# kept"), "{saved}");
+            let reloaded = Config::load_from(&path).unwrap();
+            assert_eq!(reloaded.review.trigger(), expected, "{saved}");
+        }
+    }
+    // Once automatic reviewers are chosen the pending trigger goes too.
+    let mut pending = ReviewConfig::legacy_default();
+    assert_eq!(pending.trigger(), ReviewTrigger::Push);
+    pending.reviewers = vec![SubagentChoice {
+        model: "gpt-6-terra".into(),
+        effort: None,
+    }];
+    pending.clear_legacy();
+    assert!(!toml::to_string(&pending).unwrap().contains("trigger"));
+}
+
+/// A session that chose Off is off whatever reviewers exist; one that names
+/// neither Off nor Push follows whether review is on.
+#[test]
+fn session_choice_decides_whether_review_runs() {
+    let choice = SubagentChoice {
+        model: "gpt-6-terra".into(),
+        effort: None,
+    };
+    let on = ReviewConfig {
+        reviewers: vec![choice.clone()],
+        ..ReviewConfig::default()
+    };
+    let off = ReviewConfig::default();
+    let inherit = SessionReview::Inherit {
+        reviewers: Some(vec![choice.clone()]),
+    };
+    let push = SessionReview::Push { reviewers: None };
+    assert_eq!(
+        on.for_session(Some(&SessionReview::Off)).trigger(),
+        ReviewTrigger::Off
+    );
+    assert_eq!(on.for_session(Some(&push)).trigger(), ReviewTrigger::Push);
+    assert_eq!(
+        on.for_session(Some(&inherit)).trigger(),
+        ReviewTrigger::Push
+    );
+    // A session reviewer choice enables review even without global reviewers.
+    assert_eq!(
+        off.for_session(Some(&inherit)).trigger(),
+        ReviewTrigger::Push
+    );
+    assert_eq!(
+        off.for_session(Some(&SessionReview::Push {
+            reviewers: Some(vec![choice])
+        }))
+        .trigger(),
+        ReviewTrigger::Push
+    );
+    assert_eq!(off.for_session(Some(&push)).trigger(), ReviewTrigger::Off);
+}
+
+/// Per-turn review was removed. Sessions and launch files an older build
+/// stored with `turn` (or `on`) read as `push`, and are written as `push`.
+#[test]
+fn stored_turn_review_reads_as_push_and_is_never_written() {
+    let choice = r#"[{"model":"gpt-6-terra","effort":"high"}]"#;
+    for mode in ["turn", "on", "push"] {
+        let session: SessionReview =
+            serde_json::from_str(&format!(r#"{{"mode":"{mode}","reviewers":{choice}}}"#)).unwrap();
+        assert!(matches!(
+            &session,
+            SessionReview::Push { reviewers: Some(reviewers) } if reviewers.len() == 1
+        ));
+        assert_eq!(session.trigger(), Some(ReviewTrigger::Push));
+        let saved = serde_json::to_value(&session).unwrap();
+        assert_eq!(saved["mode"], "push");
+    }
+    // The count, model and effort form an older build stored.
+    let legacy: SessionReview =
+        serde_json::from_str(r#"{"mode":"turn","count":2,"model":"gpt-6-terra"}"#).unwrap();
+    assert_eq!(legacy.trigger(), Some(ReviewTrigger::Push));
+    assert_eq!(serde_json::to_value(&legacy).unwrap()["mode"], "push");
+    let trigger: ReviewTrigger = serde_json::from_str(r#""turn""#).unwrap();
+    assert_eq!(trigger, ReviewTrigger::Push);
+    assert_eq!(serde_json::to_string(&trigger).unwrap(), r#""push""#);
 }
 
 // Hard-won: 060306642: startup discovery duplicated a home containing `..`.
@@ -3284,14 +3602,17 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
     {
         let profile = |home: PathBuf| HarnessProfile {
             enabled: true,
-            kind: HarnessKind::Claude,
-            home,
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
             codex_profile: None,
+            ..HarnessProfile::new(HarnessKind::Claude, home)
         };
         let mut configured = Config::default();
         configured
@@ -3313,4 +3634,74 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
         );
         assert_eq!(configured.profiles["claude"].home, configured_home);
     }
+}
+
+/// `models` is optional: a profile without it loads unchanged and saves
+/// without the key, and a list survives a save and reload.
+#[test]
+fn a_profile_models_allow_list_round_trips_and_is_omitted_when_empty() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("opencode");
+    fs::create_dir(&home).unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[profiles.ds8bit]\nkind = \"open-code\"\nhome = {:?}\n",
+            home.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let mut config = Config::load_from(&path).unwrap();
+    assert!(config.profiles["ds8bit"].models.is_empty());
+    config.save_to(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("models"));
+    // The credits option loads off, is not written while off, and survives
+    // being on.
+    assert!(!config.profiles["ds8bit"].load_balancing_may_consume_credits);
+    assert!(
+        !fs::read_to_string(&path)
+            .unwrap()
+            .contains("load_balancing_may_consume_credits")
+    );
+    config
+        .profiles
+        .get_mut("ds8bit")
+        .unwrap()
+        .load_balancing_may_consume_credits = true;
+    config.save_to(&path).unwrap();
+    assert!(
+        Config::load_from(&path).unwrap().profiles["ds8bit"].load_balancing_may_consume_credits
+    );
+    config
+        .profiles
+        .get_mut("ds8bit")
+        .unwrap()
+        .load_balancing_may_consume_credits = false;
+    config.save_to(&path).unwrap();
+
+    let listed = "openrouter/deepseek/deepseek-v4.1-flash-1017".to_owned();
+    config.profiles.get_mut("ds8bit").unwrap().models = vec![listed.clone()];
+    config.save_to(&path).unwrap();
+    assert!(fs::read_to_string(&path).unwrap().contains(&listed));
+    assert_eq!(
+        Config::load_from(&path).unwrap().profiles["ds8bit"].models,
+        [listed]
+    );
+}
+
+#[test]
+fn an_aws_role_table_on_a_profile_that_cannot_use_it_does_not_refuse_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let mut profile = HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile.aws = Some(AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    });
+    assert_ne!(profile.auth_scheme(), AuthScheme::AwsCredentialChain);
+    profile.ensure_ready("claude").unwrap();
 }

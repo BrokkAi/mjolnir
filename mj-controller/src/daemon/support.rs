@@ -1,8 +1,36 @@
 use super::*;
 
+/// Publication is deliberately synchronous: I/O settles in the coordinators.
+pub(super) fn publish_background_results(
+    state: &Arc<RuntimeState>,
+    recovery: impl Iterator<Item = crate::recovery::RecoveryResult>,
+    upgrades: impl Iterator<Item = crate::worker_upgrade::WorkerUpgradeResult>,
+) {
+    for result in recovery {
+        report_recovery(&result);
+    }
+    for result in upgrades {
+        report_worker_upgrade(state, &result);
+    }
+}
+
+/// Records already reach the owner through the committed publication feed.
+/// Reporting a finished copy must never join the configuration I/O owner.
+pub(super) fn report_recovery(result: &crate::recovery::RecoveryResult) {
+    if let Err(error) = &result.outcome {
+        if result.deferred {
+            tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
+        } else if result.cancelled {
+            tracing::info!(session_id = %result.session_id, %error, reason = "superseded by suspend", "daemon recovery checkpoint cancelled");
+        } else {
+            tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
+        }
+    }
+}
+
 /// Log one finished worker upgrade, and tell the surfaces about the one that
 /// changed something.
-pub(super) async fn report_worker_upgrade(
+pub(super) fn report_worker_upgrade(
     state: &Arc<RuntimeState>,
     result: &crate::worker_upgrade::WorkerUpgradeResult,
 ) {
@@ -24,7 +52,7 @@ pub(super) async fn report_worker_upgrade(
                 .get(session_id)
                 .map_or_else(
                     || session_id.clone(),
-                    |session| session.display_title().to_owned(),
+                    |session| session.listed_title().to_owned(),
                 );
             state.push_notice(session_id, format!("Upgraded the worker for {name}."));
         }
@@ -36,38 +64,11 @@ pub(super) async fn report_worker_upgrade(
         }
         Err(error) => {
             tracing::warn!(%session_id, %error, "could not upgrade the session worker");
-            if let Some(failure) = &result.preparation_failure {
-                state
-                    .fail_harness_preparation(
-                        session_id.clone(),
-                        failure.clone(),
-                        result.observed_updated_at.clone(),
-                    )
-                    .await;
+            if let Some(cause) = &result.applied_preparation_failure {
+                state.push_notice(session_id, cause.clone());
             }
         }
     }
-}
-
-/// Children of `parent_session_id` whose session is still active, in the
-/// order they should be stopped before the parent. A child that already
-/// stopped needs nothing and would make `force_stop` fail on it.
-pub(super) fn active_child_session_ids(
-    state: &mj_core::state::State,
-    parent_session_id: &str,
-) -> Vec<String> {
-    state
-        .subagents
-        .values()
-        .filter(|child| child.parent_session_id == parent_session_id)
-        .filter(|child| {
-            state
-                .sessions
-                .get(&child.child_session_id)
-                .is_some_and(|session| session.state.is_active())
-        })
-        .map(|child| child.child_session_id.clone())
-        .collect()
 }
 
 pub(super) struct DaemonStageReportingExecutor<E> {
@@ -93,7 +94,46 @@ impl<E> DaemonStageReportingExecutor<E> {
     }
 }
 
+impl<E: CommandExecutor> DaemonStageReportingExecutor<E> {
+    /// Hold the command's lifecycle stage while `run` executes it, and log the
+    /// outcome.
+    fn staged(
+        &self,
+        command: &CommandSpec,
+        finished: &'static str,
+        run: impl FnOnce() -> Result<CommandOutput>,
+    ) -> Result<CommandOutput> {
+        let _stage = command
+            .stage
+            .as_ref()
+            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
+        let started = std::time::Instant::now();
+        let result = run();
+        tracing::info!(
+            session_id = %self.session_id,
+            stage = command
+                .stage
+                .as_ref()
+                .map(ProvisionStage::label)
+                .unwrap_or_else(|| "command".to_owned()),
+            purpose = %command.purpose,
+            duration_ms = started.elapsed().as_millis(),
+            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
+            "{finished}"
+        );
+        result
+    }
+}
+
 impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.inner.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.inner.cancellation_requested_without_deadline()
+    }
+
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let _stage = command
             .stage
@@ -115,25 +155,9 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        let _stage = command
-            .stage
-            .as_ref()
-            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
-        let started = std::time::Instant::now();
-        let result = self.inner.execute(command);
-        tracing::info!(
-            session_id = %self.session_id,
-            stage = command
-                .stage
-                .as_ref()
-                .map(ProvisionStage::label)
-                .unwrap_or_else(|| "command".to_owned()),
-            purpose = %command.purpose,
-            duration_ms = started.elapsed().as_millis(),
-            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
-            "session command stage finished"
-        );
-        result
+        self.staged(command, "session command stage finished", || {
+            self.inner.execute(command)
+        })
     }
 
     fn execute_with_stdin(
@@ -141,25 +165,28 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         command: &CommandSpec,
         input: &mut (dyn std::io::Read + Send),
     ) -> Result<CommandOutput> {
-        let _stage = command
-            .stage
-            .as_ref()
-            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
-        let started = std::time::Instant::now();
-        let result = self.inner.execute_with_stdin(command, input);
-        tracing::info!(
-            session_id = %self.session_id,
-            stage = command
-                .stage
-                .as_ref()
-                .map(ProvisionStage::label)
-                .unwrap_or_else(|| "command".to_owned()),
-            purpose = %command.purpose,
-            duration_ms = started.elapsed().as_millis(),
-            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
-            "session streaming command stage finished"
-        );
-        result
+        self.staged(command, "session streaming command stage finished", || {
+            self.inner.execute_with_stdin(command, input)
+        })
+    }
+
+    // Staging that precedes a timeout-bound command is still session work, so
+    // it shows in the lifecycle stage and the log like any other command.
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.staged(command, "session command stage finished", || {
+            self.inner.execute_without_deadline(command)
+        })
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.staged(command, "session streaming command stage finished", || {
+            self.inner
+                .execute_with_stdin_without_deadline(command, input)
+        })
     }
 
     fn cancellation_requested(&self) -> bool {
@@ -178,10 +205,6 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
             self.state
                 .change_lifecycle_stage(&self.session_id, id, stage, false);
         }
-    }
-
-    fn bound_admitted_work(&self, timeout: Option<Duration>) {
-        self.inner.bound_admitted_work(timeout);
     }
 
     fn shutdown_interrupted(&self) -> bool {
@@ -214,7 +237,20 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
     }
 
     fn end_resumable_work(&self, label: &'static str) -> Result<()> {
-        let work = crate::upgrade::activity_unless_draining(label)?;
+        // Synchronous callers include workspace copies. Hand the wait off
+        // async workers, and let the gate wake it on closure or drain lapse.
+        let admitted = mj_core::runtime::off_async_worker(|| {
+            crate::upgrade::gate().enter_after_draining(label)
+        });
+        if admitted.is_err() {
+            let mut owner = self.state.owner();
+            if let Some(active) = owner.lifecycle.get_mut(&self.session_id)
+                && self.operation_id.as_ref() == Some(&active.operation_id)
+            {
+                active.interrupt_for_shutdown();
+            }
+        }
+        let work = admitted?;
         let owner = self.state.owner();
         let active = owner
             .lifecycle
@@ -287,4 +323,115 @@ pub(super) fn write_metadata(path: &Path, metadata: &DaemonMetadata) -> Result<(
     fs::rename(&temporary, path)
         .with_context(|| format!("publish daemon metadata {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use crate::daemon::tests::{test_metadata, test_runtime_state};
+
+    // Hard-won: #1499: result publication awaited configuration ownership on the serving loop.
+    #[tokio::test]
+    async fn result_publication_does_not_wait_for_configuration() {
+        const CHILD: &str = "MJ_RESULT_PUBLICATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                "daemon::support::publication_tests::result_publication_does_not_wait_for_configuration",
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "result-publication-test")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut state = test_runtime_state();
+        Arc::get_mut(&mut state).unwrap().committed =
+            Some(crate::database::subscribe_committed_state().unwrap());
+        let config_owner = state.config_mutation.lock().await;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let metadata = test_metadata(address);
+        let cancellation = CancellationToken::new();
+        let server_cancel = cancellation.clone();
+        let serving = state.clone();
+        let server = tokio::spawn(async move {
+            // The same synchronous drain used by the real serving tick must
+            // finish before this task can accept and answer a connection.
+            publish_background_results(
+                &serving,
+                [(false, true), (true, false), (false, false), (false, false)]
+                    .into_iter()
+                    .enumerate()
+                    .map(
+                        |(index, (cancelled, deferred))| crate::recovery::RecoveryResult {
+                            session_id: "finished-copy".into(),
+                            expected_target: mj_core::state::TargetLocator::LocalBare {
+                                worker_root: "unused".into(),
+                            },
+                            outcome: if index == 3 {
+                                Ok(crate::controller::CheckpointArtifact {
+                                    metadata: mj_core::state::CheckpointMetadata {
+                                        archive_path: "unused.zip".into(),
+                                        sha256: "verified".into(),
+                                        created_at: "2026-11-11T15:00:00Z".into(),
+                                        event_frontier: 1,
+                                    },
+                                    native_session_id: "native".into(),
+                                    event_frontier_digest: "verified".into(),
+                                })
+                            } else {
+                                Err("copy completed without an artifact".into())
+                            },
+                            cancelled,
+                            deferred,
+                        },
+                    ),
+                [crate::worker_upgrade::WorkerUpgradeResult {
+                    session_id: "finished-upgrade".into(),
+                    outcome: Err("harness preparation failed".into()),
+                    applied_preparation_failure: Some("durably failed".into()),
+                    cancelled: false,
+                }]
+                .into_iter(),
+            );
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(stream, metadata, serving, server_cancel)
+                .await
+                .unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            for (request_id, action) in [(1, DaemonAction::Ping), (2, DaemonAction::Stop)] {
+                write_frame(
+                    &mut stream,
+                    &RequestEnvelope {
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id,
+                        token: "right-token".into(),
+                        action,
+                    },
+                )
+                .await
+                .unwrap();
+                let reply = read_frame::<ResponseEnvelope>(&mut stream)
+                    .await
+                    .unwrap()
+                    .result
+                    .unwrap();
+                if request_id == 1 {
+                    assert!(matches!(reply, DaemonReply::Pong));
+                } else {
+                    assert!(matches!(reply, DaemonReply::Done));
+                }
+            }
+            assert!(cancellation.is_cancelled());
+            drop(stream);
+            server.await.unwrap();
+        })
+        .await
+        .expect("publication blocked request/stop behind configuration mutation");
+        drop(config_owner);
+    }
 }

@@ -15,6 +15,12 @@
 //! never enter the durable event stream or a checkpoint archive. Fingerprints
 //! and freshness timestamps are not secret and may appear in logs.
 
+mod locking;
+pub use locking::{
+    CLAUDE_REFRESH_LOCK_WAIT, CredentialInstall, CredentialWriteGuard,
+    canonical_login_is_replaced_by, install_credentials_if_newer, install_session_credentials,
+};
+
 use crate::hex::lower_hex;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -44,6 +50,39 @@ pub const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 
 pub fn credential_fingerprint(bytes: &[u8]) -> String {
     lower_hex(Sha256::digest(bytes))
+}
+
+/// The staged OAuth login, excluding setup tokens and API-key/Bedrock launches.
+pub fn claude_oauth_login_path(
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Option<PathBuf> {
+    if [
+        CLAUDE_OAUTH_TOKEN_ENV,
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    ]
+    .iter()
+    .any(|key| {
+        environment
+            .get(*key)
+            .is_some_and(|value| !value.is_empty() && value != "0")
+    }) {
+        return None;
+    }
+    let home = Path::new(environment.get(HarnessKind::Claude.home_env())?);
+    Some(crate::config::harness_authentication_marker(
+        HarnessKind::Claude,
+        home,
+    ))
+}
+
+/// Identity of the access token itself. Stripping a refresh token or rewriting
+/// the JSON cannot authorize recovery of a prompt that used the same login.
+pub fn claude_access_token_fingerprint(bytes: &[u8]) -> Option<String> {
+    let login: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let token = login.pointer("/claudeAiOauth/accessToken")?.as_str()?;
+    (!token.is_empty()).then(|| credential_fingerprint(token.as_bytes()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +261,68 @@ pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
     kind.credential_expiry_ms(&serde_json::from_slice(bytes).ok()?)
 }
 
+impl HarnessKind {
+    /// Whether the credential copies this host hands to a harness process omit
+    /// the refresh token, so the daemon stays the grant's only refresher.
+    ///
+    /// Claude Code refreshes five minutes before `expiresAt`, under a lock that
+    /// covers only its own config directory. Every copy that carries the
+    /// rotating single-use refresh token can therefore spend it, and a refresh
+    /// inside a copy nobody pulls back leaves the host holding a spent token
+    /// (#1490). Without the key, Claude Code never refreshes or writes the file
+    /// and rereads a replaced one by modification time.
+    ///
+    /// The same on every host. Where the host's own login lives is
+    /// [`HarnessKind::login_store`]'s business (on macOS it is the Keychain,
+    /// which the sync reads and the refresher renews); the copies are files
+    /// either way.
+    pub fn copies_omit_refresh_token(self) -> bool {
+        self == Self::Claude
+    }
+}
+
+/// The bytes of a Claude credential copy without `claudeAiOauth.refreshToken`.
+/// The key is removed, never set to `""`, which Claude Code reads as "login
+/// ended"; an existing `""` is left alone. Callers decide whether a copy is
+/// stripped ([`HarnessKind::copies_omit_refresh_token`]). Other harnesses, and
+/// a document that is not Claude's JSON shape, are unchanged.
+pub fn credential_copy_for_harness(kind: HarnessKind, bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+
+    if !credential_holds_refresh_token(kind, bytes) {
+        return Cow::Borrowed(bytes);
+    }
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Cow::Borrowed(bytes);
+    };
+    let Some(oauth) = json
+        .get_mut("claudeAiOauth")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Cow::Borrowed(bytes);
+    };
+    oauth.remove("refreshToken");
+    match serde_json::to_vec(&json) {
+        Ok(stripped) => Cow::Owned(stripped),
+        Err(_) => Cow::Borrowed(bytes),
+    }
+}
+
+/// Whether a Claude credential carries a refresh token its holder could
+/// spend. An empty string is the "login ended" marker, not a token. Other
+/// harnesses report none here.
+pub fn credential_holds_refresh_token(kind: HarnessKind, bytes: &[u8]) -> bool {
+    kind == HarnessKind::Claude
+        && serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|json| {
+                json.pointer("/claudeAiOauth/refreshToken")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|token| !token.is_empty())
+            })
+            .unwrap_or(false)
+}
+
 /// Muse's Meta login records its access-token expiry in epoch seconds. A
 /// refresh moves it forward, so it both orders copies and says when the login
 /// runs out. A stored API key has none.
@@ -235,6 +336,11 @@ impl HarnessKind {
     /// Read [`credential_freshness`] out of this harness's own credential JSON.
     pub fn credential_freshness_ms(self, json: &serde_json::Value) -> Option<i64> {
         match self {
+            Self::Antigravity => {
+                chrono::DateTime::parse_from_rfc3339(json.get("token")?.get("expiry")?.as_str()?)
+                    .ok()
+                    .map(|expiry| expiry.timestamp_millis())
+            }
             Self::Claude => json.get("claudeAiOauth")?.get("expiresAt")?.as_i64(),
             Self::Codex => {
                 let last_refresh = json.get("last_refresh")?.as_str()?;
@@ -275,7 +381,7 @@ impl HarnessKind {
             Self::Muse => muse_login_expiry_ms(json),
             // None of these has a proactive-refresh path, so none reports an
             // expiry Hel would act on: each refreshes its own tokens on demand.
-            Self::Grok | Self::OpenCode | Self::Dsh => None,
+            Self::Grok | Self::OpenCode | Self::Dsh | Self::Antigravity => None,
         }
     }
 
@@ -292,6 +398,7 @@ impl HarnessKind {
             // dsh-acp has no login; its profiles authenticate with an API
             // key, so `login_command` refuses before this is reached.
             Self::Dsh => Vec::new(),
+            Self::Antigravity => vec!["acp".into(), "--login".into(), "--disable-telemetry".into()],
         };
         (self.cli_binary_name().to_owned(), arguments)
     }
@@ -330,7 +437,7 @@ pub fn validate_credential_payload(_kind: HarnessKind, bytes: &[u8]) -> Result<(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoginStatus {
     /// A credential the harness can start from is present.
     SignedIn,
@@ -439,12 +546,7 @@ pub fn read_credential_file(
 /// cannot redirect the write.
 pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Result<()> {
     validate_credential_payload(kind, bytes)?;
-    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        bail!(
-            "credential destination {} is a symbolic link",
-            path.display()
-        );
-    }
+    refuse_symlinked_token("credential", path)?;
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -465,7 +567,7 @@ pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Re
 /// Full-phrase markers that a harness rejected the session's credentials.
 /// Kept tight on purpose: a false positive costs one redundant sync and one
 /// notice, but a noisy list would train operators to ignore both.
-const AUTH_FAILURE_PHRASES: [&str; 8] = [
+const AUTH_FAILURE_PHRASES: [&str; 9] = [
     "oauth session expired and could not be refreshed",
     "please run /login",
     "authorization grant is invalid",
@@ -483,6 +585,8 @@ const AUTH_FAILURE_PHRASES: [&str; 8] = [
     // Hel's own marker for a turn the bridge failed with ACP `auth_required`.
     // The bridge's wording ("Authentication required") is too generic to match.
     "acp auth_required",
+    // Codex ACP can refuse workspace routing while loading a parked session.
+    "workspace routing discovery unauthorized (401)",
 ];
 
 /// Machine-readable authentication errors must be complete identifiers. This
@@ -538,9 +642,10 @@ pub fn turn_diagnostic_reports_auth_failure(diagnostic: &TurnDiagnostic) -> bool
         return false;
     }
     diagnostic.code.as_deref().is_some_and(|code| {
-        AUTH_FAILURE_ERROR_KINDS
-            .iter()
-            .any(|kind| code.eq_ignore_ascii_case(kind))
+        code == agent_client_protocol::ErrorCode::AUTH_REQUIRED.to_string()
+            || AUTH_FAILURE_ERROR_KINDS
+                .iter()
+                .any(|kind| code.eq_ignore_ascii_case(kind))
     }) || contains_auth_failure_signature(&diagnostic.message)
 }
 
@@ -556,12 +661,68 @@ pub enum CredentialSyncReason {
 pub struct CredentialSyncSignal {
     pub ordinal: u64,
     pub reason: CredentialSyncReason,
+    /// Hash of the access token the failed turn used (the turn diagnostic's
+    /// `login_fingerprint`). `None` when the failure carries none: a warning,
+    /// a worker that predates the field, or a harness without a token hash.
+    // Never serialized: an older client's copy of this struct denies unknown
+    // fields and would fail to decode the session view. The daemon passes it
+    // in-process only.
+    #[serde(skip)]
+    pub login_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSyncCause {
     pub session_id: String,
     pub reason: CredentialSyncReason,
+    /// The failed turn's access-token hash, as in [`CredentialSyncSignal`].
+    pub login_fingerprint: Option<String>,
+}
+
+/// What an authentication failure means, decided once against the profile's
+/// current login (#1547). Every consumer (the push, the refusal, the notice)
+/// reads this answer instead of comparing logins on its own snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthenticationVerdict {
+    /// The failed token is no longer the profile's: the login was renewed
+    /// under the session. The current login is pushed and the turn retries.
+    LoginRenewed,
+    /// The failed token is still the profile's current one: the provider
+    /// refused the current login.
+    CurrentLoginRefused,
+    /// Either side's token identity is missing. Never grounds for a refusal.
+    Unknown,
+}
+
+/// Is the access token that failed still the profile's current access token?
+pub fn classify_authentication_failure(
+    failed_token: Option<&str>,
+    current_token: Option<&str>,
+) -> AuthenticationVerdict {
+    match (failed_token, current_token) {
+        (Some(failed), Some(current)) if failed == current => {
+            AuthenticationVerdict::CurrentLoginRefused
+        }
+        (Some(_), Some(_)) => AuthenticationVerdict::LoginRenewed,
+        _ => AuthenticationVerdict::Unknown,
+    }
+}
+
+/// The failed turn's access-token hash, when this event is a failed prompt.
+pub fn relay_event_login_fingerprint(event: &RelayEvent) -> Option<String> {
+    match &event.observation {
+        RelayObservation::CommandCompleted {
+            outcome:
+                RelayCommandOutcome::Prompt {
+                    diagnostic: Some(diagnostic),
+                    ..
+                },
+            ..
+        } if turn_diagnostic_reports_auth_failure(diagnostic) => {
+            diagnostic.login_fingerprint.clone()
+        }
+        _ => None,
+    }
 }
 
 /// Detect a reason for immediate credential reconciliation only in relay
@@ -654,7 +815,9 @@ pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> 
 /// exists, where "this profile needs no login" is not a useful answer: it only
 /// wants the program name to run `--version` against.
 pub fn native_login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
-    profile.kind.native_login_command()
+    let (command, mut args) = profile.kind.native_login_command();
+    args.extend(profile.kind.home_cli_args(&profile.home));
+    (command, args)
 }
 
 /// One live session the coordinator may reconcile with its profile.
@@ -695,18 +858,71 @@ pub enum CredentialSyncAction {
     GithubTokenPushed,
     /// A stale session token was removed because the controller has none.
     GithubTokenRemoved,
+    /// The session's AWS credentials were withdrawn, because the profile
+    /// requires role-scoped credentials and none could be issued.
+    AwsCredentialsRemoved,
     /// The host's slopcop login replaced the session copy.
     SlopcopLoginPushed,
     /// The session copy was removed because the host is signed out.
     SlopcopLoginRemoved,
 }
 
+/// The independent steps of one session's sync. Each fails on its own, and a
+/// result can say that a step is fine again only if it checked that step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyncStep {
+    /// Not a step: the session's whole sync failed (its connection, say)
+    /// before any step ran. Reported without a step.
+    Session,
+    /// The role-scoped AWS credentials, renewed by the session's own task.
+    Aws,
+    /// The profile's one AWS export, reconciled with its login pass.
+    AwsExport,
+    HarnessLogin,
+    Skills,
+    GithubToken,
+    Slopcop,
+}
+
+/// One step that failed while the others ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepFailure {
+    pub step: SyncStep,
+    /// What failed, beginning with the step's name.
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSyncOutcome {
     pub session_id: String,
+    /// Hash of the access token in the profile's login as this sync read it
+    /// (Claude only). With the failed turn's hash it decides what an
+    /// authentication failure means; see [`classify_authentication_failure`].
+    pub current_access_token: Option<String>,
+    /// The snapshot that initially matched the failing session without any
+    /// credential mutation. Refusal evidence must refer to this observation,
+    /// never to a later reading of the profile's login.
+    pub unchanged_login: Option<CredentialSnapshot>,
     /// Every action taken for the session, or why the reconcile failed. An
     /// empty action list means the copies already agreed.
     pub outcome: std::result::Result<Vec<CredentialSyncAction>, String>,
+    /// Steps of the sync that failed while the others ran, such as the AWS
+    /// credentials. `outcome` then still lists what the other steps did, so
+    /// their work is counted and reported.
+    pub step_failures: Vec<StepFailure>,
+}
+
+impl CredentialSyncOutcome {
+    /// The step failures as one line, for a log or a test.
+    pub fn failure_text(&self) -> Option<String> {
+        (!self.step_failures.is_empty()).then(|| {
+            self.step_failures
+                .iter()
+                .map(|failure| failure.detail.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
 }
 
 /// Reported to the UI loops only when something happened: an action was taken,
@@ -719,10 +935,32 @@ pub struct CredentialSyncResult {
     /// The whole reconcile stopped before it could report per-session
     /// outcomes. Kept separate so the failure is reported, never dropped.
     pub failure: Option<String>,
+    /// The result covers only the sessions in `outcomes` (one session's AWS
+    /// renewal), not the whole profile: a failure it does not mention is not
+    /// thereby over.
+    pub partial: bool,
     pub outcomes: Vec<CredentialSyncOutcome>,
 }
 
 impl CredentialSyncResult {
+    /// What the triggering authentication failure meant, from the profile's
+    /// login as this sync read it. `None` when the sync was not triggered by
+    /// an authentication failure or did not reach the triggering session.
+    pub fn authentication_verdict(&self) -> Option<AuthenticationVerdict> {
+        let cause = self.trigger.as_ref()?;
+        if cause.reason != CredentialSyncReason::AuthenticationFailure {
+            return None;
+        }
+        let reached = self
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.session_id == cause.session_id)?;
+        Some(classify_authentication_failure(
+            cause.login_fingerprint.as_deref(),
+            reached.current_access_token.as_deref(),
+        ))
+    }
+
     pub fn pushed_to(&self, session_id: &str) -> bool {
         self.outcomes.iter().any(|outcome| {
             outcome.session_id == session_id
@@ -733,13 +971,24 @@ impl CredentialSyncResult {
         })
     }
 
-    pub fn failures(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.outcomes
-            .iter()
-            .filter_map(|outcome| match &outcome.outcome {
-                Err(detail) => Some((outcome.session_id.as_str(), detail.as_str())),
-                Ok(_) => None,
-            })
+    /// Every failure, with the step it belongs to (`None` for a session whose
+    /// whole sync failed).
+    pub fn failures(&self) -> impl Iterator<Item = (&str, Option<SyncStep>, &str)> {
+        self.outcomes.iter().flat_map(|outcome| {
+            let whole = outcome
+                .outcome
+                .as_ref()
+                .err()
+                .map(|detail| (outcome.session_id.as_str(), None, detail.as_str()));
+            let steps = outcome.step_failures.iter().map(|failure| {
+                (
+                    outcome.session_id.as_str(),
+                    (failure.step != SyncStep::Session).then_some(failure.step),
+                    failure.detail.as_str(),
+                )
+            });
+            whole.into_iter().chain(steps)
+        })
     }
 
     /// Sessions that took at least one action of any kind.
@@ -803,13 +1052,24 @@ impl CredentialSyncResult {
 ///
 /// The credential sync is what learns it: a session reported an auth failure,
 /// the sync reached that session, and the profile's copy was no fresher than
-/// the session's, so there was nothing to push that could help. Each entry
-/// keeps the fingerprint the profile's credential file had at that moment and
-/// holds only while the file is unchanged, so `mj login`, or a fresher copy
-/// pulled from another session, ends it.
+/// the session's, so there was nothing to push that could help.
+///
+/// A Claude refusal is recorded for exactly one access token: the failed
+/// turn's token, and only when it is still the profile's current token
+/// ([`classify_authentication_failure`]). It ends when the profile's token
+/// differs, so a renewal, `mj login`, or a fresher copy pulled from another
+/// session clears it, and a failure of an older token never records one.
+/// Other harnesses report no token identity, so their refusal still holds
+/// while the whole login file is unchanged.
 #[derive(Debug, Default)]
 pub struct RejectedLogins {
-    profiles: std::collections::BTreeMap<String, (PathBuf, String)>,
+    profiles: std::collections::BTreeMap<String, (PathBuf, RefusedLogin)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RefusedLogin {
+    AccessToken(String),
+    File(String),
 }
 
 impl RejectedLogins {
@@ -826,12 +1086,28 @@ impl RejectedLogins {
         {
             return;
         }
-        let reached = result.outcomes.iter().find_map(|outcome| {
-            (outcome.session_id == cause.session_id).then_some(&outcome.outcome)
-        });
-        let Some(Ok(actions)) = reached else {
+        let reached = result
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.session_id == cause.session_id);
+        // A step that failed (the harness login among them) is not a clean
+        // check that the profile's own login is the one the provider refused.
+        let Some(CredentialSyncOutcome {
+            outcome: Ok(actions),
+            unchanged_login: Some(snapshot),
+            current_access_token,
+            step_failures,
+            ..
+        }) = reached
+        else {
             return;
         };
+        if step_failures
+            .iter()
+            .any(|failure| matches!(failure.step, SyncStep::HarnessLogin | SyncStep::Session))
+        {
+            return;
+        }
         if actions.iter().any(|action| {
             matches!(
                 action,
@@ -842,27 +1118,50 @@ impl RejectedLogins {
             // profile's; either way the next turn may succeed.
             return;
         }
-        let marker = profile.authentication_marker();
-        if let Ok((snapshot, _)) = read_credential_file(profile.kind, &marker)
-            && snapshot.present
-        {
-            tracing::info!(
-                profile_id = %result.profile_id,
-                session_id = %cause.session_id,
-                "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
-            );
-            self.profiles
-                .insert(result.profile_id.clone(), (marker, snapshot.fingerprint));
+        if !snapshot.present {
+            return;
         }
+        let refused = if profile.kind == HarnessKind::Claude {
+            // Only the failed turn's own token can show that the provider
+            // refused the current login. An unknown token proves nothing.
+            match classify_authentication_failure(
+                cause.login_fingerprint.as_deref(),
+                current_access_token.as_deref(),
+            ) {
+                AuthenticationVerdict::CurrentLoginRefused => {
+                    RefusedLogin::AccessToken(cause.login_fingerprint.clone().unwrap_or_default())
+                }
+                AuthenticationVerdict::LoginRenewed | AuthenticationVerdict::Unknown => return,
+            }
+        } else {
+            RefusedLogin::File(snapshot.fingerprint.clone())
+        };
+        let entry = (profile.authentication_marker(), refused);
+        // The same login refused again (another session, or a repeated
+        // signal) is already known; it is recorded and reported once.
+        if self.profiles.get(&result.profile_id) == Some(&entry) {
+            return;
+        }
+        tracing::info!(
+            profile_id = %result.profile_id,
+            session_id = %cause.session_id,
+            "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
+        );
+        self.profiles.insert(result.profile_id.clone(), entry);
     }
 
     /// Why a new session on this profile would fail to sign in, while its
-    /// login file is still the one the provider refused.
+    /// login is still the one the provider refused.
     pub fn refusal(&self, profile_id: &str) -> Option<String> {
         let (marker, refused) = self.profiles.get(profile_id)?;
         let current = std::fs::read(marker).ok()?;
-        (credential_fingerprint(&current) == *refused)
-            .then(|| crate::subagent::login_invalid_reason(profile_id))
+        let still_refused = match refused {
+            RefusedLogin::AccessToken(token) => {
+                claude_access_token_fingerprint(&current).as_deref() == Some(token.as_str())
+            }
+            RefusedLogin::File(fingerprint) => credential_fingerprint(&current) == *fingerprint,
+        };
+        still_refused.then(|| crate::subagent::login_invalid_reason(profile_id))
     }
 }
 
@@ -919,6 +1218,23 @@ pub fn enqueue(queue: &mut VecDeque<SyncTrigger>, trigger: SyncTrigger) {
         return;
     }
     queue.push_back(trigger);
+}
+
+/// Authentication variables understood by GitHub CLI on github.com and enterprise hosts.
+pub const GITHUB_AUTHENTICATION_ENVIRONMENT: [&str; 4] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// A credential-free launch removes these after environment composition.
+pub fn remove_github_authentication_environment(
+    environment: &mut std::collections::BTreeMap<String, String>,
+) {
+    for name in GITHUB_AUTHENTICATION_ENVIRONMENT {
+        environment.remove(name);
+    }
 }
 
 #[cfg(test)]

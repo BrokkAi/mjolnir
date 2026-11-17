@@ -1,0 +1,129 @@
+{
+  "id": "L0303",
+  "title": "Scala method value arity",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "9e727f6593018ae37949ea2e04e1bacf",
+    "session_title": "eval32 3512 opushighluna",
+    "reply_position": 588,
+    "captured_at": "2026-09-29T23:41:17.192Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight.",
+    "is_child": false
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3512: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nRepository history after the base commit is out of bounds. This issue was\nsolved on master after the base commit; do not read, fetch, log, diff or\ncheck out anything newer than the base commit named above, do not look at\nclosed pull requests or issue comments, and do not search master for the\nlanded solution. Solve it from the base commit and the issue text below.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports.\nDelegation policy for this lane: this session has Mjolnir sub-agent\ntools (spawn, wait, send_input, list_agents, close); use them. Every child is\nGPT-6 Luna at effort max, fixed by the harness. Treat Luna as a strong senior\nengineer, not as you. Work this way:\n1. Start by spawning investigators, two to four in parallel, one question each,\n   with file excerpts and the acceptance criteria. Do not read the repository\n   yourself for a question you have assigned; read the handback, then only the\n   files it names.\n2. Implement through children by default: split your agreed design into slices\n   with a spec, files and tests each, and dispatch them in parallel. Keep a\n   slice yourself only when it needs your whole context, when the setup a\n   child would need exceeds doing it yourself, or when a child has already\n   failed it once; say which, in one sentence, when you keep it.\n3. When a handback is wrong or incomplete, re-task that child once with the\n   specific correction and the failing evidence. If the second handback is\n   still wrong, take the slice over yourself and note it in your report.\n4. Delegate suite, lint and format runs: \"run these suites; report only\n   failures, with test names, a one-line reason and the log path each\". Run a\n   suite yourself only to reproduce one failure a child reported. Rerun\n   nothing a child ran green.\n5. Put the design, file excerpts and acceptance criteria in the spawn\n   instruction. Use send_input to answer a child's question or give a\n   correction, not for progress checks.\n6. After you spawn, call wait once for every outstanding child with the default\n   timeout (return_when any when the next step depends on whichever finishes\n   first). The brief's five-minute limit on shell commands does not apply to\n   wait. Do not poll: every wait, and every poll of a shell cell that runs a\n   wait, re-sends your whole context.\n7. Keep for yourself: the design, the review of the integrated diff, the\n   commit, the final report, and any decision a child hands back.\n8. Children share your container and checkout: give concurrent children\n   disjoint files and say so; expect their cargo builds\n[... 3619 bytes omitted from the middle of this message ...]\nroven boundary. The witnesses are in the Waves repository; the corpus driver and pins from #3500 are in `.agents/docs/issue-3500-validation.md` on the base.\n\n# Issue\n\nIssue #3512: Scala: this.apply method references are proven usage hits but fail forward navigation\n\nScala method references can remain proven usage hits even when forward navigation cannot resolve them. This is distinct from the JDK/workspace import collision in #3500.\n\nThe archived before/after corpus replay uses Bifrost base `a6cb9de6cd8e432dd2f670eb8fd31f70828d56eb` and Waves `66faa85e5f6195c7ac3edf4cbe15723de865825c`. Both revisions return `no_applicable_scala_callable` for:\n\n- `node/src/main/scala/com/wavesplatform/account/PrivateKey.scala:22:52`, `byteStrFormat.map(this.apply)`.\n- `node/src/main/scala/com/wavesplatform/account/PublicKey.scala:50:52`, the equivalent `this.apply` reference.\n\nThe inverse scans include the sites among proven hits with zero unproven hits. The PrivateKey scan retains seven rows; PublicKey retains 31. The two navigation failures are unchanged on the exact base and after the import correction, and the audit counts them as unresolved rather than successful round trips.\n\nReproduce with the corpus driver and pins in `.agents/docs/issue-3500-validation.md` at candidate `96839c9818b1e9733ec030540af1e601e5dfab43`; the full before/after JSON is in `.agents/docs/issue-3500-results/`. The archived branch is `eval19-3500-astra` (bundle in the local evaluation evidence). The driver enumerates the full declaration census, scans both public surfaces, and round-trips every location hit. This filing records the candidate's measured exact-base evidence; it does not claim a fresh replay on current master.\n\nResolve the method reference through the structured callable applicability route, or retain an explicit unproven boundary consistently in both surfaces. Add the two reduced higher-order method-reference witnesses and preserve all existing companion-call recall controls. Neither #3500 candidate currently fixes this separate defect.\n\n"
+        },
+        {
+          "id": "agent:233",
+          "role": "assistant",
+          "text": "Meanwhile, reviewing the diff."
+        },
+        {
+          "id": "agent:329",
+          "role": "assistant",
+          "text": "I'm making a checkpoint commit of the working version first, so the refinement is a separate diff that is easy to review."
+        },
+        {
+          "id": "agent:353",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 11:10pm (UTC)"
+        },
+        {
+          "id": "user:391",
+          "role": "user",
+          "text": "Judge note. Your previous turn ended because the provider account's usage window was exhausted, and your session was then moved to another account; nothing in your work caused this. The workspace and your commits are still there, but any sub-agent sessions and background commands you had running were stopped by the move: treat their handbacks as not received and spawn new sub-agents as needed. Continue from where you stopped under the same brief, keep the same base and commit discipline, and finish with the FINAL REPORT in this turn.\n"
+        },
+        {
+          "id": "agent:400",
+          "role": "assistant",
+          "text": "The refinement child had nearly finished before the move: its edits are in the working tree and its logs include a final clippy run. Checking the logs' final state."
+        },
+        {
+          "id": "agent:430",
+          "role": "assistant",
+          "text": "Clippy finished clean at 22:51, which was after the 22:40 edit. Reviewing the refinement diff."
+        },
+        {
+          "id": "agent:517",
+          "role": "assistant",
+          "text": "Both validators are running. Meanwhile, I'm pulling the base-failure evidence from the first implementer's log for the report."
+        },
+        {
+          "id": "agent:563",
+          "role": "assistant",
+          "text": "All three validators came back green. Committing."
+        },
+        {
+          "id": "agent:588",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nFixed and committed on the detached HEAD. Forward navigation now resolves `this.apply` method references through the same structured route the inverse scan uses. On Waves, both witnesses now return the two `apply` overloads as an explicit ambiguity instead of `no_applicable_scala_callable`, and no other row changed.\n\n**1. Confirmed cause**\n\n- **Navigation, confirmed by a base test and the corpus:** a cursor on `apply` in `byteStrFormat.map(this.apply)` reaches `resolve_scala_field`. The method value has no written argument list, so `scala_call_site_shape` returned `None` before it could derive an expected function shape. `scala_filter_callable_units` then applied its no-shape rule, which accepts a parameterized method only when it is the only candidate. Waves `PrivateKey` and `PublicKey` each have two `apply` overloads (`ByteStr` and `Array[Byte]`), so the set came out empty and navigation returned `no_applicable_scala_callable`.\n- **Inverse scan, read from code:** `crates/bifrost-jvm/src/scala/graph/inverted.rs` already treats a selection in argument position as a method value. It takes the expected function shape from a typed val/def or from the called method's parameter (`companion_method_value_context` and `call_parameter_method_value_context`). When that shape is unknown, `exact_method_value_declaration_for_owner` proves the nearest declaring owner's overload family. In Waves, `map` is play-json's `Reads.map`, which is outside the workspace, so the shape is unknown and both overloads count as proven hits.\n- **Zero unproven hits:** this is partly a surface contract. Scans that target a Scala declaration do not fill the unproven bucket (`query.rs` ~755). The positive hit itself does go through the exact owner and shape-applicability path.\n\n**2. Changes and reasons**\n\n- **Base:** `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19`.\n- **Checkpoint:** `4629e26ecac71635503f0aa8ed79322c95f05308`.\n- **Final:** `e3fd8bbaeba490cd041d3e79d90e803f5f8d1768`.\n\nChanges:\n- **`get_definition/scala.rs`:**\n  - Navigation now builds a method-value call shape (no argument lists, arity from the expected function type) and filters overloads with the shared matcher.\n  - Callees written as `field_expression` (for example `Mapper.map`) are resolved through their exact receiver owner.\n  - When the shape is unknown and the method value is an argument, navigation returns the nearest owner's overload family, with the same field, nested-object and replica-family blockers the inverse scan uses. Distinct signatures return `ambiguous_scala_method_value_overload`, because `candidates_outcome` would merge overloads that share an FQN into one resolved answer.\n  - The context is derived once per reference.\n  - The identifier-callee lookup keeps the base order (enclosing lexical scopes, then the owner's members) and consults imports only when both miss.\n- **`syntax.rs` and `inverted.rs`:** the pure-AST reading of method values is now in shared helpers (`scala_method_value_expression_with_parent`, `scala_declared_method_value_context_with_parent`, and the two postfix helpers). Each takes the parent lookup as a closure, so both surfaces decide \"is this a method value\" with one piece of code. The inverse scan's behavior is unchanged.\n- **New test file `tests/suite_issues/issue_3512_scala_method_reference_navigation.rs`:**\n  - Reduced PrivateKey and PublicKey witnesses. Each asserts that navigation returns the complete overload family and that the public reference scan proves the same line.\n  - Known-shape controls: a field callee, a bare identifier, a typed return, and an explicit `this.apply _`.\n  - A missing-member negative control.\n- **No epoch bump:** this is a query-time change and persisted facts are unchanged. The semantic-adapter version does not depend on these functions.\n- **Two corrections I made myself during review:**\n  - I restored the `postfix_expression` kind check, which the child's shared helper had dropped.\n  - I restored the base callee precedence; the child had put owner members before local definitions.\n\n**3. Validation** (`JAVA_H\n[... 2887 bytes omitted from the middle of this message ...]\njected both `apply` overloads because neither was unique. The inverse scan already treats that selection as a method value: it reads the expected function type from the surrounding val, def or call parameter. When that type is unknown, it proves the owner's whole overload family. Navigation now follows the same route: it builds a method-value shape with no argument lists and filters overloads with the shared applicability matcher. When the expected type is unknown, as with play-json's `map` in Waves, navigation returns the overload family as an explicit ambiguity rather than `no_applicable_scala_callable`. The rule that decides which syntax is a method value now lives in one shared helper that both surfaces call, so they cannot drift apart again. On the pinned Waves commit, both witnesses now return the two workspace `apply` overloads. Every other scan row and round-trip result is unchanged, and the scans keep all 7 and 31 rows. New regressions cover the two reduced witnesses, expected-shape selection for field, bare, typed and `_` method values, and a missing-member negative case. The companion-call recall tests from #3290, #3295 and #3500 still pass, along with the Scala suites, the analysis and JVM library tests, and clippy.\n\n`★ Insight ─────────────────────────────────────`\n- The real defect was two copies of the same syntax rule on two surfaces. Parameterizing the shared helper by a parent-lookup closure lets the scan's precomputed `ParentIndex` and tree-sitter's `Node::parent` use one implementation.\n- \"No argument list\" and \"zero arguments\" are different facts. A method value supplies its arity from the expected function type, not from a written call.\n- The regression tests check that navigation and the reference scan agree at the same site, not only that navigation returns something.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Judge note. Your previous turn ended because the provider account's usage window was exhausted, and your session was then moved to another account; nothing in your work caused this. The workspace and your commits are still there, but any sub-agent sessions and background commands you had running were stopped by the move: treat their handbacks as not received and spawn new sub-agents as needed. Continue from where you stopped under the same brief, keep the same base and commit discipline, and finish with the FINAL REPORT in this turn.\n",
+    "assistant_text_tail": "jected both `apply` overloads because neither was unique. The inverse scan already treats that selection as a method value: it reads the expected function type from the surrounding val, def or call parameter. When that type is unknown, it proves the owner's whole overload family. Navigation now follows the same route: it builds a method-value shape with no argument lists and filters overloads with the shared applicability matcher. When the expected type is unknown, as with play-json's `map` in Waves, navigation returns the overload family as an explicit ambiguity rather than `no_applicable_scala_callable`. The rule that decides which syntax is a method value now lives in one shared helper that both surfaces call, so they cannot drift apart again. On the pinned Waves commit, both witnesses now return the two workspace `apply` overloads. Every other scan row and round-trip result is unchanged, and the scans keep all 7 and 31 rows. New regressions cover the two reduced witnesses, expected-shape selection for field, bare, typed and `_` method values, and a missing-member negative case. The companion-call recall tests from #3290, #3295 and #3500 still pass, along with the Scala suites, the analysis and JVM library tests, and clippy.\n\n`★ Insight ─────────────────────────────────────`\n- The real defect was two copies of the same syntax rule on two surfaces. Parameterizing the shared helper by a parent-lookup closure lets the scan's precomputed `ParentIndex` and tree-sitter's `Node::parent` use one implementation.\n- \"No argument list\" and \"zero arguments\" are different facts. A method value supplies its arity from the expected function type, not from a written call.\n- The regression tests check that navigation and the reference scan agree at the same site, not only that navigation returns something.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      588
+    ],
+    "user_position": 391,
+    "input_rationale": "The fix is delivered, but the agent declined to undo a forbidden GitHub label change and asks the user to decide whether to remove it.",
+    "label": "required_final",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:588"
+    ]
+  },
+  "context": {
+    "after": []
+  }
+}

@@ -7,9 +7,16 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// Optional GitHub integration settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GithubConfig {
+    /// Share GitHub authentication with newly created sessions. Each session
+    /// retains its accepted choice, and children inherit an opt-out.
+    #[serde(
+        default = "super::default_true",
+        skip_serializing_if = "super::is_true"
+    )]
+    pub session_credentials: bool,
     /// Controller-side token file distributed to sessions instead of App or
     /// host CLI credentials. Its contents are never serialized here.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,9 +30,23 @@ pub struct GithubConfig {
     pub watch: GithubWatchConfig,
 }
 
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            session_credentials: true,
+            session_token_path: None,
+            app: None,
+            watch: GithubWatchConfig::default(),
+        }
+    }
+}
+
 impl GithubConfig {
     pub fn is_default(&self) -> bool {
-        self.session_token_path.is_none() && self.app.is_none() && self.watch.is_default()
+        self.session_credentials
+            && self.session_token_path.is_none()
+            && self.app.is_none()
+            && self.watch.is_default()
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -42,7 +63,7 @@ impl GithubConfig {
 
 /// Configuration for the durable GitHub mailbox producer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct GithubWatchConfig {
     /// Whether the watcher produces GitHub events. Jev must also be enabled.
     #[serde(
@@ -50,6 +71,15 @@ pub struct GithubWatchConfig {
         skip_serializing_if = "super::is_true"
     )]
     pub enabled: bool,
+    /// Opt in to local relevance scoring instead of sending every item to the proxy.
+    #[serde(skip_serializing_if = "super::is_false")]
+    pub local_inference: bool,
+    /// Select a measured GPU for local inference; false keeps scoring on CPU.
+    #[serde(
+        default = "super::default_true",
+        skip_serializing_if = "super::is_true"
+    )]
+    pub use_gpu: bool,
     /// Delay between polls, bounded to avoid a tight retry loop.
     pub interval_seconds: u64,
     /// GitHub REST API base URL; configurable for isolated fake-server tests.
@@ -66,6 +96,8 @@ impl Default for GithubWatchConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            local_inference: false,
+            use_gpu: true,
             interval_seconds: 60,
             api_base: "https://api.github.com".into(),
         }
@@ -74,7 +106,6 @@ impl Default for GithubWatchConfig {
 
 /// Controller-host credentials for one GitHub App and its installations.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GithubAppConfig {
     /// Numeric identifier shown in the GitHub App settings page.
     pub app_id: u64,

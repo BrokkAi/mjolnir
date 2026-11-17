@@ -172,6 +172,7 @@ fn a_disconnected_view_without_a_snapshot_stops_stale_animation() {
     apply_session_view(
         &mut chat,
         Ok(ManagedSessionView {
+            attention: Default::default(),
             snapshot: None,
             connected: false,
             error: None,
@@ -320,16 +321,21 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
     let latest_ordinal = session.applied_event_ordinal;
     let latest_digest = session.applied_event_digest.clone();
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             window: mj_core::state::ProjectionWindow::of(&session),
             materialized: session,
             latest_credential_sync_signal: None,
             worker_build: None,
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             operational: mj_core::relay::RelayOperationalState {
                 assessment: None,
+                open_request: None,
+                person_input_through: 0,
+                work_liveness: None,
+                undelivered_mailbox_event_keys: Vec::new(),
                 assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),
@@ -348,6 +354,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
 
                 capacity_retry: None,
                 retry_assessment_pending: false,
+                authentication_retry_waiting: None,
                 activity_turn_started_at_ms: None,
                 store_id: None,
                 idle_since_ms: None,
@@ -369,10 +376,11 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 agent_info: None,
                 runtime: None,
                 steering_supported: None,
+                mailbox_delivery: None,
                 turn_controls: None,
-                config_options: Vec::new(),
+                config_options: Vec::new().into(),
                 modes: None,
-                available_commands: Vec::new(),
+                available_commands: Vec::new().into(),
                 config: BTreeMap::new(),
                 active_prompt: None,
                 queued_prompts: Vec::new(),
@@ -389,7 +397,8 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 last_harness_turn_started_ordinal: None,
                 background_commands: Vec::new(),
                 background_work_known: None,
-            },
+            }
+            .into(),
         }),
         connected: true,
         error: None,
@@ -578,6 +587,7 @@ fn a_transient_error_before_the_first_snapshot_keeps_the_loading_row() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_transcript_loading(true);
     let view = ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: false,
         error: Some(ViewError::Unreachable("database is busy".into())),
@@ -663,10 +673,9 @@ async fn the_dictation_chord_says_why_dictation_is_unavailable() {
     assert_eq!(chat.draft(), "");
 
     // Once the probe has answered, the chord gives its reason.
-    chat.apply_voice_update(VoiceUpdate::Availability(
-        Vec::new(),
-        Ok(Err(io::DICTATION_NEEDS_A_CODEX_PROFILE.to_owned())),
-    ));
+    chat.apply_voice_update(VoiceUpdate::Availability(Ok(Err(
+        io::DICTATION_NEEDS_A_CODEX_PROFILE.to_owned(),
+    ))));
     chat.state.clear_notice();
     assert_eq!(
         chat.toggle_dictation().as_deref(),
@@ -823,6 +832,9 @@ const CONTEXT_TEST_WORKSPACE: &str = "workspace-for-chat-session-context-tests";
 
 fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -844,11 +856,10 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
-        container_cpus: None,
-        container_memory: None,
         state: mj_core::state::SessionState::Running,
         archived: false,
         target: None,
@@ -860,6 +871,8 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -873,15 +886,10 @@ fn config_with_profiles(profiles: &[(&str, mj_core::config::HarnessKind)]) -> Co
                 (
                     (*id).to_owned(),
                     mj_core::config::HarnessProfile {
-                        enabled: true,
-                        kind: *kind,
-                        home: std::path::PathBuf::from("/profiles").join(id),
-                        environment: Default::default(),
-                        context_window_bytes: None,
-                        legacy_subagents: Default::default(),
-                        guardian_review_model: None,
-                        muse_auto_review: None,
-                        codex_profile: None,
+                        ..mj_core::config::HarnessProfile::new(
+                            *kind,
+                            std::path::PathBuf::from("/profiles").join(id),
+                        )
                     },
                 )
             })
@@ -906,12 +914,16 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-review", 88);
     let mut context = chat_context("session-review", &[]);
     context.config.review = mj_core::config::ReviewConfig {
-        trigger: mj_core::config::ReviewTrigger::Turn,
-        count: mj_core::config::default_review_count(),
-        tier: Some("extended".into()),
-        profile: Some("reviewer-a".into()),
-        model: None,
-        effort: None,
+        legacy: None,
+        disabled: false,
+        brief_writer: None,
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "gpt-6-terra".into(),
+                effort: None
+            };
+            2
+        ],
     };
     let mut chat = ActiveChat::open(
         fixture.stopped,
@@ -926,16 +938,22 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     assert_eq!(
         chat.state.review_config(),
         mj_core::config::ReviewConfig {
-            trigger: mj_core::config::ReviewTrigger::Turn,
-            count: mj_core::config::default_review_count(),
-            tier: Some("extended".into()),
-            profile: Some("reviewer-a".into()),
-            model: None,
-            effort: None,
+            legacy: None,
+            disabled: false,
+            brief_writer: None,
+            reviewers: vec![
+                mj_core::config::SubagentChoice {
+                    model: "gpt-6-terra".into(),
+                    effort: None
+                };
+                2
+            ],
         }
     );
     let title = prompt_title_parts(&chat.state);
-    assert!(title.iter().any(|part| part == "review"), "{title:?}");
+    // Review runs before push, not at the end of a turn, so the composer
+    // shows nothing for it.
+    assert!(title.iter().all(|part| part != "review"), "{title:?}");
     assert!(
         title
             .iter()
@@ -944,7 +962,10 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     );
 
     let mut reloaded = Config::default();
-    reloaded.review.profile = Some("reviewer-b".into());
+    reloaded.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "gpt-6-sol".into(),
+        effort: None,
+    }];
     chat.refresh_context(&reloaded, None, None);
 
     assert_eq!(chat.state.review_config(), reloaded.review);
@@ -2586,6 +2607,25 @@ async fn golden_active_chat_render() {
     append_active_golden_state(&mut output, "running conversation follow-up", &buffer, &[]);
 
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_turn_review(Some(mj_client::review::RuntimeReviewView {
+        child_session_id: None,
+        session_id: "session-review".into(),
+        phase: mj_core::review::driver::TurnReviewPhase::LaunchingReviewer,
+        roles: Vec::new(),
+        status: "Review running · 2 reviewers".into(),
+        verdict: None,
+        questions: Vec::new(),
+    }));
+    chat.set_input("Can you inspect the changes?".into());
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(
+        &mut output,
+        "review running with editable composer",
+        &buffer,
+        &[active_golden_rect(&chat, SurfaceId::PromptInput)],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_input("/".into());
     let buffer = active_golden_buffer(&mut chat, 80, 24);
     let popup = chat
@@ -3194,7 +3234,9 @@ async fn clipboard_and_attachment_results_follow_the_live_composer_across_regist
         generation: launch.input_generation(),
         target: launch.clipboard_target(),
         staging: true,
-        result: Ok(ClipboardContent::Image(super::super::tests::test_image())),
+        result: Ok(ClipboardContent::Image(
+            super::super::tests::test_reference_image(),
+        )),
     };
     launch.begin_submission(
         "accepted-before-parking".into(),
@@ -3225,7 +3267,7 @@ async fn clipboard_and_attachment_results_follow_the_live_composer_across_regist
         .attachment_queue
         .pop_front()
         .unwrap();
-    let image = super::super::tests::test_image();
+    let image = super::super::tests::test_reference_image();
     destination
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence,
@@ -3274,7 +3316,7 @@ async fn pending_image_submission_and_deleted_markers_survive_a_live_composer_tr
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence: 17,
             fallback: AttachmentFallback::FailedMarker,
-            result: Ok(super::super::tests::test_image()),
+            result: Ok(super::super::tests::test_reference_image()),
         }))
         .unwrap();
     assert_eq!(
@@ -3298,7 +3340,7 @@ async fn pending_image_submission_and_deleted_markers_survive_a_live_composer_tr
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence: 18,
             fallback: AttachmentFallback::FailedMarker,
-            result: Ok(super::super::tests::test_image()),
+            result: Ok(super::super::tests::test_reference_image()),
         }))
         .unwrap();
     attached.state.drain_composer();
@@ -3367,6 +3409,10 @@ async fn late_prompt_refusal_from_a_parked_worker_view_reaches_the_live_composer
     assert!(standby.pending_submissions.is_empty());
 }
 
+/// One listing of the session's stored prompts that a test answers.
+type SessionPromptsCall =
+    tokio::sync::oneshot::Sender<anyhow::Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
+
 #[derive(Clone)]
 struct DelayedNativeSession {
     delegate: mj_client::session::SessionHandle,
@@ -3374,6 +3420,9 @@ struct DelayedNativeSession {
         mj_core::relay::RelayCommand,
         tokio::sync::oneshot::Sender<anyhow::Result<u64>>,
     )>,
+    submitted_ids: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// When set, session-prompt listings go to the test instead of the delegate.
+    history: Option<tokio::sync::mpsc::UnboundedSender<SessionPromptsCall>>,
 }
 impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
     fn clone_box(&self) -> Box<dyn mj_client::session::SessionHandleBackend> {
@@ -3402,9 +3451,30 @@ impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
         bundle: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_core::storage::PromptHistoryPage>>
+    {
+        Box::pin(
+            self.delegate
+                .search_prompts(bundle, scope, query, after, limit),
+        )
+    }
+    fn session_prompts(
+        &self,
     ) -> mj_client::session::BoxFuture<'_, anyhow::Result<Vec<mj_core::storage::PromptHistoryEntry>>>
     {
-        Box::pin(self.delegate.search_prompts(bundle, scope, query))
+        if let Some(history) = &self.history {
+            let (reply, listing) = tokio::sync::oneshot::channel();
+            let sent = history.send(reply);
+            return Box::pin(async move {
+                sent.map_err(|_| anyhow::anyhow!("test history closed"))?;
+                listing
+                    .await
+                    .map_err(|_| anyhow::anyhow!("test history reply dropped"))?
+            });
+        }
+        Box::pin(self.delegate.session_prompts())
     }
     fn config_result(
         &self,
@@ -3414,12 +3484,17 @@ impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
     }
     fn enqueue_submit(
         &self,
-        _: String,
+        command_id: String,
         command: mj_core::relay::RelayCommand,
     ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_client::session::PendingRelaySubmit>>
     {
         let replies = self.replies.clone();
+        let submitted_ids = self.submitted_ids.clone();
         Box::pin(async move {
+            if let Some(ids) = submitted_ids {
+                ids.send(command_id)
+                    .map_err(|_| anyhow::anyhow!("test identity observer closed"))?;
+            }
             let (reply, receive) = tokio::sync::oneshot::channel();
             replies
                 .send((command, reply))
@@ -3485,8 +3560,12 @@ async fn native_acknowledgements_survive_dropping_the_view_that_submitted_them()
                 .await
                 .unwrap();
             let (replies, mut observed) = tokio::sync::mpsc::unbounded_channel();
-            let session =
-                mj_client::session::SessionHandle::new(DelayedNativeSession { delegate, replies });
+            let session = mj_client::session::SessionHandle::new(DelayedNativeSession {
+                delegate,
+                replies,
+                submitted_ids: None,
+                history: None,
+            });
             let mut source = ActiveChat::open(
                 session,
                 "bundle",
@@ -3637,7 +3716,7 @@ async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_
     attached.apply_attachment_result(AttachmentResult {
         sequence: 1,
         fallback: AttachmentFallback::FailedMarker,
-        result: Ok(super::super::tests::test_image()),
+        result: Ok(super::super::tests::test_reference_image()),
     });
     attached.drain().await;
     let prompt = attached.take_prepared_startup_prompts().pop().unwrap();
@@ -3698,4 +3777,378 @@ async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_
     unresolved.settle_deferred_move_origin(5, Some("cancelled-original"), false);
     assert!(unresolved.drain_composer().is_none());
     assert_eq!(unresolved.draft(), "do not rebind this deferred prompt");
+}
+
+// Hard-won: 747d8ed78: a prompt sent to an open session from the web never reached Up
+#[tokio::test]
+async fn an_accepted_prompt_lists_the_sessions_prompts_again_for_up() {
+    use mj_core::storage::PromptHistoryEntry;
+    let fixture = mj_client::session::replacement_session_test_fixture("history-refresh", 1);
+    fixture
+        .replacement_view
+        .send_replace(managed_view(MaterializedSession::empty("history-refresh")));
+    let delegate = fixture.control.session("history-refresh").await.unwrap();
+    let (replies, _observed) = tokio::sync::mpsc::unbounded_channel();
+    let (history, mut listings) = tokio::sync::mpsc::unbounded_channel();
+    let session = mj_client::session::SessionHandle::new(DelayedNativeSession {
+        delegate,
+        replies,
+        submitted_ids: None,
+        history: Some(history),
+    });
+    let mut chat = ActiveChat::open(
+        session,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    let entry = |id: i64, text: &str| PromptHistoryEntry {
+        id,
+        session_id: "history-refresh".into(),
+        text: text.into(),
+    };
+    async fn answer(
+        chat: &mut ActiveChat,
+        listings: &mut tokio::sync::mpsc::UnboundedReceiver<SessionPromptsCall>,
+        entries: Vec<PromptHistoryEntry>,
+    ) {
+        let reply = tokio::time::timeout(Duration::from_secs(2), listings.recv())
+            .await
+            .expect("the session's prompts were listed")
+            .unwrap();
+        reply.send(Ok(entries)).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                chat.drain().await;
+                if !chat.state.session_history.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the listing arrived");
+    }
+
+    answer(&mut chat, &mut listings, vec![entry(1, "typed here")]).await;
+    // The session accepted a prompt sent from the web viewer.
+    chat.state.apply_event(&SequencedEvent {
+        seq: 2,
+        recorded_at_ms: None,
+        request_id: Some("phone-prompt".into()),
+        event: WorkerEvent::PromptAccepted {
+            request_id: "phone-prompt".into(),
+            text: "sent from the web".into(),
+            attachments: Vec::new(),
+        },
+    });
+    chat.drain().await;
+    chat.state.session_history.clear();
+    answer(
+        &mut chat,
+        &mut listings,
+        vec![entry(2, "sent from the web"), entry(1, "typed here")],
+    )
+    .await;
+
+    chat.handle_event_result(Event::Key(key(KeyCode::Up)));
+    assert_eq!(chat.state.input, "sent from the web");
+}
+
+// Hard-won: #1480: transferred submissions miss an already applied delivery snapshot.
+#[tokio::test]
+async fn delivered_submission_disappears_when_composer_arrives_after_snapshot() {
+    for queued in [false, true] {
+        for unconfirmed in [false, true] {
+            let mut source = clipboard_test_chat();
+            source.state.begin_submission(
+                "delivered-before-attach".into(),
+                super::super::SubmissionKind::Prompt,
+                PromptPayload::text("already delivered"),
+                "Sending",
+            );
+            source.apply_remote_result(if unconfirmed {
+                ChatRemoteResult::DeliveryUnconfirmed {
+                    command_id: "delivered-before-attach".into(),
+                    error: "Connection reset by peer (os error 104)".into(),
+                }
+            } else {
+                ChatRemoteResult::Prompt {
+                    command_id: "delivered-before-attach".into(),
+                    text: "already delivered".into(),
+                    images: Vec::new(),
+                    result: Ok(1),
+                }
+            });
+            let mut session = MaterializedSession::empty("clipboard-admission");
+            session.applied_event_ordinal = 2;
+            if queued {
+                session
+                    .queued_prompts
+                    .push(mj_core::state::MaterializedQueuedPrompt {
+                        command_id: "delivered-before-attach".into(),
+                        kind: mj_core::state::QueuedCommandKind::Prompt,
+                        content: vec![
+                            serde_json::json!({"type":"text", "text":"already delivered"}),
+                        ],
+                        queued_at_ms: 1,
+                        accepted_ordinal: Some(1),
+                    });
+            } else {
+                let mut item =
+                    agent_message_item("user:delivered-before-attach", 2, "already delivered");
+                Arc::make_mut(&mut item).body = mj_core::transcript::TranscriptBody::User {
+                    content: vec![serde_json::json!({"type":"text", "text":"already delivered"})],
+                };
+                session.transcript.push(item);
+            }
+            let fixture =
+                mj_client::session::replacement_session_test_fixture("clipboard-admission", 72);
+            fixture.replacement_view.send_replace(managed_view(session));
+            let handle = fixture
+                .control
+                .session("clipboard-admission")
+                .await
+                .unwrap();
+            let mut destination = ActiveChat::open(
+                handle,
+                "bundle-1",
+                None,
+                fixture.control,
+                SessionHeaderIdentity::default(),
+                String::new(),
+                Notices::default(),
+            );
+            destination.adopt_live_composer(source.take_live_composer().unwrap());
+            assert_eq!(destination.state.submission_entries().count(), 0);
+            assert_eq!(
+                destination.state.queued_prompt_texts(),
+                if queued {
+                    vec!["already delivered"]
+                } else {
+                    vec![]
+                }
+            );
+            let screen =
+                crate::chat::test_support::transcript_text(&mut destination.state, 100).join("\n");
+            assert!(!screen.contains("Delivery unconfirmed"), "{screen}");
+            if !queued {
+                assert!(screen.contains("already delivered"), "{screen}");
+            }
+        }
+    }
+}
+
+// Hard-won: #1480: an unacknowledged submit had no idempotent resend or dismissal.
+#[tokio::test]
+async fn unconfirmed_submission_can_be_resent_with_its_identity_or_dismissed() {
+    for resend in [false, true] {
+        let fixture = mj_client::session::replacement_session_test_fixture("recover-submission", 1);
+        fixture
+            .replacement_view
+            .send_replace(managed_view(MaterializedSession::empty(
+                "recover-submission",
+            )));
+        let delegate = fixture.control.session("recover-submission").await.unwrap();
+        let (replies, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let (ids, mut observed_ids) = tokio::sync::mpsc::unbounded_channel();
+        let session = mj_client::session::SessionHandle::new(DelayedNativeSession {
+            delegate,
+            replies,
+            submitted_ids: Some(ids),
+            history: None,
+        });
+        let mut chat = ActiveChat::open(
+            session,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        );
+        chat.state.set_input("original prompt".into());
+        chat.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let id = tokio::time::timeout(Duration::from_secs(2), observed_ids.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, reply) = observed.recv().await.unwrap();
+        reply
+            .send(Err(mj_client::session::DeliveryUnconfirmed.into()))
+            .unwrap();
+        while chat.state.recoverable_submission_id().is_none() {
+            let result = tokio::time::timeout(Duration::from_secs(2), chat.remote.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            chat.apply_remote_result(result);
+        }
+        let saved = chat.state.encoded_draft();
+        assert!(saved.contains(&id));
+        assert!(
+            chat.state.input.is_empty(),
+            "an unconfirmed result must not restore a sendable draft"
+        );
+        chat.state.set_input("new draft".into());
+        let event = Event::Key(KeyEvent::new(
+            KeyCode::Char(if resend { 'r' } else { 'd' }),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert!(chat.handle_event_result(event).consumed);
+        assert_eq!(chat.state.input, "new draft");
+        if resend {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), observed_ids.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                id
+            );
+            let (command, reply) = observed.recv().await.unwrap();
+            assert!(matches!(
+                command,
+                mj_core::relay::RelayCommand::Prompt { .. }
+            ));
+            assert_eq!(chat.state.pending_submissions.len(), 1);
+            reply.send(Ok(1)).unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(2), chat.remote.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            chat.apply_remote_result(result);
+            let mut session = MaterializedSession::empty("recover-submission");
+            session.applied_event_ordinal = 2;
+            let mut item = agent_message_item(&format!("user:{id}"), 2, "original prompt");
+            Arc::make_mut(&mut item).body = mj_core::transcript::TranscriptBody::User {
+                content: vec![serde_json::json!({"type":"text","text":"original prompt"})],
+            };
+            session.transcript.push(item);
+            fixture.replacement_view.send_replace(managed_view(session));
+            let view = chat.session.changed().await;
+            chat.apply_session_view(view);
+        } else {
+            assert!(
+                observed_ids.try_recv().is_err(),
+                "dismiss must not send a command"
+            );
+        }
+        assert!(chat.state.pending_submissions.is_empty());
+        let saved = chat.state.encoded_draft();
+        assert!(
+            !saved.contains(&id),
+            "saved draft must drop the retired receipt"
+        );
+        let mut restored = ChatState::new(&snapshot(), &[]);
+        restored.restore_draft(saved);
+        assert_eq!(restored.input, "new draft");
+        assert!(restored.pending_submissions.is_empty());
+    }
+}
+
+// Hard-won: #1480: an unconfirmed local row stayed below every newer reply.
+#[tokio::test]
+async fn golden_unconfirmed_submission_precedes_newer_turns() {
+    let fixture = mj_client::session::replacement_session_test_fixture("inline-submission", 1);
+    let mut session = MaterializedSession::empty("inline-submission");
+    session.applied_event_ordinal = 10;
+    session
+        .transcript
+        .push(agent_message_item("agent:before", 10, "Previous reply"));
+    fixture
+        .replacement_view
+        .send_replace(managed_view(session.clone()));
+    let handle = fixture.control.session("inline-submission").await.unwrap();
+    let mut chat = ActiveChat::open(
+        handle,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    chat.state.begin_submission(
+        "unconfirmed-original".into(),
+        super::super::SubmissionKind::Prompt,
+        PromptPayload::text("Prompt whose acknowledgement was lost"),
+        "Sending",
+    );
+    chat.apply_remote_result(ChatRemoteResult::DeliveryUnconfirmed {
+        command_id: "unconfirmed-original".into(),
+        error: "Connection reset by peer (os error 104)".into(),
+    });
+    let saved = chat.state.encoded_draft();
+    session.applied_event_ordinal = 30;
+    session
+        .transcript
+        .push(agent_message_item("agent:later", 20, "A later turn"));
+    session
+        .transcript
+        .push(agent_message_item("agent:latest", 30, "Newest reply"));
+    fixture
+        .replacement_view
+        .send_replace(managed_view(session.clone()));
+    let view = chat.session.changed().await;
+    chat.apply_session_view(view);
+    // Timestamps are unrelated to placement and vary with the local timezone.
+    for entry in &mut chat.state.entries {
+        entry.recorded_at_ms = None;
+    }
+    let screen = crate::chat::test_support::transcript_text(&mut chat.state, 100)
+        .iter()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        screen.find("Previous reply").unwrap() < screen.find("Prompt whose").unwrap(),
+        "{screen}"
+    );
+    assert!(
+        screen.find("Delivery unconfirmed").unwrap() < screen.find("A later turn").unwrap(),
+        "{screen}"
+    );
+    assert_eq!(screen.trim_end().lines().last(), Some("│ Newest reply"));
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "unconfirmed-submission-placement",
+        &screen,
+    );
+    assert_eq!(
+        chat.state.submission_entries().count(),
+        0,
+        "only actively waiting rows may be pinned"
+    );
+    // Reopening keeps the original frontier rather than anchoring at the new tail.
+    let mut reopened = ChatState::from_materialized(&session, &[], &[]);
+    reopened.restore_draft(saved);
+    for entry in &mut reopened.entries {
+        entry.recorded_at_ms = None;
+    }
+    let reopened_screen = crate::chat::test_support::transcript_text(&mut reopened, 100)
+        .iter()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(screen, reopened_screen);
+    chat.state
+        .restore_transcript_position(crate::chat::TranscriptPosition::at_stable_id(
+            "agent:later".into(),
+        ));
+    let position = chat.state.transcript_position();
+    chat.handle_event(Event::Key(KeyEvent::new(
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    )));
+    assert_eq!(
+        chat.state.transcript_position(),
+        position,
+        "dismiss must preserve the reader's position"
+    );
 }

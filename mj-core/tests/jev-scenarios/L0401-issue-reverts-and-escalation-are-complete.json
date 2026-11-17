@@ -1,0 +1,170 @@
+{
+  "id": "L0401",
+  "title": "Issue reverts and escalation are complete",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "c5bf6d2d738d8d942329eeab16a7f5a3",
+    "session_title": "bifrost via claude2",
+    "reply_position": 320,
+    "captured_at": "2026-10-01T20:25:25.771Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "revert c788c91b50 and push pls"
+        },
+        {
+          "id": "agent:13",
+          "role": "assistant",
+          "text": "I'll look at the commit first, then revert it on master and push."
+        },
+        {
+          "id": "agent:26",
+          "role": "assistant",
+          "text": "Working tree is clean on master. The commit is a regular (non-merge) commit, so a plain `git revert` applies."
+        },
+        {
+          "id": "user:57",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "agent:59",
+          "role": "assistant",
+          "text": "Continuing: I'll revert the commit, then push to origin/master."
+        },
+        {
+          "id": "agent:71",
+          "role": "assistant",
+          "text": "The fetch failed. Let me check the remote configuration."
+        },
+        {
+          "id": "agent:80",
+          "role": "assistant",
+          "text": "SSH auth is refused in this environment. I'll do the revert locally first, then try pushing over HTTPS through the `gh` credential helper without changing the remote config."
+        },
+        {
+          "id": "agent:98",
+          "role": "assistant",
+          "text": "HTTPS works. Remote master has moved past local. Let me check whether local is simply behind."
+        },
+        {
+          "id": "agent:111",
+          "role": "assistant",
+          "text": "Local is only behind, so I'll fast-forward. Two newer commits touch the same files, including one that extends the engine profile, so the revert may conflict."
+        },
+        {
+          "id": "agent:127",
+          "role": "assistant",
+          "text": "The revert conflicts because a later commit, #3818, built on the same plan, test file, and `src/lib.rs` code. I need to see what #3818 changed before deciding how to resolve."
+        },
+        {
+          "id": "agent:172",
+          "role": "assistant",
+          "text": "You chose to revert both. I'll revert #3818 first, then c788c91b50, so each applies against the code it introduced."
+        },
+        {
+          "id": "agent:190",
+          "role": "assistant",
+          "text": "Both reverts applied cleanly. The default revert messages lack the attribution line and a reason, so I'll recreate the two local commits with proper messages before verifying the build."
+        },
+        {
+          "id": "agent:207",
+          "role": "assistant",
+          "text": "Now I'll confirm the reverted tree compiles, covering the facade library and the policy test suite that lost a module."
+        },
+        {
+          "id": "user:225",
+          "role": "user",
+          "text": "when pushed, close #3817, then reopen the respective tickets from the reverted commits and explain what happened. mark them Escalated as well"
+        },
+        {
+          "id": "agent:229",
+          "role": "assistant",
+          "text": "The build check passed and nothing else depends on the removed code. Next I'll push, then look up #3817 and the issues tied to the two reverted commits."
+        },
+        {
+          "id": "agent:252",
+          "role": "assistant",
+          "text": "Push succeeded. The two commits came from PRs #3805 and #3818. I'll find the issues those PRs closed through the GraphQL API, since this `gh` is too old for that field, and check the Escalated label."
+        },
+        {
+          "id": "agent:273",
+          "role": "assistant",
+          "text": "Neither PR formally closed an issue. PR #3805 says it \"relates to #3792\". I'll check #3818's references and the current state of #3792."
+        },
+        {
+          "id": "agent:288",
+          "role": "assistant",
+          "text": "Both PRs reference only #3792, and #3792 was never closed, so there is nothing to reopen. I'll comment on #3792 and label it escalated, then close #3817 with a pointer to the reverts."
+        },
+        {
+          "id": "agent:305",
+          "role": "assistant",
+          "text": "The comment and label on #3792 worked. This `gh` version has no `--comment` flag on close, so I'll post the comment and close the issue separately."
+        },
+        {
+          "id": "agent:320",
+          "role": "assistant",
+          "text": "The reverts are pushed to master and #3817 is closed. Nothing needed reopening: both reverted commits only referenced #3792, which was still open, so I marked it escalated and explained the reverts there.\n\n**What was pushed:** I reverted two commits, not one, because you chose that when the single revert conflicted. A later commit from PR #3818 had built on c788c91b50 in the same profile function, tests and ExecPlan. Reverting it first let c788c91b50 revert cleanly.\n\n| Revert commit | Reverts | Source |\n| --- | --- | --- |\n| 1969c1f75 | 563e2bd16, which added `normal-and-exceptional-exit` | PR #3818 |\n| b1f008583 | c788c91b50, which added `structural-match` and moved the bootstrap | PR #3805 |\n\nThe facade library and the policy test suite still type-check. I did not run the tests. SSH push was refused in this environment, so I pushed over HTTPS with the GitHub CLI token and left the remote config unchanged.\n\n**GitHub changes:**\n- **#3817** is closed. Its comment names both reverts.\n- **#3792** now has the escalated label and a comment. The comment says what was reverted and why, which tests and ExecPlan went with it, and that the cause of the slowdown is still unknown. It also asks for a passing quick performance check before the work lands again.\n\n**Still open:**\n- **Unconfirmed fix:** the reverts should end the slowdown, but the next run of the quick performance check on master has not confirmed it yet.\n- **#3792 assignment:** it is still assigned to David Baker Effendi and still has the agent-in-progress label. I left both alone because the issue belongs to them.\n\n`★ Insight ─────────────────────────────────────`\n- When a later commit builds on the one you want to revert, revert them newest first. Each revert then applies to exactly the code that commit introduced, so neither needs hand-editing.\n- `gh` on this machine is old. `gh issue close` has no `--comment` flag, and fields such as `closingIssuesReferences` need the GraphQL API.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "when pushed, close #3817, then reopen the respective tickets from the reverted commits and explain what happened. mark them Escalated as well",
+    "assistant_text_tail": "so I marked it escalated and explained the reverts there.\n\n**What was pushed:** I reverted two commits, not one, because you chose that when the single revert conflicted. A later commit from PR #3818 had built on c788c91b50 in the same profile function, tests and ExecPlan. Reverting it first let c788c91b50 revert cleanly.\n\n| Revert commit | Reverts | Source |\n| --- | --- | --- |\n| 1969c1f75 | 563e2bd16, which added `normal-and-exceptional-exit` | PR #3818 |\n| b1f008583 | c788c91b50, which added `structural-match` and moved the bootstrap | PR #3805 |\n\nThe facade library and the policy test suite still type-check. I did not run the tests. SSH push was refused in this environment, so I pushed over HTTPS with the GitHub CLI token and left the remote config unchanged.\n\n**GitHub changes:**\n- **#3817** is closed. Its comment names both reverts.\n- **#3792** now has the escalated label and a comment. The comment says what was reverted and why, which tests and ExecPlan went with it, and that the cause of the slowdown is still unknown. It also asks for a passing quick performance check before the work lands again.\n\n**Still open:**\n- **Unconfirmed fix:** the reverts should end the slowdown, but the next run of the quick performance check on master has not confirmed it yet.\n- **#3792 assignment:** it is still assigned to David Baker Effendi and still has the agent-in-progress label. I left both alone because the issue belongs to them.\n\n`★ Insight ─────────────────────────────────────`\n- When a later commit builds on the one you want to revert, revert them newest first. Each revert then applies to exactly the code that commit introduced, so neither needs hand-editing.\n- `gh` on this machine is old. `gh issue close` has no `--comment` flag, and fields such as `closingIssuesReferences` need the GraphQL API.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "still-open turn-ending reply labels",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "No user action is pending.",
+    "input_rationale": "Revert, push, close #3817 and escalate were all done. The still-open items are the unconfirmed effect of the reverts (awaits the next automated perf run) and another person's assignment the agent left alone; neither asks anything of the user.",
+    "label": "none",
+    "kind": null,
+    "request_positions": [],
+    "user_position": 225
+  },
+  "context": {
+    "after": []
+  }
+}

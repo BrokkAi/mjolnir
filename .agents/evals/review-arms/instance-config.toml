@@ -1,0 +1,97 @@
+# Config of the private review-arms instance ($REVIEW_ARMS_DIR/instance/config/config.toml), as of stage 4.
+# The carrier home holds carrier-AGENTS.md as AGENTS.md; dsh-review's home is empty. secrets.toml
+# supplies DEEPSEEK_API_KEY and ZAI_API_KEY (GLM was dropped). The image is pinned by ID and tagged
+# localhost/review-arms:pinned-20261114 so pruning cannot remove it; see instance/IMAGE-NOTES.txt.
+version = 22
+
+[phone]
+enabled = true
+bind = "127.0.0.1:38517"
+tailscale_detect = false
+
+[review]
+
+[subagents]
+max_concurrent = 16
+
+[subagents.straightforward]
+model = "gpt-6-luna"
+effort = "high"
+
+[subagents.subtle]
+model = "gpt-6.1-sol"
+effort = "medium"
+
+[profiles.codex]
+kind = "codex"
+home = "/home/jonathan/.codex"
+
+[profiles.codex2]
+kind = "codex"
+home = "/home/jonathan/.codex2"
+
+[profiles.codex3]
+kind = "codex"
+home = "/home/jonathan/.codex3"
+
+[profiles.codex4]
+kind = "codex"
+home = "/home/jonathan/.codex4"
+
+[profiles.carrier]
+kind = "dsh"
+home = "/mnt/optane/review-arms-20261113/instance/carrier-dsh"
+
+[profiles.carrier.environment]
+DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
+# The carrier offers only deepseek-v4-pro, so deepseek-flash reviewers are placed on
+# dsh-review and never get the carrier's AGENTS.md.
+DEEPSEEK_MODEL = "deepseek-v4-pro"
+DSH_ACP_MODELS = "deepseek-v4-pro"
+
+# DeepSeek Flash reviewers: a clean home with no instructions.
+[profiles.dsh-review]
+kind = "dsh"
+home = "/mnt/optane/review-arms-20261113/instance/dsh-review"
+
+[profiles.dsh-review.environment]
+DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
+DSH_ACP_MODELS = "deepseek-flash"
+
+[profiles.muse]
+kind = "muse"
+home = "/home/jonathan/.config/muse"
+
+[profiles.gemini]
+kind = "antigravity"
+home = "/home/jonathan/.gemini"
+
+[profiles.kimi]
+kind = "kimi"
+home = "/home/jonathan/.kimi-code"
+
+[bundles.mjolnir]
+primary_repo = "mjolnir"
+
+[[bundles.mjolnir.repositories]]
+id = "mjolnir"
+github = "BrokkAi/mjolnir"
+destination = "mjolnir"
+
+[targets.podman]
+kind = "podman"
+image = "8eee5a3ab7e2321b472689a6066072794bea4288bc4bba6fcc15d8986eb2d5e8"
+pull_policy = "never"
+
+[machines.local]
+kind = "local"
+
+[machines.local.build_cache]
+enabled = false
+
+[profiles.glm]
+kind = "codex"
+home = "/home/jonathan/.codex-glm"
+
+[profiles.glm.environment]
+ZAI_API_KEY = { from_secret = "ZAI_API_KEY" }

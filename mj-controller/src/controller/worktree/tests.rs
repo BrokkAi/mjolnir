@@ -1,3 +1,4 @@
+use mj_core::targets::SshTrafficClass;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,6 +34,29 @@ use super::*;
 fn managed_clone_copies_large_origin_ref_sets_in_one_command() {
     struct RecordingExecutor(RefCell<Vec<String>>);
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.0.borrow_mut().push(command.purpose.clone());
             Git231Executor.execute(command)
@@ -218,7 +242,12 @@ fn independent_clones_share_a_starting_branch_and_push_normally() {
         test_git(&first.worktree_root, &["rev-parse", "HEAD"])
     );
     for owned in [&first, &second] {
-        cleanup_managed_worktree(&ProcessExecutor, owned, BranchDisposition::Keep).unwrap();
+        super::super::environment::cleanup_unstarted_checkout(
+            &ProcessExecutor,
+            owned,
+            BranchDisposition::Keep,
+        )
+        .unwrap();
     }
 }
 
@@ -604,6 +633,29 @@ fn concurrent_session_starts_fetch_one_repository_one_at_a_time() {
         fetches: AtomicUsize,
     }
     impl CommandExecutor for OverlapRecorder {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.args.iter().any(|arg| arg == "fetch") {
                 let now = self.fetching.fetch_add(1, Ordering::SeqCst) + 1;
@@ -630,6 +682,104 @@ fn concurrent_session_starts_fetch_one_repository_one_at_a_time() {
     });
     assert_eq!(executor.fetches.load(Ordering::SeqCst), 4);
     assert_eq!(executor.most.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_github_ssh_origin_without_a_key_is_fetched_over_https() {
+    struct Origin {
+        url: &'static str,
+        https_works: bool,
+        fetches: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+    impl CommandExecutor for Origin {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if !command.args.iter().any(|arg| arg == "fetch") {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: format!("{}\n", self.url).into_bytes(),
+                    stderr: Vec::new(),
+                });
+            }
+            self.fetches.lock().unwrap().push(command.args.clone());
+            let https = command.args.iter().any(|arg| arg.contains("insteadOf"));
+            Ok(if https && self.https_works {
+                CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }
+            } else {
+                CommandOutput {
+                    status: 128,
+                    stdout: Vec::new(),
+                    stderr: if https { "https refused" } else { "publickey" }.into(),
+                }
+            })
+        }
+    }
+    let fetch = |url, https_works| {
+        let executor = Origin {
+            url,
+            https_works,
+            fetches: Default::default(),
+        };
+        let result = refresh_source_origin(
+            &executor,
+            &ManagedWorktreeTarget::Local,
+            Path::new("/home/dev/ssh-origin-project"),
+        );
+        (result, executor.fetches.into_inner().unwrap())
+    };
+
+    for url in [
+        "git@github.com:owner/repo.git",
+        "ssh://git@github.com/owner/repo.git",
+    ] {
+        let (result, fetches) = fetch(url, true);
+        result.unwrap();
+        assert_eq!(fetches.len(), 2, "{url}");
+        for prefix in ["git@github.com:", "ssh://git@github.com/"] {
+            let rewrite = format!("url.https://github.com/.insteadOf={prefix}");
+            assert!(fetches[1].contains(&rewrite), "{url}: {:?}", fetches[1]);
+        }
+        assert_eq!(fetches[1].last().map(String::as_str), Some("origin"));
+    }
+
+    // Both failures reach the person, so neither credential problem hides.
+    let (result, _) = fetch("git@github.com:owner/repo.git", false);
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(
+        error.contains("publickey") && error.contains("https refused"),
+        "{error}"
+    );
+
+    // Another server's SSH failure is not retried against GitHub.
+    let (result, fetches) = fetch("git@gitlab.com:owner/repo.git", true);
+    assert!(format!("{:#}", result.unwrap_err()).contains("publickey"));
+    assert_eq!(fetches.len(), 1);
 }
 
 #[test]
@@ -729,7 +879,7 @@ fn a_plain_local_directory_cannot_convert_into_a_bundle_workspace() {
     assert!(!project.plain_directories.is_empty());
     let mut session = raw_session_on("localhost", plain.path().to_str().unwrap());
     session.target_template_id = "local-bare".into();
-    session.project = Some(project);
+    session.project = Some(project.into());
     let config = resume_compatibility_config();
 
     let detail = resume_compatibility(&session, &config, "podman").unwrap_err();
@@ -758,6 +908,29 @@ fn a_plain_local_directory_cannot_convert_into_a_bundle_workspace() {
 fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
     struct OriginExecutor;
     impl CommandExecutor for OriginExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(
                 command.args,
@@ -801,6 +974,29 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
         common: String,
     }
     impl CommandExecutor for NoOriginExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.args.iter().any(|argument| argument == "config") {
                 return Ok(CommandOutput {
@@ -872,6 +1068,29 @@ fn raw_non_git_directory_keeps_its_local_path_source() {
         commands: RefCell<Vec<CommandSpec>>,
     }
     impl CommandExecutor for NonGitExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             let status = if command.args.iter().any(|argument| argument == "config") {
@@ -923,6 +1142,29 @@ fn raw_non_git_directory_keeps_its_local_path_source() {
 fn project_root_lookup_reports_git_failures_instead_of_treating_them_as_non_git() {
     struct FailedGit;
     impl CommandExecutor for FailedGit {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 128,
@@ -946,6 +1188,29 @@ struct CheckoutPositionExecutor {
     branch: Option<String>,
 }
 impl CommandExecutor for CheckoutPositionExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = if command.args.iter().any(|argument| argument == "rev-parse") {
             self.head_commit.clone()
@@ -1575,7 +1840,12 @@ fn managed_raw_worktree_inherits_upstream_and_cleans_up_owned_artifacts() {
     assert_eq!(test_git(repository.path(), &["status", "--porcelain"]), "");
     std::fs::write(worktree.worktree_root.join("dirty.txt"), "session\n").unwrap();
 
-    cleanup_managed_worktree(&ProcessExecutor, &worktree, BranchDisposition::Delete).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &ProcessExecutor,
+        &worktree,
+        BranchDisposition::Delete,
+    )
+    .unwrap();
     assert!(!worktree.worktree_root.exists());
     assert!(!repository.path().join(".mj").exists());
     let output = Command::new("git")
@@ -1603,7 +1873,12 @@ fn retired_worktree_can_be_recreated_from_its_retained_branch() {
     // The checkout is dirty by design: its dirty state moved into the target.
     std::fs::write(worktree.worktree_root.join("dirty.txt"), "session\n").unwrap();
 
-    retire_managed_worktree(&ProcessExecutor, &worktree).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &ProcessExecutor,
+        &worktree,
+        BranchDisposition::Keep,
+    )
+    .unwrap();
 
     assert!(!worktree.worktree_root.exists());
     assert!(!repository.path().join(".mj").exists());
@@ -1634,6 +1909,29 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
     }
 
     impl CommandExecutor for RemoteExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             let status = if command.purpose == "check managed worktree path" {
@@ -1669,7 +1967,12 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
         commands: RefCell::new(Vec::new()),
     };
 
-    retire_managed_worktree(&executor, &worktree).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &executor,
+        &worktree,
+        BranchDisposition::Keep,
+    )
+    .unwrap();
 
     let purposes = executor
         .commands
@@ -1703,7 +2006,7 @@ fn a_managed_conversion_carries_the_session_worktree_not_the_primary_checkout() 
 
     assert_eq!(conversion.checkout, worktree.worktree_root);
     assert_eq!(conversion.repository_id, "project");
-    assert_eq!(conversion.retire, Some(worktree));
+    assert_eq!(conversion.retire, Some(worktree).map(|v| *v));
     // The archive names the session directory as the repository, and the
     // test bundle's accepted destination is the session directory.
     assert_eq!(conversion.destination, PathBuf::from(session_id));
@@ -1725,7 +2028,7 @@ fn raw_to_workspace_keeps_the_accepted_bundle_and_adds_its_source() {
     let project = crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap();
     let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
     session.bundle_id = "bifrost".into();
-    session.project = Some(project.clone());
+    session.project = Some(project.clone().into());
     let checkout_state = session.checkout();
 
     // A snapshot-only imported session must not need its bundle in config.
@@ -1773,7 +2076,7 @@ fn raw_to_workspace_uses_the_configured_github_source() {
     let project = crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap();
     let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
     session.bundle_id = "bifrost".into();
-    session.project = Some(project);
+    session.project = Some(project.into());
 
     let conversion = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap();
 
@@ -2092,7 +2395,7 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
                 plain_directories: Default::default(),
             },
             source: fixture_network_source(),
-            retire: previous.managed_worktree.clone(),
+            retire: previous.managed_worktree.clone().map(|v| *v),
         },
     )
     .unwrap();
@@ -2125,6 +2428,18 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
     ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
 )]
 fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
+    const TEST: &str = "cancelled_new_session_cleanup_removes_managed_worktree_and_branch";
+    const CHILD: &str = "MJ_TEST_CANCELLED_CHECKOUT";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .isolated_store(directory.path())
+            .env(CHILD, "1")
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
     let worktree = ManagedWorktree {
@@ -2146,7 +2461,7 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
 
     let mut session = checkpoint_test_session(session_id);
     session.project_directory = Some(worktree.worktree_root.clone());
-    session.managed_worktree = Some(worktree.clone());
+    session.managed_worktree = Some(Box::new(worktree.clone()));
     let controller = Controller {
         config: Config::default(),
         state: State {
@@ -2154,6 +2469,7 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
             ..State::default()
         },
     };
+    crate::database::save_session(&controller.state.sessions[session_id]).unwrap();
     let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let executor = CancellableProcessExecutor::new(cancelled);
     assert!(executor.cancellation_requested());
@@ -2266,6 +2582,7 @@ fn managed_worktree_ssh_commands_preserve_hostile_path_boundaries() {
         ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
     };
     let command = managed_git_command(
+        SshTrafficClass::Control,
         &target,
         Path::new("/srv/project with ' quote"),
         ["worktree", "prune"],
@@ -2317,7 +2634,7 @@ fn archiving_deletes_a_branch_another_branch_contains() {
         &["merge", "--no-ff", "-m", "merge session", &worktree.branch],
     );
 
-    cleanup_managed_worktree(
+    super::super::environment::cleanup_unstarted_checkout(
         &ProcessExecutor,
         &worktree,
         BranchDisposition::DeleteIfMerged,
@@ -2342,7 +2659,7 @@ fn archiving_keeps_a_branch_holding_unmerged_commits() {
     let worktree = session.managed_worktree.unwrap();
     commit_on_session_branch(&worktree);
 
-    cleanup_managed_worktree(
+    super::super::environment::cleanup_unstarted_checkout(
         &ProcessExecutor,
         &worktree,
         BranchDisposition::DeleteIfMerged,
@@ -2377,7 +2694,7 @@ fn archiving_keeps_a_branch_only_another_session_branch_contains() {
         ],
     );
 
-    cleanup_managed_worktree(
+    super::super::environment::cleanup_unstarted_checkout(
         &ProcessExecutor,
         &worktree,
         BranchDisposition::DeleteIfMerged,
@@ -2394,6 +2711,29 @@ fn archiving_keeps_a_branch_only_another_session_branch_contains() {
 fn raw_checkout_inspection_uses_recorded_access_after_template_removal() {
     struct RecordedHost;
     impl CommandExecutor for RecordedHost {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(command.program, "ssh");
             assert!(command.args.contains(&"builder@original.test".to_owned()));

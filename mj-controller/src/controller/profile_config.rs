@@ -25,40 +25,35 @@ pub async fn subagent_options(
     .await
 }
 
-/// Setup probes its draft without saving it or changing the live configuration.
-pub async fn subagent_options_for(
-    config: Config,
-    parent: String,
-    model: Option<String>,
-) -> Result<mj_core::subagent::SubagentOptions> {
-    subagent_options_with(&config, &parent, model, |id, model| {
-        let draft = config.clone();
-        serialized(id.clone(), move |cancelled| {
-            discover_from_config(&draft, &id, model, false, cancelled)
-        })
-    })
-    .await
-}
-
+/// The catalog's probe. `refresh` probes bypass the process-global cache:
+/// they exist because something outside the profile definition (a home edit
+/// the catalog owner detected, an expired entry) may have changed what the
+/// harness advertises, so a cache row discovered earlier must not answer.
+/// Reports whether the harness actually ran: a served cache row answers
+/// from an earlier read of the home, which the catalog's settled-digest
+/// recording must not treat as current.
 pub(crate) async fn discover_for(
     config: Config,
     id: String,
     model: Option<String>,
     cancellation: CancellationToken,
-) -> Result<ProfileConfig> {
+    refresh: bool,
+) -> Result<Discovery> {
     serialized_until(id.clone(), cancellation, move |cancelled| {
-        discover_from_config(&config, &id, model, false, cancelled)
+        discover_with_provenance(&config, &id, model, refresh, cancelled)
     })
     .await
 }
 
 /// Validate the session's straightforward choice, and its subtle choice when
 /// it has one, against enabled profiles. Subtle is optional; straightforward
-/// is not.
-pub async fn validate_session_subagent_policy(
+/// is not. A YOLO target reads its own set of choices.
+pub(crate) async fn validate_session_subagent_policy(
+    catalog: &Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
     config: &Config,
     profile_id: &str,
     policy: &mj_core::subagent::SubagentPolicy,
+    target_id: &str,
 ) -> Result<()> {
     let refuse = |message: String| {
         anyhow::Error::new(
@@ -66,13 +61,16 @@ pub async fn validate_session_subagent_policy(
                 .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
         )
     };
-    let kind = config
-        .enabled_profile(profile_id)
-        .context("parent profile unavailable")?
-        .kind;
-    if !kind.supports_delegation_tools() && !policy.is_native() {
+    let yolo = config
+        .targets
+        .get(target_id)
+        .is_some_and(mj_core::config::TargetTemplate::is_yolo);
+    let kind = config.named_profile(profile_id)?.kind;
+    // None asks for no Mjolnir sub-agents at all, so any harness accepts it;
+    // only a Mjolnir policy needs the delegation tools.
+    if !kind.supports_delegation_tools() && policy.uses_mjolnir() {
         return Err(refuse(format!(
-            "{} sessions use their harness's own delegation; Mjolnir sub-agents and the None choice need a Claude, Codex, or DSH profile",
+            "{} sessions use their harness's own delegation; Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile",
             kind.display_name()
         )));
     }
@@ -90,27 +88,48 @@ pub async fn validate_session_subagent_policy(
     use mj_core::subagent::SubagentTaskType;
     if config
         .subagents
-        .effective_choice(policy, SubagentTaskType::Straightforward)
+        .effective_choice_for(policy, SubagentTaskType::Straightforward, yolo)
         .is_none()
     {
-        return Err(refuse(
-            "Mjolnir requires [subagents.straightforward] or --subagent-straightforward <MODEL>"
-                .into(),
-        ));
+        let key = if yolo {
+            "[subagents.yolo.straightforward]"
+        } else {
+            "[subagents.straightforward]"
+        };
+        return Err(refuse(format!(
+            "Mjolnir requires {key} or --subagent-straightforward <MODEL>{}",
+            if yolo { " on a YOLO target" } else { "" }
+        )));
     }
-    for task_type in [SubagentTaskType::Straightforward, SubagentTaskType::Subtle] {
-        let Some(choice) = config.subagents.effective_choice(policy, task_type) else {
+    let task_types = [SubagentTaskType::Straightforward, SubagentTaskType::Subtle];
+    let models = task_types
+        .iter()
+        .filter_map(|task_type| {
+            config
+                .subagents
+                .effective_choice_for(policy, *task_type, yolo)
+                .map(|choice| choice.model.clone())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let options = catalog
+        .admission_options(config, profile_id, models)
+        .await?;
+    for task_type in task_types {
+        let Some(choice) = config
+            .subagents
+            .effective_choice_for(policy, task_type, yolo)
+        else {
             continue;
         };
-        let options = subagent_options_for(
-            config.clone(),
-            profile_id.to_owned(),
-            Some(choice.model.clone()),
-        )
-        .await?;
+        let options = &options[&choice.model];
+        let section = if yolo && policy.override_choice(task_type).is_none() {
+            format!("subagents.yolo.{}", task_type.id())
+        } else {
+            format!("subagents.{}", task_type.id())
+        };
         options
             .validate(choice)
-            .map_err(|message| refuse(format!("[subagents.{}]: {message}", task_type.id())))?;
+            .map_err(|message| refuse(format!("[{section}]: {message}")))?;
     }
     Ok(())
 }
@@ -125,9 +144,7 @@ where
     F: Fn(String, Option<String>) -> Fut + Copy,
     Fut: std::future::Future<Output = Result<ProfileConfig>>,
 {
-    config
-        .enabled_profile(parent)
-        .context("parent profile is unavailable")?;
+    config.named_profile(parent)?;
     let candidates = config
         .profiles
         .iter()
@@ -135,16 +152,40 @@ where
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     let mut options = mj_core::subagent::SubagentOptions::default();
-    let results = futures::future::join_all(candidates.into_iter().map(|id| {
-        let model = model.clone();
+    let defaults = futures::future::join_all(candidates.into_iter().map(|id| async move {
+        let result = probe(id.clone(), None)
+            .await
+            .map(|choices| choices.restricted_to(&config.profiles[&id].models));
+        (id, result)
+    }))
+    .await;
+    let models = defaults
+        .iter()
+        .filter_map(|(_, result)| result.as_ref().ok())
+        .flat_map(|choices| choices.models.iter().cloned())
+        .collect::<Vec<_>>();
+    let identity = model
+        .as_deref()
+        .map(|model| mj_core::model_catalog::model_id(&models, model));
+    let results = futures::future::join_all(defaults.into_iter().map(|(id, result)| {
+        let identity = identity.as_deref();
+        let model = model.as_deref();
         async move {
             let result = async {
-                let mut choices = probe(id.clone(), None).await?;
-                if let Some(model) = model
-                    .as_ref()
-                    .filter(|model| choices.models.iter().any(|choice| &choice.value == *model))
-                {
-                    choices = probe(id.clone(), Some(model.clone())).await?;
+                let mut choices = result?;
+                if let Some(offer) = identity.and_then(|identity| {
+                    mj_core::model_catalog::offer(
+                        &choices.models,
+                        identity,
+                        model.unwrap_or(identity),
+                    )
+                }) {
+                    let default = choices.model.clone();
+                    let mut specific = probe(id.clone(), Some(offer.value)).await?;
+                    let selected = std::mem::replace(&mut specific.model, default);
+                    specific = specific.restricted_to(&config.profiles[&id].models);
+                    specific.model = selected;
+                    choices = specific;
                 }
                 Ok::<_, anyhow::Error>(choices)
             }
@@ -156,10 +197,14 @@ where
     for (id, result) in results {
         match result {
             Ok(choices) => {
-                if model
-                    .as_ref()
-                    .is_some_and(|model| choices.models.iter().any(|choice| &choice.value == model))
-                {
+                if identity.as_deref().is_some_and(|identity| {
+                    mj_core::model_catalog::offer(
+                        &choices.models,
+                        identity,
+                        model.as_deref().unwrap_or(identity),
+                    )
+                    .is_some()
+                }) {
                     for choice in choices.efforts {
                         if !options
                             .efforts
@@ -170,19 +215,12 @@ where
                         }
                     }
                 }
-                for choice in choices.models {
-                    if !options
-                        .models
-                        .iter()
-                        .any(|existing| existing.value == choice.value)
-                    {
-                        options.models.push(choice);
-                    }
-                }
+                options.models.extend(choices.models);
             }
             Err(error) => options.unavailable.push(format!("{id}: {error:#}")),
         }
     }
+    options.models = mj_core::model_catalog::merged_choices(options.models);
     Ok(options)
 }
 
@@ -226,11 +264,14 @@ async fn serialized(
     serialized_until(profile_id, CancellationToken::new(), job).await
 }
 
-async fn serialized_until(
+async fn serialized_until<T>(
     profile_id: String,
     cancellation: CancellationToken,
-    job: impl FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Result<ProfileConfig> + Send + 'static,
-) -> Result<ProfileConfig> {
+    job: impl FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Result<T> + Send + 'static,
+) -> Result<T>
+where
+    T: Send + 'static,
+{
     let lock = {
         let mut locks = PROBES
             .get_or_init(Default::default)
@@ -327,16 +368,14 @@ pub(crate) fn observation_check(
 pub(crate) async fn observe(
     profile_id: String,
     worker_build: String,
-    state: mj_core::relay::RelayOperationalState,
+    state: mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
     check: ObservationCheck,
 ) -> Result<bool> {
     let stored = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let job_stored = stored.clone();
     serialized(profile_id.clone(), move |cancelled| {
         let config = Config::load()?;
-        let profile = config
-            .enabled_profile(&profile_id)
-            .context("observed profile was removed")?;
+        let profile = config.named_profile(&profile_id)?;
         let facts = mj_core::acp::AcpSessionFacts::from_operational(
             profile.kind,
             &state.config,
@@ -408,23 +447,31 @@ fn discover_blocking(
         "profile discovery cancelled"
     );
     let config = Config::load()?;
-    discover_from_config(&config, profile_id, model, refresh, cancelled)
+    Ok(discover_with_provenance(&config, profile_id, model, refresh, cancelled)?.choices)
 }
 
-fn discover_from_config(
+/// What discovery returned, and whether the harness actually ran: a
+/// process-cache row younger than the choice lifetime is served without
+/// launching anything, and its choices may predate the profile home's
+/// current files. Settled-digest recording and any other answer that must
+/// describe the home as it is now need `probed`.
+pub(crate) struct Discovery {
+    pub choices: ProfileConfig,
+    pub probed: bool,
+}
+
+fn discover_with_provenance(
     config: &Config,
     profile_id: &str,
     model: Option<String>,
     refresh: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<ProfileConfig> {
+) -> Result<Discovery> {
     ensure!(
         !cancelled.load(std::sync::atomic::Ordering::Acquire),
         "profile discovery cancelled"
     );
-    let profile = config
-        .enabled_profile(profile_id)
-        .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?;
+    let profile = config.named_profile(profile_id)?;
     let mut environment = profile.environment.resolved().clone();
     let _ = super::worker_binary::apply_claude_setup_token(
         &mut environment,
@@ -436,10 +483,13 @@ fn discover_from_config(
     // caching it: always probe the installation that actually runs, and never
     // write the result back.
     if profile.kind == mj_core::config::HarnessKind::Muse {
-        return probe_profile(profile_id, profile, environment, model, cancelled);
+        return Ok(Discovery {
+            choices: probe_profile(profile_id, profile, environment, model, cancelled)?,
+            probed: true,
+        });
     }
     let fingerprint = fingerprint(profile);
-    resolve_cached(
+    resolve_cached_discovery(
         refresh,
         is_current,
         || Ok(load(profile_id, &model, &fingerprint)),
@@ -477,7 +527,10 @@ fn is_current_at(choices: &ProfileConfig, now: i64) -> bool {
 
 /// Serve current cached choices, or probe. An out-of-date entry is still
 /// served when the probe fails, so an offline or signed-out provider keeps
-/// its last known choices instead of losing them.
+/// its last known choices instead of losing them. Production discovery uses
+/// [`resolve_cached_discovery`], which also reports whether the harness ran;
+/// this wrapper remains for its unit tests.
+#[cfg(test)]
 fn resolve_cached(
     refresh: bool,
     current: impl FnOnce(&ProfileConfig) -> bool,
@@ -485,23 +538,44 @@ fn resolve_cached(
     probe: impl FnOnce() -> Result<ProfileConfig>,
     save: impl FnOnce(&ProfileConfig) -> Result<()>,
 ) -> Result<ProfileConfig> {
+    Ok(resolve_cached_discovery(refresh, current, load, probe, save)?.choices)
+}
+
+/// [`resolve_cached`] with the added fact of whether the answer came from
+/// running the harness (`probed`) or from a cache row that was read earlier.
+fn resolve_cached_discovery(
+    refresh: bool,
+    current: impl FnOnce(&ProfileConfig) -> bool,
+    load: impl FnOnce() -> Result<Option<ProfileConfig>>,
+    probe: impl FnOnce() -> Result<ProfileConfig>,
+    save: impl FnOnce(&ProfileConfig) -> Result<()>,
+) -> Result<Discovery> {
     let cached = if refresh { None } else { load()? };
     if let Some(choices) = &cached
         && current(choices)
     {
-        return Ok(choices.clone());
+        return Ok(Discovery {
+            choices: choices.clone(),
+            probed: false,
+        });
     }
     match probe() {
         Ok(choices) => {
             save(&choices)?;
-            Ok(choices)
+            Ok(Discovery {
+                choices,
+                probed: true,
+            })
         }
         Err(error) => match cached {
             Some(choices) => {
                 if !discovery_is_unsupported(&error) {
                     tracing::warn!(error = %format!("{error:#}"), "profile discovery failed; serving out-of-date cached choices");
                 }
-                Ok(choices)
+                Ok(Discovery {
+                    choices,
+                    probed: false,
+                })
             }
             None => Err(error),
         },
@@ -673,6 +747,147 @@ mod tests {
     use mj_core::refusal::Refusal;
     use std::cell::{Cell, RefCell};
 
+    // Hard-won: #1534 review: a first-listed older alias hid the newer profile during admission.
+    #[tokio::test]
+    async fn subagent_options_preserve_versions_sharing_the_same_launch_alias() {
+        let config = crate::server_runtime::profile_catalog::test_config(&[
+            ("a-stale", mj_core::config::HarnessKind::Claude),
+            ("newer", mj_core::config::HarnessKind::Claude),
+        ]);
+        let recorded: BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> =
+            serde_json::from_str(include_str!(
+                "../../../mj-core/tests/fixtures/claude-antigravity-models.json"
+            ))
+            .unwrap();
+        let recorded = &recorded;
+        let calls = &RefCell::new(Vec::new());
+        let options = subagent_options_with(
+            &config,
+            "newer",
+            Some("claude-sonnet-5-5".into()),
+            |id, model| async move {
+                calls.borrow_mut().push((id.clone(), model.clone()));
+                let mut models = recorded["claude"].clone();
+                if id == "a-stale" {
+                    models[1].name = "Sonnet 5".into();
+                }
+                let effort = mj_core::acp::SessionConfigChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                    description: None,
+                };
+                let selected = model.is_some();
+                if let Some(model) = &model {
+                    assert_eq!((id.as_str(), model.as_str()), ("newer", "sonnet"));
+                }
+                Ok(ProfileConfig {
+                    model: model.or_else(|| Some("opus".into())),
+                    models,
+                    efforts: if selected { vec![effort] } else { vec![] },
+                    observed_at: 0,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        options
+            .validate(&mj_core::config::SubagentChoice {
+                model: "claude-sonnet-5-5".into(),
+                effort: Some("high".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            mj_core::model_catalog::model_id(&options.models, "sonnet"),
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(
+            calls
+                .borrow()
+                .iter()
+                .filter(|(_, model)| model.is_some())
+                .count(),
+            1
+        );
+    }
+
+    /// A profile's `models` list hides a model from delegation as well as
+    /// from pickers: session creation must not accept a sub-agent model that
+    /// later selection cannot find.
+    #[tokio::test]
+    async fn subagent_options_offer_only_models_the_profile_list_allows() {
+        let mut config = crate::server_runtime::profile_catalog::test_config(&[(
+            "gateway",
+            mj_core::config::HarnessKind::Codex,
+        )]);
+        config.profiles.get_mut("gateway").unwrap().models = vec!["allowed".into()];
+        let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+            value: value.into(),
+            name: value.into(),
+            description: None,
+        };
+        let probe = |_id: String, model: Option<String>| {
+            let choices = ProfileConfig {
+                model: Some(model.unwrap_or_else(|| "default".into())),
+                models: vec![choice("default"), choice("allowed"), choice("hidden")],
+                efforts: vec![choice("high")],
+                observed_at: 0,
+            };
+            async move { Ok(choices) }
+        };
+        let values = |options: &mj_core::subagent::SubagentOptions| {
+            options
+                .models
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let hidden = subagent_options_with(&config, "gateway", Some("hidden".into()), probe)
+            .await
+            .unwrap();
+        assert_eq!(values(&hidden), ["default", "allowed"]);
+        assert!(
+            hidden.efforts.is_empty(),
+            "a hidden model offers no efforts"
+        );
+
+        let allowed = subagent_options_with(&config, "gateway", Some("allowed".into()), probe)
+            .await
+            .unwrap();
+        assert_eq!(values(&allowed), ["default", "allowed"]);
+        assert_eq!(allowed.efforts.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires MJ_ANTIGRAVITY_TEST_HOME with a copied Google login and MJ_WORKER_BINARY pointing to the current mj-worker build"]
+    fn live_antigravity_profile_discovery_reads_base_models_and_efforts() {
+        let home = std::path::PathBuf::from(
+            std::env::var_os("MJ_ANTIGRAVITY_TEST_HOME").expect("set copied Google login home"),
+        );
+        let profile = HarnessProfile::new(mj_core::config::HarnessKind::Antigravity, home);
+        let choices = probe_profile(
+            "antigravity-discovery-test",
+            &profile,
+            Default::default(),
+            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(
+            choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "gemini-3.8-flash")
+        );
+        assert!(choices.efforts.iter().any(|choice| choice.value == "low"));
+        assert!(
+            !choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "gemini-4-carbon-high")
+        );
+    }
+
     // Hard-won: #1284: discovery staged Muse credentials outside its XDG home.
     #[test]
     #[ignore = "requires MJ_MUSE_TEST_HOME with a Muse login and MJ_WORKER_BINARY pointing to the current mj-worker build; discovers models without a provider turn"]
@@ -693,15 +908,8 @@ mod tests {
         // never change the person's own credentials or session data.
         let credentials = std::fs::read(home.join("auth.json")).unwrap();
         let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Muse,
-            home: home.clone(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
             legacy_subagents: None,
+            ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Muse, home.clone())
         };
         let choices = probe_profile(
             "muse-discovery-1284-test",
@@ -759,15 +967,11 @@ mod tests {
         .unwrap();
         for home in [stored, legacy] {
             let profile = HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::OpenCode,
-                home: home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::OpenCode,
+                    home.clone(),
+                )
             };
             let choices = probe_profile(
                 "opencode-database-login-test",
@@ -810,15 +1014,11 @@ mod tests {
         Config::default().save().unwrap();
         let home = tempfile::tempdir().unwrap();
         let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: home.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
             legacy_subagents: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_path_buf(),
+            )
         };
         let key = fingerprint(&profile);
         let choice = |value: &str| mj_core::acp::SessionConfigChoice {
@@ -836,7 +1036,7 @@ mod tests {
         store("unsaved", &key, &catalog.model, &catalog);
         let mut draft = Config::default();
         draft.profiles.insert("unsaved".into(), profile);
-        assert!(!draft.subagents.is_configured());
+        assert!(!draft.subagents.is_configured_for(false));
         draft.subagents.straightforward = Some(mj_core::config::SubagentChoice {
             model: "chosen".into(),
             effort: Some("high".into()),
@@ -855,7 +1055,16 @@ mod tests {
                     effort: effort.map(str::to_owned),
                 })),
             };
-            let result = validate_session_subagent_policy(&draft, "unsaved", &policy).await;
+            let result = validate_session_subagent_policy(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    CancellationToken::new(),
+                ),
+                &draft,
+                "unsaved",
+                &policy,
+                "localhost",
+            )
+            .await;
             if available {
                 result.unwrap();
             } else {
@@ -867,6 +1076,7 @@ mod tests {
             }
         }
         validate_session_subagent_policy(
+            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -876,22 +1086,26 @@ mod tests {
                     effort: None,
                 })),
             },
+            "localhost",
         )
         .await
         .unwrap();
         // Subtle is optional: the straightforward choice alone is enough.
         validate_session_subagent_policy(
+            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
                 straightforward: None,
                 subtle: None,
             },
+            "localhost",
         )
         .await
         .unwrap();
         draft.subagents.straightforward = None;
         let missing = validate_session_subagent_policy(
+            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -901,6 +1115,7 @@ mod tests {
                     effort: None,
                 })),
             },
+            "localhost",
         )
         .await
         .unwrap_err();
@@ -912,9 +1127,11 @@ mod tests {
             missing.to_string().contains("[subagents.straightforward]"),
             "subtle alone is never enough: {missing:#}"
         );
-        let options = subagent_options_for(draft, "unsaved".into(), Some("chosen".into()))
-            .await
-            .unwrap();
+        let options =
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new())
+                .options_for(&draft, "unsaved", Some("chosen".into()))
+                .await
+                .unwrap();
         assert_eq!(options.models, catalog.models);
         assert_eq!(options.efforts, catalog.efforts);
         assert!(options.unavailable.is_empty());
@@ -922,63 +1139,13 @@ mod tests {
     }
 
     #[test]
-    fn harness_home_files_do_not_invalidate_configured_capabilities() {
-        let home = tempfile::tempdir().unwrap();
-        let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: home.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
-        };
-        let key = || fingerprint(&profile);
-
-        let built_in = key();
-        std::fs::write(
-            home.path().join("config.toml"),
-            "model = \"glm-5.3\"\n\
-             model_provider = \"zai\"\n\
-             \n\
-             [model_providers.zai]\n\
-             base_url = \"https://api.z.ai/api/v1\"\n\
-             env_key = \"ZAI_API_KEY\"\n\
-             wire_api = \"responses\"\n",
-        )
-        .unwrap();
-        let provider = key();
-        assert_eq!(
-            built_in, provider,
-            "only configured profile definitions invalidate capabilities"
-        );
-        std::fs::write(
-            home.path().join("models.json"),
-            r#"{"models":[{"slug":"glm-5.3-flash"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            provider,
-            key(),
-            "a home catalog edit does not invalidate capabilities"
-        );
-    }
-
-    #[test]
     fn discovery_fingerprint_ignores_creation_defaults_and_unrelated_profile_preferences() {
         let home = tempfile::tempdir().unwrap();
         let mut profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: home.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_path_buf(),
+            )
         };
         let original = fingerprint(&profile);
         for _ in 0..2 {
@@ -998,15 +1165,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let token = root.path().join("token");
         let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Claude,
-            home: root.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Claude,
+                root.path().to_path_buf(),
+            )
         };
         let resolve = |environment: BTreeMap<String, String>| {
             let mut environment = environment;
@@ -1038,7 +1200,7 @@ mod tests {
     async fn retiring_a_definition_cancels_probes_and_preserves_its_replacement() {
         let cancellation = CancellationToken::new();
         let (started, running) = tokio::sync::oneshot::channel();
-        let first = tokio::spawn(serialized_until(
+        let first = tokio::spawn(serialized_until::<()>(
             "retirement-test".into(),
             cancellation.clone(),
             move |cancelled| {
@@ -1276,6 +1438,68 @@ mod tests {
         assert_eq!(resolved, stale);
     }
 
+    // Hard-won: #1337 review: a cache-served retry recorded the home's
+    // current digest as settled, masking an edit for up to the choice
+    // lifetime. Only an answer the harness actually read may settle.
+    #[test]
+    fn resolve_cached_discovery_reports_whether_the_harness_ran() {
+        let cached = ProfileConfig {
+            model: Some("cached".into()),
+            models: vec![],
+            efforts: vec![],
+            observed_at: 1,
+        };
+        let probed = ProfileConfig {
+            model: Some("probed".into()),
+            observed_at: 2,
+            ..cached.clone()
+        };
+
+        // A current cache row is served without probing.
+        let served = resolve_cached_discovery(
+            false,
+            |_| true,
+            || Ok(Some(cached.clone())),
+            || panic!("a current cache row must not probe"),
+            |_| panic!("a cache hit saves nothing"),
+        )
+        .unwrap();
+        assert_eq!(served.choices, cached);
+        assert!(
+            !served.probed,
+            "a cache row answers from an earlier read of the home"
+        );
+
+        // A refresh bypasses the cache and reports the probe ran.
+        let saved = RefCell::new(None);
+        let served = resolve_cached_discovery(
+            true,
+            |_| true,
+            || Ok(Some(cached.clone())),
+            || Ok(probed.clone()),
+            |choices| {
+                *saved.borrow_mut() = Some(choices.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(served.choices, probed);
+        assert!(served.probed);
+        assert_eq!(saved.borrow().as_ref(), Some(&probed));
+
+        // A failed probe falls back to the stale row, also not read now.
+        let served = resolve_cached_discovery(
+            false,
+            |_| false,
+            || Ok(Some(cached.clone())),
+            || anyhow::bail!("provider offline"),
+            |_| panic!("a failed probe saves nothing"),
+        )
+        .unwrap();
+        assert_eq!(served.choices, cached);
+        assert!(!served.probed);
+    }
+
     /// Muse models and efforts change server-side without a managed-pin bump,
     /// so caching a worker's observed catalogue hides options people expect.
     /// Muse observations must leave the cache untouched while other
@@ -1317,18 +1541,24 @@ mod tests {
         .unwrap();
         let profile = |kind: mj_core::config::HarnessKind| HarnessProfile {
             enabled: true,
-            kind,
-            home: if kind == mj_core::config::HarnessKind::Muse {
-                home.clone()
-            } else {
-                root.path().into()
-            },
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            models: Default::default(),
             legacy_subagents: None,
+            ..mj_core::config::HarnessProfile::new(
+                kind,
+                if kind == mj_core::config::HarnessKind::Muse {
+                    home.clone()
+                } else {
+                    root.path().into()
+                },
+            )
         };
         let mut config = Config::default();
         config
@@ -1342,6 +1572,10 @@ mod tests {
         fn observed() -> RelayOperationalState {
             RelayOperationalState {
                 assessment: None,
+                open_request: None,
+                person_input_through: 0,
+                work_liveness: None,
+                undelivered_mailbox_event_keys: Vec::new(),
                 assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),
@@ -1359,6 +1593,7 @@ mod tests {
                 goal: Default::default(),
                 capacity_retry: None,
                 retry_assessment_pending: false,
+                authentication_retry_waiting: None,
                 store_id: None,
                 idle_since_ms: None,
                 session_id: "observed".to_owned(),
@@ -1379,6 +1614,7 @@ mod tests {
                 agent_info: None,
                 runtime: None,
                 steering_supported: None,
+                mailbox_delivery: None,
                 turn_controls: None,
                 config_options: vec![
                     SessionConfigOption::select(
@@ -1391,9 +1627,10 @@ mod tests {
                         ]),
                     )
                     .category(SessionConfigOptionCategory::ThoughtLevel),
-                ],
+                ]
+                .into(),
                 modes: None,
-                available_commands: Vec::new(),
+                available_commands: Vec::new().into(),
                 config: BTreeMap::new(),
                 active_prompt: None,
                 queued_prompts: Vec::new(),
@@ -1431,7 +1668,7 @@ mod tests {
             !observe(
                 "muse".into(),
                 String::new(),
-                observed(),
+                observed().into(),
                 ObservationCheck::NoProbe,
             )
             .await
@@ -1454,7 +1691,7 @@ mod tests {
             observe(
                 "codex".into(),
                 String::new(),
-                observed(),
+                observed().into(),
                 ObservationCheck::NoProbe,
             )
             .await
@@ -1464,34 +1701,102 @@ mod tests {
         assert!(load("codex", &None, &codex_fingerprint).is_some());
     }
     #[tokio::test]
+    async fn a_yolo_target_needs_its_own_straightforward_choice() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "parent".into(),
+            HarnessProfile {
+                enabled: true,
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+                codex_profile: None,
+                legacy_muse_auto_review: None,
+                load_balancing_may_consume_credits: false,
+                claude_permission_mode: None,
+                aws: None,
+                models: Default::default(),
+                legacy_subagents: None,
+                ..HarnessProfile::new(mj_core::config::HarnessKind::Codex, "/fixture")
+            },
+        );
+        config.targets.insert(
+            "yolo".into(),
+            mj_core::config::TargetTemplate::SshBare {
+                ssh: mj_core::config::SshConnection {
+                    host: "builder.example.com".into(),
+                    user: None,
+                    identity_file: None,
+                    extra_args: Vec::new(),
+                },
+                permissions: mj_core::config::PermissionMode::Yolo,
+                workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+            },
+        );
+        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+            model: "shared".into(),
+            effort: None,
+        });
+        config.subagents.use_same_on_all_targets = false;
+        let error = validate_session_subagent_policy(
+            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
+            &config,
+            "parent",
+            &mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+            "yolo",
+        )
+        .await
+        .unwrap_err();
+        let refusal = Refusal::of(&error).unwrap();
+        let message = refusal.message();
+        assert!(
+            message.contains("[subagents.yolo.straightforward]"),
+            "{message}"
+        );
+        assert!(message.contains("YOLO target"), "{message}");
+    }
+
+    #[tokio::test]
     async fn create_and_move_mjolnir_policy_refuse_unconfigured_and_unsupported_parents() {
         for kind in [
             mj_core::config::HarnessKind::Codex,
             mj_core::config::HarnessKind::Dsh,
+            mj_core::config::HarnessKind::OpenCode,
             mj_core::config::HarnessKind::Grok,
+            mj_core::config::HarnessKind::Muse,
         ] {
             let mut config = Config::default();
             config.profiles.insert(
                 "parent".into(),
                 HarnessProfile {
                     enabled: true,
-                    kind,
-                    home: "/fixture".into(),
                     environment: Default::default(),
                     context_window_bytes: None,
                     guardian_review_model: None,
                     codex_profile: None,
-                    muse_auto_review: None,
+                    legacy_muse_auto_review: None,
+                    load_balancing_may_consume_credits: false,
+                    claude_permission_mode: None,
+                    aws: None,
+                    models: Default::default(),
                     legacy_subagents: None,
+                    ..mj_core::config::HarnessProfile::new(kind, "/fixture")
                 },
             );
             let error = validate_session_subagent_policy(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    CancellationToken::new(),
+                ),
                 &config,
                 "parent",
                 &mj_core::subagent::SubagentPolicy::Mjolnir {
                     straightforward: None,
                     subtle: None,
                 },
+                "localhost",
             )
             .await
             .unwrap_err();
@@ -1504,14 +1809,35 @@ mod tests {
                 assert!(refusal.message().contains("[subagents.straightforward]"));
                 assert!(refusal.message().contains("--subagent-straightforward"));
             } else {
-                assert!(refusal.message().contains("Claude, Codex, or DSH"));
+                assert!(
+                    refusal
+                        .message()
+                        .contains("Claude, Codex, DSH, or OpenCode")
+                );
             }
+            // None asks for no Mjolnir sub-agents at all; every harness
+            // accepts it, including one without delegation tools (#1284).
+            validate_session_subagent_policy(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    CancellationToken::new(),
+                ),
+                &config,
+                "parent",
+                &mj_core::subagent::SubagentPolicy::None,
+                "localhost",
+            )
+            .await
+            .unwrap();
             // Native keeps a harness's own sub-agents; DSH has none, so an
             // explicit Native is refused with the two choices it offers.
             let native = validate_session_subagent_policy(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    CancellationToken::new(),
+                ),
                 &config,
                 "parent",
                 &mj_core::subagent::SubagentPolicy::Native,
+                "localhost",
             )
             .await;
             if kind.has_native_subagents() {
@@ -1527,9 +1853,13 @@ mod tests {
                 );
                 // The default for an omitted policy is accepted.
                 validate_session_subagent_policy(
+                    &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                        CancellationToken::new(),
+                    ),
                     &config,
                     "parent",
                     &mj_core::subagent::SubagentPolicy::default_for(kind),
+                    "localhost",
                 )
                 .await
                 .unwrap();

@@ -236,6 +236,7 @@ fn reconcile_config(
                         .insert(canonical.clone(), saved.project.bundle);
                 }
                 fresh.bundles.remove(&id);
+                fresh.images.consolidate_bundle(&id, &canonical);
             }
             Ok(())
         })?;
@@ -393,7 +394,7 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                 let (id, project) = if let Some(session) = &known
                     && let Some(project) = &session.project
                 {
-                    (session.bundle_id.clone(), project.clone())
+                    (session.bundle_id.clone(), (**project).clone())
                 } else {
                     accept_directory(target, &path, executor)?
                 };
@@ -675,9 +676,9 @@ mod tests {
         let mut record = crate::database::test_session("healthy", "old-project");
         record.project_directory = Some(checkout.clone());
         record.target_template_id = "localhost".into();
-        record.target = Some(mj_core::state::TargetLocator::LocalBare {
+        record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: root.path().join("workers").join(&record.id),
-        });
+        }));
         let raw_key =
             ProjectMemoryIdentity::for_legacy_session(&record, Some(&legacy_bundle), None)
                 .unwrap()
@@ -881,14 +882,17 @@ mod tests {
         }
         let profile = |kind, home| HarnessProfile {
             enabled: true,
-            kind,
-            home,
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            ..mj_core::config::HarnessProfile::new(kind, home)
         };
         Config::update(|config| {
             config.profiles = BTreeMap::from([

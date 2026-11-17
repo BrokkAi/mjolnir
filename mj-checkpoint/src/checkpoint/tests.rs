@@ -137,7 +137,7 @@ fn dsh_checkpoint_keeps_the_session_record_and_restores_it_at_the_new_workspace(
         &restored_native_artifact_bytes(
             HarnessKind::Dsh,
             &relative,
-            &artifacts[0].data,
+            &artifact_bytes(&artifacts[0]),
             Some(&moved),
             temp.path(),
         )
@@ -287,6 +287,302 @@ fn an_opencode_checkpoint_keeps_live_sessions_and_no_login_secret() {
     }
 }
 
+/// The workspace record agy writes at `trajectory_metadata_blob.main`, as a
+/// protobuf: every workspace root nested in a repeated field 1 and again in a
+/// repeated field 7, around fields that relocation must leave as they are.
+/// Encoded here independently of the editor that rewrites it.
+fn antigravity_workspace_record(session: &str, roots: &[&str]) -> Vec<u8> {
+    antigravity_workspace_record_naming(session, roots, roots)
+}
+
+fn antigravity_workspace_record_naming(
+    session: &str,
+    nested_roots: &[&str],
+    roots: &[&str],
+) -> Vec<u8> {
+    fn varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push((value & 0x7f) as u8 | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+    fn string(number: u64, payload: &[u8], out: &mut Vec<u8>) {
+        varint(number << 3 | 2, out);
+        varint(payload.len() as u64, out);
+        out.extend_from_slice(payload);
+    }
+    let mut stamp = Vec::new();
+    varint(1 << 3, &mut stamp);
+    varint(1_794_582_301, &mut stamp);
+    varint(2 << 3, &mut stamp);
+    varint(592_695_273, &mut stamp);
+    let mut record = Vec::new();
+    for uri in nested_roots {
+        let mut root = Vec::new();
+        string(1, uri.as_bytes(), &mut root);
+        string(3, b"", &mut root);
+        string(1, &root, &mut record);
+    }
+    string(2, &stamp, &mut record);
+    string(3, b"05300845-02a9-4765-ab5f-3b8ce6691497", &mut record);
+    string(6, session.as_bytes(), &mut record);
+    for uri in roots {
+        string(7, uri.as_bytes(), &mut record);
+    }
+    // Fields this checkpoint does not understand are copied as they were.
+    string(15, &[1, 2, 3, 4, 5, 0xff, 0xfe, 0xfd], &mut record);
+    string(18, b"default-cli-project", &mut record);
+    record
+}
+
+/// agy keeps each conversation in a SQLite database it holds open in WAL mode,
+/// so the newest turn is only in the log while agy runs, and records every
+/// workspace it was given inside the database (the launch directory and any
+/// additional ones, with nothing to tell which is which). It runs commands in
+/// the first root it knows, so a restore at another path records the new
+/// launch directory as the only root, even when a recorded root still exists
+/// where the session is restored (an old copy of the tree would run its
+/// commands); the request that opens the conversation names the additional
+/// directories again. A checkpoint keeps the conversation's database and its
+/// `brain` files and nothing else in the home, a restore removes the log of
+/// the database it replaces, and a workspace record it cannot read refuses the
+/// restore.
+#[test]
+fn an_antigravity_checkpoint_keeps_the_live_conversation_and_follows_the_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    spec.session.harness_kind = HarnessKind::Antigravity;
+    spec.harness_home = temp.path().join("antigravity");
+    let agy = spec.harness_home.join("antigravity-cli");
+    let conversations = agy.join("conversations");
+    fs::create_dir_all(&conversations).unwrap();
+    let old_uri = "file:///old/workspace/app";
+    // Roots that still exist where the session is restored: an additional
+    // directory, and the tree the session was launched in, now an old copy.
+    let extra = temp.path().join("extra library");
+    fs::create_dir_all(&extra).unwrap();
+    let extra_uri = format!("file://{}/extra%20library", temp.path().display());
+    let old_copy_uri = format!("file://{}/app", spec.workspace_root.display());
+    let database = conversations.join(format!("{NATIVE}.db"));
+    // The tables agy 1.5.8 creates that hold what the checkpoint relocates.
+    let live = rusqlite::Connection::open(&database).unwrap();
+    live.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA wal_autocheckpoint = 0;
+         CREATE TABLE `trajectory_meta` (`trajectory_id` text,`cascade_id` text,`trajectory_type` integer,`source` integer,PRIMARY KEY (`trajectory_id`));
+         CREATE TABLE `steps` (`idx` integer,`step_type` integer NOT NULL DEFAULT 0,`status` integer NOT NULL DEFAULT 0,`step_payload` blob,PRIMARY KEY (`idx`));
+         CREATE TABLE `trajectory_metadata_blob` (`id` text DEFAULT \"main\",`data` blob,PRIMARY KEY (`id`));",
+    )
+    .unwrap();
+    live.execute(
+        "INSERT INTO trajectory_metadata_blob VALUES ('main', ?1)",
+        [antigravity_workspace_record(
+            NATIVE,
+            &[&extra_uri, &old_copy_uri, old_uri],
+        )],
+    )
+    .unwrap();
+    live.execute("INSERT INTO steps VALUES (0, 14, 3, 'first turn')", [])
+        .unwrap();
+    live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    live.execute(
+        "INSERT INTO steps VALUES (1, 15, 3, 'turn only in the log')",
+        [],
+    )
+    .unwrap();
+    assert!(
+        conversations
+            .join(format!("{NATIVE}.db-wal"))
+            .metadata()
+            .unwrap()
+            .len()
+            > 0
+    );
+
+    // Everything else agy keeps in its home, none of which a checkpoint takes.
+    let secrets = ["agy-access-token", "agy-refresh-token", "me@example.test"];
+    let write = |relative: &str, body: &str| {
+        let path = agy.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    };
+    write(
+        "antigravity-oauth-token",
+        &format!(
+            r#"{{"token":{{"access_token":"{}","refresh_token":"{}"}}}}"#,
+            secrets[0], secrets[1]
+        ),
+    );
+    write("log/acp-server-1.log", &format!("account {}", secrets[2]));
+    write("conversation_summaries.db", "index of every conversation");
+    write("annotations/other.pbtxt", "title:\"other\"");
+    write("conversations/other.db", "another conversation");
+    write("conversations/other.db-wal", "another conversation's log");
+    write(
+        "brain/other/.system_generated/steps/2/output.txt",
+        "another conversation's output",
+    );
+    // The conversation's own files: the full output its database points at.
+    write(
+        &format!("brain/{NATIVE}/.system_generated/steps/2/output.txt"),
+        "the full output",
+    );
+    write(&format!("brain/{NATIVE}/notes/plan.md"), "an artifact");
+
+    export_checkpoint(&spec).unwrap();
+    drop(live);
+
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    let native = archive
+        .manifest
+        .payloads
+        .iter()
+        .filter_map(|descriptor| match &descriptor.role {
+            PayloadRole::NativeArtifact { relative_path } => Some(relative_path.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        native,
+        [
+            format!("antigravity-cli/brain/{NATIVE}/.system_generated/steps/2/output.txt"),
+            format!("antigravity-cli/brain/{NATIVE}/notes/plan.md"),
+            format!("antigravity-cli/conversations/{NATIVE}.db"),
+        ]
+        .map(PathBuf::from)
+    );
+    for descriptor in &archive.manifest.payloads {
+        let payload = archive.payload(descriptor).unwrap();
+        for secret in secrets {
+            assert!(
+                !payload
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()),
+                "the checkpoint carries {secret} in {:?}",
+                descriptor.role
+            );
+        }
+    }
+
+    // The home a resume finds still holds the log of the conversation's
+    // previous run, which SQLite would replay over the restored pages.
+    let retained = temp.path().join("retained");
+    let retained_conversations = retained.join("antigravity-cli/conversations");
+    fs::create_dir_all(&retained_conversations).unwrap();
+    for sidecar in ["db-wal", "db-shm"] {
+        fs::write(
+            retained_conversations.join(format!("{NATIVE}.{sidecar}")),
+            b"stale pages",
+        )
+        .unwrap();
+    }
+    fs::write(retained_conversations.join("other.db-wal"), b"not ours").unwrap();
+    // A path of another length, with a space, a non-ASCII letter and
+    // characters agy escapes and the `url` crate does not.
+    let moved = temp.path().join("new wörk space (copy)/app");
+    let restore_spec = |archive_path: &Path, home: &Path| CheckpointRestoreSpec {
+        report_root: None,
+        archive_path: archive_path.to_owned(),
+        workspace_root: spec.workspace_root.clone(),
+        relay_root: temp.path().join(format!(
+            "relay-{}",
+            home.file_name().unwrap().to_string_lossy()
+        )),
+        harness_home: home.to_owned(),
+        restore_repositories: false,
+        restore_native: true,
+        queue_policy: QueueRestorePolicy::Restore,
+        primary_repository_root: Some(moved.clone()),
+    };
+    restore_checkpoint(&restore_spec(&spec.output_path, &retained), &SystemGit).unwrap();
+
+    let restored_path = retained_conversations.join(format!("{NATIVE}.db"));
+    assert!(
+        !retained_conversations
+            .join(format!("{NATIVE}.db-wal"))
+            .exists()
+    );
+    assert!(
+        !retained_conversations
+            .join(format!("{NATIVE}.db-shm"))
+            .exists()
+    );
+    assert!(retained_conversations.join("other.db-wal").exists());
+    let restored = rusqlite::Connection::open(&restored_path).unwrap();
+    let turns = restored
+        .prepare("SELECT step_payload FROM steps ORDER BY idx")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(turns, ["first turn", "turn only in the log"]);
+    let record: Vec<u8> = restored
+        .query_row(
+            "SELECT data FROM trajectory_metadata_blob WHERE id = 'main'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let new_uri = format!(
+        "file://{}/new%20w%C3%B6rk%20space%20%28copy%29/app",
+        temp.path().display()
+    );
+    assert_eq!(record, antigravity_workspace_record(NATIVE, &[&new_uri]));
+    assert_eq!(
+        fs::read_to_string(retained.join(format!(
+            "antigravity-cli/brain/{NATIVE}/.system_generated/steps/2/output.txt"
+        )))
+        .unwrap(),
+        "the full output"
+    );
+    drop(restored);
+
+    // A record whose two lists of roots name different workspaces is not one
+    // to guess at.
+    let overwrite = |record: Vec<u8>| {
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE trajectory_metadata_blob SET data = ?1 WHERE id = 'main'",
+                [record],
+            )
+            .unwrap();
+    };
+    let export_again = |name: &str| {
+        let mut again = spec.clone();
+        again.output_path = temp.path().join(format!("worker/{name}.hel.zip"));
+        export_checkpoint(&again).unwrap();
+        again.output_path
+    };
+    overwrite(antigravity_workspace_record_naming(
+        NATIVE,
+        &[old_uri],
+        &["file:///elsewhere/app"],
+    ));
+    let error = restore_checkpoint(
+        &restore_spec(&export_again("mismatch"), &temp.path().join("refused")),
+        &SystemGit,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("two different sets of workspaces"),
+        "{error:#}"
+    );
+
+    // Without its database, the conversation's `brain` files are no history.
+    fs::remove_file(&database).unwrap();
+    let mut without_database = spec.clone();
+    without_database.output_path = temp.path().join("worker/no-database.hel.zip");
+    let error = export_checkpoint(&without_database).unwrap_err();
+    assert!(
+        format!("{error:#}").contains(NO_SESSION_ARTIFACTS),
+        "{error:#}"
+    );
+}
+
 /// R4-5: a Codex session whose only turn failed at the usage limit, followed
 /// by `/clear`, could not be suspended ("no session artifacts found"). The
 /// clear had replaced the native session with one that never received a
@@ -417,7 +713,13 @@ fn ignore_nested_repositories_exports_outer_work_without_persisting_the_omission
     assert_eq!(fs::read(checkout.join("README.md")).unwrap(), b"unstaged\n");
     assert_eq!(git(&checkout, &["show", ":README.md"]), "staged");
     assert_eq!(fs::read(checkout.join("keep.txt")).unwrap(), b"untracked\n");
-    assert!(!checkout.join(".scratch").exists());
+    // The registered worktree is the repository's own work and comes back;
+    // only the independent clone, which the user chose to omit, does not.
+    assert_eq!(
+        fs::read(checkout.join(nested).join("valuable.txt")).unwrap(),
+        b"nested work\n"
+    );
+    assert!(!checkout.join(".scratch/independent").exists());
     assert_eq!(
         fs::read(repository.join(".git/info/exclude")).unwrap(),
         exclude
@@ -682,8 +984,16 @@ fn native_allowlist_excludes_credentials_and_other_sessions() {
         .iter()
         .find(|artifact| artifact.relative_path.as_path() == Path::new("session_index.jsonl"))
         .unwrap();
-    assert!(std::str::from_utf8(&index.data).unwrap().contains(NATIVE));
-    assert!(!std::str::from_utf8(&index.data).unwrap().contains("other"));
+    assert!(
+        std::str::from_utf8(&index.data.bytes().unwrap())
+            .unwrap()
+            .contains(NATIVE)
+    );
+    assert!(
+        !std::str::from_utf8(&index.data.bytes().unwrap())
+            .unwrap()
+            .contains("other")
+    );
     assert!(artifacts.iter().all(|artifact| {
         !artifact
             .relative_path
@@ -762,18 +1072,18 @@ fn muse_checkpoint_keeps_selected_child_streams_without_credentials_or_other_ses
     assert!(
         artifacts
             .iter()
-            .any(|artifact| artifact.data.len() == 128 * 1024)
+            .any(|artifact| artifact.size().unwrap() == 128 * 1024)
     );
     assert!(
         artifacts
             .iter()
-            .any(|artifact| artifact.data == b"child history")
+            .any(|artifact| artifact_bytes(artifact) == b"child history")
     );
     let restored = tempfile::tempdir().unwrap();
     for artifact in artifacts {
         let path = restored.path().join(&artifact.relative_path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, &artifact.data).unwrap();
+        fs::write(path, artifact_bytes(&artifact)).unwrap();
     }
     assert_eq!(
         collect_native_artifacts(HarnessKind::Muse, restored.path(), NATIVE, false)
@@ -813,7 +1123,7 @@ fn muse_import_normalizes_selected_tree_to_worker_storage() {
             ".data/muse/sessions/2026/09/08/{NATIVE}/session.jsonl"
         ))
     );
-    assert_eq!(artifacts[1].data, b"child");
+    assert_eq!(artifact_bytes(&artifacts[1]), b"child");
     assert!(
         collect_import_native_artifacts(
             HarnessKind::Muse,
@@ -853,6 +1163,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
         untracked_tar_path: "repositories/app/untracked.tar".into(),
         conflicted_worktree_tar_path: None,
         operation_state_tar_path: None,
+        linked_worktrees: Vec::new(),
     }];
     let path = restored_native_relative_path(
         HarnessKind::Grok,
@@ -1168,6 +1479,7 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
         untracked_tar_path: "repositories/app/untracked.tar".into(),
         conflicted_worktree_tar_path: None,
         operation_state_tar_path: None,
+        linked_worktrees: Vec::new(),
     }];
     let path = restored_native_relative_path(
         HarnessKind::Claude,
@@ -1216,6 +1528,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
         untracked_tar_path: "repositories/app/untracked.tar".into(),
         conflicted_worktree_tar_path: None,
         operation_state_tar_path: None,
+        linked_worktrees: Vec::new(),
     }];
     let path = restored_native_relative_path(
             HarnessKind::Kimi,
@@ -1445,6 +1758,7 @@ fn a_plain_project_directory_is_recorded_but_never_captured_or_restored() {
     assert!(!restore_root.join("notes/drafts").exists());
 }
 
+// Hard-won: 7d68f8bde: the staged copy must own its size when the live source changes at EOF.
 #[test]
 fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
     let temp = tempfile::tempdir().unwrap();
@@ -1453,7 +1767,81 @@ fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
         .harness_home
         .join(format!("sessions/2026/08/09/rollout-{NATIVE}.jsonl"));
     fs::write(&large_native, vec![b'n'; 128 * 1024]).unwrap();
-    export_checkpoint(&export_spec).unwrap();
+    // The same stream used by capture can reach EOF just before the harness
+    // appends. Its result must describe the sealed destination, not the source.
+    struct AppendAtEof {
+        source: File,
+        path: PathBuf,
+        appended: bool,
+    }
+    impl Read for AppendAtEof {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.source.read(bytes)?;
+            if count == 0 && !self.appended {
+                self.appended = true;
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.path)?
+                    .write_all(b"later harness bytes")?;
+            }
+            Ok(count)
+        }
+    }
+    let copied = write_private_reader(
+        temp.path(),
+        Path::new("owned-native-copy"),
+        &mut AppendAtEof {
+            source: File::open(&large_native).unwrap(),
+            path: large_native.clone(),
+            appended: false,
+        },
+        0o600,
+    )
+    .unwrap();
+    assert_eq!(
+        copied,
+        fs::metadata(temp.path().join("owned-native-copy"))
+            .unwrap()
+            .len()
+    );
+    assert!(fs::metadata(&large_native).unwrap().len() > copied);
+    struct AppendDuringGit {
+        path: PathBuf,
+        appended: std::sync::atomic::AtomicBool,
+    }
+    impl GitCommandRunner for AppendDuringGit {
+        fn run(&self, repository: &Path, command: &GitCommand) -> Result<GitOutput> {
+            if !self
+                .appended
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.path)?
+                    .write_all(b"async native write during Git")?;
+            }
+            SystemGit.run(repository, command)
+        }
+    }
+    let captured = fs::read(&large_native).unwrap();
+    export_checkpoint_with_git(
+        &export_spec,
+        &AppendDuringGit {
+            path: large_native.clone(),
+            appended: std::sync::atomic::AtomicBool::new(false),
+        },
+    )
+    .unwrap();
+    let legacy = read_archive_verified(&export_spec.output_path).unwrap();
+    let native = legacy
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+    assert_eq!(legacy.payload(native).unwrap(), captured);
+    assert!(fs::metadata(&large_native).unwrap().len() > captured.len() as u64);
+    fs::write(&large_native, captured).unwrap();
 
     let reports = export_spec
         .workspace_root
@@ -1580,7 +1968,7 @@ fn checkpoint_packaging_throughput() {
             };
             Some(NativeArtifact {
                 relative_path: relative_path.clone(),
-                data: archive.payload(descriptor).unwrap().to_vec(),
+                data: (archive.payload(descriptor).unwrap().to_vec()).into(),
                 mode: descriptor.mode,
             })
         })
@@ -1593,7 +1981,7 @@ fn checkpoint_packaging_throughput() {
         .collect::<Vec<_>>();
     let payload_bytes = native_artifacts
         .iter()
-        .map(|artifact| artifact.data.len() as u64)
+        .map(|artifact| artifact.size().unwrap())
         .chain(repositories.iter().flat_map(|repository| {
             [
                 repository.committed_bundle.len() as u64,
@@ -1617,7 +2005,7 @@ fn checkpoint_packaging_throughput() {
         write_private_file(
             &harness_home,
             &artifact.relative_path,
-            &artifact.data,
+            &artifact.data.bytes().unwrap(),
             artifact.mode,
         )
         .unwrap();
@@ -1747,7 +2135,7 @@ fn codex_root_archive_throughput() {
     .unwrap();
     let native_bytes = native_artifacts
         .iter()
-        .map(|artifact| artifact.data.len() as u64)
+        .map(|artifact| artifact.size().unwrap())
         .sum::<u64>();
     let collect_ms = collect_started.elapsed().as_millis();
     let repositories = metadata
@@ -1761,6 +2149,7 @@ fn codex_root_archive_throughput() {
             unstaged_patch: Vec::new(),
             untracked_tar: Vec::new(),
             operation_payloads: None,
+            linked_worktrees: Vec::new(),
         })
         .collect::<Vec<_>>();
     let archive_started = std::time::Instant::now();
@@ -1803,6 +2192,9 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
     fs::create_dir_all(&memory_root).unwrap();
     fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
     mj_core::worker_launch::WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
+        no_github_credentials: false,
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         goal_resume_request: Default::default(),
@@ -1825,6 +2217,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         native_session_id: Some(NATIVE.into()),
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        subagent_kind: None,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
@@ -1839,6 +2232,8 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
             mcp_delivery: mj_core::worker_launch::ProjectMemoryMcpDelivery::Acp,
         }),
         execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
     }
     .write(&spec.relay_root.join("launch.json"))
     .unwrap();
@@ -1855,7 +2250,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
     .unwrap();
     assert!(artifacts.iter().any(|artifact| {
         artifact.relative_path == Path::new("projects/replica/memory/MEMORY.md")
-            && artifact.data == b"remember this"
+            && artifact_bytes(artifact) == b"remember this"
     }));
 }
 
@@ -1901,7 +2296,7 @@ fn checkpoint_collects_memory_from_a_legacy_worker_launch_config() {
 
     assert!(artifacts.iter().any(|artifact| {
         artifact.relative_path == Path::new("projects/replica/memory/MEMORY.md")
-            && artifact.data == b"legacy memory"
+            && artifact_bytes(artifact) == b"legacy memory"
     }));
 }
 
@@ -2403,6 +2798,287 @@ fn a_subdirectory_session_restores_work_across_its_whole_checkout() {
     assert_restored(&other);
 }
 
+/// Agents make linked worktrees inside their checkout (`git worktree add
+/// .mj/lanes/x`); a recovery copy must carry each one's HEAD, index, files and
+/// lock, and bring them back at the same place.
+#[test]
+fn linked_worktrees_inside_a_clone_survive_a_recovery_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, archive_path) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let base = git(&repository, &["rev-parse", "HEAD"]);
+    spec.repositories[0].capture = CheckpointRepositoryCapture::ManagedClone {
+        base_commit: base.clone(),
+    };
+    let configure = |directory: &Path| {
+        git(directory, &["config", "user.email", "hel@example.test"]);
+        git(directory, &["config", "user.name", "Hel Test"]);
+    };
+    // A lane on its own branch with a commit, a staged edit, an unstaged
+    // edit and an untracked file with a non-ASCII name.
+    git(
+        &repository,
+        &["worktree", "add", ".mj/lanes/a", "-b", "lane-a"],
+    );
+    let lane_a = repository.join(".mj/lanes/a");
+    configure(&lane_a);
+    fs::write(lane_a.join("a.txt"), b"committed in a\n").unwrap();
+    git(&lane_a, &["add", "a.txt"]);
+    git(&lane_a, &["commit", "-m", "lane a"]);
+    fs::write(lane_a.join("README.md"), b"staged in a\n").unwrap();
+    git(&lane_a, &["add", "README.md"]);
+    fs::write(lane_a.join("a.txt"), b"unstaged in a\n").unwrap();
+    fs::write(lane_a.join("ü-notes.txt"), b"untracked in a\n").unwrap();
+    // A lane nested inside the first one.
+    git(&lane_a, &["worktree", "add", ".mj/lanes/c", "-b", "lane-c"]);
+    fs::write(lane_a.join(".mj/lanes/c/c.txt"), b"untracked in c\n").unwrap();
+    // A detached lane whose HEAD is a commit no ref holds.
+    git(&repository, &["worktree", "add", "--detach", ".mj/lanes/d"]);
+    let lane_d = repository.join(".mj/lanes/d");
+    configure(&lane_d);
+    fs::write(lane_d.join("d.txt"), b"only d holds this\n").unwrap();
+    git(&lane_d, &["add", "d.txt"]);
+    git(&lane_d, &["commit", "-m", "detached lane"]);
+    // A locked lane, and a registered lane whose directory is gone.
+    git(
+        &repository,
+        &["worktree", "add", ".mj/lanes/l", "-b", "lane-l"],
+    );
+    git(
+        &repository,
+        &["worktree", "lock", "--reason", "busy", ".mj/lanes/l"],
+    );
+    git(
+        &repository,
+        &["worktree", "add", ".mj/lanes/x", "-b", "lane-x"],
+    );
+    fs::remove_dir_all(repository.join(".mj/lanes/x")).unwrap();
+    fs::write(
+        repository.join("keep.txt"),
+        b"untracked in the main checkout\n",
+    )
+    .unwrap();
+
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&archive_path).unwrap();
+    assert_eq!(
+        archive.manifest.schema_version,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+    );
+    let recorded = archive.manifest.repositories[0]
+        .linked_worktrees
+        .iter()
+        .map(|worktree| worktree.metadata.path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded,
+        [
+            ".mj/lanes/a",
+            ".mj/lanes/a/.mj/lanes/c",
+            ".mj/lanes/d",
+            ".mj/lanes/l"
+        ]
+        .map(PathBuf::from),
+        "the missing lane is left out and parents come before children"
+    );
+    let main_tar = archive
+        .payload_by_role(&PayloadRole::GitUntrackedTar {
+            repository_id: "app".into(),
+        })
+        .unwrap();
+    let main_files = tar::Archive::new(std::io::Cursor::new(main_tar))
+        .entries()
+        .unwrap()
+        .map(|entry| entry.unwrap().path().unwrap().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        main_files,
+        [PathBuf::from("keep.txt")],
+        "lane contents travel as the lanes' own entries"
+    );
+    assert_eq!(
+        git(&repository, &["for-each-ref", "refs/mj-checkpoint"]),
+        "",
+        "the capture removes its temporary refs"
+    );
+
+    let restored_root = temp.path().join("restored");
+    fs::create_dir(&restored_root).unwrap();
+    git(
+        &restored_root,
+        &["clone", repository.to_str().unwrap(), "app"],
+    );
+    restore_repositories(&archive_path, &restored_root, &SystemGit).unwrap();
+    let restored = restored_root.join("app");
+    for lane in [
+        ".mj/lanes/a",
+        ".mj/lanes/a/.mj/lanes/c",
+        ".mj/lanes/d",
+        ".mj/lanes/l",
+    ] {
+        let (source, copy) = (repository.join(lane), restored.join(lane));
+        assert_eq!(
+            git(&copy, &["rev-parse", "HEAD"]),
+            git(&source, &["rev-parse", "HEAD"]),
+            "{lane} HEAD"
+        );
+        let branch = |directory: &Path| {
+            let output = std::process::Command::new("git")
+                .args(["symbolic-ref", "--quiet", "HEAD"])
+                .current_dir(directory)
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        assert_eq!(branch(&copy), branch(&source), "{lane} branch");
+        assert_eq!(
+            git(&copy, &["status", "--porcelain"]),
+            git(&source, &["status", "--porcelain"]),
+            "{lane} status"
+        );
+        assert_eq!(
+            git(&copy, &["diff", "--cached"]),
+            git(&source, &["diff", "--cached"]),
+            "{lane} index"
+        );
+        assert_eq!(
+            git(&copy, &["diff"]),
+            git(&source, &["diff"]),
+            "{lane} worktree"
+        );
+    }
+    assert_eq!(
+        fs::read(restored.join(".mj/lanes/a/ü-notes.txt")).unwrap(),
+        b"untracked in a\n"
+    );
+    let lock = |checkout: &Path| {
+        let directory = git(
+            checkout,
+            &["rev-parse", "--path-format=absolute", "--git-dir"],
+        );
+        fs::read_to_string(Path::new(&directory).join("locked"))
+            .ok()
+            .map(|reason| reason.trim_end().to_owned())
+    };
+    assert_eq!(lock(&restored.join(".mj/lanes/l")).as_deref(), Some("busy"));
+    assert_eq!(lock(&restored.join(".mj/lanes/d")), None);
+    assert!(!restored.join(".mj/lanes/x").exists());
+    assert_eq!(git(&restored, &["for-each-ref", "refs/mj-checkpoint"]), "");
+
+    // A retried restore finds the worktrees it already made and leaves them.
+    let snapshot = crate::checkpoint::restore::archived_repository_snapshot(
+        &archive,
+        &archive.manifest.repositories[0],
+    )
+    .unwrap();
+    crate::archive::restore_linked_worktrees_for_test(
+        &SystemGit,
+        &restored,
+        &snapshot.linked_worktrees,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(restored.join(".mj/lanes/a/a.txt")).unwrap(),
+        b"unstaged in a\n"
+    );
+}
+
+/// A managed worktree's bundle is empty when its own HEAD has nothing beyond
+/// the base, yet a lane's commits, branch-held or detached, must still travel.
+#[test]
+fn linked_worktree_commits_travel_when_the_checkout_has_none_of_its_own() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, archive_path) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    for (lane, arguments) in [
+        ("branch", ["-b", "lane-branch"].as_slice()),
+        ("detached", ["--detach"].as_slice()),
+    ] {
+        let path = format!(".mj/lanes/{lane}");
+        let mut add = vec!["worktree", "add", path.as_str()];
+        add.extend(arguments);
+        git(&repository, &add);
+        let directory = repository.join(&path);
+        git(&directory, &["config", "user.email", "hel@example.test"]);
+        git(&directory, &["config", "user.name", "Hel Test"]);
+        fs::write(directory.join(format!("{lane}.txt")), lane.as_bytes()).unwrap();
+        git(&directory, &["add", "."]);
+        git(&directory, &["commit", "-m", lane]);
+    }
+    export_checkpoint(&spec).unwrap();
+
+    let restored_root = temp.path().join("restored");
+    fs::create_dir(&restored_root).unwrap();
+    git(
+        &restored_root,
+        &["clone", repository.to_str().unwrap(), "app"],
+    );
+    restore_repositories(&archive_path, &restored_root, &SystemGit).unwrap();
+    let restored = restored_root.join("app");
+    for lane in ["branch", "detached"] {
+        let (source, copy) = (
+            repository.join(format!(".mj/lanes/{lane}")),
+            restored.join(format!(".mj/lanes/{lane}")),
+        );
+        assert_eq!(
+            git(&copy, &["rev-parse", "HEAD"]),
+            git(&source, &["rev-parse", "HEAD"]),
+            "{lane} HEAD"
+        );
+    }
+    assert_eq!(
+        git(
+            &restored.join(".mj/lanes/branch"),
+            &["branch", "--show-current"]
+        ),
+        "lane-branch"
+    );
+    assert_eq!(
+        git(
+            &restored.join(".mj/lanes/detached"),
+            &["branch", "--show-current"]
+        ),
+        ""
+    );
+}
+
+/// A retry skips a worktree that already sits at its recorded commit, so a
+/// restore that failed after `worktree add` must not leave one behind.
+#[test]
+fn a_linked_worktree_that_fails_to_restore_leaves_nothing_for_a_retry_to_skip() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let head = git(&repository, &["rev-parse", "HEAD"]);
+    let mut snapshot = crate::archive::LinkedWorktreeSnapshot {
+        metadata: mj_core::archive::LinkedWorktreeMetadata {
+            path: PathBuf::from(".mj/lanes/a"),
+            head_commit: head,
+            branch: None,
+            lock_reason: None,
+            git_operation: None,
+        },
+        staged_patch: b"this is not a patch\n".to_vec(),
+        unstaged_patch: Vec::new(),
+        untracked_tar: Vec::new(),
+        operation_payloads: None,
+    };
+    let restore = |snapshot: &crate::archive::LinkedWorktreeSnapshot| {
+        crate::archive::restore_linked_worktrees_for_test(
+            &SystemGit,
+            &repository,
+            std::slice::from_ref(snapshot),
+        )
+    };
+    restore(&snapshot).unwrap_err();
+    assert!(!repository.join(".mj/lanes/a").exists());
+    assert!(!git(&repository, &["worktree", "list"]).contains("lanes/a"));
+
+    snapshot.staged_patch = Vec::new();
+    restore(&snapshot).unwrap();
+    assert!(repository.join(".mj/lanes/a/README.md").exists());
+}
+
 fn copy_archive_with_schema(source: &Path, destination: &Path, schema_version: u32) {
     let source = File::open(source).unwrap();
     let mut archive = zip::ZipArchive::new(source).unwrap();
@@ -2692,7 +3368,13 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
     )
     .unwrap();
     let reviewed = format!("refs/mj/reviewed/{tree}");
-    for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
+    let overridden = format!("refs/mj/overridden/{tree}");
+    for (name, object) in [
+        (baseline, &point),
+        (&start, &head),
+        (&reviewed, &head),
+        (&overridden, &head),
+    ] {
         git(&source, &["update-ref", name, object]);
     }
     export_checkpoint(&spec).unwrap();
@@ -2734,7 +3416,7 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
     // while commit refs whose objects remain locally available are recreated.
     restore_single_repository_into_checkout(&spec.output_path, &destination, &SystemGit).unwrap();
     assert_eq!(git(&destination, &["for-each-ref", baseline]), "");
-    for name in [&start, &reviewed] {
+    for name in [&start, &reviewed, &overridden] {
         assert_eq!(git(&destination, &["rev-parse", name]), head);
     }
     // Move transports workspace files separately and disables repository
@@ -2747,9 +3429,11 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
         git(&source, &["update-ref", "-d", name]);
     }
     restore_into(temp.path(), &spec, false);
-    for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
+    for (name, object) in [(&start, &head), (&reviewed, &head)] {
         assert_eq!(git(&source, &["rev-parse", name]), *object);
     }
+    // The old pin was not archived, so no restore brings it back.
+    assert_eq!(git(&source, &["for-each-ref", baseline]), "");
     let foreign = crate::archive::record_review_point(
         &SystemGit,
         &source,
@@ -3616,7 +4300,11 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
     let readme = spec.workspace_root.join("app/README.md");
     let before = fs::read(&readme).unwrap();
 
-    for schema_version in [1, crate::archive::ARCHIVE_SCHEMA_VERSION + 1] {
+    for schema_version in [
+        1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION + 1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES + 1,
+    ] {
         let incompatible = temp
             .path()
             .join(format!("incompatible-{schema_version}.hel.zip"));
@@ -3958,4 +4646,326 @@ fn captured_checkpoint_accepts_an_older_workers_json() {
     assert!(json.get("report_directories").is_none());
     let decoded: CheckpointExportSpec = serde_json::from_value(json).unwrap();
     assert!(decoded.report_directories.is_none());
+}
+
+// Hard-won: move-a618a54a: a 1 GiB native-file cap made a quota Move of a long Claude session fail
+#[test]
+fn quota_move_streams_a_native_transcript_larger_than_one_gib() {
+    use std::io::{Seek, SeekFrom};
+    let started = std::time::Instant::now();
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    spec.session.harness_kind = HarnessKind::Claude;
+    let relative = PathBuf::from(format!("projects/old/{NATIVE}.jsonl"));
+    let source = spec.harness_home.join(&relative);
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let mut file = File::create(&source).unwrap();
+    file.set_len(1024 * 1024 * 1024 + 65537).unwrap();
+    file.write_all(b"transcript start\n").unwrap();
+    file.seek(SeekFrom::End(-16)).unwrap();
+    file.write_all(b"transcript end!\n").unwrap();
+    drop(file);
+    export_checkpoint(&spec).unwrap();
+    verify_archive_streaming(&spec.output_path).unwrap();
+    let stage_path = spec.relay_root.join("large-native-stage");
+    capture_checkpoint(
+        &CheckpointCaptureSpec {
+            protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+            session: spec.session.clone(),
+            target: spec.target.clone(),
+            bundle: spec.bundle.clone(),
+            relay_root: spec.relay_root.clone(),
+            harness_home: spec.harness_home.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            repositories: spec.repositories.clone(),
+            report_directories: None,
+            allow_empty_native: false,
+            stage_path: stage_path.clone(),
+            refresh_existing: false,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    pack_checkpoint(&CheckpointPackSpec {
+        protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        relay_root: spec.relay_root.clone(),
+        stage_path,
+        canonical_session: spec.canonical_session.clone(),
+        output_path: spec.output_path.clone(),
+    })
+    .unwrap();
+    let repository_archive = crate::archive::read_archive_repositories(&spec.output_path).unwrap();
+    for payload in &repository_archive.manifest.payloads {
+        if matches!(payload.role, PayloadRole::NativeArtifact { .. }) {
+            assert!(!repository_archive.payloads.contains_key(&payload.path));
+        }
+    }
+    let home = temp.path().join("restored-home");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: spec.output_path.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            relay_root: temp.path().join("restored-relay"),
+            harness_home: home.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Discard,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    let restored_relative = restored_native_relative_path(
+        HarnessKind::Claude,
+        &relative,
+        Some(&spec.workspace_root.join("app")),
+    )
+    .unwrap();
+    let digest = |path: &Path| {
+        let mut source = File::open(path).unwrap();
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let count = source.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+        hash.finalize()
+    };
+    let restored = home.join(restored_relative);
+    assert_eq!(
+        fs::metadata(&source).unwrap().len(),
+        fs::metadata(&restored).unwrap().len()
+    );
+    assert_eq!(digest(&source), digest(&restored));
+    eprintln!(
+        "large native checkpoint round trip: {:?}",
+        started.elapsed()
+    );
+}
+
+fn artifact_bytes(artifact: &NativeArtifact) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    artifact.reader().unwrap().read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
+// Hard-won: 055d8a772 review: parent runtime loss must not rewind a retained checkout or child state.
+#[cfg(unix)]
+#[test]
+fn missing_parent_restore_preserves_current_components_and_retries_partial_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let native_relative = PathBuf::from(format!("sessions/2026/08/09/rollout-{NATIVE}.jsonl"));
+    let archived_native = vec![b'n'; 128 * 1024];
+    fs::write(spec.harness_home.join(&native_relative), &archived_native).unwrap();
+    export_checkpoint(&spec).unwrap();
+    let checkout = spec.workspace_root.join("app");
+    let current = checkout.join("README.md");
+    fs::write(&current, b"current work after checkpoint").unwrap();
+    let index = git(&checkout, &["ls-files", "--stage"]);
+    let child_report = spec.workspace_root.join(".mj/agents/child/report.txt");
+    fs::create_dir_all(child_report.parent().unwrap()).unwrap();
+    fs::write(&child_report, b"current child report").unwrap();
+    let restore = CheckpointRestoreSpec {
+        archive_path: spec.output_path.clone(),
+        workspace_root: spec.workspace_root.clone(),
+        report_root: Some(spec.workspace_root.join(".mj/agents")),
+        relay_root: temp.path().join("recovered-parent"),
+        harness_home: temp.path().join("recovered-native"),
+        restore_repositories: false,
+        restore_native: true,
+        queue_policy: QueueRestorePolicy::Restore,
+        primary_repository_root: Some(checkout.clone()),
+    };
+    fs::create_dir_all(&restore.relay_root).unwrap();
+    let seed = restore
+        .relay_root
+        .join(mj_core::relay::RESTORED_RELAY_SEED_FILE);
+    let mut current_projection = spec.canonical_session.clone();
+    current_projection.event_frontier = 27;
+    current_projection.event_frontier_digest = "b".repeat(64);
+    current_projection.queued_prompts.clear();
+    let current_seed =
+        relay_seed_for_restore(&current_projection, true, QueueRestorePolicy::Restore).unwrap();
+    std::os::unix::fs::symlink(&current, &seed).unwrap();
+    assert!(
+        restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(&current).unwrap(),
+        b"current work after checkpoint"
+    );
+    assert_eq!(
+        fs::read(restore.harness_home.join(&native_relative)).unwrap(),
+        archived_native
+    );
+    fs::remove_file(&seed).unwrap();
+    // Hard-won: 98a60381e: a leftover seed must not replay completed work after journal loss.
+    fs::write(
+        &seed,
+        serde_json::to_vec(
+            &relay_seed_for_restore(&spec.canonical_session, true, QueueRestorePolicy::Restore)
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let retry =
+        restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
+            .unwrap();
+    assert!(!retry.native_restored);
+    assert!(retry.relay_restored);
+    let recovered_seed: mj_core::relay::RestoredRelaySeed =
+        serde_json::from_slice(&fs::read(&seed).unwrap()).unwrap();
+    assert_eq!(recovered_seed.event_frontier, 27);
+    assert!(
+        recovered_seed.queued_prompts.is_empty(),
+        "the archive must not replay already completed queued work"
+    );
+    fs::write(
+        restore.harness_home.join(&native_relative),
+        b"newer native history",
+    )
+    .unwrap();
+    let relay = restore.relay_root.join(mj_core::relay::RELAY_STATE_FILE);
+    fs::write(&relay, b"current relay state").unwrap();
+    let repeated =
+        restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
+            .unwrap();
+    assert!(!repeated.native_restored && !repeated.relay_restored);
+    assert_eq!(fs::read(&relay).unwrap(), b"current relay state");
+    assert_eq!(
+        fs::read(restore.harness_home.join(&native_relative)).unwrap(),
+        b"newer native history"
+    );
+    assert_eq!(
+        fs::read(&current).unwrap(),
+        b"current work after checkpoint"
+    );
+    assert_eq!(fs::read(&child_report).unwrap(), b"current child report");
+    assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
+    let mut from_store = restore.clone();
+    from_store.archive_path = temp.path().join("no-recovery-archive");
+    from_store.relay_root = temp.path().join("runtime-from-store");
+    from_store.restore_native = false;
+    let result = restore_missing_parent_checkpoint(
+        &from_store,
+        &NoNativeCheckpointState,
+        Some(&current_seed),
+    )
+    .unwrap();
+    assert!(result.relay_restored && !result.native_restored);
+    assert_eq!(
+        fs::read(from_store.harness_home.join(&native_relative)).unwrap(),
+        b"newer native history"
+    );
+}
+
+// Hard-won: bd6363001 review: publishing a SQLite database before its WAL made retry silently lose conversation rows.
+#[cfg(unix)]
+#[test]
+fn missing_sqlite_recovery_publishes_a_complete_wal_snapshot_before_other_artifact_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    export_checkpoint(&spec).unwrap();
+    let original = read_archive_verified(&spec.output_path).unwrap();
+    let source = temp.path().join("legacy.db");
+    let live = rusqlite::Connection::open(&source).unwrap();
+    live.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE conversation(id TEXT PRIMARY KEY, body TEXT); PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    let body = "conversation only in WAL ".repeat(8192);
+    live.execute("INSERT INTO conversation VALUES ('wal-only', ?1)", [&body])
+        .unwrap();
+    let wal = fs::read(temp.path().join("legacy.db-wal")).unwrap();
+    assert!(wal.len() > 64 * 1024);
+    let mut session = original.manifest.session.clone();
+    session.harness_kind = HarnessKind::OpenCode;
+    let relative = PathBuf::from(".data/opencode/opencode.db");
+    let legacy = temp.path().join("legacy.hel.zip");
+    write_archive_hashed(
+        &legacy,
+        &ArchiveInput {
+            session,
+            target: original.manifest.target.clone(),
+            bundle: original.manifest.bundle.clone(),
+            canonical_session: original.canonical_session().unwrap(),
+            repositories: original
+                .manifest
+                .repositories
+                .iter()
+                .map(|repository| archived_repository_snapshot(&original, repository).unwrap())
+                .collect(),
+            native_artifacts: vec![
+                NativeArtifact {
+                    relative_path: relative.clone(),
+                    data: fs::read(&source).unwrap().into(),
+                    mode: 0o600,
+                },
+                NativeArtifact {
+                    relative_path: PathBuf::from(".data/opencode/opencode.db-wal"),
+                    data: wal.into(),
+                    mode: 0o600,
+                },
+                NativeArtifact {
+                    relative_path: PathBuf::from("blocked/late-artifact"),
+                    data: b"last artifact".to_vec().into(),
+                    mode: 0o600,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    drop(live);
+    let home = temp.path().join("recovered-home");
+    fs::create_dir_all(&home).unwrap();
+    let current = temp.path().join("current-files");
+    fs::create_dir(&current).unwrap();
+    std::os::unix::fs::symlink(&current, home.join("blocked")).unwrap();
+    let restore = CheckpointRestoreSpec {
+        archive_path: legacy,
+        workspace_root: spec.workspace_root.clone(),
+        report_root: None,
+        relay_root: temp.path().join("recovered-relay"),
+        harness_home: home.clone(),
+        restore_repositories: false,
+        restore_native: true,
+        queue_policy: QueueRestorePolicy::Discard,
+        primary_repository_root: Some(spec.workspace_root.join("app")),
+    };
+    assert!(restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, None).is_err());
+    assert!(home.join(&relative).is_file());
+    assert!(!home.join(".data/opencode/opencode.db-wal").exists());
+    assert!(!home.join(".data/opencode/opencode.db-shm").exists());
+    let database = rusqlite::Connection::open(home.join(&relative)).unwrap();
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT body FROM conversation WHERE id='wal-only'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        body
+    );
+    drop(database);
+    fs::remove_file(home.join("blocked")).unwrap();
+    restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, None).unwrap();
+    let database = rusqlite::Connection::open(home.join(&relative)).unwrap();
+    database
+        .execute("UPDATE conversation SET body='newer conversation'", [])
+        .unwrap();
+    drop(database);
+    restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, None).unwrap();
+    let database = rusqlite::Connection::open(home.join(&relative)).unwrap();
+    assert_eq!(
+        database
+            .query_row("SELECT body FROM conversation", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "newer conversation"
+    );
 }

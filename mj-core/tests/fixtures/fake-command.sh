@@ -16,4 +16,21 @@ case "$0" in
 */*) fake_dir=${0%/*} ;;
 *) fake_dir=. ;;
 esac
+# A stand-in worker never holds a real worker lock, so the lifecycle commands
+# that ask the lock (`worker stop|liveness|holder`) find no worker running.
+if [ "${1:-}" = worker ]; then
+    case "${2:-}" in
+    build-id)
+        # The stamped copy (fake-worker.sh) carries its build on a comment line.
+        # An unstamped fake answers from its own script.
+        fake_build=
+        while IFS= read -r fake_line; do
+            case $fake_line in '#MJ-BUILD-ID:'*) fake_build=${fake_line#'#MJ-BUILD-ID:'} ;; esac
+        done <"$0"
+        if [ -n "$fake_build" ]; then echo "$fake_build"; exit 0; fi
+        ;;
+    stop | holder) exit 0 ;;
+    liveness) echo dead; exit 0 ;;
+    esac
+fi
 exec /bin/sh "$fake_dir/${0##*/}.script" "$@"

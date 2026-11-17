@@ -7,7 +7,10 @@ model gpt-5.4; effort high:
 model unknown; effort unknown:
   cache_read_tokens  600  (1 turns)
 not in totals: 1 last-request, 0 unknown-scope, 1 missing reports
+priced turn cost: 0.0000000000 USD (0 provider, 0 estimated, 0 missing costs)
 session session-parent: task root; parent none; retained session
   provider session cost: 0.0123 USD
+  priced turn cost: 0.0000000000 USD (0 provider, 0 estimated, 0 missing costs)
 session session-reviewer: task Review the migration plan; parent session-parent; accounting retained after cleanup
   provider session cost: 0.0045 USD
+  priced turn cost: 0.0000000000 USD (0 provider, 0 estimated, 0 missing costs)

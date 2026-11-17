@@ -1,15 +1,29 @@
 use super::*;
 
+pub(super) async fn profile_login_errors(
+    State(state): State<ServerState>,
+) -> Result<Json<std::collections::BTreeMap<String, String>>, ApiFailure> {
+    Ok(Json(backend(&state)?.profile_login_errors()?))
+}
+
 pub(super) async fn profile_config(
     State(state): State<ServerState>,
     Path(profile_id): Path<String>,
     Query(query): Query<ProfileConfigQuery>,
 ) -> Result<Json<mj_core::worker_launch::ProfileConfig>, ApiFailure> {
-    crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
-    let choices = backend(&state)?
-        .profile_config(profile_id, query.model, false)
-        .await
-        .map_err(|error| ApiFailure::unavailable(format!("profile discovery failed: {error:#}")))?;
+    // The served profile list holds enabled profiles only; a disabled one is
+    // still discoverable when the caller asks for it, through the same
+    // catalogue, which refuses an id the configuration does not have.
+    if !query.with_disabled {
+        crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
+    }
+    let backend = backend(&state)?;
+    let choices = if query.unrestricted {
+        backend.unrestricted_profile_config(profile_id).await
+    } else {
+        backend.profile_config(profile_id, query.model, false).await
+    }
+    .map_err(|error| ApiFailure::unavailable(format!("profile discovery failed: {error:#}")))?;
     Ok(Json(choices))
 }
 
@@ -18,7 +32,7 @@ pub(super) async fn subagent_options(
     Path(profile_id): Path<String>,
     Query(query): Query<ProfileConfigQuery>,
 ) -> Result<Json<mj_core::subagent::SubagentOptions>, ApiFailure> {
-    crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
+    crate::server::require_named_profile(&state.snapshot_rx.borrow(), &profile_id)?;
     let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
         .await
         .map_err(|error| ApiFailure::unavailable(error.to_string()))?
@@ -85,13 +99,14 @@ pub(super) async fn set_config(
     )?);
     // The snapshot has not caught up with the change that just succeeded, so
     // the answer reports what the session itself holds.
-    if let Some(options) = crate::server::live_session_config_options(
+    if let Some((mut options, owned)) = crate::server::live_session_config_options(
         &state,
         &session_id,
         session.harness_kind.parse()?,
     )
     .await
     {
+        options.retain(|option| !owned.contains(&option.key));
         session.config_options = options;
     }
     Ok(Json(session))

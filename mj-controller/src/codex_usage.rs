@@ -6,9 +6,7 @@
 
 use mj_core::file_lock::FileLock;
 use std::collections::{HashMap, VecDeque};
-#[cfg(unix)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,6 +38,7 @@ pub enum CodexUsageStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUsageReport {
+    pub paid_credits: Option<mj_client::quota::PaidCredits>,
     pub banked_resets: Option<u64>,
     pub primary: Option<CodexUsageWindow>,
     pub secondary: Option<CodexUsageWindow>,
@@ -373,11 +372,12 @@ async fn prepare<'a>(
     }
     if client.is_none() {
         if let CodexLauncher::Container(check) = launcher {
-            check
-                .runtime
-                .ensure_image_async()
-                .await
-                .map_err(|error| QueryError::ImageUnavailable(format!("{error:#}")))?;
+            check.runtime.ensure_image_async().await.map_err(|error| {
+                QueryError::ImageUnavailable {
+                    detail: format!("{error:#}"),
+                    downloading: check.runtime.image_refresh().is_some(),
+                }
+            })?;
         }
         *client = Some(CodexUsageClient::spawn(cwd, env, launcher).await?);
     }
@@ -563,32 +563,7 @@ async fn spawn_codex(
     #[cfg(unix)]
     {
         let lease = open_managed_codex_lease(&install)?;
-        let manifest_matches = managed_harness_manifest_matches(
-            &install,
-            HarnessKind::Codex,
-            pin(HarnessKind::Codex).install_id,
-        )
-        .map_err(|error| QueryError::NotInstalled {
-            expected: Some(install.clone()),
-            detail: Some(error.to_string()),
-        })?;
-        if !manifest_matches {
-            return Err(QueryError::NotInstalled {
-                expected: Some(install),
-                detail: Some("missing or mismatched mj-harness.json".to_owned()),
-            });
-        }
-
-        let launcher = install.join(CODEX_CLI_ENTRYPOINT);
-        if !is_executable_file(&launcher) {
-            return Err(QueryError::NotInstalled {
-                expected: Some(install),
-                detail: Some(format!(
-                    "missing or non-executable launcher {}",
-                    launcher.display()
-                )),
-            });
-        }
+        let launcher = managed_codex_launcher(&install)?;
 
         let stdio = spawn_app_server(&launcher, cwd, env)
             .await
@@ -600,6 +575,69 @@ async fn spawn_codex(
                 other => other,
             })?;
         Ok((stdio, lease))
+    }
+}
+
+/// The launcher of the installation at `install`, once its receipt matches
+/// the current pin and the launcher is executable.
+#[cfg(unix)]
+fn managed_codex_launcher(install: &Path) -> Result<PathBuf, QueryError> {
+    let manifest_matches = managed_harness_manifest_matches(
+        install,
+        HarnessKind::Codex,
+        pin(HarnessKind::Codex).install_id,
+    )
+    .map_err(|error| QueryError::NotInstalled {
+        expected: Some(install.to_path_buf()),
+        detail: Some(error.to_string()),
+    })?;
+    if !manifest_matches {
+        return Err(QueryError::NotInstalled {
+            expected: Some(install.to_path_buf()),
+            detail: Some("missing or mismatched mj-harness.json".to_owned()),
+        });
+    }
+    let launcher = install.join(CODEX_CLI_ENTRYPOINT);
+    if !mj_core::program_path::is_executable_file(&launcher) {
+        return Err(QueryError::NotInstalled {
+            expected: Some(install.to_path_buf()),
+            detail: Some(format!(
+                "missing or non-executable launcher {}",
+                launcher.display()
+            )),
+        });
+    }
+    Ok(launcher)
+}
+
+/// Whether this host holds the managed Codex installation a host check would
+/// start: the same lease, receipt and launcher checks `spawn_codex` makes,
+/// without taking the lease. `cache_root` is as in [`CodexLauncher::Managed`].
+///
+/// The launcher is a Node script, and a host check passes it only the
+/// profile's environment, so `node` must also be on `path`, the PATH that
+/// environment gives it. A host whose only Node is Mjolnir's managed copy
+/// therefore uses a container under `auto`.
+pub(crate) fn host_has_codex(cache_root: Option<&Path>, path: Option<&std::ffi::OsStr>) -> bool {
+    #[cfg(unix)]
+    {
+        if mj_core::program_path::find_executable_on_path("node", path).is_none() {
+            return false;
+        }
+        let cache_root = match cache_root {
+            Some(root) => root.to_path_buf(),
+            None => match process_managed_cache_root() {
+                Ok(root) => root,
+                Err(_) => return false,
+            },
+        };
+        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
+        install.join(LEASE_FILE).is_file() && managed_codex_launcher(&install).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (cache_root, path);
+        false
     }
 }
 
@@ -676,13 +714,6 @@ fn open_managed_codex_lease(install: &Path) -> Result<FileLock, QueryError> {
     }
 }
 
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-}
-
 #[derive(Debug)]
 enum QueryError {
     NotInstalled {
@@ -694,8 +725,13 @@ enum QueryError {
     // constructs it.
     #[cfg_attr(not(unix), allow(dead_code))]
     Launch(String),
-    /// The container engine does not hold the agent-dev image yet.
-    ImageUnavailable(String),
+    /// The container engine does not hold the agent-dev image yet;
+    /// `downloading` says whether the runtime's pull policy lets the daemon
+    /// download it.
+    ImageUnavailable {
+        detail: String,
+        downloading: bool,
+    },
     NotSignedIn,
     UnsupportedAccount,
     Unsupported,
@@ -737,8 +773,15 @@ impl QueryError {
                 "Codex quota probing is unavailable because managed Codex installations require Unix"
             }
             Self::Launch(_) => "could not start Codex CLI",
-            Self::ImageUnavailable(_) => {
+            Self::ImageUnavailable {
+                downloading: true, ..
+            } => {
                 "the agent-dev image is not downloaded yet; Mjolnir downloads it in the background"
+            }
+            Self::ImageUnavailable {
+                downloading: false, ..
+            } => {
+                "the agent-dev image is not downloaded, and its runtime's pull policy is never, so Mjolnir does not download it"
             }
             Self::NotSignedIn => "not signed in with ChatGPT",
             Self::UnsupportedAccount => {
@@ -755,7 +798,7 @@ impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Launch(detail) => write!(f, "could not start Codex CLI: {detail}"),
-            Self::ImageUnavailable(detail) => f.write_str(detail),
+            Self::ImageUnavailable { detail, .. } => f.write_str(detail),
             Self::Protocol(kind) => write!(f, "Codex app-server protocol error ({kind:?})"),
             Self::NotInstalled { expected, detail } => {
                 f.write_str(self.user_reason())?;
@@ -810,14 +853,33 @@ fn parse_report(result: &Value) -> Result<CodexUsageReport, QueryError> {
 
 fn parse_snapshot(snapshot: &Value) -> Option<CodexUsageReport> {
     let report = CodexUsageReport {
+        paid_credits: snapshot.get("credits").and_then(parse_paid_credits),
         banked_resets: None,
         primary: snapshot.get("primary").and_then(parse_window),
         secondary: snapshot.get("secondary").and_then(parse_window),
     };
-    if report.primary.is_none() && report.secondary.is_none() {
+    if report.primary.is_none() && report.secondary.is_none() && report.paid_credits.is_none() {
         None
     } else {
         Some(report)
+    }
+}
+
+fn parse_paid_credits(value: &Value) -> Option<mj_client::quota::PaidCredits> {
+    use mj_client::quota::PaidCredits;
+    if value.get("unlimited").and_then(Value::as_bool) == Some(true) {
+        return Some(PaidCredits::Unlimited);
+    }
+    if !value.get("hasCredits")?.as_bool()? {
+        return PaidCredits::limited(0.0);
+    }
+    match value.get("balance").filter(|value| !value.is_null()) {
+        None => Some(PaidCredits::Available),
+        Some(value) => value
+            .as_str()?
+            .parse::<f64>()
+            .ok()
+            .and_then(PaidCredits::limited),
     }
 }
 
@@ -995,6 +1057,44 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn host_has_codex_only_for_a_complete_managed_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_root = test_cache_root(&temp);
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        std::fs::write(bin.join("node"), "#!/bin/sh\nexit 0\n").expect("node");
+        std::fs::set_permissions(bin.join("node"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod node");
+        let with_node = Some(bin.as_os_str());
+        assert!(!host_has_codex(Some(&cache_root), with_node));
+
+        let install = install_fake_managed_codex(&cache_root, "#!/bin/sh\nexit 0\n");
+        assert!(host_has_codex(Some(&cache_root), with_node));
+
+        // The launcher is a Node script: without `node` on its PATH it cannot
+        // start.
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert!(!host_has_codex(
+            Some(&cache_root),
+            Some(empty.path().as_os_str())
+        ));
+        assert!(!host_has_codex(Some(&cache_root), None));
+
+        // A `codex` on PATH is not the managed install.
+        let other = tempfile::tempdir().expect("tempdir");
+        assert!(!host_has_codex(
+            Some(&other.path().join("cache")),
+            with_node
+        ));
+
+        std::fs::remove_file(install.join(mj_core::harness_runtime::MANIFEST_FILE))
+            .expect("remove manifest");
+        assert!(!host_has_codex(Some(&cache_root), with_node));
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn client_holds_a_shared_install_lease_for_its_lifetime() {
         use std::fs::OpenOptions;
@@ -1034,11 +1134,13 @@ mod tests {
     #[test]
     fn parses_codex_bucket_and_formats_remaining_windows() {
         let report = parse_report(&json!({
-            "rateLimits": { "primary": { "usedPercent": 99, "windowDurationMins": 60 } },
+            "rateLimits": { "primary": { "usedPercent": 99, "windowDurationMins": 60 },
+                "credits": {"hasCredits": true, "unlimited": true} },
             "rateLimitsByLimitId": {
                 "codex": {
                     "primary": { "usedPercent": 25, "windowDurationMins": 300 },
-                    "secondary": { "usedPercent": 18, "windowDurationMins": 10080 }
+                    "secondary": { "usedPercent": 18, "windowDurationMins": 10080 },
+                    "credits": {"hasCredits": true, "unlimited": false, "balance": "0.125"}
                 }
             }
         }))
@@ -1048,6 +1150,10 @@ mod tests {
         assert_eq!(report.primary.as_ref().unwrap().label, "5H");
         assert_eq!(report.secondary.as_ref().unwrap().remaining_percent, 82);
         assert_eq!(report.secondary.as_ref().unwrap().label, "Week");
+        assert_eq!(
+            report.paid_credits,
+            mj_client::quota::PaidCredits::limited(0.125)
+        );
     }
 
     #[test]
@@ -1235,11 +1341,11 @@ read_and_log
 read_and_log
 printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
-printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300},"credits":{"hasCredits":true,"unlimited":false,"balance":"50.25"}}}}'
 read_and_log
 printf '%s\n' '{"id":4,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
-printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300}}}}'
+printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300},"credits":{"hasCredits":false,"unlimited":false,"balance":"50.25"}}}}'
 "#,
         );
         let mut client = None;
@@ -1248,9 +1354,20 @@ printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
             refresh_in_temp(&mut client, temp.path().to_path_buf(), env.clone(), &temp).await;
         let second = refresh_in_temp(&mut client, temp.path().to_path_buf(), env, &temp).await;
 
+        for (status, balance) in [(&first, 50.25), (&second, 0.0)] {
+            let CodexUsageStatus::Available(report) = status else {
+                panic!("missing quota report")
+            };
+            assert_eq!(
+                report.paid_credits,
+                mj_client::quota::PaidCredits::limited(balance)
+            );
+        }
+
         assert!(matches!(
             first,
             CodexUsageStatus::Available(CodexUsageReport {
+                paid_credits: Some(_),
                 banked_resets: None,
                 primary: Some(CodexUsageWindow {
                     remaining_percent: 75,
@@ -1262,6 +1379,7 @@ printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
         assert!(matches!(
             second,
             CodexUsageStatus::Available(CodexUsageReport {
+                paid_credits: Some(_),
                 banked_resets: None,
                 primary: Some(CodexUsageWindow {
                     remaining_percent: 50,
@@ -1360,6 +1478,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":10,"wind
         assert!(matches!(
             status,
             CodexUsageStatus::Available(CodexUsageReport {
+                paid_credits: None,
                 banked_resets: None,
                 primary: Some(CodexUsageWindow {
                     remaining_percent: 90,
@@ -1591,6 +1710,7 @@ IFS= read -r line
                 engine: crate::quota_runtime::Engine::Podman,
                 program: engine,
                 image: "example.invalid/agent-dev:test".to_owned(),
+                pull_policy: mj_core::config::ImagePullPolicy::Auto,
             },
             home: temp.path().join("codex-home"),
         };

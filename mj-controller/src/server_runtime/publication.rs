@@ -87,6 +87,43 @@ impl ViewerPublication {
             }
             self.dirty.insert(id.clone());
         }
+        for (id, _) in self
+            .runtime
+            .metadata
+            .session_attention
+            .changes(&next.metadata.session_attention)
+        {
+            self.dirty.insert(id.clone());
+            for runtime in [&self.runtime, next] {
+                if let Some(native) = runtime.native_agents.get(id) {
+                    self.dirty.insert(native.agent.owner_session_id.clone());
+                }
+            }
+        }
+        for (id, _) in self
+            .runtime
+            .metadata
+            .form_holders
+            .changes(&next.metadata.form_holders)
+        {
+            self.dirty.insert(id.clone());
+        }
+        for (id, _) in self
+            .runtime
+            .metadata
+            .notification_dismissals
+            .changes(&next.metadata.notification_dismissals)
+        {
+            self.dirty.insert(id.clone());
+        }
+        for (id, _) in self
+            .runtime
+            .metadata
+            .unread_frontiers
+            .changes(&next.metadata.unread_frontiers)
+        {
+            self.dirty.insert(id.clone());
+        }
         self.runtime = next.clone();
     }
 
@@ -132,7 +169,7 @@ impl ViewerPublication {
                 self.children
                     .entry(relation.parent_session_id.clone())
                     .or_insert_with(Default::default)
-                    .insert(id.clone(), ());
+                    .insert(id.clone(), relation.kind);
             }
         }
         for id in self.operations.keys().chain(views.operations.keys()) {
@@ -173,6 +210,40 @@ impl ViewerPublication {
             }),
             &mut self.engines,
         );
+        for id in snapshot.sessions.0.keys().cloned().collect::<Vec<_>>() {
+            let row = snapshot.sessions.0.get_mut(&id).expect("selected row");
+            row.attention = self
+                .runtime
+                .metadata
+                .session_attention
+                .get(&id)
+                .copied()
+                .unwrap_or_default();
+            row.unread_frontier = self.runtime.metadata.unread_frontiers.get(&id).copied();
+            row.notification_dismissal = self
+                .runtime
+                .metadata
+                .notification_dismissals
+                .get(&id)
+                .cloned();
+            row.form_holder = self.runtime.metadata.form_holders.get(&id).cloned();
+            row.capabilities.dismiss_notification = row.notification_dismissal.is_some();
+            row.native_subagent_attention = row
+                .native_subagents
+                .iter()
+                .map(|native| {
+                    (
+                        native.session_id.clone(),
+                        self.runtime
+                            .metadata
+                            .session_attention
+                            .get(&native.view_id())
+                            .copied()
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
+        }
         for id in &self.dirty {
             match snapshot.sessions.0.get(id) {
                 Some(row) => {

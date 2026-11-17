@@ -29,12 +29,24 @@ impl RuntimeState {
         {
             return Ok(());
         }
+        let _foreground = self
+            .recovery_observer
+            .gate
+            .enter_foreground(
+                session_id,
+                "suspend preparation",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &AtomicBool::new(false),
+                &ProcessExecutor,
+            )
+            .await?;
+        self.persist_suspension_intent(session_id).await
+    }
+
+    async fn persist_suspension_intent(self: &Arc<Self>, session_id: &str) -> Result<()> {
         blocking({
             let session_id = session_id.to_owned();
-            let observer = self.recovery_observer.clone();
             move || {
-                let cancelled = AtomicBool::new(false);
-                let _reservation = reserve_recovery_or_cancel(&observer, &session_id, &cancelled)?;
                 ensure!(
                     !crate::controller::move_session::move_has_pending_queue(&session_id),
                     "Move queue admission is incomplete; retry Move on the same destination before suspending"
@@ -45,6 +57,7 @@ impl RuntimeState {
                     .sessions
                     .get_mut(&session_id)
                     .with_context(|| format!("unknown session {session_id}"))?;
+                let ready_move = crate::controller::move_session::move_destination_before_close(record)?;
                 if matches!(
                     record.state,
                     SessionState::Running
@@ -54,11 +67,10 @@ impl RuntimeState {
                     record.state = SessionState::Closing;
                     record.last_error = None;
                     record.updated_at = chrono::Utc::now().to_rfc3339();
-                    crate::database::save_lifecycle_session(record)?;
                 } else if record.public_error().is_some() {
                     record.last_error = None;
-                    crate::database::save_lifecycle_session(record)?;
                 }
+                crate::database::save_suspension_intent(record, ready_move.as_ref())?;
                 Ok(())
             }
         })
@@ -98,41 +110,108 @@ impl RuntimeState {
         acknowledge_unpublished_work: bool,
         ignore_nested_repositories: bool,
     ) -> Result<()> {
-        self.request_close(&session_id);
-        let result = self
-            .suspend_with_children(
-                &session_id,
+        let started = self
+            .start_suspend_session(
+                session_id,
                 acknowledge_unpublished_work,
                 ignore_nested_repositories,
             )
-            .await;
-        if let Err(error) = &result {
-            let reference = new_command_id("suspension").unwrap_or_else(|_| "suspension".into());
-            tracing::warn!(%session_id, %reference, error = format!("{error:#}"), "session suspension failed");
-            self.record_failed_close(&session_id, &reference, &LifecycleFailure::of(error))
-                .await;
-        }
-        self.clear_close_request(&session_id);
-        if result.is_err() {
-            self.tell_live_parent_about_stopped_subagents(&session_id)
-                .await;
-        }
-        result
+            .await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
     }
 
-    /// The parent's sub-agents are stopped inside its close, once its
-    /// checkpoint is verified (see [`Self::stop_subagents_for_suspend`]).
-    async fn suspend_with_children(
+    pub(super) async fn start_suspend_session(
         self: &Arc<Self>,
-        session_id: &str,
+        session_id: String,
         acknowledge_unpublished_work: bool,
         ignore_nested_repositories: bool,
-    ) -> Result<()> {
-        self.prepare_suspension(session_id).await?;
-        self.close_requested_session_with_ack(
-            session_id.to_owned(),
+    ) -> Result<StartedLifecycle> {
+        self.start_suspend_session_controlled(
+            session_id,
             acknowledge_unpublished_work,
             ignore_nested_repositories,
+            LifecycleControl::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn start_suspend_session_controlled(
+        self: &Arc<Self>,
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
+        control: LifecycleControl,
+    ) -> Result<StartedLifecycle> {
+        self.start_suspend_session_origin(
+            session_id,
+            acknowledge_unpublished_work,
+            ignore_nested_repositories,
+            control,
+            super::lifecycle::LifecycleOrigin::Person,
+        )
+        .await
+    }
+
+    pub(super) async fn recover_suspension(self: &Arc<Self>, session_id: String) -> Result<()> {
+        let started = self
+            .start_suspend_session_origin(
+                session_id,
+                true,
+                false,
+                LifecycleControl::default(),
+                super::lifecycle::LifecycleOrigin::Automatic,
+            )
+            .await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
+    }
+
+    async fn start_suspend_session_origin(
+        self: &Arc<Self>,
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
+        control: LifecycleControl,
+        origin: super::lifecycle::LifecycleOrigin,
+    ) -> Result<StartedLifecycle> {
+        ensure!(
+            !control.cancelled.load(Ordering::Acquire),
+            "phone action cancelled"
+        );
+        let key =
+            serde_json::to_string(&(acknowledge_unpublished_work, ignore_nested_repositories))?;
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        self.admit_prepared_lifecycle(
+            session_id,
+            LifecycleKind::Suspend,
+            super::lifecycle::LifecycleStart {
+                origin,
+                ..super::lifecycle::LifecycleStart::request(key, None, Some(control.clone()))
+            },
+            Some(acceptance),
+            move |state, session_id, _, session_admission| async move {
+                let result = async {
+                    state.persist_suspension_intent(&session_id).await?;
+                    accepted.send_replace(Some(Ok(())));
+                    state
+                        .suspend_admitted(
+                            &session_admission,
+                            session_id.clone(),
+                            control,
+                            acknowledge_unpublished_work,
+                            ignore_nested_repositories,
+                        )
+                        .await
+                }
+                .await;
+                if result.is_err() {
+                    state
+                        .tell_live_parent_about_stopped_subagents(&session_id)
+                        .await;
+                }
+                result
+            },
         )
         .await
     }
@@ -148,31 +227,68 @@ impl RuntimeState {
     ///
     /// A child's durable output is the report it hands back, so a child is
     /// stopped and removed the way a destroy removes one, with no checkpoint
-    /// of its own; its conversation is put into SessionWiki first, so it stays
-    /// searchable. The children are listed on the parent's record before any
+    /// of its own; sub-agents are excluded from SessionWiki. The children are
+    /// listed on the parent's record before any
     /// of them is stopped, so the parent's model can be told about them when
     /// the parent resumes, or at once when the close fails after this and
     /// leaves the parent live.
     ///
-    /// Only reading and recording that list can fail this. A child that
-    /// cannot be stopped is logged and its records are removed anyway: it
-    /// never fails the parent's suspend.
+    /// Every child must be stopped before the parent can retire shared files.
+    /// A failed stop leaves its logical and physical ownership available for retry.
     pub(super) async fn stop_subagents_for_suspend(
         self: &Arc<Self>,
         parent_session_id: &str,
     ) -> Result<()> {
+        // Whether a child is still waiting on processes it started is the
+        // worker's to say, so it is read from the live sessions first.
+        let children = self
+            .owner()
+            .controller()
+            .state
+            .active_child_session_ids(parent_session_id);
+        let mut liveness = std::collections::BTreeMap::new();
+        for child_id in &children {
+            liveness.insert(child_id.clone(), self.work_liveness(child_id).await);
+        }
         let stopped = blocking({
             let parent_session_id = parent_session_id.to_owned();
             move || {
                 let controller = Controller::load()?;
-                let stopped = active_child_session_ids(&controller.state, &parent_session_id)
+                let stopped = controller
+                    .state
+                    .active_child_session_ids(&parent_session_id)
                     .iter()
                     .map(|child_id| {
-                        crate::controller::stopped_subagent(&controller.state, child_id)
+                        crate::controller::stopped_subagent(
+                            &controller.state,
+                            child_id,
+                            &liveness[child_id],
+                        )
                     })
                     .collect::<Result<Vec<_>>>()?;
-                if !stopped.is_empty() {
-                    crate::database::record_stopped_subagents(&parent_session_id, &stopped)?;
+                // The primary hears that its oracle was stopped, but never its
+                // session ID or prompt: the oracle is listed by a fixed entry.
+                let mut announced = Vec::new();
+                let mut oracle_stopped = false;
+                for child in &stopped {
+                    let oracle = controller
+                        .state
+                        .subagents
+                        .get(&child.child_session_id)
+                        .is_some_and(|relation| {
+                            relation.kind == mj_core::subagent::SubagentKind::Oracle
+                        });
+                    if oracle {
+                        oracle_stopped = true;
+                    } else {
+                        announced.push(child.clone());
+                    }
+                }
+                if oracle_stopped {
+                    announced.push(mj_core::subagent::StoppedSubagent::oracle());
+                }
+                if !announced.is_empty() {
+                    crate::database::record_stopped_subagents(&parent_session_id, &announced)?;
                 }
                 Ok(stopped)
             }
@@ -189,94 +305,21 @@ impl RuntimeState {
             not_handed_back,
             "stopping sub-agents before suspending their parent"
         );
-        // One pass indexes the parent's whole tree, so each child is
-        // destroyed below without indexing it again.
-        self.index_before_destroy(parent_session_id).await;
-        for child in stopped {
-            let child_id = child.child_session_id;
-            // A sub-agent borrows its parent's worker and owns no branch.
-            let Err(error) = Box::pin(self.force_destroy_indexed_session(
-                child_id.clone(),
-                BranchDisposition::Keep,
-                LifecycleKind::StopSubagent,
-            ))
+        let children = stopped
+            .into_iter()
+            .map(|child| child.child_session_id)
+            .collect();
+        self.stop_subagents(children, LifecycleKind::StopSubagent, None)
             .await
-            else {
-                continue;
-            };
-            tracing::warn!(
-                session_id = %parent_session_id,
-                %child_id,
-                error = format!("{error:#}"),
-                "could not stop a sub-agent for its parent's suspend; removing its records"
-            );
-            if let Err(error) = self.remove_subagent_records(&child_id).await {
-                tracing::warn!(
-                    session_id = %parent_session_id,
-                    %child_id,
-                    error = format!("{error:#}"),
-                    "could not remove the records of a sub-agent its parent's suspend stopped"
-                );
-            }
-        }
+            .context("stop sub-agents before suspending their parent")?;
         Ok(())
-    }
-
-    pub(super) async fn snapshot_subagent_report_cleanup(
-        self: &Arc<Self>,
-        parent_session_id: &str,
-    ) -> Option<crate::controller::SubagentReportCleanup> {
-        let result = blocking({
-            let parent_session_id = parent_session_id.to_owned();
-            move || Controller::load()?.subagent_report_cleanup(&parent_session_id)
-        })
-        .await;
-        match result {
-            Ok(cleanup) => cleanup,
-            Err(error) => {
-                tracing::warn!(
-                    session_id = parent_session_id,
-                    error = format!("{error:#}"),
-                    "cannot snapshot sub-agent report cleanup"
-                );
-                None
-            }
-        }
-    }
-
-    pub(super) async fn finish_subagent_report_cleanup(
-        self: &Arc<Self>,
-        parent_session_id: &str,
-        cleanup: Option<crate::controller::SubagentReportCleanup>,
-    ) {
-        let Some(cleanup) = cleanup else { return };
-        if let Err(error) = blocking(move || {
-            cleanup.run(&ProcessExecutor);
-            Ok(())
-        })
-        .await
-        {
-            tracing::warn!(
-                session_id = parent_session_id,
-                error = format!("{error:#}"),
-                "sub-agent report cleanup task failed"
-            );
-        }
     }
 
     async fn stop_subagents_and_remove_reports(
         self: &Arc<Self>,
         parent_session_id: &str,
     ) -> Result<()> {
-        // Capture relations before the cascade deletes their durable records.
-        // The caller has already verified the parent's checkpoint.
-        let cleanup = self
-            .snapshot_subagent_report_cleanup(parent_session_id)
-            .await;
-        self.stop_subagents_for_suspend(parent_session_id).await?;
-        self.finish_subagent_report_cleanup(parent_session_id, cleanup)
-            .await;
-        Ok(())
+        self.stop_subagents_for_suspend(parent_session_id).await
     }
 
     /// An automatic close keeps every sub-agent. Their workers run in this
@@ -333,7 +376,7 @@ impl RuntimeState {
     ///
     /// A close admitted on a record already past this point started
     /// committed; a commit never reverts, so that one goes on.
-    fn commit_close(control: &LifecycleControl) -> Result<()> {
+    pub(super) fn commit_close(control: &LifecycleControl) -> Result<()> {
         ensure!(
             control.grant_commit() || control.is_committed(),
             "operation cancelled before the session began to stop"
@@ -437,29 +480,6 @@ impl RuntimeState {
     /// Forget a sub-agent whose stop failed: its record, its relation to the
     /// parent, its conversation and its attachments. Its worker lives on the
     /// parent's target, which the parent's suspend releases next.
-    async fn remove_subagent_records(self: &Arc<Self>, child_id: &str) -> Result<()> {
-        self.preempt_active_lifecycle(child_id).await?;
-        blocking({
-            let child_id = child_id.to_owned();
-            move || {
-                if let Err(error) = mj_core::attachment::AttachmentStore::controller(&child_id)
-                    .and_then(|store| store.remove_session_data())
-                {
-                    tracing::warn!(
-                        %child_id,
-                        error = format!("{error:#}"),
-                        "could not remove a stopped sub-agent's attachments"
-                    );
-                }
-                crate::database::delete_session(&child_id)
-            }
-        })
-        .await?;
-        self.reload_controller().await?;
-        self.publish_revision();
-        Ok(())
-    }
-
     pub(super) async fn wait_before_close(self: &Arc<Self>, session_id: &str) -> Result<()> {
         // Cancellation is a request: the old owner must actually finish before
         // close acquires the target, including an irreversible create commit.
@@ -476,7 +496,11 @@ impl RuntimeState {
                 })
                 .map(|operation| {
                     let restart_intent = operation.restart_intent.clone();
-                    operation.request_cancel();
+                    if operation.origin == super::lifecycle::LifecycleOrigin::Automatic
+                        && !operation.control.is_committed()
+                    {
+                        operation.request_cancel(session_id, "close superseded automatic work");
+                    }
                     (restart_intent, operation.result.clone())
                 })
         };
@@ -507,50 +531,19 @@ impl RuntimeState {
     ) -> Result<()> {
         let key = serde_json::to_string(&(parent_session_id, request_id))?;
         let control = LifecycleControl::default();
-        let result = self.start_or_join_lifecycle_controlled(
-            session_id,
-            LifecycleKind::Suspend,
-            None,
-            Some(key),
-            Some(control.clone()),
-            move |state, session_id, _cancelled| async move {
-                state
-                    .suspend_admitted(session_id, control, true, false)
-                    .await
-            },
-        )?;
-        let completed = result.clone();
-        let outcome = Self::wait_lifecycle_result(result).await;
-        self.remove_completed_lifecycle(&completed);
-        outcome?;
-        Ok(())
-    }
-
-    async fn close_requested_session_with_ack(
-        self: &Arc<Self>,
-        session_id: String,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
-    ) -> Result<()> {
-        self.wait_before_close(&session_id).await?;
-        let control = LifecycleControl::default();
-        let result = self.start_or_join_lifecycle_controlled(
-            session_id,
-            LifecycleKind::Suspend,
-            None,
-            None,
-            Some(control.clone()),
-            move |state, session_id, _cancelled| async move {
-                state
-                    .suspend_admitted(
-                        session_id,
-                        control,
-                        acknowledge_unpublished_work,
-                        ignore_nested_repositories,
-                    )
-                    .await
-            },
-        )?;
+        let result = self
+            .admit_lifecycle(
+                session_id,
+                LifecycleKind::Suspend,
+                super::lifecycle::LifecycleStart::request(key, None, Some(control.clone()))
+                    .automatic(),
+                move |state, session_id, _cancelled, session_admission| async move {
+                    state
+                        .suspend_admitted(&session_admission, session_id, control, true, false)
+                        .await
+                },
+            )
+            .await?;
         let completed = result.clone();
         let outcome = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&completed);
@@ -562,20 +555,13 @@ impl RuntimeState {
     /// it holds, and the close commits through it.
     async fn suspend_admitted(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: String,
         control: LifecycleControl,
         acknowledge_unpublished_work: bool,
         ignore_nested_repositories: bool,
     ) -> Result<DaemonLifecycleResult> {
         let cancelled = control.cancelled.clone();
-        let _recovery_reservation = tokio::task::spawn_blocking({
-            let observer = self.recovery_observer.clone();
-            let session_id = session_id.clone();
-            let cancelled = cancelled.clone();
-            move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-        })
-        .await
-        .context("reserve recovery for daemon close task")??;
         let mut controller = tokio::task::spawn_blocking(Controller::load)
             .await
             .context("load controller for daemon close task")??;
@@ -585,6 +571,7 @@ impl RuntimeState {
             session_id.clone(),
         );
         self.suspend_with_loaded_controller(
+            session_admission,
             &session_id,
             &mut controller,
             &executor,
@@ -598,8 +585,10 @@ impl RuntimeState {
     /// `commit` is the control a daemon close commits through at its point of
     /// no return. A Restart's fallback passes none: it holds its own teardown
     /// phase for the whole stop instead.
+    #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
     pub(super) async fn suspend_with_loaded_controller(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         controller: &mut Controller,
         executor: &(impl CommandExecutor + Sync),
@@ -607,6 +596,16 @@ impl RuntimeState {
         ignore_nested_repositories: bool,
         commit: Option<&LifecycleControl>,
     ) -> Result<DaemonLifecycleResult> {
+        if controller
+            .settle_superseded_move_for_close(
+                session_id,
+                executor,
+                Some(self.stop_subagents_before_close(session_id, commit.cloned())),
+            )
+            .await?
+        {
+            return Ok(DaemonLifecycleResult::Done);
+        }
         let route = close_route(
             controller.state.sessions.get(session_id),
             controller.state.subagents.contains_key(session_id),
@@ -626,6 +625,7 @@ impl RuntimeState {
             CloseRoute::Subagent => {
                 controller
                     .suspend_subagent_controlled(
+                        session_admission,
                         session_id,
                         executor,
                         Some(&self.session_manager),
@@ -638,6 +638,7 @@ impl RuntimeState {
             CloseRoute::RecoverInterrupted => {
                 controller
                     .recover_interrupted_close_managed(
+                        session_admission,
                         session_id,
                         executor,
                         &self.session_manager,
@@ -663,6 +664,7 @@ impl RuntimeState {
             _ => {
                 controller
                     .suspend_session_managed_controlled(
+                        session_admission,
                         session_id,
                         executor,
                         &self.session_manager,
@@ -680,27 +682,29 @@ impl RuntimeState {
         })
     }
 
-    pub(super) fn start_deferred_cleanup(
+    pub(super) async fn start_deferred_cleanup(
         self: &Arc<Self>,
         session_id: String,
     ) -> Result<LifecycleWatch> {
-        let result = self.start_or_join_lifecycle(
-            session_id.clone(),
-            LifecycleKind::Cleanup,
-            |state, session_id, cancelled| async move {
-                blocking(move || {
-                    let mut controller = Controller::load()?;
-                    let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled),
-                        state,
-                        session_id.clone(),
-                    );
-                    controller.cleanup_stopped_target(&session_id, &executor)?;
-                    Ok(DaemonLifecycleResult::Done)
-                })
-                .await
-            },
-        )?;
+        let result = self
+            .start_automatic_lifecycle(
+                session_id.clone(),
+                LifecycleKind::Cleanup,
+                |state, session_id, cancelled, _session_admission| async move {
+                    blocking(move || {
+                        let mut controller = Controller::load()?;
+                        let executor = DaemonStageReportingExecutor::new(
+                            CancellableProcessExecutor::new(cancelled),
+                            state,
+                            session_id.clone(),
+                        );
+                        controller.cleanup_stopped_target(&session_id, &executor)?;
+                        Ok(DaemonLifecycleResult::Done)
+                    })
+                    .await
+                },
+            )
+            .await?;
         let caller_result = result.clone();
         let channel = result.clone();
         let state = Arc::clone(self);
@@ -718,8 +722,8 @@ impl RuntimeState {
     }
 
     /// Recovery is teardown only: never reconnect or reprovision a failed worker.
-    pub(super) fn resume_startup_cleanups(self: &Arc<Self>, immediately: bool) {
-        self.resume_move_destination_cleanups(immediately);
+    pub(super) async fn resume_startup_cleanups(self: &Arc<Self>, immediately: bool) {
+        self.resume_move_destination_cleanups(immediately).await;
         let ids = {
             let owner = self.owner();
             owner
@@ -746,29 +750,31 @@ impl RuntimeState {
                 .collect::<Vec<_>>()
         };
         for session_id in ids {
-            let result = self.start_or_join_lifecycle(
-                session_id.clone(),
-                LifecycleKind::StartupCleanup,
-                |_state, session_id, _cancelled| async move {
-                    blocking(move || {
-                        let mut controller = Controller::load()?;
-                        // The decision follows lifecycle admission, so a competing
-                        // close or destroy cannot settle this snapshot under us.
-                        if controller
-                            .state
-                            .sessions
-                            .get(&session_id)
-                            .is_none_or(|record| record.state != SessionState::StartupCleanup)
-                        {
-                            return Ok(DaemonLifecycleResult::Done);
-                        }
-                        let executor = crate::controller::failed_launch_cleanup_executor();
-                        controller.cleanup_failed_startup_controlled(&session_id, &executor)?;
-                        Ok(DaemonLifecycleResult::Done)
-                    })
-                    .await
-                },
-            );
+            let result = self
+                .start_automatic_lifecycle(
+                    session_id.clone(),
+                    LifecycleKind::StartupCleanup,
+                    |_state, session_id, _cancelled, _session_admission| async move {
+                        blocking(move || {
+                            let mut controller = Controller::load()?;
+                            // The decision follows lifecycle admission, so a competing
+                            // close or destroy cannot settle this snapshot under us.
+                            if controller
+                                .state
+                                .sessions
+                                .get(&session_id)
+                                .is_none_or(|record| record.state != SessionState::StartupCleanup)
+                            {
+                                return Ok(DaemonLifecycleResult::Done);
+                            }
+                            let executor = crate::controller::failed_launch_cleanup_executor();
+                            controller.cleanup_failed_startup_controlled(&session_id, &executor)?;
+                            Ok(DaemonLifecycleResult::Done)
+                        })
+                        .await
+                    },
+                )
+                .await;
             match result {
                 Ok(result) => {
                     let state = self.clone();
@@ -787,7 +793,7 @@ impl RuntimeState {
         }
     }
 
-    pub(super) fn resume_retained_cleanups(self: &Arc<Self>) {
+    pub(super) async fn resume_retained_cleanups(self: &Arc<Self>) {
         let session_ids = self
             .owner()
             .controller()
@@ -816,7 +822,7 @@ impl RuntimeState {
             {
                 continue;
             }
-            if let Err(error) = self.start_deferred_cleanup(session_id.clone()) {
+            if let Err(error) = self.start_deferred_cleanup(session_id.clone()).await {
                 tracing::warn!(%session_id, error = format!("{error:#}"), "could not resume deferred Podman cleanup");
                 self.push_notice(
                     &session_id,
@@ -857,7 +863,7 @@ impl RuntimeState {
                 if !needs_cleanup {
                     return Ok(());
                 }
-                self.start_deferred_cleanup(session_id.to_owned())?
+                self.start_deferred_cleanup(session_id.to_owned()).await?
             }
         };
         let channel = result.clone();

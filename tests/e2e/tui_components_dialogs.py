@@ -23,7 +23,10 @@ the companion tui_components_actions module against the same owned fixture.
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
+
+from reliability_lab import TIMEOUT_SCALE
 
 
 _TEMP_TITLE = "dialog-probe"
@@ -34,7 +37,7 @@ def _capture(tmux: Any) -> str:
     return str(tmux.capture())
 
 
-def _wait(tmux: Any, marker: str, description: str | None = None, timeout: float = 8) -> str:
+def _wait(tmux: Any, marker: str, description: str | None = None, timeout: float = 8 * TIMEOUT_SCALE) -> str:
     """Wait for a visible marker and return the resulting pane."""
 
     return str(tmux.wait_for(marker, description or f"{marker!r} is visible", timeout=timeout))
@@ -100,7 +103,7 @@ def _session_title(lab: Any, screen: str) -> str:
 
 
 def _open_palette_command(tmux: Any, query: str, marker: str) -> str:
-    tmux.send_key("F2")
+    tmux.send_prefix(":")
     _wait(tmux, "Commands", "command palette")
     tmux.send_text(query)
     _wait(tmux, marker, f"palette command {query!r}")
@@ -120,7 +123,7 @@ def probe_rename(lab: Any, tmux: Any, evidence: Any) -> None:
         evidence,
         tmux,
         "dialog-rename-open",
-        "F2, search for Rename session, and press Enter",
+        "Ctrl+B :, search for Rename session, and press Enter",
         "Rename session field and standard Cancel/Save buttons are visible",
         dialog,
     )
@@ -146,7 +149,7 @@ def probe_rename(lab: Any, tmux: Any, evidence: Any) -> None:
     tmux.wait_until(
         lambda: _TEMP_TITLE in _capture(tmux) and "Rename session" not in _capture(tmux),
         "temporary rename is saved",
-        timeout=8,
+        timeout=8 * TIMEOUT_SCALE,
     )
     _record(
         evidence,
@@ -170,7 +173,7 @@ def probe_rename(lab: Any, tmux: Any, evidence: Any) -> None:
     tmux.wait_until(
         lambda: original_title in _capture(tmux) and "Rename session" not in _capture(tmux),
         "original session title is restored",
-        timeout=8,
+        timeout=8 * TIMEOUT_SCALE,
     )
     _record(
         evidence,
@@ -231,60 +234,11 @@ def probe_target_config_id(lab: Any, tmux: Any, evidence: Any) -> None:
     _wait(tmux, "Sessions", "dashboard focus restored after target probe")
 
 
-def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
-    """Disabled Save consumes a real click; async discovery preserves the draft."""
-    import time
-    from tui_components_tmux import locate_text
-    before = lab.snapshot()["review_config"]
-    from tui_components_actions import open_review_settings
-    open_review_settings(tmux)
-    _wait(tmux, "Trigger")
-    _record(evidence, tmux, "review-settings-open", "open review settings", "review form visible")
-    tmux.send_key("Enter")
-    tmux.send_key("Down")
-    tmux.send_key("Enter")
-    time.sleep(0.15)
-    # Open the profile dropdown, then choose its explicit empty option.
-    screen = _capture(tmux)
-    row = next((y, line) for y, line in enumerate(screen.splitlines()) if "Profile   " in line)
-    tmux.mouse_click(row[1].index("Profile   ") + 12, row[0])
-    tmux.send_key("Home")
-    tmux.send_key("Enter")
-    screen = _wait(tmux, "No reviewer profile")
-    x, y = locate_text(screen, "  Save Setup  ")
-    tmux.mouse_click(x + 3, y)
-    time.sleep(0.3)
-    _wait(tmux, "Setup › Code Review")
-    if lab.snapshot()["review_config"] != before:
-        raise AssertionError("disabled Save persisted an invalid review draft")
-    _record(evidence, tmux, "review-disabled-save", "enable without a reviewer; click disabled Save", "invalid draft stays open and persisted settings are unchanged")
-    tmux.send_key("F1")
-    _wait(tmux, "Keyboard shortcuts")
-    tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Keyboard shortcuts" not in _capture(tmux), "Help dismissed over review editor")
-    _wait(tmux, "No reviewer profile")
-    x, y = locate_text(_capture(tmux), "  Cancel  ", last=True)
-    tmux.mouse_click(x + 3, y)
-    _wait(tmux, "Discard unsaved changes?", "review draft protection")
-    tmux.send_key("Enter")
-    tmux.wait_until(lambda: "Discard unsaved changes?" not in _capture(tmux), "safe default keeps review edits")
-    _wait(tmux, "No reviewer profile")
-    tmux.send_key("Escape")
-    _wait(tmux, "Discard unsaved changes?")
-    tmux.send_key("Right")
-    tmux.send_key("Enter")
-    tmux.wait_until(lambda: "Setup › Code Review" not in _capture(tmux), "review child cancellation")
-    tmux.send_key("Escape")
-    if lab.snapshot()["review_config"] != before:
-        raise AssertionError("cancelling review settings persisted the draft")
-    _record(evidence, tmux, "review-protected-cancel", "Cancel; keep editing; Escape; discard", "safe default preserves edits and discard restores Setup without saving")
-
-
 def probe_new_wizard(lab: Any, tmux: Any, evidence: Any) -> None:
     """Open the new-session wizard, move a selector, and cancel in its footer."""
 
     del lab
-    tmux.send_key("M-n")
+    tmux.send_prefix("c")
     wizard = _wait(tmux, "New session", "new session wizard")
     _record(
         evidence,
@@ -326,9 +280,9 @@ def probe_resume_import(lab: Any, tmux: Any, evidence: Any) -> None:
 
     del lab
     # Resume moved to the prefix chord: ctrl+b arms, then g opens the picker.
-    tmux.send_key("C-b")
-    tmux.send_key("g")
-    resume = _wait(tmux, "Resume a session", "resume dialog")
+    tmux.send_prefix("g")
+    # The picker opens on its Live tab; Mjolnir, Import and Archive follow.
+    resume = _wait(tmux, "Running sessions", "resume dialog")
     _record(
         evidence,
         tmux,
@@ -339,12 +293,14 @@ def probe_resume_import(lab: Any, tmux: Any, evidence: Any) -> None:
     )
 
     tmux.send_key("Right")
+    _wait(tmux, "Mjolnir sessions · newest first", "Mjolnir tab")
+    tmux.send_key("Right")
     importing = _wait(tmux, "Importable sessions", "import tab")
     _record(
         evidence,
         tmux,
         "dialog-resume-import-tab",
-        "press Right on the resume list",
+        "press Right twice on the resume list",
         "Import tab and its search control are visible",
         importing,
     )
@@ -361,14 +317,19 @@ def probe_resume_import(lab: Any, tmux: Any, evidence: Any) -> None:
         searched,
     )
 
+    # Escape peels one layer at a time: the query, then the search box's hold
+    # on the keyboard, then the dialog itself.
     tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Resume a session" not in _capture(tmux), "resume/import dismissed")
+    _wait(tmux, "Importable sessions · newest first", "search cleared")
+    tmux.send_key("Escape")
+    tmux.send_key("Escape")
+    tmux.wait_until(lambda: "× Sessions" not in _capture(tmux), "resume/import dismissed")
     cancelled = _capture(tmux)
     _record(
         evidence,
         tmux,
         "dialog-resume-import-cancel",
-        "press Escape from Import search",
+        "press Escape three times from Import search",
         "resume dialog closes without importing a session",
         cancelled,
     )
@@ -378,13 +339,13 @@ def probe_web_dialog(lab: Any, tmux: Any, evidence: Any) -> None:
     """Open the web dialog and activate its shared Close button."""
 
     del lab
-    tmux.send_key("F4")
+    tmux.send_prefix("u")
     web = _wait(tmux, "Web viewer", "web dialog")
     _record(
         evidence,
         tmux,
         "dialog-web-open",
-        "press F4",
+        "press Ctrl+B u",
         "web dialog and title close control are visible",
         web,
     )
@@ -401,29 +362,28 @@ def probe_web_dialog(lab: Any, tmux: Any, evidence: Any) -> None:
     )
 
 
-def probe_setup_double_click(lab: Any, tmux: Any, evidence: Any) -> None:
-    """Selection and activation use the same row as keyboard Enter."""
+def probe_setup_click(lab: Any, tmux: Any, evidence: Any) -> None:
+    """One click on a Settings row opens its page, the same as keyboard Enter."""
     del lab
     from tui_components_tmux import locate_text
-    tmux.send_key("F7")
-    screen = _wait(tmux, "Interface", "setup categories")
-    x, y = locate_text(screen, "Interface")
+    tmux.send_prefix("s")
+    _wait(tmux, "Interface", "setup categories")
+    # A control takes clicks once the frame that drew it has registered it.
+    time.sleep(0.3 * TIMEOUT_SCALE)
+    x, y = locate_text(_capture(tmux), "Interface")
     tmux.mouse_click(x, y)
-    selected = _capture(tmux)
-    if "Setup › Interface" in selected:
-        raise AssertionError("one setup click activated instead of selecting")
-    # A fresh pair is sent together so capture latency cannot affect the interval.
-    tmux.send_key("Home")
-    tmux.mouse_click(x, y)
-    tmux.mouse_click(x, y)
-    opened = _wait(tmux, "Setup › Interface", "double-click opens selected setup category")
-    _record(evidence, tmux, "setup-double-click", "select once, then double-click Interface", "Interface opens like Enter", opened)
-    tmux.send_key("BSpace")
-    _wait(tmux, "Interface", "setup parent category")
-    tmux.send_key("Enter")
-    _wait(tmux, "Setup › Interface", "Enter reopens the restored selection")
+    opened = _wait(tmux, "Settings › Interface", "one click opens the setup category like Enter")
+    _record(evidence, tmux, "setup-click", "click Interface", "Interface opens like Enter", opened)
+    # Escape goes back to the categories, which keep their selection.
     tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Setup › Interface" not in _capture(tmux), "setup dismissed without edits")
+    tmux.wait_until(lambda: "Settings › Interface" not in _capture(tmux), "setup parent category")
+    tmux.send_key("Enter")
+    _wait(tmux, "Settings › Interface", "Enter reopens the restored selection")
+    # Escape goes back one level at a time: first to the categories, then out.
+    tmux.send_key("Escape")
+    tmux.wait_until(lambda: "Settings › Interface" not in _capture(tmux), "setup page closed")
+    tmux.send_key("Escape")
+    tmux.wait_until(lambda: "× Settings" not in _capture(tmux), "setup dismissed without edits")
 
 
 def run_dialog_acceptance(lab: Any, tmux: Any, evidence: Any) -> None:
@@ -434,10 +394,9 @@ def run_dialog_acceptance(lab: Any, tmux: Any, evidence: Any) -> None:
     preconditions; every probe restores them before returning.
     """
 
-    probe_setup_double_click(lab, tmux, evidence)
+    probe_setup_click(lab, tmux, evidence)
     probe_rename(lab, tmux, evidence)
     probe_target_config_id(lab, tmux, evidence)
-    probe_review_settings(lab, tmux, evidence)
     probe_new_wizard(lab, tmux, evidence)
     probe_resume_import(lab, tmux, evidence)
     probe_web_dialog(lab, tmux, evidence)

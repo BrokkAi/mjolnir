@@ -1,0 +1,640 @@
+{
+  "id": "L2803",
+  "title": "Cache fn data flow summaries",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "07d292ca700ead3ba5c751211efb3228",
+    "session_title": "bifrost via claude",
+    "reply_position": 404874,
+    "captured_at": "2026-11-05T21:42:25.300Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:101",
+          "role": "user",
+          "text": "sorry for the interruption, i've enabled subagents now"
+        },
+        {
+          "id": "user:134",
+          "role": "user",
+          "text": "when you have a plan, ask 61f0abcccf634f1496fc07478093eb5d to review it"
+        },
+        {
+          "id": "user:2863",
+          "role": "user",
+          "text": "can we split these out to ec2 vms to get results faster? this is high priority and i'm in a hurry\n\n(fine to leave matrix here, also fine to move it if we expect the time remaining to be >> time spent so far)"
+        },
+        {
+          "id": "user:3054",
+          "role": "user",
+          "text": "you can run boto3 via uv if that's easier"
+        },
+        {
+          "id": "user:6670",
+          "role": "user",
+          "text": "is message ordering actually material to correctness here or just \"we wanted to change absolutely nothing\""
+        },
+        {
+          "id": "user:6794",
+          "role": "user",
+          "text": "yeah i think the gate is incorrect here and we should revise it. close 7118"
+        },
+        {
+          "id": "user:10459",
+          "role": "user",
+          "text": "it looks like you stopped. keep going, you can build on to-be-merged PRs"
+        },
+        {
+          "id": "user:59360",
+          "role": "user",
+          "text": "is 7761 the last piece?"
+        },
+        {
+          "id": "user:59972",
+          "role": "user",
+          "text": "can we accelerate 4b?"
+        },
+        {
+          "id": "user:60187",
+          "role": "user",
+          "text": "yes"
+        },
+        {
+          "id": "user:65736",
+          "role": "user",
+          "text": "answer on dist?"
+        },
+        {
+          "id": "user:66004",
+          "role": "user",
+          "text": "> Bifrost should skip generated or minified files by default\n\ni mean it should, yes\n\n> .bifrostignore in the benchmark setup\n\nlet's do that"
+        },
+        {
+          "id": "user:73775",
+          "role": "user",
+          "text": "> Reaching the flask target probably needs keys per declaration or procedure instead of per file. That is a new milestone-sized piece of design, so it is your call whether to start it next.\n\npls perform the measurement and create the ticket but idt i want to scope creep to this atm"
+        },
+        {
+          "id": "user:82275",
+          "role": "user",
+          "text": "The 4(a) durable root-product engine (#8048), measured against its master base on 11 flask commits on one VM, both orders: cold scan +2.4%, one-commit source edits +0.4% to +2.9% (+1.3% overall), docs-only commit -25%, net -0.7%. Even 100% root reuse saves only 25%, because master's one-commit check costs almost as much as its cold scan (about 510 vs 527 CPU s). The bigger cost is 36 policies that run in full mode on every check (20 unbounded units, 9 plans crossing seeds). What should happen with #8048?\n\n#8048: Hold; do full-mode next (Recommended)"
+        },
+        {
+          "id": "user:82711",
+          "role": "user",
+          "text": "why do we have a \"full mode policy,\" shouldn't our design mean that all policies get diff-base mode automatically once it lands?"
+        },
+        {
+          "id": "user:82902",
+          "role": "user",
+          "text": "ok but you can start on the other gaps while waiting for that"
+        },
+        {
+          "id": "user:92631",
+          "role": "user",
+          "text": "while you're waiting, ask 61f0abcccf634f1496fc07478093eb5d if we're missing anything\nthat's causing us to not realize the hoped-for improvements, besides the file-level keys"
+        },
+        {
+          "id": "user:95932",
+          "role": "user",
+          "text": "While you were away: on flask, 282 of 298 units recomputed after a one-line edit to src/flask/cli.py fail on one read, the module-path index key `flask.cli` (#8180). The verifier counts every index key an edited file contributes as changed, even when that file's entries for the key are identical before and after. Comparing the entries per key is a contained change to index verification and the store's row builders, not per-declaration keys (#7965). Should I take #8180 on next?\n\n#8180: Yes, do it next (Recommended)"
+        },
+        {
+          "id": "user:111713",
+          "role": "user",
+          "text": "did you try \"pr ready\" or just assume it doesn't work?"
+        },
+        {
+          "id": "user:111761",
+          "role": "user",
+          "text": "0a. I explicitly authorize this\n0b. How do I configure fucking claude code to always alow this\n1. why do we get 75% savings instead of 95%?\n2. what's the decision / how do we fix type flow cost?"
+        },
+        {
+          "id": "user:112197",
+          "role": "user",
+          "text": "1a. is absent-member slicing complementary with \"cache type flow in sqlite\" or does the latter obsolete the former?\n1b. i thought we had a bunch of work on caching type flow summaries already\n\n2. i think we should just remove full mode entirely and figure out how to make policies that require it, not require it, is that feasible? if not why not?"
+        },
+        {
+          "id": "user:112740",
+          "role": "user",
+          "text": "Under the new partial-answer rule, #8314's per-branch merged-limit walk is parity machinery: it only lets a sliced answer through when it would match the whole run's truncation. A simpler change: if every unit finished untruncated, return the merged answer (it is complete), and if a limit is hit, return the merged subset with incompleteness reported, instead of falling back to full mode. That also slices except-plans and selectors, and drops the per-leaf charges and their epoch token. The remaining question is cost: summed unit recomputes can exceed one whole run's budget, so the unit loop would stop once the request budget is spent and report the rest incomplete. How should #8314 proceed?\n\n#8314 path: Rework #8314 now (Recommended)"
+        },
+        {
+          "id": "user:113150",
+          "role": "user",
+          "text": "1a. good, kick off absent-member slicing\n1b. let's investigate this and hopefully fix it\n\n2.i.a. kick off recompute just the failed units\n2.i.b. redefinining truncated results is not an issue\n\n2.ii. I thought that was what we just built, what was the file-level reuse that you just finished, I guess it only applies to single-file rules? if so jfc why did that take multiple days I'm worried that you dramatically overcomplicated something"
+        },
+        {
+          "id": "user:113649",
+          "role": "user",
+          "text": "mark #8368 ready"
+        },
+        {
+          "id": "user:113917",
+          "role": "user",
+          "text": "> What per-file reuse can't do\n\nlet's make this concrete\n\n1. give an example of a cross-file policy that benefits substantially (no typestate, no taint)\n2. suppose i have a sql injection rule, this is taint right? what would file-level reuse plausibly save, vs what would it not?"
+        },
+        {
+          "id": "user:114282",
+          "role": "user",
+          "text": "> the next precision step\n\nyes we should obviously do this\n\n> the per-declaration keys\n\nif it's just a matter of finer-grained keys then sure let's try it\n\n> #8368\n\ni will work w/ coordinator directly on this, you can stand down\n\n> If it were sliced per source file\n\nhow much value does this add assuming we get typestate summaries working and the other improvements in motion?"
+        },
+        {
+          "id": "user:114297",
+          "role": "user",
+          "text": "also i thought there was a \"cache results by source\", if we know that the graph from root X hasn't changed we don't need to recompute X"
+        },
+        {
+          "id": "user:115097",
+          "role": "user",
+          "text": "ok so just to clarify\n\n1a. we only care about native engine (rust, mostly go, others in progress), if work benefits legacy as well then great but we should not do work that only benefits legacy \n1b. corollary: you really need to be testing in a native engine path, is the flash \"costs more than it saved\" result a function of legacy distortion? idk, best to not introduce this question\n2a. i want general solutions not a bunch of point fixes, so \"we built solution X for problem shape A but not for B\" is a huge massive smell, okay to increase the blast radius of the refactor to address these\n2b. in this specific case yes i agree that policy units should cover this"
+        },
+        {
+          "id": "user:115480",
+          "role": "user",
+          "text": "ok so is this a reasonable summary of where we're at for my boss? image included so you can see how it's nested \n\n\nNon-graph rules: completed\nEasy mode, just cache results by file and invalidate when changed, this is in the merge queue now\nThis doesn't mean it only applies to single-file analysis, for example, \"do python parameters passed anonymously match declared kwargs\" applies to declarations that are not in the same file, but we can still cache the analysis by file (if neither caller's nor callee's file changed, the result is the same)\nGraph-based rules are harder, two sub-pieces, both in progress\nCache entire paths -- meaning, if we know that none of the edges from source X have changed then the entire analysis for X is unchanged\nFor some reason Opus built this but only for typestate queries and did not generalize to taint\nCache intermediate nodes, primarily this means \"build a reusable summary of type flow within each function and cache that instead of recomputing it for every call,\" this is straightforward conceptually but quite messy in dynamic languages since you basically have to store partial results at every transformation"
+        },
+        {
+          "id": "user:115799",
+          "role": "user",
+          "text": "> Per-function summaries exist for type flow and for Rust taint. The gap is Go taint, which has no stored summaries.\n\nokay so the gap is\n\n1. we built something per-language that goes in the shared engine\n2. possibly also we built two specializations of node-based summaries that should be generalized"
+        },
+        {
+          "id": "user:115934",
+          "role": "user",
+          "text": "> some cached reads cover a whole file\n\nacceptable, for now\n\n> or include source positions\n\nnot acceptable, you're fixing this right?"
+        },
+        {
+          "id": "user:116387",
+          "role": "user",
+          "text": "approved. launch all zig!"
+        },
+        {
+          "id": "user:138771",
+          "role": "user",
+          "text": "did the merged policy node summaries make it to the generalized engine?"
+        },
+        {
+          "id": "user:138974",
+          "role": "user",
+          "text": "why is go blocked by a jvm gate?"
+        },
+        {
+          "id": "user:139079",
+          "role": "user",
+          "text": "> #8402's 16% cold-CPU cost and the unfinished #8453\n\nare these in motion?"
+        },
+        {
+          "id": "user:139180",
+          "role": "user",
+          "text": "yes to both"
+        },
+        {
+          "id": "user:148476",
+          "role": "user",
+          "text": "/mnt/optane is back"
+        },
+        {
+          "id": "user:148514",
+          "role": "user",
+          "text": "> landing #8402\n\nwhat call do you need"
+        },
+        {
+          "id": "user:148641",
+          "role": "user",
+          "text": "it sounds like this should be something that gets generalized for the entire native engine, not a Go one-off #collaborating"
+        },
+        {
+          "id": "user:149181",
+          "role": "user",
+          "text": "let's land 8402 now\n\nthen extend it to the native languages and make it obvious that is part of native-language implementation\n\nif at some point we find a native impl where it's not worth the cost we deal with it then, YAGNI applies"
+        },
+        {
+          "id": "user:155704",
+          "role": "user",
+          "text": "> #8575 lands on the reuse gains alone\n\nwfm"
+        },
+        {
+          "id": "user:168805",
+          "role": "user",
+          "text": "#8580: Python and Scala can only publish IR at parse time after a redesign. Python needs a model gate for non-returning calls (small) and a new query-time step for `with` suppression (medium). Scala needs collection-flow contracts applied at query time in the flow engine (large; Rust's unused facts would gain a reader too). Production Python policy checks likely lower Python IR on demand today, but that cost has never been measured. How should I proceed?\n\n#8580 scope: Measure first (Recommended)\nOther: what is the alternative to ir at parse time?"
+        },
+        {
+          "id": "user:169397",
+          "role": "user",
+          "text": "go ahead and perform the A / B\n\nif we can parallelize by using two VMs, so much the better"
+        },
+        {
+          "id": "user:169835",
+          "role": "user",
+          "text": "i get the incentives here but including budget in a cache key just seems so wrong, is there a sane alternative?"
+        },
+        {
+          "id": "user:169986",
+          "role": "user",
+          "text": "yes"
+        },
+        {
+          "id": "user:170417",
+          "role": "user",
+          "text": "#8856: your ruling says a complete stored result replays when its recorded COST fits the request's budget. Today no per-dimension cost is measured (many query/solver counters are local). The narrower repair records the LIMITS the base ran under and replays a complete policy only when the request's limits are at least as large in every dimension; a smaller budget evaluates fresh. That fixes the regression (same caller budget -> identical limits -> replay) and keeps today's boundary that incomplete policies are never replayed. Accept the narrower repair now?\n\n#8856 rule: Narrower repair now (Recommended)"
+        },
+        {
+          "id": "user:170457",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:170791",
+          "role": "user",
+          "text": "separately, where does your per-function summary work stand?"
+        },
+        {
+          "id": "user:171502",
+          "role": "user",
+          "text": "> #8386, your 2026-10-30 architecture: one summary, composition and slicing design for native dataflow\n\nit sounds like there's a bunch of next steps we can start here in parallel"
+        },
+        {
+          "id": "user:171901",
+          "role": "user",
+          "text": "The #8386 maps are back. #8388 slice 3 (Go taint on composition) is implementing. The other two have small measured payoffs: #8389's next slicing contract targets ~4% (cross-seed) + ~15% (absent-member) of flask policy time and does nothing for ripgrep's 89% (read-key precision); generic composition slice 1 is a pure extraction with no cost change until a second client (native flow policies) moves onto it. Those shares come from the 2026-10-29 census, which predates #8093/#8188/#8193/#8203/#8314 and #8856. How should I proceed with the rest of #8386?\n\n#8386 next: Re-measure first (Recommended)"
+        },
+        {
+          "id": "user:172144",
+          "role": "user",
+          "text": "/goal drive #8386 to completion; parallelize as much as possible, including using subagents and EC2 where those can add throughput"
+        },
+        {
+          "id": "user:172207",
+          "role": "user",
+          "text": "if the execplan is messy, clean it up first"
+        },
+        {
+          "id": "user:172276",
+          "role": "user",
+          "text": "pls delegate the 8856 fix to session d09dcdedbf83ad19ee90e5ae6eb48c44 so you can focus on 8386. (commit any work-in-progress and push to a branch)"
+        },
+        {
+          "id": "user:174077",
+          "role": "user",
+          "text": "#8386's plan defines completion broadly: no native policy selects the ICFG taint engine (all four forms), and no native policy widens with plan_crosses_seeds (every cross-seed operator). A census of the deployed packs shows only four native taint/flow policies (2 store-ends, 2 flow) and one cross-seed policy (ctor-initialization, intersect only). No deployed native policy uses conditional sanitizers, entry points, correlate, general except or require-both. The coordinator says narrowing completion to deployed policies is a direction change for you to approve. Which completion criteria should #8386 use?\n\n#8386 done: Full plan as written\nOther: goal is to move the entire engine to the caching design, it sounds like plan-as-written leaves us with two designs still which is suboptimal #collaborating"
+        },
+        {
+          "id": "user:174204",
+          "role": "user",
+          "text": "if this is worth surfacing to the native engine coordinator (0bf0983d553751026807d97d54857ede) pls do so"
+        },
+        {
+          "id": "user:175316",
+          "role": "user",
+          "text": "Deleting the ICFG taint engine (#8386 Milestone 3's end) is blocked by non-native languages: only Rust sinks use composition today (Go joins with #8388 slice 3); Python, Java, Kotlin, C#, JS/TS and the rest select ICFG for taint. Composition needs, per language, semantic IR (parse-time rows or on-demand) plus a caller-inventory coverage certificate; without the certificate, answers stay honest but incomplete where callers can't be enumerated. How should the deletion handle those languages?\n\nICFG delete: Migrate every language (Recommended)\nOther: messy bc we have a whole bunch of in-flight work here; answer is we move any native engine impl that is ready for it (consult 0bf0983d553751026807d97d54857ede) and make sure that this is the New Obvious Way To Do It for the others. don't scope creep to porting legacy languages with no NE impl"
+        },
+        {
+          "id": "user:187807",
+          "role": "user",
+          "text": "localhost is at about 20% cpu util, is there more we can do in parallel?"
+        },
+        {
+          "id": "user:199015",
+          "role": "user",
+          "text": "/compact"
+        },
+        {
+          "id": "user:263637",
+          "role": "user",
+          "text": "localhost is ~idle, is there more we can do in parallel?"
+        },
+        {
+          "id": "user:281415",
+          "role": "user",
+          "text": "localhost is ~idle, is there more we can do in parallel?"
+        },
+        {
+          "id": "user:332638",
+          "role": "user",
+          "text": "what is the IAM decision"
+        },
+        {
+          "id": "user:332852",
+          "role": "user",
+          "text": "iam approved"
+        },
+        {
+          "id": "user:333024",
+          "role": "user",
+          "text": "done"
+        },
+        {
+          "id": "user:345343",
+          "role": "user",
+          "text": "The coordinator released measurement B (run 8386b-20261104f), and I verified both pinned hashes. The auto-mode classifier then blocked the launch command. It starts one on-demand c7i.8xlarge in us-east-1, which terminates itself by a 19,800 s deadline (about $7.85 of compute at most, plus EBS and transfer). How do you want to proceed?\n\nB launch: Allow me to launch\nOther: i explicitly approve the launch"
+        },
+        {
+          "id": "user:347608",
+          "role": "user",
+          "text": "(after session restart your Monitor A task is gone)"
+        },
+        {
+          "id": "user:347881",
+          "role": "user",
+          "text": "localhost is ~idle, is there more we can do in parallel?"
+        },
+        {
+          "id": "user:348866",
+          "role": "user",
+          "text": "is there a reason not to tackle 9768 and 9743 now?"
+        },
+        {
+          "id": "user:358858",
+          "role": "user",
+          "text": "> Large briefs keep ending in partial checkpoints\n\nyou mean the subagent stops partway through? yes, that's a known limitation"
+        },
+        {
+          "id": "user:361554",
+          "role": "user",
+          "text": "pls summarize where we're at on the \"deliver true incremental processing\" goal"
+        },
+        {
+          "id": "user:361934",
+          "role": "user",
+          "text": "is there anything else we can do in parallel now?"
+        },
+        {
+          "id": "user:362364",
+          "role": "user",
+          "text": "yes, take 9840"
+        },
+        {
+          "id": "user:384717",
+          "role": "user",
+          "text": "is there anything else we can do in parallel now?"
+        },
+        {
+          "id": "user:385153",
+          "role": "user",
+          "text": "May I launch the #9947 Bat measurement on EC2 once the coordinator releases the frozen packet? It is one on-demand c7i.4xlarge in us-east-1 on account 842609633142, with a 2-hour absolute deadline (about $1.43 of compute, $2.50 ceiling). No retry. Run-scoped cleanup with a zero-resource proof. It builds the M1 branch, then runs the issue's cold and warm run_policy on the pinned Bat subject.\n\nEC2 launch: Approve after release (Recommended)"
+        },
+        {
+          "id": "user:388400",
+          "role": "user",
+          "text": "The coordinator has accepted the amended #9947 Bat packet (frozen-p4). May I launch it once, exactly as frozen? Run ID 9947bat-20261105a (checked unused). One on-demand c7i.4xlarge in us-east-1, account 842609633142. The deadline is 7,200 s absolute, with no retry, replacement or extension, and run-scoped cleanup with a zero-resource proof. Pricing checked at 16:01 UTC: $0.714/h, so compute is at most about $1.43 (ceiling $2.50), plus about $0.04 of gp3 storage (ceiling $0.10). The command is APPROVED_RUN_ID=9947bat-20261105a APPROVED_PACKET_DIGEST=c5928843da307a25756e3a97c9e9d27470371af3aa7cc79e9f7cad11d6423fc9 APPROVED_INPUT_DIGEST=c5928843…fc9 (the same) APPROVED_CHECKER_DIGEST=5b8cee0b658fb83d583fd5220d7cd1e4fb648e40e8543adac30d5021d8cf40cf bash /mnt/optane/tmp/9947-ec2/frozen-p4/launch.sh. I recheck the bytes immediately before running it.\n\nEC2 launch: Launch frozen-p4 once (Recommended)"
+        },
+        {
+          "id": "user:389604",
+          "role": "user",
+          "text": "Approve one EC2 launch of the corrected #9947 Bat measurement packet (frozen-p5, run ID 9947bat-20261105b)? The p4 run failed at its first build step and cleanup is proven (instance terminated; no volumes, groups, keys or alarms left). p5 fixes the build command and the pack check. Reviewer 5992a accepted it. Both build forms pass `cargo check` at the pinned tree (log /mnt/optane/tmp/9947-ec2/p5-exact-tree-check.log). Setup is unchanged: one on-demand c7i.4xlarge in us-east-1, 7,200 s absolute deadline, no retry, cleanup of this run's resources only. Current price is $0.714/hour, so at most about $1.45 including the 200 GiB disk. Approval covers exactly these bytes: SHA256SUMS 9c94c687...b8, checker 5b8cee0b...cf. Any change needs a new approval.\n\nEC2 launch: Launch frozen-p5 once (Recommended)"
+        },
+        {
+          "id": "user:389836",
+          "role": "user",
+          "text": "is there anything else we can do in parallel now?"
+        },
+        {
+          "id": "user:391949",
+          "role": "user",
+          "text": "Launch the corrected #9947 Bat packet (frozen-p6) once on EC2 as run 9947bat-20261105c? Two earlier runs failed in the guest on packet defects, and both were cleaned up (about $0.15 each). A local rehearsal of the full worker flow then found and fixed three more defects. With the exact p6 scripts it now passes end to end on a synthetic crate, using the pinned binary, real packs and rules, and the subject's .bifrost config. Reviewer 5992a accepted p6 but asked for one more rehearsal on the real Bat repository. Your rule is that real repositories run only on EC2, so I have not done that. The remaining risk is a defect that only the real subject triggers; the run would then fail early and clean up. Setup is unchanged: one on-demand c7i.4xlarge in us-east-1, 7,200 s absolute deadline, no retry, cleanup of this run's resources only, $0.714/hour (at most about $1.45). Approval covers exactly SHA256SUMS f4927f50...a3c024 and checker 5b8cee0b...cf.\n\nEC2 launch: Launch frozen-p6 once (Recommended)"
+        },
+        {
+          "id": "agent:402780",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The tripwire turns the M0 audit's negative claim, \"no unrecorded cache hit on the taint Output route\", into a test-time invariant. If a later change routes a taint Output through the FieldSlotIndex memory hit, every taint suite run panics with the issue numbers, instead of quietly reusing stale Outputs.\n- Scoping the marker to the Output capture, not to every policy unit, is deliberate. RQL field-slot queries hit the same cache under #7262's broader open problem. Tripping on those would turn an unrelated known gap into test failures, and that would make it tempting to switch the tripwire off.\n`─────────────────────────────────────────────────`\n\nTo use the idle capacity, I started three more #8386 follow-ups in parallel, each in its own worktree:\n- **#10072** (child `f797a7e3`): reproduce the possible false Complete after a Partial whole-workspace source query. This one is a correctness question.\n- **#10097** (child `fb90b432`): read-only design map for precise read keys on the widened-selector seed scan, for 5992a's design review.\n- **#10096** (child `931823fb`): find the producer that drops the Go composition leak witness.\n\nOther work in progress:\n- **#8880**: tripwire committed (`a0a0e90a4f`), and I'm rerunning the taint suites with it armed, outside the sandbox. Child `c326a312` is diagnosing the entry-point rows.\n- **#9947**: child `8f8f2662` is on step 3.\n- **#10095**: child `1bed4090` is isolating the direct-call refusal.\n- **#9642**: child `4f606124` is running the remaining gates.\n\nWaiting for results."
+        },
+        {
+          "id": "agent:402901",
+          "role": "assistant",
+          "text": "The #10097 map limits the \"smallest fix\". The common callee-name form `(call :callee (name \"x\"))` plans as `RoleName`, not `ExactName`, so moving the indexed path ahead of the scope read would not cover the usual taint selectors. There is also a cost problem: the index is keyed by content identity, so after any edit, verifying a name-inventory key may rebuild it over every file. I'll check whether the index already posts role names. That decides whether a general fix can reuse existing structure."
+        },
+        {
+          "id": "agent:403033",
+          "role": "assistant",
+          "text": "Next I'll commit the #10097 plan, add its open-core classification row, and send it to 5992a for design review."
+        },
+        {
+          "id": "agent:403076",
+          "role": "assistant",
+          "text": "I'll check the tripwire suite run."
+        },
+        {
+          "id": "agent:403086",
+          "role": "assistant",
+          "text": "The tripwire run is at 395 of 396 tests. The remaining one is most likely the unblessed selection-rows golden.\n\nStatus:\n- **#10097**: plan committed and sent to 5992a for design review.\n- **#10072**: child `d1007557` is checking whether a non-sliceable source query's Incomplete is lost. That is the remaining case where a false Complete could occur.\n- **#8880**: child `c326a312` is diagnosing the entry rows, and the tripwire suite run is about to finish.\n- **#9947**: child `8f8f2662` is on step 3.\n- **#10095**: child `1bed4090` is isolating the direct-call refusal.\n- **#10096**: child `931823fb` is tracing the missing witness.\n- **#9642**: child `4f606124` is running the remaining gates.\n- **#9794**: PR #10117 is ready.\n\nWaiting for results."
+        },
+        {
+          "id": "agent:403147",
+          "role": "assistant",
+          "text": "The step-3 child fixed the five mount- or order-dependent reasons. It stopped before the provider-origin audit and the two-root parity test. Its one flow-lib failure expects JSON `3` and gets `5`. That may be the Output DTO version, which M2a deliberately moves, so I'll check the test before treating it as a regression."
+        },
+        {
+          "id": "agent:403373",
+          "role": "assistant",
+          "text": "Next, the rest of #9947 step 3: the provider-origin reason audit and the two-root parity test. A continuation child picks it up from `30a01f378d`."
+        },
+        {
+          "id": "agent:403395",
+          "role": "assistant",
+          "text": "While that runs, I'll record 5992a's #10097 ruling in the plan, and answer the token question from code: how does the store decode a lookup kind it does not know?"
+        },
+        {
+          "id": "agent:403503",
+          "role": "assistant",
+          "text": "Now the #10097 implementation (M1 and M2 plus the token), delegated with the stop rule on the read-key columns."
+        },
+        {
+          "id": "agent:403519",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The entry-row puzzle was an accounting gap, not a key defect. In diff-base mode, a policy edit is paid for by the base pass, which runs the edited policy against the base revision, and the head then reuses what the base published. A reuse golden that renders only head counters hides the place where a key rotation is paid. That is why every row now also renders `base_recomputed`.\n- The #10097 token decision came from reading the decoder, not from preference. An unknown `LookupKind` is a plain store error that propagates, so an older binary would fail, not miss. Changing the epoch makes unit keys differ, so old and new binaries never see each other's units, and the decoder question no longer arises.\n`─────────────────────────────────────────────────`\n\nStatus:\n- **#10072**: closed by analysis as no defect, on every path traced. GitHub denied the comment-and-close write, so the comment is saved at `/tmp/10072-close.md`. Should I post it and close #10072, or would you rather do it yourself?\n- **#10097**: 5992a approved the design with conditions, and I recorded the conditions and the token decision in the plan. Child `4ab6b93c` is implementing M1 and M2. The M0 measurement and the RoleName completeness differential come after it.\n- **#8880**: the tripwire is merged (`79d36689e6`). Child `86887eab` is finishing and blessing the table golden, now with base-pass counts.\n- **#9947**: step 3's mount-free detail fixes and the stale DTO test are committed (`30a01f378d`). Child `7e612378` is doing the provider-origin audit and the two-root parity test.\n- **#9642**: I'm rerunning the seven sandbox-blocked policy-integration tests myself, with Python 3.12.\n- **#10095** and **#10096**: children `1bed4090` and `931823fb` are still diagnosing.\n- **#9794**: PR #10117 is ready."
+        },
+        {
+          "id": "agent:403642",
+          "role": "assistant",
+          "text": "I'll check the #9642 rerun, which is the one item waiting on me."
+        },
+        {
+          "id": "agent:403655",
+          "role": "assistant",
+          "text": "The tests could not load `libpython3.12.so`. The earlier child got past this by adding uv's Python library directory, and I'll do the same."
+        },
+        {
+          "id": "agent:403778",
+          "role": "assistant",
+          "text": "0bf0983d is suspended. Per my routing note, identity levers moved to 5992a on 2026-11-05, so I'll send the migration-number request there. First, the #9642 rerun results."
+        },
+        {
+          "id": "agent:403819",
+          "role": "assistant",
+          "text": "The rendered summary is the same on both sides; only the long canonical-JSON line differs. I'll pull out exactly which JSON fields differ."
+        },
+        {
+          "id": "agent:403878",
+          "role": "assistant",
+          "text": "Next, I'll commit #9947's provider-reason partial after a compile check, and spawn the step-3 continuation."
+        },
+        {
+          "id": "agent:403937",
+          "role": "assistant",
+          "text": "I filed the follow-up as #10126. Now the #10097 implementation brief, updated with migration 0286 and the reviewer's schema conditions."
+        },
+        {
+          "id": "agent:404004",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- Two independent maps found existing machinery that the issue text said was missing: `role_postings` for #10097 and `go_static_type_member` for #10061. Issue text describes the code as it was when someone wrote it, so mapping before designing kept both changes to composition of existing parts instead of new subsystems.\n- The model-owner limit in `go_static_type_member` is deliberate: model members are marked incomplete. It is the same authority question that blocks #10095's `*os.File` case. Keeping #10061 to workspace types means it can land without deciding that question, and the question stays visible for #10095 instead of being settled implicitly.\n`─────────────────────────────────────────────────`\n\nStatus:\n- **#10097**: migration 0286 reserved and the shape approved. Child `eaecd5a4` is implementing M1 and M2 with the migration. Follow-up #10126 is filed.\n- **#10061**: design sent to 5992a. It reuses `go_static_type_member` for method and interface-method calls and adds the token `-10061-go-method-call-result-pointer`.\n- **#9642**: six of the seven policy-integration failures were sandbox effects and pass outside it. The seventh is a real branch difference, `typestate.compilations` 2 against 1. Child `5779c6dd` is diagnosing it with a master control.\n- **#9947**: step 3's provider partial is committed (`e2c076f90b`). Child `6d2c0c55` is finishing the audit and the two-root parity test.\n- **#8880**: child `86887eab` is finishing and blessing the table golden.\n- **#10095**: child `e393573a` is testing rule R plus a method-selector claim for the direct case.\n- **#10096**: child `931823fb` is still tracing the missing witness.\n- **#10072**: GitHub denied the comment-and-close write, so the comment is saved at `/tmp/10072-close.md`. Should I post it and close #10072, or would you rather do it yourself?\n\nWaiting for results."
+        },
+        {
+          "id": "agent:404130",
+          "role": "assistant",
+          "text": "The work is spread across running children. I'll confirm they are all actually alive and progressing, not stalled."
+        },
+        {
+          "id": "agent:404177",
+          "role": "assistant",
+          "text": "All six earlier children are running, and #10061 now has its own (`22527e66`). I filed #10127 for the named-pointer follow-up that 5992a's deferral requires.\n\nWhat is running:\n- **#10097**: M1, M2 and migration 0286 (child `eaecd5a4`).\n- **#10061**: the approved method-call design, with 5992a's six extra test cases (child `22527e66`).\n- **#8880**: blessing the table golden (child `86887eab`).\n- **#9947**: step 3 audit and two-root parity test (child `6d2c0c55`).\n- **#9642**: the double-compile diagnosis (child `5779c6dd`).\n- **#10095**: the direct-call probe (child `e393573a`).\n- **#10096**: the witness diagnosis (child `931823fb`).\n\nTwo things still need you:\n1. **#10072 close**: GitHub denied my comment-and-close write. The analysis is saved at `/tmp/10072-close.md`: no false Complete exists on any traced path. Should I post it and close the issue, or would you rather do it yourself?\n2. **EC2 re-measure for #9947**: once M2a lands, the warm Bat measurement needs a new approval from you, with an exact packet digest and run ID. I'll ask when the packet is ready.\n\nWaiting for the child reports."
+        },
+        {
+          "id": "agent:404260",
+          "role": "assistant",
+          "text": "Two pieces of preparation don't depend on any running child. I'll draft them now so they are ready when the children report:\n- the #8880 PR body, which must state the #10097 limitation;\n- the #9642 integrated-evidence packet for 5992a."
+        },
+        {
+          "id": "agent:404294",
+          "role": "assistant",
+          "text": "I drafted the #8880 PR body at `/tmp/9642-s6/pr-8880-draft.md`, including the required #10097 limitation. It gets the golden's rows once child `86887eab` blesses them. The #9642 evidence packet for 5992a depends on the double-compile diagnosis, so it waits for child `5779c6dd`.\n\nNothing else can move until reports arrive. Seven children are running (#10097, #10061, #8880, #9947, #9642, #10095, #10096), and each report will start a new turn.\n\nStill waiting on you:\n1. **#10072**: should I post the analysis in `/tmp/10072-close.md` and close the issue, or would you rather do it yourself?\n2. **#9947 EC2 re-measure**: I'll ask for approval with the packet details once M2a lands."
+        },
+        {
+          "id": "agent:404343",
+          "role": "assistant",
+          "text": "Every open item is delegated or waiting on a report. Ending the turn is how I wait: each child report starts a new turn. I'll also start a 25-minute heartbeat as a fallback in case a child stalls."
+        },
+        {
+          "id": "agent:404446",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- #10096 shows a gap that only appears in the simplest case. The witness is built from what happens along the path (events and call handoffs), so the more trivial the leak (acquire, then nothing), the less evidence it gets, down to none. Starting every witness at the acquisition fixes this without a special case for empty paths, which matches the project's \"one general case\" rule.\n- Requiring a comparison with ICFG before implementing keeps the two engines' witnesses aligned. If ICFG anchors its witness differently, inventing a composition-only acquisition step would create a new difference between the engines for every composed finding.\n`─────────────────────────────────────────────────`\n\n#10096 now has a diagnosis and a design, and child `57aa6620` is implementing it after the ICFG comparison. Eight children are running (#10097, #10061, #10096, #8880, #9947, #9642, #10095, and the heartbeat as fallback). Waiting for reports.\n\nThe two user decisions are still open: posting `/tmp/10072-close.md` and closing #10072, and, later, approval for the EC2 re-measure."
+        },
+        {
+          "id": "agent:404532",
+          "role": "assistant",
+          "text": "The #10097 child added only `role_name_inventory` before reaching its context stop. The whole M1+M2 job is too large for one child. I'll commit the partial and split the rest into two narrow slices with exact pointers:\n- **A**: the shared role label, lookup kind and question, the store encode/decode, and migration 0286 with its tests.\n- **B**: the verifier, single-term recording, the M2 ordering and the token. B uses A's types, so it runs after A."
+        },
+        {
+          "id": "agent:404602",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The slices follow the dependency boundary, not file count. Slice A owns everything that defines the persisted key: types, schema and codec. Slice B consumes it in the verifier and the seed path. A change at the store boundary is where agents most often make schema-drift mistakes, so A gets the upgrade/downgrade and FK tests before anything is built on top of it.\n- Reusing `Role::label()` as the stored value meets the reviewer's \"one stable label in one place\" condition with no new code. The index's `RolePostingKey` already holds a `Role`, so the encoder, decoder and index cannot drift apart.\n`─────────────────────────────────────────────────`\n\n#10097 slice A (store, migration 0286, codec, upgrade and downgrade tests) is running in child `2534027d`. Slice B follows when it hands back. The other children are still running: #10061, #10096, #8880 golden, #9947 step 3c, #9642 double-compile, #10095 direct probe. Waiting for reports."
+        },
+        {
+          "id": "agent:404680",
+          "role": "assistant",
+          "text": "The direct-call refusal is explained. The deferred form claims the callee through `footprint_refuse_subtree_for_scoped(node)` (`semantic.rs:11568`), while a direct call claims only its call node, and #9954 claims callee subtrees only for package selectors. The external `file.Close` selector resolves as Unknown inside the file, so nothing claims it. Claiming the callee selector made the direct case Complete. The remaining closure reasons are external-summary diagnostics, and the run's completion is Complete. Before designing the narrow version, I'll read the experiment diff to see exactly what it claimed."
+        },
+        {
+          "id": "agent:404839",
+          "role": "assistant",
+          "text": "#9017's PR (#10066) is merged, so #10095 needs no token. I'll recheck at Ready. Now the three children: #10095 implementation, #9947 step 3 validation, and #9642's merged-limit diagnosis."
+        },
+        {
+          "id": "agent:404874",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- 5992a's over-coverage control (`f := file.Close; defer f(); keep(f)`) tests the one place where rule R's argument could fail. If covering the selection-point gap also silenced the openness of a method value that escapes to another call, R would claim more than \"this call's target is still open\". The control shows that the escape's own coverage still reports.\n- The #9642 double compile looks like a cost regression, but it is a correctness mechanism working as designed: the whole-policy fallback recompiles with fresh budget handles, so it never inherits a slice's partly spent allowance. The real question is why the branch reaches the merged limit at all, which is what the new diagnosis answers.\n`─────────────────────────────────────────────────`\n\nRunning now:\n- **#10095**: implementation of the approved design (child `8c66ae1b`).\n- **#10097**: slice A, store and migration 0286 (child `2534027d`).\n- **#10061**: implementation (child `22527e66`).\n- **#10096**: matching ICFG's seed step (child `fa4cd7ed`).\n- **#8880**: rows diagnosis (child `17e180ee`).\n- **#9947**: step 3 validation (child `4f68a434`).\n- **#9642**: merged-limit diagnosis (child `01292470`).\n\nStill waiting on you: the #10072 close (draft at `/tmp/10072-close.md`), and later the EC2 re-measure approval."
+        }
+      ],
+      "authorization_complete": false,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Launch the corrected #9947 Bat packet (frozen-p6) once on EC2 as run 9947bat-20261105c? Two earlier runs failed in the guest on packet defects, and both were cleaned up (about $0.15 each). A local rehearsal of the full worker flow then found and fixed three more defects. With the exact p6 scripts it now passes end to end on a synthetic crate, using the pinned binary, real packs and rules, and the subject's .bifrost config. Reviewer 5992a accepted p6 but asked for one more rehearsal on the real Bat repository. Your rule is that real repositories run only on EC2, so I have not done that. The remaining risk is a defect that only the real subject triggers; the run would then fail early and clean up. Setup is unchanged: one on-demand c7i.4xlarge in us-east-1, 7,200 s absolute deadline, no retry, cleanup of this run's resources only, $0.714/hour (at most about $1.45). Approval covers exactly SHA256SUMS f4927f50...a3c024 and checker 5b8cee0b...cf.\n\nEC2 launch: Launch frozen-p6 once (Recommended)",
+    "assistant_text_tail": "`★ Insight ─────────────────────────────────────`\n- 5992a's over-coverage control (`f := file.Close; defer f(); keep(f)`) tests the one place where rule R's argument could fail. If covering the selection-point gap also silenced the openness of a method value that escapes to another call, R would claim more than \"this call's target is still open\". The control shows that the escape's own coverage still reports.\n- The #9642 double compile looks like a cost regression, but it is a correctness mechanism working as designed: the whole-policy fallback recompiles with fresh budget handles, so it never inherits a slice's partly spent allowance. The real question is why the branch reaches the merged limit at all, which is what the new diagnosis answers.\n`─────────────────────────────────────────────────`\n\nRunning now:\n- **#10095**: implementation of the approved design (child `8c66ae1b`).\n- **#10097**: slice A, store and migration 0286 (child `2534027d`).\n- **#10061**: implementation (child `22527e66`).\n- **#10096**: matching ICFG's seed step (child `fa4cd7ed`).\n- **#8880**: rows diagnosis (child `17e180ee`).\n- **#9947**: step 3 validation (child `4f68a434`).\n- **#9642**: merged-limit diagnosis (child `01292470`).\n\nStill waiting on you: the #10072 close (draft at `/tmp/10072-close.md`), and later the EC2 re-measure approval.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      404294,
+      404446,
+      404874
+    ],
+    "user_position": 389836,
+    "input_rationale": "The agent asked whether to post the #10072 analysis and close the issue, and it will need approval for the EC2 Bat re-measure. Both need the user. The user's next message is 'both approved'.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:404294",
+      "agent:404446",
+      "agent:404874"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-05T21:43:18.668Z",
+        "kind": "user",
+        "text": "both approved"
+      },
+      {
+        "at": "2026-11-05T21:43:30.693Z",
+        "kind": "agent",
+        "text": "Thanks. I'll post the #10072 analysis and close the issue now, and record the EC2 approval with its scope: one Bat warm re-measure, same packet shape, after #9947 M2a lands."
+      },
+      {
+        "at": "2026-11-05T21:45:30.218Z",
+        "kind": "agent",
+        "text": "Both are done, with one mistake on my side:  - **#10072**: closed, and the analysis is posted as a comment (issuecomment-6670351198). My earlier statement that the draft was saved at `/tmp/10072-close"
+      },
+      {
+        "at": "2026-11-05T21:49:38.805Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task 8880-diag-rows4 finished: completed     State: completed     Report directory: /home/jonathan/Projects/bifrost/.mj/clones/07d292ca700ead3ba5c751211efb3228/.mj/agents/17e"
+      },
+      {
+        "at": "2026-11-05T21:49:38.824Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-05T21:49:55.351Z",
+        "kind": "agent",
+        "text": "The rows diagnosis explains all three surprises, and none is a production defect: - **Reuse rows**: the new conditional-sanitizer selector (`checked-value`) runs a seed scan inside every Output solve."
+      }
+    ]
+  }
+}

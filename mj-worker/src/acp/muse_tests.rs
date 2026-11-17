@@ -25,6 +25,7 @@ pub(crate) async fn native_muse_turn(
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -45,14 +46,13 @@ pub(crate) async fn native_muse_turn(
         initial_model: None,
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource::Direct {
-            key: String::new(),
-            endpoint: String::new(),
-        }),
+        verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
     let (commands, receiver) = mpsc::channel(16);
@@ -187,6 +187,7 @@ for line in sys.stdin:
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -224,14 +225,13 @@ for line in sys.stdin:
         initial_model: None,
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource::Direct {
-            key: String::new(),
-            endpoint: String::new(),
-        }),
+        verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
     let (commands, receiver) = mpsc::channel(16);
@@ -345,6 +345,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
@@ -365,14 +366,13 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             initial_model: None,
             harness: HarnessKind::Muse,
             execution_policy: policy,
+            claude_permission_mode: Default::default(),
+            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource::Direct {
-                key: String::new(),
-                endpoint: String::new(),
-            }),
+            verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
         };
         let (commands, receiver) = mpsc::channel(16);

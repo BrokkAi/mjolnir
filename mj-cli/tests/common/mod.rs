@@ -15,64 +15,11 @@ use anyhow::{Context, Result, bail};
 /// unwinding, so every test daemon also watches this process and exits with
 /// it. The environment is inherited by the daemon a client spawns.
 pub fn own_test_daemons(command: &mut Command) -> &mut Command {
-    command.env(DAEMON_OWNER_ENV, std::process::id().to_string())
-}
-
-/// A node beside a daemon a test started directly, as the launcher starts one
-/// beside every daemon it launches: the daemon runs its commands on it. Killed
-/// when the test drops it.
-#[allow(dead_code)]
-pub struct TestNode(std::process::Child);
-
-impl Drop for TestNode {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Start a node for the daemon `daemon` started, once that daemon publishes
-/// its endpoint under `data`. The node gets the daemon's environment, because
-/// it is where the daemon's commands, and any fake tools on `PATH`, run.
-#[allow(dead_code)]
-pub fn start_test_node(daemon: &Command, data: &Path) -> TestNode {
-    let metadata = data.join("daemon.json");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let published = loop {
-        if let Ok(bytes) = std::fs::read(&metadata)
-            && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
-        {
-            break value;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the daemon never published {}",
-            metadata.display()
-        );
-        thread::sleep(Duration::from_millis(25));
-    };
-    let endpoint = serde_json::json!({
-        "address": published["address"],
-        "token": published["token"],
-        "build_version": published["build_version"],
-    });
-    std::fs::write(
-        data.join("node-endpoint.json"),
-        serde_json::to_vec(&endpoint).unwrap(),
-    )
-    .unwrap();
-    let mut node = Command::new(daemon.get_program());
-    for (key, value) in daemon.get_envs() {
-        match value {
-            Some(value) => node.env(key, value),
-            None => node.env_remove(key),
-        };
-    }
-    node.arg("node")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    TestNode(node.spawn().expect("start the test node"))
+    // Hard-won: #1524: inherited session identity discarded isolated fixture environments.
+    command
+        .env_remove("MJ_SESSION_ID")
+        .env_remove("MJ_SESSION_BASH_ENV")
+        .env(DAEMON_OWNER_ENV, std::process::id().to_string())
 }
 
 /// The variable [`own_test_daemons`] sets, for launchers other than
@@ -163,17 +110,27 @@ impl DaemonStorage {
     // start a daemon in the background.
     #[allow(dead_code)]
     pub fn wait_until_owned(&self, deadline: Instant) -> bool {
+        self.wait_until_owned_while(deadline, || {})
+    }
+
+    /// [`Self::wait_until_owned`], calling `poll` between checks, for a
+    /// fixture that must keep serving its client while the daemon starts.
+    #[allow(dead_code)]
+    pub fn wait_until_owned_while(&self, deadline: Instant, mut poll: impl FnMut()) -> bool {
         // Metadata is published only after the daemon owns the store. Taking
         // the lock to probe startup can instead lock out that daemon's one
         // admission attempt, making an otherwise isolated fixture fail.
         let metadata = self.data.join("daemon.json");
-        while !self.daemon_pid(&metadata).is_some_and(process_exists) {
+        loop {
+            poll();
+            if self.daemon_pid(&metadata).is_some_and(process_exists) {
+                return true;
+            }
             if Instant::now() >= deadline {
                 return false;
             }
             thread::sleep(Duration::from_millis(10));
         }
-        true
     }
 
     /// Stop whichever daemon owns this store, so the storage can be removed.

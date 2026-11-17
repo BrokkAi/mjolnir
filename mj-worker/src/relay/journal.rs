@@ -680,6 +680,10 @@ impl DurableRelay {
         command_id: Option<&str>,
         observation: RelayObservation,
     ) -> Result<u64> {
+        // Every journal write passes here, so this is the one place that
+        // decides whether a ready checkpoint barrier's hold survives it. What
+        // waited is journaled first, which also keeps arrival order.
+        self.end_checkpoint_hold_for(command_id, &observation)?;
         let ordinal = self
             .snapshot
             .latest_ordinal
@@ -776,7 +780,7 @@ impl DurableRelay {
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
         }
-        if self.snapshot.assessment != previous_assessment {
+        if self.classifies_turns() && self.snapshot.assessment != previous_assessment {
             self.publish_assessment_diagnostic();
         }
         self.turn_context
@@ -804,7 +808,7 @@ impl DurableRelay {
         };
         if authorization_changed {
             self.turn_context
-                .set_authorization_context(self.snapshot.assessment_context.clone());
+                .set_authorization_context(self.snapshot.authorization_context());
         }
         if matches!(
             event.observation,
@@ -838,6 +842,7 @@ impl DurableRelay {
         {
             self.persist_snapshot()?;
         }
+        self.suppress_child_assessment()?;
         Ok(ordinal)
     }
 

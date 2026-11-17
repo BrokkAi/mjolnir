@@ -1,6 +1,36 @@
 use super::*;
 
 impl DashboardState {
+    /// The launch the new-session wizard seeds its choices from: the last
+    /// interactive launch when this client made one, else the newest session.
+    fn recent_launch_choice(&self) -> Option<LaunchRecency> {
+        let interactive = self.recent_launch.as_ref().map(|recent| LaunchRecency {
+            bundle_id: recent.bundle_id.clone(),
+            last_profile: recent.profile_id.clone(),
+            target_template_id: recent.target_id.clone(),
+            newest_created_at: String::new(),
+        });
+        match interactive.as_ref() {
+            Some(recent) => {
+                most_recent_configured_session(&self.config, std::slice::from_ref(recent))
+            }
+            None => most_recent_configured_session(&self.config, &self.launch_recency),
+        }
+        .cloned()
+    }
+
+    /// The index among the offered profiles the wizard opens on. A launch
+    /// that copies another session's settings uses it too when that session's
+    /// profile cannot be used.
+    pub(crate) fn default_new_profile_index(&self) -> usize {
+        self.recent_launch_choice()
+            .and_then(|session| {
+                self.offered_profiles()
+                    .position(|(id, _)| id == session.last_profile)
+            })
+            .unwrap_or(0)
+    }
+
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
         if let Some(action) = self.git_identity_gate_action() {
             return action;
@@ -40,23 +70,9 @@ impl DashboardState {
             }
             return DashboardAction::None;
         }
-        let interactive = self.recent_launch.as_ref().map(|recent| LaunchRecency {
-            bundle_id: recent.bundle_id.clone(),
-            last_profile: recent.profile_id.clone(),
-            target_template_id: recent.target_id.clone(),
-            newest_created_at: String::new(),
-        });
-        let recent = if let Some(recent) = interactive.as_ref() {
-            most_recent_configured_session(&self.config, std::slice::from_ref(recent))
-        } else {
-            most_recent_configured_session(&self.config, &self.launch_recency)
-        };
-        let profile = recent
-            .and_then(|session| {
-                self.offered_profiles()
-                    .position(|(id, _)| id == session.last_profile)
-            })
-            .unwrap_or(0);
+        let recent = self.recent_launch_choice();
+        let recent = recent.as_ref();
+        let profile = self.default_new_profile_index();
         let bundle = recent
             .and_then(|session| {
                 bundle_ids_by_recent_creation(&self.config, &self.launch_recency)
@@ -72,12 +88,20 @@ impl DashboardState {
             .expect("an offered profile was checked above");
         let profile_id = profile_id.as_str();
         let remembered = self.state.last_subagent_policy_for(profile_id);
+        let yolo = self
+            .config
+            .targets
+            .get(&nth_key(&self.config.targets, target))
+            .is_some_and(TargetTemplate::is_yolo);
         let mut delegation = subagents::SubagentDraft::new(remembered.clone());
+        delegation.oracle = self.state.last_oracle_choice_for(profile_id);
         delegation.refresh_create(
             profile_id,
             &self.config,
             &self.profile_capabilities,
             &remembered,
+            self.state.last_oracle_choice_for(profile_id),
+            yolo,
         );
         self.mode = Mode::New(NewWizard {
             subagents: Box::new(delegation),
@@ -106,7 +130,6 @@ impl DashboardState {
             project_history_index: 0,
             resource_allocation: None,
             remember_container_size: false,
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             remote_repositories: None,
@@ -119,7 +142,7 @@ impl DashboardState {
         if action != DashboardAction::None {
             return action;
         }
-        self.resolve_all_aws_resource_options_action()
+        DashboardAction::None
     }
 
     /// Open the resume wizard for one session by id. The dashboard reaches
@@ -135,7 +158,9 @@ impl DashboardState {
                 .set("This session is active; press Enter to open it.");
             return DashboardAction::None;
         }
-        if session.checkpoint.is_none() {
+        if session.checkpoint.is_none()
+            && !(session.state == SessionState::Error && session.target.is_some())
+        {
             self.notices
                 .set("This session has no verified recovery copy to resume.");
             return DashboardAction::None;
@@ -157,13 +182,14 @@ impl DashboardState {
             .unwrap_or(0);
         let target = self.offered_target_index_or_first(&session.target_template_id);
         self.mode = Mode::Resume(ResumeWizard {
-            subagents: Box::new(subagents::SubagentDraft::new(
-                session.subagents.clone().unwrap_or_default(),
-            )),
+            subagents: Box::new(
+                subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
+                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned()),
+            ),
             files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
-            title: session.display_title().to_owned(),
+            title: session.listed_title().to_owned(),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: false,
             preparation: None,
@@ -180,7 +206,6 @@ impl DashboardState {
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts.clone()),
 
             resource_allocation: None,
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: false,
@@ -191,7 +216,7 @@ impl DashboardState {
         if action != DashboardAction::None {
             return action;
         }
-        self.resolve_all_aws_resource_options_action()
+        DashboardAction::None
     }
 
     /// Open the resume wizard for an archived SessionWiki session.
@@ -250,7 +275,6 @@ impl DashboardState {
             mounts: MountWizard::with_mounts(Vec::new(), Vec::new()),
 
             resource_allocation: None,
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: false,
@@ -261,7 +285,7 @@ impl DashboardState {
         if action != DashboardAction::None {
             return action;
         }
-        self.resolve_all_aws_resource_options_action()
+        DashboardAction::None
     }
 
     /// Open the resume controls for an active session as a Move operation.
@@ -298,13 +322,14 @@ impl DashboardState {
             .unwrap_or(0);
         let target = self.offered_target_index_or_first(&session.target_template_id);
         self.mode = Mode::Resume(ResumeWizard {
-            subagents: Box::new(subagents::SubagentDraft::new(
-                session.subagents.clone().unwrap_or_default(),
-            )),
+            subagents: Box::new(
+                subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
+                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned()),
+            ),
             files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
-            title: session.display_title().to_owned(),
+            title: session.listed_title().to_owned(),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: true,
             preparation: None,
@@ -321,7 +346,6 @@ impl DashboardState {
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts),
 
             resource_allocation: session.resource_allocation,
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             // Move's safe default is to leave pending work idle. The review
@@ -334,7 +358,7 @@ impl DashboardState {
         if action != DashboardAction::None {
             return action;
         }
-        self.resolve_all_aws_resource_options_action()
+        DashboardAction::None
     }
 
     /// Open the Move wizard for a retained failure while the source is still
@@ -390,7 +414,7 @@ impl DashboardState {
             files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
-            title: session.display_title().to_owned(),
+            title: session.listed_title().to_owned(),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: true,
             preparation: None,
@@ -418,7 +442,6 @@ impl DashboardState {
                 .resource_allocation
                 .clone()
                 .or(session.resource_allocation),
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: operation.queue == ResumeQueueDisposition::Discard,
@@ -444,24 +467,6 @@ impl DashboardState {
                 self.advance_resume_wizard(wizard)
             }
             _ => unreachable!(),
-        }
-    }
-
-    fn resolve_all_aws_resource_options_action(&self) -> DashboardAction {
-        let target_template_ids = self
-            .config
-            .targets
-            .iter()
-            .filter_map(|(id, target)| {
-                matches!(target, TargetTemplate::AwsEc2 { .. }).then_some(id.clone())
-            })
-            .collect::<Vec<_>>();
-        if target_template_ids.is_empty() {
-            DashboardAction::None
-        } else {
-            DashboardAction::ResolveAwsResourceOptions {
-                target_template_ids,
-            }
         }
     }
 

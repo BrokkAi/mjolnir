@@ -23,6 +23,9 @@
   "local_changes_excluded": false,
   "review_notice": "Code review is off for this session: its folder has no Git commits, and review finds changes through Git history."
 }
+=== shared HTTP/control launch validation ===
+result: rejected
+reason: attached directories are unsupported for bare targets
 === isolated project rejected (1 preflight review) ===
 result: rejected
 reason: Project "hel": the directory <local repository> does not exist.

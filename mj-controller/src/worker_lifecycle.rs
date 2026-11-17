@@ -151,7 +151,7 @@ impl WorkerPermit {
     pub(crate) fn verify_target(&self, expected: &mj_core::state::TargetLocator) -> Result<()> {
         let current = crate::database::read_durable_session_record(self.session_id())?;
         ensure!(
-            current.is_some_and(|session| session.target.as_ref() == Some(expected)),
+            current.is_some_and(|session| session.target.as_deref() == Some(expected)),
             "worker target changed before lifecycle ownership"
         );
         Ok(())
@@ -259,7 +259,7 @@ impl WorkerPermit {
         }
     }
 
-    fn acquire_blocking(
+    pub(crate) fn acquire_blocking(
         session_id: &str,
         reason: &'static str,
         executor: &impl CommandExecutor,
@@ -268,6 +268,7 @@ impl WorkerPermit {
             return Ok(permit);
         }
         let slot = slot(session_id);
+        let mut announced = false;
         loop {
             if let Some(permit) = Self::claim(slot.clone(), session_id, reason)? {
                 return Ok(permit);
@@ -278,6 +279,10 @@ impl WorkerPermit {
             );
             let owner = slot.owner.lock().unwrap_or_else(|e| e.into_inner());
             if owner.is_some() {
+                if !announced {
+                    executor.notify_notice("Waiting for the session's worker lifecycle operation");
+                    announced = true;
+                }
                 drop(
                     slot.released
                         .wait_timeout(owner, Duration::from_millis(25))

@@ -6,10 +6,10 @@
 //! means the CLI and the server cannot disagree about them.
 
 pub(crate) mod events;
+mod fetch;
 mod pinned_tls;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -20,7 +20,6 @@ use mj_controller::server::api::{
     SessionMessageRequest, SessionMessageResponse, StartSessionRequest, StartSessionResponse,
     SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
 };
-use mj_controller::server::api_token_path;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -66,6 +65,7 @@ impl BusyRetry {
 /// A client for one daemon's API.
 pub(crate) struct ApiClient {
     base_url: String,
+    daemon_instance: Option<String>,
     token: String,
     busy_retry: BusyRetry,
     /// Where the one "waiting for the daemon" line goes; stderr outside tests.
@@ -123,6 +123,13 @@ impl ApiClient {
         }
     }
 
+    /// Connect to the daemon only if one is already running. Read-only
+    /// diagnostics use this so they never start or replace a daemon.
+    pub(crate) async fn connect_running() -> Result<Self> {
+        let mut client = mj_client::daemon::connect_existing().await?;
+        Self::connect_to(&mut client).await
+    }
+
     async fn connect_to(client: &mut daemon::DaemonClient) -> Result<Self> {
         let access = daemon::wait_for_web_access(client).await?;
         let mj_client::web::WebViewerAccess::Ready {
@@ -134,28 +141,23 @@ impl ApiClient {
         else {
             unreachable!("wait_for_web_access returns only Ready")
         };
-        let local_address = local_address
-            .context("the daemon did not publish a local web viewer address; restart the daemon")?;
-        let (viewer_url, resolver) = route_viewer_to_local_socket(&viewer_url, local_address)?;
+        let (viewer_url, resolver) = if let Some(connector) = client.connector()
+            && connector.is_ssh()
+        {
+            connector.validate_viewer_url(&viewer_url).await?;
+            (viewer_url, None)
+        } else {
+            let local_address = local_address.context(
+                "the daemon did not publish a local web viewer address; restart the daemon",
+            )?;
+            route_viewer_to_local_socket(&viewer_url, local_address)?
+        };
         let http = http_client(certificate_sha256.as_deref(), resolver)?;
         probe_api(&http, &viewer_url).await?;
-        let token_path = api_token_path();
-        let token = std::fs::read_to_string(&token_path)
-            .with_context(|| {
-                format!(
-                    "read the API token {}; this daemon supports the API, but its token is missing or unreadable; check permissions or run `mj daemon restart`",
-                    token_path.display()
-                )
-            })?
-            .trim()
-            .to_owned();
-        if token.is_empty() {
-            bail!(
-                "the API token file {} is empty; delete it and run `mj daemon restart` to mint a new one",
-                token_path.display()
-            );
-        }
-        Ok(Self::with_http(viewer_url, token, http))
+        let token = client.api_credential().await?;
+        let mut api = Self::with_http(viewer_url, token, http);
+        api.daemon_instance = Some(client.identity().await?.instance_id);
+        Ok(api)
     }
 
     #[cfg(test)]
@@ -166,6 +168,7 @@ impl ApiClient {
     fn with_http(base_url: String, token: String, http: reqwest::Client) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
+            daemon_instance: None,
             token,
             busy_retry: BusyRetry::DEFAULT,
             wait_notice: |line| eprintln!("{line}"),
@@ -173,12 +176,56 @@ impl ApiClient {
         }
     }
 
-    pub(crate) fn base_url(&self) -> &str {
-        &self.base_url
+    pub(crate) fn daemon_instance(&self) -> Option<&str> {
+        self.daemon_instance.as_deref()
     }
 
-    pub(crate) fn token_path() -> PathBuf {
-        api_token_path()
+    pub(crate) async fn image_start(
+        &self,
+        request: &mj_client::session_image::ImageRequest,
+        status: bool,
+    ) -> Result<mj_client::session_image::ImageStarted> {
+        self.post_json(
+            if status {
+                "/images/status"
+            } else {
+                "/images/build"
+            },
+            request,
+            REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn image_follow(
+        &self,
+        id: &str,
+        offset: usize,
+    ) -> Result<Option<mj_client::session_image::ImageFollow>> {
+        let response = self
+            .send_optional(
+                self.http
+                    .get(self.url(&format!("/images/operations/{id}")))
+                    .query(&[("offset", offset)]),
+            )
+            .await?;
+        match response {
+            Some(response) => Ok(Some(decode(response).await?)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn image_cancel(&self, id: &str) -> Result<()> {
+        self.send(
+            self.http
+                .delete(self.url(&format!("/images/operations/{id}"))),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     fn url(&self, path: &str) -> String {
@@ -394,6 +441,8 @@ impl ApiClient {
         &self,
         profile: &str,
         model: Option<String>,
+        unrestricted: bool,
+        with_disabled: bool,
     ) -> Result<mj_core::worker_launch::ProfileConfig> {
         let mut request = self
             .http
@@ -402,7 +451,27 @@ impl ApiClient {
         if let Some(model) = model {
             request = request.query(&[("model", model)]);
         }
+        if unrestricted {
+            request = request.query(&[("unrestricted", "true")]);
+        }
+        if with_disabled {
+            request = request.query(&[("with_disabled", "true")]);
+        }
         decode(self.send(request).await?).await
+    }
+
+    pub(crate) async fn profile_login_errors(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        decode(
+            self.send(
+                self.http
+                    .get(self.url("/profiles/login-errors"))
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?,
+        )
+        .await
     }
 
     pub(crate) async fn set_config(
@@ -683,52 +752,6 @@ impl ApiClient {
         Ok(())
     }
 
-    /// A file, a directory as a zip archive, or with `list` a JSON listing of
-    /// either, from the session's target, with the path it resolved to there.
-    pub(crate) async fn fetch(
-        &self,
-        session_id: &str,
-        path: &str,
-        list: bool,
-    ) -> Result<mj_checkpoint::archive::FetchedPath> {
-        use mj_checkpoint::archive::FetchedKind;
-        let mut request = self
-            .http
-            .get(self.url(&format!("/sessions/{session_id}/files")))
-            .query(&[("path", path)]);
-        if list {
-            request = request.query(&[("list", "true")]);
-        }
-        let response = self.send(request.timeout(EXPORT_TIMEOUT)).await?;
-        let headers = response.headers();
-        let kind = match headers
-            .get(reqwest::header::CONTENT_TYPE)
-            .map(reqwest::header::HeaderValue::as_bytes)
-        {
-            Some(b"application/octet-stream") => FetchedKind::File,
-            Some(b"application/zip") => FetchedKind::Directory,
-            Some(b"application/json") if list => FetchedKind::Listing,
-            other => bail!(
-                "the daemon answered a fetch with content type {:?}",
-                other.map(String::from_utf8_lossy)
-            ),
-        };
-        let resolved = headers
-            .get(mj_controller::server::api::FETCHED_PATH_HEADER)
-            .and_then(|value| mj_controller::server::api::decode_fetched_path(value.as_bytes()))
-            .context("the daemon did not say where the path resolved; it predates `mj fetch`")?;
-        let bytes = response
-            .bytes()
-            .await
-            .context("read the fetched path")?
-            .to_vec();
-        Ok(mj_checkpoint::archive::FetchedPath {
-            kind,
-            path: resolved,
-            bytes,
-        })
-    }
-
     /// Export the session's work. A branch push answers JSON; a patch and a
     /// bundle answer bytes, so the caller gets both and uses the one its kind
     /// produced.
@@ -804,6 +827,21 @@ impl ApiClient {
         .map(|_| ())
     }
 
+    pub(crate) async fn notices(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<mj_client::daemon::RuntimeNotice>> {
+        decode(
+            self.send(
+                self.http
+                    .get(self.url(&format!("/sessions/{session_id}/notices")))
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?,
+        )
+        .await
+    }
+
     /// Ask the daemon to resume a stopped session. It answers as soon as the
     /// resume is admitted, so this does not wait for the session to come up.
     pub(crate) async fn resume(
@@ -846,21 +884,6 @@ impl ApiClient {
         decode(response).await
     }
 
-    /// Forward, dismiss, or cancel the review the session has open.
-    pub(crate) async fn resolve_review(
-        &self,
-        session_id: &str,
-        resolution: &str,
-    ) -> Result<mj_controller::server::api::ResolveReviewResponse> {
-        let response = self
-            .send(
-                self.http
-                    .post(self.url(&format!("/sessions/{session_id}/review/{resolution}"))),
-            )
-            .await?;
-        decode(response).await
-    }
-
     /// The review the session has open, if any.
     pub(crate) async fn review_status(
         &self,
@@ -868,6 +891,23 @@ impl ApiClient {
     ) -> Result<mj_controller::server::api::ReviewStatusResponse> {
         self.get_json(&format!("/sessions/{session_id}/review"))
             .await
+    }
+
+    /// A finished review's per-reviewer output, or the latest when `review_id`
+    /// is `None`.
+    pub(crate) async fn finished_review(
+        &self,
+        session_id: &str,
+        review_id: Option<&str>,
+    ) -> Result<mj_controller::server::api::FinishedReviewResponse> {
+        let mut request = self
+            .http
+            .get(self.url(&format!("/sessions/{session_id}/reviews")));
+        if let Some(review_id) = review_id {
+            request = request.query(&[("review", review_id)]);
+        }
+        let response = self.send(request).await?;
+        decode(response).await
     }
 
     pub(crate) async fn stop_background_task(&self, session_id: &str, task_id: &str) -> Result<()> {
@@ -1057,7 +1097,7 @@ impl ApiError {
         }
         let remedy = match self.code.as_deref() {
             Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE) => {
-                " Configure [subagents.straightforward], and optionally [subagents.subtle], in config.toml or TUI Settings → Sub-agents."
+                " Configure [subagents.straightforward] and optionally [subagents.subtle], or their [subagents.yolo.*] counterparts for a YOLO target, in config.toml or TUI Settings → Sub-agents."
             }
             _ => "",
         };
@@ -1283,17 +1323,15 @@ mod tests {
             .unwrap()
             .expect("the route answers with the session");
         assert_eq!(session.id, "session-2");
-        assert_eq!(
-            client
-                .fetch("session-1", "docs/README.md", false)
-                .await
-                .unwrap(),
-            mj_checkpoint::archive::FetchedPath {
-                kind: mj_checkpoint::archive::FetchedKind::File,
-                path: "/workspace/docs/README.md".to_owned(),
-                bytes: b"file bytes".to_vec(),
-            }
-        );
+        let fetched = client
+            .fetch("session-1", "docs/README.md", false)
+            .await
+            .unwrap();
+        assert_eq!(fetched.kind, mj_checkpoint::archive::FetchedKind::File);
+        assert_eq!(fetched.path, "/workspace/docs/README.md");
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut fetched.reader(), &mut bytes).unwrap();
+        assert_eq!(bytes, b"file bytes");
 
         let seen = seen.lock().unwrap().clone();
         assert_eq!(

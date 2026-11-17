@@ -1,0 +1,254 @@
+{
+  "id": "L2007",
+  "title": "mjolnir via claude",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "3f9fd0962609fb6f056e76f5d9e5d8e4",
+    "session_title": "mjolnir via claude",
+    "reply_position": 3151,
+    "captured_at": "2026-10-05T17:37:27.261Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "when i use claude code, i see its subagents reporting intermittently what it is that they're working on. \n\n1. how is the sub prompted to do this / what tool does it call?\n2. does the primary session model see those updates or are they harness-only?\n\nhave subs investigate ~/.claude traces"
+        },
+        {
+          "id": "user:41",
+          "role": "user",
+          "text": "2nd question. how does mj memory system resolve concurrent edits to the same project memories? how does our tool-based system sync with claude code's file-based system?"
+        },
+        {
+          "id": "user:451",
+          "role": "user",
+          "text": "how does CC primary agent get information \"what is subagent X doing\" then?"
+        },
+        {
+          "id": "user:696",
+          "role": "user",
+          "text": "it sounds like the conflicts then are \"first write wins?\""
+        },
+        {
+          "id": "user:935",
+          "role": "user",
+          "text": "> After the merge\n\nwhat performs merges?"
+        },
+        {
+          "id": "user:1079",
+          "role": "user",
+          "text": "I still don't understand how deterministic Rust code can correctly merge edits to the same memory."
+        },
+        {
+          "id": "user:1278",
+          "role": "user",
+          "text": "we should do this, but we still have same-line conflicts right?"
+        },
+        {
+          "id": "user:1459",
+          "role": "user",
+          "text": "should we roll our own 3wm, leverage git in a design like ../letta, or just embed letta?"
+        },
+        {
+          "id": "user:1803",
+          "role": "user",
+          "text": "1. we should support syncing deletes yes, no strong feelings about the exact 6a5e162c code\n2. defer and create a ticket for this\n\nalso\ni. we should do line-based merging of the memory files as well, not just the index\nii. we can use the helper model to perform merges but since a claude-only install (or one that has exhausted its credits) has no helper model we need to use FWW / LWW for those\niii. our system still feels complex and fragile, how would cliff click simplify?"
+        },
+        {
+          "id": "agent:1817",
+          "role": "assistant",
+          "text": "Issue #1222 already proposes \"controller-side git merge\" for project memory. I'm reading it before I answer."
+        },
+        {
+          "id": "agent:1853",
+          "role": "assistant",
+          "text": "Before answering, a correction: you already filed this redesign as **#1222** on 2026-10-04, and your comment there moves the git work onto the controller only. I should have checked the issue tracker before recommending against git last time. The answers below take #1222 into account. I saved today's decisions to my project memory.\n\n### 2. The deferred ticket overlaps #1222\n\n#1222's phase 2 already covers this: conflict reminders and \"memory updated by another session\" notices at turn start. A new ticket would duplicate it. I recommend adding a comment to #1222 that records today's decisions and marks this item as deferred. I haven't posted anything yet. Tell me whether you want that comment or a separate issue.\n\n### i. Line-based merging of every memory file\n\nAgreed. This is a normal three-way text merge, done for every file.\n\n### ii. Utility model first, fixed rule as fallback\n\nAgreed. `mj-controller/src/handoff.rs:28-56` already uses this pattern: it calls `UtilityLlmRuntime::shared().resolve(...)`, and if no model is configured, has credentials or has quota left, it logs a warning and falls back to a deterministic result. The memory merge can work the same way, and should also fall back when the model's output fails validation or the call times out.\n\nFor the fallback, I recommend **last writer wins**, where \"last\" means the session whose checkpoint is being merged now:\n- The session being merged keeps its own text, so its agent does not find its file rewritten at the next turn start.\n- When memory changes over time, the newer edit is usually the more current fact.\n- Only the conflicting block of lines is lost, not the whole file. Log the losing text at warn level so it can be recovered.\n\n### iii. How Cliff Click would simplify it\n\nI am applying principles Click is known for, not quoting him. His lock-free hash table works because every state is a valid state, each change is a single compare-and-swap, and a failed swap just retries. Measured against that, our design has several states that are not valid and several steps that coordinate when they could retry:\n\n| Fragile part | Simplification |\n|---|---|\n| Conflict states: the `conflicts/` folder, plus #1222's in-file conflict markers and `needs_reconcile` flag | **Make the merge always return a clean tree.** `merge(base, ours, theirs)` resolves conflicts with the model or the fallback rule. An unresolved conflict state never exists, so nothing needs a reminder or a cleanup step. |\n| The per-project lock is held during the merge, and it only works inside one process | **Merge first, then swap.** Read canonical version *v*, merge with no lock held (a model call can take seconds), then replace canonical only if it is still *v*. If it changed, merge again. The lock is held only for the compare and the swap. |\n| `install_snapshot` only adds files, so deletions never apply | **Install the whole tree, but only at turn start, and only if the directory still matches what the controller read.** This check is in your #1222 comment. Once the check exists, replacing the whole tree is safe, so deletions apply with no extra code. |\n| A git repository on the controller: one-time import, history, bundles | **Drop the repository.** Your comment says nothing reads the history. Git's useful part here is the three-way text merge, and `git merge-file` or a Rust crate does that on three files with no repository state. |\n| Two write paths: MCP compare-and-swap tools and native files | Remove the MCP document tools, as #1222 already plans. |\n\nThe resulting system:\n- **Worker:** a plain directory, plus the tree it last installed (its baseline). At turn start, it installs a pending tree if the directory has not changed.\n- **Controller:** after a turn ends or at a checkpoint, it computes `merge(baseline, canonical, replica)`, which always produces a clean tree. It then compares and swaps that tree into canonical and sends it back to the worker as the pending tree.\n\nDeletions, line-level merging and the model-or-fallback rule all live in that one merge function. The other parts move data and do not decide anything.\n\n`★ Insight ─────────────────────────────────────`\n- Most of the complexity comes from conflict states that persist: folders, markers, flags and the reminders that point at them. If every conflict is resolved inside the merge, those states never exist, and neither does the code that handles them.\n- The compare-and-swap at turn start is what makes replacing the whole tree safe, and replacing the whole tree is what makes deletions work. Today's add-only install avoids erasing a concurrent edit by never deleting anything. The check avoids it by refusing to install over a directory that changed.\n`─────────────────────────────────────────────────`\n\nTwo decisions before I write an implementation plan:\n1. Is last writer wins acceptable as the fallback?\n2. Should I drop the controller git repository from #1222 in favor of a merge with no repository? If yes, I'll include that in the #1222 comment."
+        },
+        {
+          "id": "user:2198",
+          "role": "user",
+          "text": "1. yes LWW wins\n2. we can throw out 1222, i'm deliberately starting over, i don't want to preclude a multiuser git repo but to start with git-free seems simpler no?"
+        },
+        {
+          "id": "agent:2219",
+          "role": "assistant",
+          "text": "Yes. Git-free is simpler to start with, and it doesn't rule out a shared git repository later, as long as we keep two boundaries clean.\n\n**Why git-free is simpler now.** All the sync needs is three steps: a three-way merge of text, a version check on the shared copy, and an install at turn start. None of these need a repository. Git would add:\n- a one-time import of existing memory\n- repository state that has to stay consistent with the files\n- a decision about where the repository lives and how it is archived at checkpoints\n- a `git` dependency on the controller host for the main path\n\nWe would get history in exchange, and nothing in the new design reads history.\n\n**How to keep a multi-user git repository possible later.** Two parts should not depend on how the shared copy is stored:\n\n1. **The merge is a pure function over trees.** `merge(base, canonical, replica) -> tree`, where a tree is a map from path to content. A git backend can reuse it unchanged, for example when merging a teammate's pushed commit.\n2. **The shared copy sits behind a small store interface:** `read() -> (version, tree)` and `swap(expected_version, new_tree) -> Ok | Changed`. The first version stores files on disk and uses a content hash as the version. A git version would map almost directly onto this: `git update-ref <ref> <new> <old>` updates the ref only if it still points to `<old>`, which is the same compare-and-swap operation.\n\nTwo more choices keep that path open: the worker's baseline should keep full tree content, not only a hash, and file paths should stay plain relative paths. A git repository could then use the same data as-is.\n\n`★ Insight ─────────────────────────────────────`\n- A shared git repository mainly changes where the shared copy lives and who else can write to it. If the merge and the version check do not depend on the storage, a second user or machine is a new store backend, not a redesign.\n- Git's `update-ref` with an old value is a compare-and-swap. So the \"merge without a lock, then swap\" approach maps directly onto a git ref later.\n`─────────────────────────────────────────────────`\n\n**Done:**\n- Created **#1223**, \"Tell sessions when a project-memory merge changed their files.\" It records the deferred notice work and its open questions.\n- Updated my project memory: #1222 discarded, git-free start, last writer wins as the fallback.\n\n**Not done:** I left #1222 open. Should I close it with a short note that the design was restarted? Next, I can write an implementation plan for the git-free design, including how to split it into child assignments."
+        },
+        {
+          "id": "user:2400",
+          "role": "user",
+          "text": "yes. close 1222 and then implement git-free"
+        },
+        {
+          "id": "agent:2414",
+          "role": "assistant",
+          "text": "I closed #1222 and created the branch `memory-sync-git-free` from the current master. Before I split the implementation, a child will map the integration points."
+        },
+        {
+          "id": "agent:2444",
+          "role": "assistant",
+          "text": "The map is clear. Next I'll define the core interface myself so the three implementation slices can proceed in parallel against fixed signatures. I'm reading the core module's structure first."
+        },
+        {
+          "id": "agent:2469",
+          "role": "assistant",
+          "text": "I'm adding the shared interface as stubs, so all three slices compile against the same signatures from the start."
+        },
+        {
+          "id": "agent:2524",
+          "role": "assistant",
+          "text": "Three children are now implementing in parallel: the core merge and store, the relay request and worker, and the controller sync. I'm waiting for them to finish."
+        },
+        {
+          "id": "agent:2544",
+          "role": "assistant",
+          "text": "The core child has finished. While the other two continue, I'm starting an independent check of the core merge, since it decides what data survives."
+        },
+        {
+          "id": "agent:2621",
+          "role": "assistant",
+          "text": "I found one bug in the controller sync and am fixing it now. Then I'll collect the verifier's report and run the integrated tests."
+        },
+        {
+          "id": "agent:2639",
+          "role": "assistant",
+          "text": "The verifier confirmed two defects in the core merge. I'm sending both back to the core child, along with the fix I've decided on for each."
+        },
+        {
+          "id": "user:2686",
+          "role": "user",
+          "text": "host restarted, continue"
+        },
+        {
+          "id": "agent:2699",
+          "role": "assistant",
+          "text": "The host restart interrupted the core child partway through the two fixes (the diff has grown, so some edits are in place). I'm resuming it with its context intact."
+        },
+        {
+          "id": "agent:2726",
+          "role": "assistant",
+          "text": "The core fixes are in, and the module's 32 tests and clippy pass. Next I'm removing the old reconcile code, which nothing should call any more."
+        },
+        {
+          "id": "agent:2748",
+          "role": "assistant",
+          "text": "While that runs, I'm reviewing the worker's replace handler, the other piece where a mistake could lose data."
+        },
+        {
+          "id": "agent:2803",
+          "role": "assistant",
+          "text": "The git-free memory sync is implemented on branch `memory-sync-git-free` and is not committed. The focused tests pass in all three crates. The workspace-wide clippy run could not finish here because GTK system libraries are missing.\n\n**What changed**\n- **Merge:** `merge_trees(base, canonical, replica)` in `mj-core/src/project_memory.rs` does a line-by-line three-way merge of every memory file and always returns a complete tree:\n  - Edits to different lines merge normally.\n  - When both sessions add lines at the same place, both are kept, which covers two sessions appending to `MEMORY.md`.\n  - Deletions sync.\n  - When one session edits a file and another deletes it, the edit wins.\n  - A clash between a file and a folder of the same name goes to the session being merged.\n- **Conflicts:** when both sessions change the same lines, `mj-controller/src/project_memory_merge.rs` asks the utility model to merge them. If no model is available, the call fails, the output fails validation, or 60 seconds pass, the session being merged wins (last writer wins).\n- **Shared copy:** it is updated by compare-and-swap. The merge and any model call run with no lock held, and the sync retries up to 3 times. If all 3 attempts find the shared copy changed, it logs a warning and the checkpoint continues.\n- **Worker:** relay protocol 31 adds `ReplaceProjectMemoryTree`. The worker replaces its whole tree, deletions included, only if its copy has not changed since the controller read it. It replaces its copy first, then the baseline. Workers older than 31 still get the old install, which only adds files.\n- **Removed:** `reconcile_snapshots`, `reconcile_into_canonical` and the `conflicts/` folder. The docs are updated to match.\n\n**Tests:** these pass: core `project_memory::` (31), core `relay` (10), worker `project_memory` (8), controller `project_memory` (12), and the existing project-catalog and relay-attach regression tests. Clippy with `-D warnings` passes for core, controller and worker.\n\n**Review fixes:**\n- An independent check found two merge defects, which are now fixed and tested. Appends to a file with no final newline lost text, and a merge could produce a tree that the worker refused to install.\n- I fixed one controller bug myself. The sync skipped updating the worker when the merged result equalled the session's copy, so the worker's baseline did not move forward. A later sync would then re-apply that session's old edits over newer changes. The fix is in `mj-controller/src/session_manager/standalone.rs`. **No test covers it yet**, so I recommend adding one before you merge.\n\n**Known limits:**\n1. **A rare case can undo another session's edit.** It needs the worker to answer `ReplicaChanged`, and the harness is idle during checkpoints, so this should almost never happen. When it does, the worker's baseline stays old, and the next sync can undo another session's change to lines this session also edited.\n2. **Line-ending changes:** a file whose CRLF line endings were changed to LF is treated as a conflict, so it goes to the model or the session being merged wins. Nothing is lost.\n3. **Model choice:** the merge uses the first available utility model and does not try the others, unlike the handoff code.\n4. **Not built yet:**\n   - Memory still syncs only at checkpoints, not after each turn.\n   - The MCP `list`/`read`/`write` tools are still there.\n   - Session notices are tracked in #1223.\n\n`★ Insight ─────────────────────────────────────`\n- The baseline bug is the main risk in any three-way sync. The baseline must always be the last version the worker received, or the merge mistakes old edits for new ones. That is also why the worker replaces its copy first: if it crashes in between, the baseline is left old, which is safe. A baseline newer than the copy would make the copy look as if it had reverted other sessions' edits.\n- The merge never writes conflict markers or leaves an unresolved conflict for later. Every outcome is a valid tree, so the controller and worker never need to handle a partly merged state.\n`─────────────────────────────────────────────────`\n\nDo you want me to add the baseline regression test and commit? Or should I start on syncing after each turn?"
+        },
+        {
+          "id": "user:3086",
+          "role": "user",
+          "text": "baseline regression, commit, merge, push to origin/master"
+        },
+        {
+          "id": "agent:3101",
+          "role": "assistant",
+          "text": "The regression test failed with the old `&&` and passes with `||`. I'm committing, merging and pushing now."
+        },
+        {
+          "id": "agent:3122",
+          "role": "assistant",
+          "text": "No overlap with the two new upstream commits. Committing."
+        },
+        {
+          "id": "agent:3151",
+          "role": "assistant",
+          "text": "The change is on `origin/master`: the merge commit is `8dfc2d68` and the feature commit is `2753a110`.\n\n- **Regression test:** `unchanged_replica_does_not_resurrect_a_deleted_line_after_sync` covers the two-sync case:\n  1. Session A adds line X and syncs.\n  2. Another session removes X.\n  3. A syncs again without changing anything, and X must stay deleted.\n\n  The test failed when I put back the old `&&` condition and passes with `||`. To make it testable, the install decision moved into `install_merged_tree` in `mj-controller/src/project_memory_merge.rs`. The controller's `project_memory` tests (13) and clippy pass.\n- **Merge:** while this work was in progress, `origin/master` gained two commits, on Codex quota and the CPU report. Neither touches memory or relay files. I merged the branch into the updated master, the controller and worker crates still compile, and I pushed.\n- **Not run on the merged result:** the workspace-wide clippy run, because GTK system libraries are missing in this container. The focused tests and clippy for core, controller and worker passed before the merge.\n\nThe branch `memory-sync-git-free` still exists locally. My project memory now records what landed and the known limits.\n\n**Still open:**\n- syncing memory after each turn\n- removing the MCP `list`/`read`/`write` tools\n- telling sessions their memory changed (#1223)\n- the three known limits from my last message"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "baseline regression, commit, merge, push to origin/master",
+    "assistant_text_tail": "The change is on `origin/master`: the merge commit is `8dfc2d68` and the feature commit is `2753a110`.\n\n- **Regression test:** `unchanged_replica_does_not_resurrect_a_deleted_line_after_sync` covers the two-sync case:\n  1. Session A adds line X and syncs.\n  2. Another session removes X.\n  3. A syncs again without changing anything, and X must stay deleted.\n\n  The test failed when I put back the old `&&` condition and passes with `||`. To make it testable, the install decision moved into `install_merged_tree` in `mj-controller/src/project_memory_merge.rs`. The controller's `project_memory` tests (13) and clippy pass.\n- **Merge:** while this work was in progress, `origin/master` gained two commits, on Codex quota and the CPU report. Neither touches memory or relay files. I merged the branch into the updated master, the controller and worker crates still compile, and I pushed.\n- **Not run on the merged result:** the workspace-wide clippy run, because GTK system libraries are missing in this container. The focused tests and clippy for core, controller and worker passed before the merge.\n\nThe branch `memory-sync-git-free` still exists locally. My project memory now records what landed and the known limits.\n\n**Still open:**\n- syncing memory after each turn\n- removing the MCP `list`/`read`/`write` tools\n- telling sessions their memory changed (#1223)\n- the three known limits from my last message",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 3086,
+    "input_rationale": "The requested regression test, commit, merge and push are done. The still-open list is the known backlog of the feature, with no question or approval asked. Weakest 'none' of the batch: the user does choose the next item next turn.",
+    "label": "none",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-05T17:37:30.321Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-05T17:39:06.588Z",
+        "kind": "user",
+        "text": "> removing the MCP list/read/write tools  do this next, push it  > unlike the handoff code  what's the difference here  > syncing memory after each turn, telling sessions their memory changed  defer"
+      },
+      {
+        "at": "2026-10-05T17:39:23.168Z",
+        "kind": "agent",
+        "text": "I have the answer to your handoff question. Next I'm checking whether the paused `mem-notes` worktree, which held earlier work on removing these tools, still exists."
+      },
+      {
+        "at": "2026-10-05T18:50:08.328Z",
+        "kind": "system",
+        "text": "Subagent \"remove-memory-doc-tools\" (98f5f944) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-05T18:50:11.943Z",
+        "kind": "agent",
+        "text": "The child has finished. I'm reviewing its changes before I commit."
+      },
+      {
+        "at": "2026-10-05T19:12:28.156Z",
+        "kind": "system",
+        "text": "Subagent \"remove-memory-doc-tools\" (98f5f944) finished turn 2892 (completed, end of turn)."
+      }
+    ]
+  }
+}

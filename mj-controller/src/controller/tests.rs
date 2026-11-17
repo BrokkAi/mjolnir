@@ -1,3 +1,4 @@
+use mj_core::targets::SshTrafficClass;
 use std::path::Path;
 
 use crate::targets::ProcessExecutor;
@@ -18,15 +19,10 @@ fn registration_config() -> Config {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: PathBuf::from("/home/dev/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Codex,
+                PathBuf::from("/home/dev/.codex"),
+            )
         },
     );
     config.bundles.insert(
@@ -94,6 +90,29 @@ impl CompletionExecutor {
 }
 
 impl CommandExecutor for CompletionExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         assert_eq!(command.program, "ssh");
         let script = command.args.last().unwrap().clone();
@@ -115,6 +134,29 @@ impl CommandExecutor for CompletionExecutor {
 struct UnusedExecutor;
 
 impl CommandExecutor for UnusedExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         panic!("a local completion ran {}", command.program);
     }
@@ -336,6 +378,29 @@ fn remote_path_resolution_uses_login_home_without_evaluating_suffix() {
         home: &'static str,
     }
     impl CommandExecutor for HomeExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             assert_eq!(command.program, "ssh");
             let script = command.args.last().unwrap();
@@ -704,11 +769,14 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
 
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
+        oracle: None,
+        oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         at: None,
         branch: None,
         base: None,
@@ -725,7 +793,158 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
 }
 
 #[test]
-fn registration_rejects_a_disabled_profile_before_persisting() {
+fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out() {
+    const MARKER: &str = "MJ_TEST_GITHUB_CREDENTIALS_CHOICE";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "github_credentials_creation_default_is_resolved_once_and_children_can_opt_out",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let mut accepted = Vec::new();
+    for (global_default, explicit, expected) in [
+        (true, false, false),
+        (true, true, true),
+        (false, false, true),
+    ] {
+        controller.config.github.session_credentials = global_default;
+        let mut options = launch_options(Vec::new());
+        options.no_github_credentials = explicit;
+        let id = controller
+            .register_session_with_resources("codex", "project", "podman", "credentials", options)
+            .unwrap();
+        assert_eq!(
+            controller.state.sessions[&id].no_github_credentials,
+            expected
+        );
+        accepted.push((id, expected));
+    }
+    controller.config.github.session_credentials = true;
+    controller.state = crate::database::load_state().unwrap();
+    for (id, expected) in &accepted {
+        assert_eq!(
+            controller.state.sessions[id].no_github_credentials,
+            *expected
+        );
+    }
+    let parent_id = &accepted[0].0;
+    let parent = controller.state.sessions.get_mut(parent_id).unwrap();
+    parent.state = SessionState::Running;
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    parent.target = Some(Box::new(TargetLocator::LocalPodman {
+        container_id: "credential-test-container".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    }));
+    crate::database::save_session(parent).unwrap();
+    let child_id = controller
+        .register_subagent(super::subagents::RegisterSubagentRequest {
+            no_github_credentials: true,
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
+            parent_session_id: parent_id.clone(),
+            task_name: "without credentials".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            fast_mode: false,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Inspect the source".into(),
+            request_key: "credential-child".into(),
+            report_root: None,
+        })
+        .unwrap()
+        .child_session_id;
+    let restored = crate::database::load_state().unwrap();
+    assert!(restored.sessions[&child_id].no_github_credentials);
+    assert!(!restored.sessions[parent_id].no_github_credentials);
+}
+
+// Hard-won: f0f32ab19: an explicitly requested oracle was silently absent from the worker launch.
+#[test]
+fn registration_turns_unavailable_explicit_oracle_off_with_a_notice() {
+    const MARKER: &str = "MJ_TEST_ORACLE_REGISTRATION_NOTICE";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_turns_unavailable_explicit_oracle_off_with_a_notice",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let implicit = controller
+        .register_session_reporting_review(
+            "codex",
+            "project",
+            "podman",
+            "implicit no model",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    assert!(implicit.oracle_notice.is_none());
+    assert!(crate::database::load_state().unwrap().sessions[&implicit.id].oracle);
+    assert_eq!(
+        controller.state.last_oracle_choices.get("codex"),
+        Some(&true)
+    );
+    let mut no_model = launch_options(Vec::new());
+    no_model.oracle = Some(true);
+    let registration = controller
+        .register_session_reporting_review("codex", "project", "podman", "no model", no_model)
+        .unwrap();
+    assert!(
+        registration
+            .oracle_notice
+            .unwrap()
+            .contains("no oracle model is configured")
+    );
+    assert!(!crate::database::load_state().unwrap().sessions[&registration.id].oracle);
+    controller.config.profiles.get_mut("codex").unwrap().kind = HarnessKind::Muse;
+    let mut muse_oracle = launch_options(Vec::new());
+    muse_oracle.oracle = Some(true);
+    muse_oracle.oracle_choice = Some(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: None,
+    });
+    let registration = controller
+        .register_session_reporting_review("codex", "project", "podman", "muse oracle", muse_oracle)
+        .unwrap();
+    assert!(registration.oracle_notice.is_none());
+    let stored = &crate::database::load_state().unwrap().sessions[&registration.id];
+    assert!(stored.oracle);
+    assert_eq!(stored.oracle_choice.as_ref().unwrap().model, "advisor");
+}
+
+#[test]
+fn registration_allows_disabled_profile_but_rejects_retired_target() {
+    const MARKER: &str = "MJ_TEST_DISABLED_PROFILE_REGISTRATION";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_allows_disabled_profile_but_rejects_retired_target",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let mut config = registration_config();
     config.profiles.get_mut("codex").unwrap().enabled = false;
     let mut controller = Controller {
@@ -733,7 +952,7 @@ fn registration_rejects_a_disabled_profile_before_persisting() {
         state: State::default(),
     };
 
-    let error = controller
+    let id = controller
         .register_session_with_resources(
             "codex",
             "project",
@@ -741,9 +960,27 @@ fn registration_rejects_a_disabled_profile_before_persisting() {
             "disabled",
             launch_options(Vec::new()),
         )
+        .unwrap();
+    assert!(controller.state.sessions.contains_key(&id));
+    assert!(controller.config.enabled_profile("codex").is_none());
+    controller.state.sessions.clear();
+    controller.config.targets.insert("retired-ec2".into(), serde_json::from_value(serde_json::json!({
+        "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+    })).unwrap());
+    let error = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "retired-ec2",
+            "retired",
+            launch_options(Vec::new()),
+        )
         .unwrap_err();
-
-    assert!(error.to_string().contains("disabled"));
+    assert!(
+        error
+            .to_string()
+            .contains(mj_core::config::LEGACY_EC2_TARGET_NOTICE)
+    );
     assert!(controller.state.sessions.is_empty());
 }
 
@@ -879,8 +1116,10 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
-    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-    config.review.profile = Some("codex".into());
+    config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "gpt-6-astra".into(),
+        effort: None,
+    }];
     let mut controller = Controller {
         config,
         state: State::default(),
@@ -893,18 +1132,22 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     let explicit = controller
         .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
-    assert!(!explicit.review_turned_off);
+    assert!(explicit.review_notice.is_none());
 
     let mut options = launch_options(Vec::new());
     options.project_directory = Some(workspace.path().to_owned());
     let registration = controller
         .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
-    assert!(registration.review_turned_off);
+    assert_eq!(
+        registration.review_notice,
+        Some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF)
+    );
     let id = registration.id;
 
     let stored = &controller.state.sessions[&id];
-    assert_eq!(stored.review, Some(mj_core::config::SessionReview::Off));
+    // The automatic rule is not stored as the user's choice.
+    assert_eq!(stored.review, None);
     assert_eq!(stored.project_directory.as_deref(), Some(workspace.path()));
     assert!(stored.managed_worktree.is_none());
     let project = stored.project.as_ref().expect("plain project was recorded");
@@ -914,6 +1157,56 @@ fn registration_records_a_plain_local_directory_as_its_project() {
         Some(expected.as_path())
     );
     project.key().unwrap();
+    controller.config.review.reviewers.clear();
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    options.review = Some(mj_core::config::SessionReview::Push { reviewers: None });
+    let no_reviewers = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
+        .unwrap();
+    assert_eq!(
+        no_reviewers.review_notice,
+        Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF)
+    );
+    assert_eq!(
+        controller.state.sessions[&no_reviewers.id].review,
+        Some(Box::new(mj_core::config::SessionReview::Push {
+            reviewers: None
+        }))
+    );
+    // The record is also a plain directory, so the launch rule keeps review
+    // off for it however the global list changes.
+    assert_eq!(
+        controller
+            .state
+            .effective_review_config(&controller.config.review, &no_reviewers.id)
+            .trigger(),
+        mj_core::config::ReviewTrigger::Off
+    );
+
+    // The API shape `{"mode":"turn","reviewers":[]}` is an explicitly empty
+    // list; it gets the same treatment even with a global list present.
+    controller.config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "gpt-6-astra".into(),
+        effort: None,
+    }];
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    options.review =
+        Some(serde_json::from_str(r#"{"mode":"turn","reviewers":[]}"#).expect("API review shape"));
+    let empty_list = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
+        .unwrap();
+    assert_eq!(
+        empty_list.review_notice,
+        Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF)
+    );
+    assert_eq!(
+        controller.state.sessions[&empty_list.id].review,
+        Some(Box::new(
+            serde_json::from_str(r#"{"mode":"turn","reviewers":[]}"#).unwrap()
+        ))
+    );
 }
 
 #[test]
@@ -949,6 +1242,8 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "podman",
             "start commit",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 at: Some(at.to_uppercase()),
                 branch: Some("town/run-1".into()),
                 ..launch_options(Vec::new())
@@ -958,12 +1253,12 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
     let stored = crate::database::load_state().unwrap().sessions[&id].clone();
     assert_eq!(
         stored.checkout,
-        Some(mj_core::remote_git::ExactCheckout {
+        Some(Box::new(mj_core::remote_git::ExactCheckout {
             repository_id: "project".into(),
             commit: at.into(),
             branch: Some("town/run-1".into()),
             no_later_history: false,
-        })
+        }))
     );
     // The checkout owns the branch, and the base is left to default to `at`.
     assert_eq!((stored.launch_base, stored.launch_branch), (None, None));
@@ -984,6 +1279,8 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "podman",
             "start commit with base",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 at: Some(at.into()),
                 base: Some("v1.0".into()),
                 ..launch_options(Vec::new())
@@ -1036,6 +1333,8 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     };
     refusal(
         register(SessionLaunchOptions {
+            oracle: None,
+            oracle_choice: None,
             no_later_history: true,
             ..launch_options(Vec::new())
         }),
@@ -1044,6 +1343,8 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     // A name would have to resolve against remote refs the workspace lacks.
     refusal(
         register(SessionLaunchOptions {
+            oracle: None,
+            oracle_choice: None,
             at: Some(at.into()),
             base: Some("origin/main".into()),
             no_later_history: true,
@@ -1053,6 +1354,8 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     );
 
     let id = register(SessionLaunchOptions {
+        oracle: None,
+        oracle_choice: None,
         at: Some(at.to_uppercase()),
         base: Some(base.to_uppercase()),
         branch: Some("review/run-1".into()),
@@ -1063,12 +1366,12 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     let stored = crate::database::load_state().unwrap().sessions[&id].clone();
     assert_eq!(
         stored.checkout,
-        Some(mj_core::remote_git::ExactCheckout {
+        Some(Box::new(mj_core::remote_git::ExactCheckout {
             repository_id: "project".into(),
             commit: at.into(),
             branch: Some("review/run-1".into()),
             no_later_history: true,
-        })
+        }))
     );
     assert_eq!(stored.launch_base.as_deref(), Some(base));
     assert!(stored.start_selection().no_later_history);
@@ -1078,11 +1381,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
             head: at.into(),
             base: Some(base.into()),
         })
-    );
-    let error = super::resume::ensure_full_history_allowed(&stored).unwrap_err();
-    assert!(
-        format!("{error:#}").contains("started without later history"),
-        "{error:#}"
     );
 
     // Any other repository in the bundle would start with its whole history.
@@ -1099,6 +1397,8 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
             "podman",
             "without later history",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 at: Some(at.into()),
                 no_later_history: true,
                 ..launch_options(Vec::new())
@@ -1272,23 +1572,32 @@ fn configuration_id_rename_rewrites_durable_session_references() {
         state: State::default(),
     };
     controller.config.save().unwrap();
+    controller
+        .state
+        .last_oracle_choices
+        .insert("codex".into(), false);
+    let mut options = launch_options(Vec::new());
+    options.oracle_choice = Some(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: None,
+    });
     let session_id = controller
-        .register_session_with_resources(
-            "codex",
-            "project",
-            "podman",
-            "rename references",
-            launch_options(Vec::new()),
-        )
+        .register_session_with_resources("codex", "project", "podman", "rename references", options)
         .unwrap();
     assert_eq!(
         controller.state.last_subagent_policy_for("codex"),
         SubagentPolicy::Native
     );
+    assert!(controller.state.sessions[&session_id].oracle);
+    assert!(controller.state.last_oracle_choice_for("codex"));
 
     controller
         .rename_profile_id("codex", "codex-renamed")
         .unwrap();
+    assert_eq!(
+        controller.state.last_oracle_choices.get("codex-renamed"),
+        Some(&true)
+    );
     assert_eq!(
         controller.state.last_subagent_policies.get("codex-renamed"),
         Some(&SubagentPolicy::Native)
@@ -1476,7 +1785,6 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
         .update_session_container_settings(
             &id,
             None,
-            None,
             vec![mount(&missing)],
             Vec::new(),
             &ProcessExecutor,
@@ -1500,7 +1808,6 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
         .update_session_container_settings(
             &id,
             None,
-            None,
             vec![mount(&present)],
             Vec::new(),
             &ProcessExecutor,
@@ -1512,8 +1819,10 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
     controller
         .update_session_container_settings(
             &id,
-            Some("2".into()),
-            None,
+            Some(SessionResourceAllocation::Container {
+                cpus: 2,
+                memory_bytes: 4 << 30,
+            }),
             vec![mount(&present)],
             Vec::new(),
             &ProcessExecutor,
@@ -1544,9 +1853,25 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
         cpus: 12,
         memory_bytes: 48 * 1024 * 1024 * 1024,
     });
+    // Provisioning uses the same allocation registration remembers for the host.
     let id = controller
         .register_session_with_resources("codex", "project", "podman", "sized", options)
         .unwrap();
+    let record = &controller.state.sessions[&id];
+    let targets::TargetTemplate::LocalPodman(container) = backend::backend_target(
+        &controller.config.targets["podman"],
+        record.resource_allocation.as_ref(),
+        backend::ContainerOverrides::for_session(record),
+    )
+    .unwrap() else {
+        panic!("a podman target");
+    };
+    assert!(container.extra_run_args.contains(&"--cpus=12".to_owned()));
+    assert!(
+        container
+            .extra_run_args
+            .contains(&format!("--memory={}", 48_u64 << 30))
+    );
     let expected = HostContainerSize {
         cpus: 12,
         memory_bytes: 48 * 1024 * 1024 * 1024,
@@ -1560,8 +1885,10 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
     controller
         .update_session_container_settings(
             &id,
-            Some("2".into()),
-            Some("4g".into()),
+            Some(SessionResourceAllocation::Container {
+                cpus: 2,
+                memory_bytes: 4 << 30,
+            }),
             Vec::new(),
             Vec::new(),
             &ProcessExecutor,
@@ -1766,7 +2093,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
     let mut parent = super::test_support::checkpoint_test_session(parent_id);
     parent.target_template_id = "localhost".into();
     parent.project_directory = Some(clone.clone());
-    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    parent.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: project.path().to_path_buf(),
         source_repository: project.path().to_path_buf(),
@@ -1774,15 +2101,15 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         branch: "master".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
         straightforward: None,
         subtle: None,
     });
     let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
-    parent.target = Some(TargetLocator::LocalBare {
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
-    });
+    }));
     controller
         .state
         .sessions
@@ -1791,6 +2118,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
 
     let child = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
@@ -1883,6 +2211,163 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
     );
 }
 
+/// A restore deletes the worker's command receipts, so the history decides
+/// whether a child's assignment is sent again. A prompt that was only queued
+/// never ran and is still delivered; one that started is not.
+// Hard-won: #1535: a Restart re-sent a finished sub-agent's assignment and froze its view.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started() {
+    use super::worker_binary::LaunchHistory;
+    use mj_core::archive::{
+        CanonicalExecutionState, CanonicalQueuedPrompt, CanonicalSessionSnapshot,
+        CanonicalSessionState, CanonicalTranscriptBody, CanonicalTranscriptItem,
+    };
+    const MARKER: &str = "MJ_TEST_CHILD_ASSIGNMENT_ONCE_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut config = registration_config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let project = tempfile::tempdir().unwrap();
+    let clone = project.path().join(".mj/clones").join(parent_id);
+    std::fs::create_dir_all(&clone).unwrap();
+    let mut parent = super::test_support::checkpoint_test_session(parent_id);
+    parent.target_template_id = "localhost".into();
+    parent.project_directory = Some(clone.clone());
+    parent.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: project.path().to_path_buf(),
+        source_repository: project.path().to_path_buf(),
+        worktree_root: clone,
+        branch: "master".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: None,
+    }));
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: parent_root,
+    }));
+    controller
+        .state
+        .sessions
+        .insert(parent_id.to_owned(), parent);
+    crate::database::save_state(&controller.state).unwrap();
+    let child = controller
+        .register_subagent(super::subagents::RegisterSubagentRequest {
+            no_github_credentials: false,
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
+            parent_session_id: parent_id.to_owned(),
+            task_name: "Review calc.py".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            fast_mode: false,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Review calc.py".into(),
+            request_key: "review-calc".into(),
+            report_root: None,
+        })
+        .unwrap();
+    let child_id = child.child_session_id.clone();
+    let prompt_id = format!("subagent-spawn-{}-prompt", child.request_key);
+    let backend = targets::TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir()
+            .join("workers")
+            .join(&child_id)
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let snapshot = |transcript: Vec<CanonicalTranscriptItem>,
+                    queued: Vec<CanonicalQueuedPrompt>| {
+        CanonicalSessionSnapshot {
+            command_ledger: None,
+            assessment_state: None,
+            event_frontier: transcript.len() as u64,
+            event_frontier_digest: "0".repeat(64),
+            session: CanonicalSessionState {
+                execution: CanonicalExecutionState::Idle,
+                last_activity_at_ms: None,
+                session_title: None,
+                configuration: Default::default(),
+            },
+            transcript,
+            queued_prompts: queued,
+        }
+    };
+    let assignment_item = CanonicalTranscriptItem {
+        stable_id: format!("user:{prompt_id}"),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: CanonicalTranscriptBody::User {
+            content: vec![serde_json::json!({"type": "text", "text": "Review calc.py"})],
+        },
+    };
+    let queued_assignment = CanonicalQueuedPrompt {
+        command_id: prompt_id.clone(),
+        kind: Default::default(),
+        content: vec![serde_json::json!({"type": "text", "text": "Review calc.py"})],
+        queued_at_ms: 0,
+    };
+    let initial_command_ids = |history: LaunchHistory<'_>| {
+        controller
+            .session_launch_config(&child_id, &backend, history)
+            .unwrap()
+            .0
+            .initial_commands
+            .into_iter()
+            .map(|command| command.command_id)
+            .collect::<Vec<_>>()
+    };
+
+    // Queued at the checkpoint but never started: the assignment is still owed.
+    let queued_only = snapshot(Vec::new(), vec![queued_assignment]);
+    let owed = initial_command_ids(LaunchHistory::Restored(&queued_only));
+    assert_eq!(owed.last(), Some(&prompt_id), "{owed:?}");
+    // Never started, and nothing queued either (a discarded queue).
+    let empty = snapshot(Vec::new(), Vec::new());
+    assert_eq!(initial_command_ids(LaunchHistory::Restored(&empty)), owed);
+    assert_eq!(initial_command_ids(LaunchHistory::Stored), owed);
+
+    // Started: the conversation holds the assignment, so nothing is re-sent.
+    let started = snapshot(vec![assignment_item], Vec::new());
+    assert!(initial_command_ids(LaunchHistory::Restored(&started)).is_empty());
+    rusqlite::Connection::open(crate::database::database_path())
+        .unwrap()
+        .execute_batch(&format!(
+            "INSERT OR IGNORE INTO materialized_sessions(session_id) VALUES ('{child_id}');
+             INSERT INTO materialized_transcript_items(session_id, stable_id, position,
+                 created_at_ms, last_changed_at_ms, body_json)
+             VALUES ('{child_id}', 'user:{prompt_id}', 1, 0, 0, '{{\"kind\":\"user\",\"content\":[]}}');"
+        ))
+        .unwrap();
+    assert!(initial_command_ids(LaunchHistory::Stored).is_empty());
+}
+
 /// `mj new --no-project-memory --no-github-events` is per session: the session and
 /// its children inherit both flags. Project memory is absent while peer
 /// messaging remains available regardless of the GitHub target opt-out.
@@ -1921,11 +2406,12 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             straightforward: None,
             subtle: None,
         });
-        session.target = Some(TargetLocator::LocalBare {
+        session.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: mj_core::config::data_dir().join("workers").join(id),
-        });
+        }));
         session.no_project_memory = opted_out;
         session.no_github_events = opted_out;
+        session.no_github_credentials = opted_out;
         session
     };
     let opted_out_id = "0123456789abcdef0123456789abcdef";
@@ -1940,6 +2426,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
 
     let child_id = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             parent_session_id: opted_out_id.to_owned(),
@@ -1957,6 +2444,13 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         .child_session_id;
     assert!(controller.state.sessions[&child_id].no_project_memory);
     assert!(controller.state.sessions[&child_id].no_github_events);
+    assert!(controller.state.sessions[&child_id].no_github_credentials);
+    assert!(
+        crate::database::read_durable_session_record(&child_id)
+            .unwrap()
+            .unwrap()
+            .no_github_credentials
+    );
 
     let launch = |controller: &Controller, id: &str| {
         controller
@@ -1976,6 +2470,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         let launch = launch(&controller, id);
         assert!(launch.project_memory.is_none(), "{id}");
         assert!(launch.agent_mailboxes_enabled, "{id}");
+        assert!(launch.no_github_credentials, "{id}");
         assert_eq!(
             controller.project_memory_sync_target(id).unwrap(),
             None,
@@ -1984,126 +2479,13 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
     }
     let ordinary = launch(&controller, ordinary_id);
     assert!(ordinary.project_memory.is_some());
+    assert!(!ordinary.no_github_credentials);
     assert_eq!(ordinary.agent_mailboxes_enabled, mailboxes);
     assert!(
         controller
             .project_memory_sync_target(ordinary_id)
             .unwrap()
             .is_some()
-    );
-}
-
-/// Auto captures a baseline even with automation off, so manual review can
-/// measure the first turn in a single-profile installation.
-// Hard-won: 105769b9d5a0: baseline capture kept huge untracked workspaces from binding a new worker socket.
-#[test]
-fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() {
-    const MARKER: &str = "MJ_TEST_LAUNCH_REVIEW_CAPTURE_CHILD";
-    if std::env::var_os(MARKER).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        run_registration_child(
-            MARKER,
-            "a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured",
-            directory.path(),
-        );
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let mut controller = Controller {
-        config: registration_config(),
-        state: State::default(),
-    };
-    let id = controller
-        .register_session_with_resources(
-            "codex",
-            "project",
-            "podman",
-            "reviewable",
-            launch_options(Vec::new()),
-        )
-        .unwrap();
-    let backend = crate::targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: crate::targets::resource_name(&id).unwrap(),
-        workspace_storage: Default::default(),
-    };
-
-    assert!(
-        controller
-            .current_worker_launch_config(&id, &backend)
-            .unwrap()
-            .review_capture,
-        "Auto can review with the primary profile even with automation off"
-    );
-
-    controller.config.review.profile = Some("codex".into());
-
-    assert!(
-        controller
-            .current_worker_launch_config(&id, &backend)
-            .unwrap()
-            .review_capture,
-        "a session a review can run for takes a baseline"
-    );
-}
-
-/// The launch decides whether a session takes a review baseline, and the
-/// reviewer choice later decides whether a review can run. Both must judge
-/// the session's own review choice by the same rule.
-// Hard-won: DSH campaign 2026-10-23 (D-10): a session-named review model chose a reviewer the launch had given no baseline
-#[test]
-fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choose() {
-    const MARKER: &str = "MJ_TEST_LAUNCH_NAMED_REVIEW_MODEL_CHILD";
-    if std::env::var_os(MARKER).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        run_registration_child(
-            MARKER,
-            "a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choose",
-            directory.path(),
-        );
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    // DSH is the only profile; both a pinned model and the price fallback can use it.
-    let mut config = registration_config();
-    let mut dsh = config.profiles.remove("codex").unwrap();
-    dsh.kind = HarnessKind::Dsh;
-    dsh.home = PathBuf::from("/home/dev/.dsh");
-    config.profiles.insert("dsh".into(), dsh);
-    let mut controller = Controller {
-        config,
-        state: State::default(),
-    };
-    let mut register = |review| {
-        let mut options = launch_options(Vec::new());
-        options.review = review;
-        controller
-            .register_session_with_resources("dsh", "project", "podman", "reviewable", options)
-            .unwrap()
-    };
-    let named = register(Some(mj_core::config::SessionReview::Turn {
-        count: None,
-        model: Some("deepseek-flash".into()),
-        effort: None,
-        tier: None,
-    }));
-    let unnamed = register(None);
-
-    let takes_baseline = |id: &str| {
-        let backend = crate::targets::TargetLocator::LocalPodman {
-            borrowed_from: None,
-            container_id: crate::targets::resource_name(id).unwrap(),
-            workspace_storage: Default::default(),
-        };
-        controller
-            .current_worker_launch_config(id, &backend)
-            .unwrap()
-            .review_capture
-    };
-    assert!(takes_baseline(&named));
-    assert!(
-        takes_baseline(&unnamed),
-        "the cheapest-model fallback can use DSH without a named model"
     );
 }
 
@@ -2123,6 +2505,29 @@ struct DurableTargetExecutor {
 }
 
 impl CommandExecutor for DurableTargetExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         self.commands.lock().unwrap().push(command.clone());
         Ok(targets::CommandOutput {
@@ -2156,11 +2561,11 @@ fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
         super::test_support::checkpoint_test_session("0123456789abcdef0123456789abcdef");
     session.target_template_id = "ec2".into();
     session.target_runtime = Some((&ssh_bare("ec2.test", &["-o", "ServerAliveCountMax=3"])).into());
-    session.target = Some(TargetLocator::SshBare {
+    session.target = Some(Box::new(TargetLocator::SshBare {
         host: "ec2.test".into(),
         workspace: ".local/share/hel/workspaces/0123456789abcdef0123456789abcdef".into(),
         worker_id: None,
-    });
+    }));
     let mut controller = Controller {
         config: registration_config(),
         state: State::default(),
@@ -2194,6 +2599,7 @@ fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
         .expect("a shared-connection session");
     assert!(
         shared
+            .target
             .ssh_args
             .contains(&"ServerAliveInterval=15".to_owned())
     );
@@ -2215,13 +2621,13 @@ fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
 }
 
 #[test]
-fn saved_target_survives_config_removal_restart_and_failed_destroy() {
+fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
     const MARKER: &str = "MJ_TEST_DURABLE_TARGET_CHILD";
     if std::env::var_os(MARKER).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
             MARKER,
-            "saved_target_survives_config_removal_restart_and_failed_destroy",
+            "saved_target_survives_config_removal_restart_and_failed_cleanup",
             directory.path(),
         );
         return;
@@ -2242,6 +2648,8 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
             "podman",
             "durable target",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 // Set at creation, since a lifecycle transition does not own
                 // this column (see `update_lifecycle_fields`); this test
                 // reloads the controller before registering a child, and the
@@ -2265,12 +2673,12 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     );
     let record = controller.state.sessions.get_mut(&id).unwrap();
     record.state = SessionState::Running;
-    record.target = Some(TargetLocator::SshPodman {
+    record.target = Some(Box::new(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: targets::resource_name(&id).unwrap(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     controller.persist_session_state(&id).unwrap();
     controller.config.targets.clear();
     controller.config.save().unwrap();
@@ -2297,6 +2705,7 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     assert_eq!(backend, original_backend);
     // The branch-export worker command uses the same resolved destination as checkpoint/bundle export.
     let command = targets::command_on_locator(
+        SshTrafficClass::Control,
         &backend,
         &id,
         vec!["hel".into(), "worker".into(), "push-branch".into()],
@@ -2306,6 +2715,7 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     executor.execute(&command).unwrap();
     let child = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             parent_session_id: id.clone(),
@@ -2341,11 +2751,7 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     executor
         .fail
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        controller
-            .force_destroy_session(&id, &executor, BranchDisposition::Keep)
-            .is_err()
-    );
+    assert!(controller.stop_subagent(&id, &executor).is_err());
     let saved = crate::database::load_state().unwrap();
     assert_eq!(saved.sessions[&id].target_runtime.as_ref(), Some(&runtime));
     assert!(saved.sessions[&id].target.is_some());
@@ -2407,12 +2813,12 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
         .insert("podman".into(), durable_remote_template("original.test"));
     let mut session =
         super::test_support::checkpoint_test_session("0123456789abcdef0123456789abcdef");
-    session.target = Some(TargetLocator::SshPodman {
+    session.target = Some(Box::new(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: "original-container".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     controller
         .state
         .sessions
@@ -2429,6 +2835,7 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
     assert_eq!(
         saved,
         mj_core::state::TargetRuntimeSettings::from(&durable_remote_template("original.test"))
+            .into()
     );
     let replacement =
         mj_core::state::TargetRuntimeSettings::from(&durable_remote_template("different.test"));
@@ -2458,7 +2865,7 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
     assert!(refusal.message().contains("podman"));
     assert!(
         controller
-            .force_destroy_session(&session.id, &UnusedExecutor, BranchDisposition::Keep)
+            .stop_subagent(&session.id, &UnusedExecutor)
             .is_err()
     );
     assert!(
@@ -2478,10 +2885,10 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
     );
     // A legacy local locator is self-contained even with no template.
     let local = controller.state.sessions.get_mut(&session.id).unwrap();
-    local.target = Some(TargetLocator::LocalDocker {
+    local.target = Some(Box::new(TargetLocator::LocalDocker {
         container_id: "local-container".into(),
         borrowed_from: None,
-    });
+    }));
     controller.config.targets.clear();
     controller
         .session_export_layout(&session.id, &UnusedExecutor)
@@ -2712,6 +3119,10 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
     config.subagents.max_concurrent = 0;
+    config.subagents.oracle = Some(mj_core::config::SubagentChoice {
+        model: "oracle-model".into(),
+        effort: Some("high".into()),
+    });
     let profile = config.profiles["codex"].clone();
     config.profiles.insert("resolved-reviewer".into(), profile);
     let parent_id = "0123456789abcdef0123456789abcdef";
@@ -2719,9 +3130,9 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     parent.target_template_id = "localhost".into();
     parent.project_directory = Some(project.path().to_path_buf());
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
-    parent.target = Some(TargetLocator::LocalBare {
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
-    });
+    }));
     let mut controller = Controller {
         config,
         state: Default::default(),
@@ -2746,6 +3157,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         "/outside-the-child".into(),
     );
     let request = RegisterSubagentRequest {
+        no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
         reviewer_launch: Some(launch.clone()),
         parent_session_id: parent_id.into(),
@@ -2775,6 +3187,8 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             .report_dir,
         None
     );
+    // Review is on, so the launch files show who may request it.
+    controller.config.review = mj_core::config::ReviewConfig::legacy_default();
     let worker_root = mj_core::config::data_dir()
         .join("workers")
         .join(&child.child_session_id);
@@ -2790,6 +3204,10 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert_eq!(worker_launch.execution_policy, launch.execution_policy);
     assert_eq!(worker_launch.initial_model, launch.model);
     assert!(!worker_launch.review_capture);
+    assert!(
+        !worker_launch.review_tools(),
+        "a reviewer never requests review"
+    );
     assert_eq!(
         worker_launch.subagent_mcp_role(),
         Some(mj_core::subagent::SubagentMcpRole::Child)
@@ -2805,6 +3223,115 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             .to_string_lossy()
             .contains(&child.child_session_id)
     );
+    let oracle = controller
+        .register_subagent(RegisterSubagentRequest {
+            no_github_credentials: false,
+            kind: mj_core::subagent::SubagentKind::Oracle,
+            reviewer_launch: None,
+            parent_session_id: parent_id.into(),
+            task_name: "oracle".into(),
+            profile_id: "resolved-reviewer".into(),
+            model: Some("oracle-model".into()),
+            effort: Some("high".into()),
+            fast_mode: false,
+            working_directory: Default::default(),
+            initial_prompt: "Question:\nWhich option?".into(),
+            request_key: "oracle-first".into(),
+            report_root: Some("/reports".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        oracle.initial_prompt,
+        format!(
+            "Your report directory is /reports/{}.\n\n{} Your answer may contain up to {} characters.\n\nQuestion:\nWhich option?",
+            oracle.child_session_id,
+            super::subagents::ORACLE_INSTRUCTIONS,
+            mj_core::subagent::SubagentKind::Oracle.max_handback_chars()
+        )
+    );
+    assert_eq!(oracle.model.as_deref(), Some("oracle-model"));
+    assert_eq!(oracle.effort.as_deref(), Some("high"));
+    assert!(oracle.handback_tool);
+    let oracle_launch = controller
+        .current_worker_launch_config(
+            &oracle.child_session_id,
+            &targets::TargetLocator::LocalBare {
+                worker_root: mj_core::config::data_dir()
+                    .join("workers")
+                    .join(&oracle.child_session_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        )
+        .unwrap();
+    assert!(
+        !oracle_launch.review_tools(),
+        "the oracle never requests review"
+    );
+    let oracle_session = &controller.state.sessions[&oracle.child_session_id];
+    assert_eq!(
+        oracle_session.subagents,
+        Some(mj_core::subagent::SubagentPolicy::None)
+    );
+    assert!(!oracle_session.oracle);
+    let muse_parent_id = "fedcba9876543210fedcba9876543210";
+    let mut muse_parent = controller.state.sessions[parent_id].clone();
+    muse_parent.id = muse_parent_id.into();
+    muse_parent.harness_kind = HarnessKind::Kimi;
+    muse_parent.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir()
+            .join("workers")
+            .join(muse_parent_id),
+    }));
+    controller
+        .state
+        .sessions
+        .insert(muse_parent_id.into(), muse_parent.clone());
+    crate::database::save_session(&muse_parent).unwrap();
+    let mut muse_profile = controller.config.profiles["resolved-reviewer"].clone();
+    muse_profile.kind = HarnessKind::Muse;
+    controller
+        .config
+        .profiles
+        .insert("oracle-muse".into(), muse_profile);
+    let muse_oracle = controller
+        .register_subagent(RegisterSubagentRequest {
+            no_github_credentials: false,
+            kind: mj_core::subagent::SubagentKind::Oracle,
+            reviewer_launch: None,
+            parent_session_id: muse_parent_id.into(),
+            task_name: "oracle".into(),
+            profile_id: "oracle-muse".into(),
+            model: Some("muse-model".into()),
+            effort: None,
+            fast_mode: false,
+            working_directory: Default::default(),
+            initial_prompt: "Question:\nWhy?".into(),
+            request_key: "muse-oracle".into(),
+            report_root: Some("/reports".into()),
+        })
+        .unwrap();
+    assert!(!muse_oracle.handback_tool);
+    assert!(
+        muse_oracle
+            .initial_prompt
+            .contains("Send each answer as your last message")
+    );
+    assert!(
+        muse_oracle
+            .initial_prompt
+            .contains("Your report directory is /reports/")
+    );
+    controller
+        .state
+        .sessions
+        .get_mut(&oracle.child_session_id)
+        .unwrap()
+        .state = SessionState::Running;
+    controller.config.subagents.max_concurrent = 1;
+    controller
+        .ensure_subagent_slot_available(parent_id, None)
+        .unwrap();
     // The reviewer holds processes but consumes no ordinary delegation slot.
     controller
         .state
@@ -2812,7 +3339,6 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .get_mut(&child.child_session_id)
         .unwrap()
         .state = SessionState::Running;
-    controller.config.subagents.max_concurrent = 1;
     controller
         .ensure_subagent_slot_available(parent_id, None)
         .unwrap();
@@ -2823,6 +3349,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     });
     let worker = controller
         .register_subagent(RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
@@ -2841,6 +3368,21 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         worker.child_session_id, child.child_session_id,
         "kind belongs to the idempotent key"
     );
+    // An ordinary sub-agent is offered the review tools but is not push-gated.
+    let ordinary_launch = controller
+        .current_worker_launch_config(
+            &worker.child_session_id,
+            &targets::TargetLocator::LocalBare {
+                worker_root: mj_core::config::data_dir()
+                    .join("workers")
+                    .join(&worker.child_session_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        )
+        .unwrap();
+    assert!(ordinary_launch.review_tools());
+    assert!(!ordinary_launch.review_gate());
     let child_record = controller
         .state
         .sessions
@@ -2853,6 +3395,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     });
     crate::database::save_session(child_record).unwrap();
     let request = RegisterSubagentRequest {
+        no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
         reviewer_launch: Some(launch),
         parent_session_id: worker.child_session_id.clone(),
@@ -2877,6 +3420,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     );
     let error = controller
         .register_subagent(RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             ..request
@@ -2900,5 +3444,118 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             .unwrap_err()
             .to_string()
             .contains("cycle")
+    );
+}
+
+#[test]
+#[cfg_attr(windows, ignore = "local bare target fixture")]
+fn ordinary_children_inherit_the_parent_effective_review_setting() {
+    const MARKER: &str = "MJ_TEST_CHILD_EFFECTIVE_REVIEW";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "ordinary_children_inherit_the_parent_effective_review_setting",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let project = tempfile::tempdir().unwrap();
+    let mut config = registration_config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    // Global review is off; the first parent enables it with a session
+    // selection, then the same parent explicitly disables it.
+    config.review = mj_core::config::ReviewConfig::default();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let mut parent = super::test_support::checkpoint_test_session(parent_id);
+    parent.target_template_id = "localhost".into();
+    parent.project_directory = Some(project.path().to_path_buf());
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+    }));
+    parent.review = Some(Box::new(mj_core::config::SessionReview::Push {
+        reviewers: Some(vec![mj_core::config::SubagentChoice {
+            model: "review-model".into(),
+            effort: None,
+        }]),
+    }));
+    controller.state.sessions.insert(parent_id.into(), parent);
+    crate::database::save_state(&controller.state).unwrap();
+
+    let register_worker = |controller: &mut Controller, request_key: &str| {
+        controller
+            .register_subagent(RegisterSubagentRequest {
+                no_github_credentials: false,
+                kind: mj_core::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
+                parent_session_id: parent_id.into(),
+                task_name: request_key.into(),
+                profile_id: "codex".into(),
+                model: None,
+                effort: None,
+                fast_mode: false,
+                working_directory: PathBuf::new(),
+                initial_prompt: "work".into(),
+                request_key: request_key.into(),
+                report_root: None,
+            })
+            .unwrap()
+    };
+    let enabled = register_worker(&mut controller, "review-enabled");
+    let backend = |child_id: &str| targets::TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir()
+            .join("workers")
+            .join(child_id)
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let enabled_launch = controller
+        .current_worker_launch_config(
+            &enabled.child_session_id,
+            &backend(&enabled.child_session_id),
+        )
+        .unwrap();
+    assert!(
+        enabled_launch.review_tools(),
+        "session-specific parent review enables child review tools"
+    );
+    // The review host asks the same function, so the child is reviewed by
+    // the parent's selected reviewers, not the global list.
+    let child_choice = controller
+        .state
+        .effective_review(&enabled.child_session_id)
+        .unwrap();
+    assert_eq!(
+        controller.config.review.for_session(child_choice).reviewers,
+        vec![mj_core::config::SubagentChoice {
+            model: "review-model".into(),
+            effort: None,
+        }]
+    );
+
+    controller.state.sessions.get_mut(parent_id).unwrap().review =
+        Some(Box::new(mj_core::config::SessionReview::Off));
+    crate::database::save_state(&controller.state).unwrap();
+    let disabled = register_worker(&mut controller, "review-disabled");
+    let disabled_launch = controller
+        .current_worker_launch_config(
+            &disabled.child_session_id,
+            &backend(&disabled.child_session_id),
+        )
+        .unwrap();
+    assert!(
+        !disabled_launch.review_tools(),
+        "explicitly disabled parent review disables child review tools"
     );
 }

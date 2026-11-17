@@ -6,7 +6,7 @@
 //! or an EC2 launch template. Each machine owns its SSH connection details,
 //! the remote directory bare runtimes keep workspaces in, and the mbx build
 //! cache every runtime on that machine shares. `[targets.<id>]` describes a
-//! runtime -- `bare`, `podman`, `docker` or `apple-container` -- and names the
+//! runtime -- `bare`, `podman`, `docker`, `apple-container` or `nitro` -- and names the
 //! machine it runs on.
 //!
 //! In memory nothing is split: every consumer still matches on the fused
@@ -238,10 +238,18 @@ pub enum StoredTarget {
         #[serde(flatten)]
         container: ContainerTemplate,
     },
+    /// An AWS Nitro Sandbox: a microVM per session on an EC2 host reached
+    /// over SSH. Only an SSH machine can hold it, so the machine is required.
+    Nitro {
+        machine: String,
+        #[serde(flatten)]
+        container: ContainerTemplate,
+    },
 }
 
-/// The four runtime kinds a version 11 configuration may name.
-pub(super) const STORED_TARGET_KINDS: [&str; 4] = ["bare", "podman", "docker", "apple-container"];
+/// The five runtime kinds a version 11 configuration may name.
+pub(super) const STORED_TARGET_KINDS: [&str; 5] =
+    ["bare", "podman", "docker", "apple-container", "nitro"];
 
 impl StoredTarget {
     /// The machine this runtime runs on.
@@ -251,7 +259,8 @@ impl StoredTarget {
             Self::Bare { machine, .. }
             | Self::Podman { machine, .. }
             | Self::Docker { machine, .. }
-            | Self::AppleContainer { machine, .. } => machine,
+            | Self::AppleContainer { machine, .. }
+            | Self::Nitro { machine, .. } => machine,
         }
     }
 
@@ -260,7 +269,8 @@ impl StoredTarget {
             Self::Bare { .. } => None,
             Self::Podman { container, .. }
             | Self::Docker { container, .. }
-            | Self::AppleContainer { container, .. } => Some(container),
+            | Self::AppleContainer { container, .. }
+            | Self::Nitro { container, .. } => Some(container),
         }
     }
 }
@@ -376,6 +386,18 @@ pub fn resolve_target(
                 container: with_cache(container),
             }),
             Machine::Ssh { ssh, .. } => Ok(TargetTemplate::SshAppleContainer {
+                ssh: ssh.clone(),
+                container: with_cache(container),
+            }),
+            Machine::AwsEc2 { .. } => {
+                bail!("target {id:?}: an EC2 machine runs a bare harness only")
+            }
+        },
+        StoredTarget::Nitro { container, .. } => match &machine {
+            Machine::Local { .. } => {
+                bail!("target {id:?}: a Nitro sandbox runs on an SSH machine, not on this machine")
+            }
+            Machine::Ssh { ssh, .. } => Ok(TargetTemplate::SshNitro {
                 ssh: ssh.clone(),
                 container: with_cache(container),
             }),
@@ -538,6 +560,10 @@ pub fn stored_target(
             machine: ssh_machine_id(machines, ssh, None, container.build_cache.as_ref(), id),
             container: without_cache(container),
         },
+        TargetTemplate::SshNitro { ssh, container } => StoredTarget::Nitro {
+            machine: ssh_machine_id(machines, ssh, None, container.build_cache.as_ref(), id),
+            container: without_cache(container),
+        },
         TargetTemplate::AwsEc2 { .. } => StoredTarget::Bare {
             machine: machine_id_for(
                 machines,
@@ -605,7 +631,8 @@ pub fn target_machine_id<'a>(
         TargetTemplate::SshBare { ssh, .. }
         | TargetTemplate::SshPodman { ssh, .. }
         | TargetTemplate::SshDocker { ssh, .. }
-        | TargetTemplate::SshAppleContainer { ssh, .. } => find_ssh_machine(machines, ssh),
+        | TargetTemplate::SshAppleContainer { ssh, .. }
+        | TargetTemplate::SshNitro { ssh, .. } => find_ssh_machine(machines, ssh),
         TargetTemplate::AwsEc2 { .. } => {
             let wanted = aws_machine(target)?;
             machines
@@ -616,8 +643,8 @@ pub fn target_machine_id<'a>(
     }
 }
 
-/// The runtime half of a fused target: `bare`, `podman`, `docker` or
-/// `apple-container`, as `[targets.<id>]` spells its `kind`.
+/// The runtime half of a fused target: `bare`, `podman`, `docker`,
+/// `apple-container` or `nitro`, as `[targets.<id>]` spells its `kind`.
 #[must_use]
 pub const fn runtime_kind_name(target: &TargetTemplate) -> &'static str {
     match target {
@@ -629,6 +656,7 @@ pub const fn runtime_kind_name(target: &TargetTemplate) -> &'static str {
         TargetTemplate::AppleContainer { .. } | TargetTemplate::SshAppleContainer { .. } => {
             "apple-container"
         }
+        TargetTemplate::SshNitro { .. } => "nitro",
     }
 }
 

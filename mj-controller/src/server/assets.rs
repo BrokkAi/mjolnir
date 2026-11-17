@@ -314,3 +314,14 @@ pub(super) async fn security_headers(request: Request, next: Next) -> Response<B
     }
     response
 }
+
+pub(super) async fn push_sync_js() -> Response<Body> {
+    static ETAG: LazyLock<HeaderValue> =
+        LazyLock::new(|| strong_etag(include_bytes!("../web/push-sync.js")));
+    static_response(
+        "text/javascript; charset=utf-8",
+        include_str!("../web/push-sync.js"),
+        false,
+        &ETAG,
+    )
+}

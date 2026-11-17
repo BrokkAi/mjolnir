@@ -42,8 +42,8 @@ To rerun automatic agent and repository discovery, use `mj setup`. For host prer
 `mj setup instructions --platform linux` or `--platform macos` prints an
 agent preparation guide. `mj set-config` changes one live session's harness
 settings (model, effort, etc.); it does not edit the user's mj defaults. In an
-interactive conversation, `/config` lists every setting the harness advertises,
-`/config <key>` opens its values, and `/config <key> <value>` applies one.
+interactive conversation, `/config` lists user-settable settings the harness advertises,
+`/config <key>` opens its values, and `/config <key> <value>` applies one. The target permission policy owns permission settings; use plan mode to enter or leave Plan.
 
 ## Change the user's dashboard for them
 
@@ -61,7 +61,7 @@ mj ui settings notify.bell=false advanced.auto_afk_minutes=30
 `mj ui settings` opens Settings on the page of the first change with every
 change filled in but not saved; tell the user to review it and press Save.
 Paths are the configuration reference's keys joined with dots (`theme`,
-`keys.prefix`, `review.trigger`); a value that reads as JSON is used as JSON,
+`keys.prefix`); a value that reads as JSON is used as JSON,
 anything else as text, and `null` clears a field. The whole request is checked
 first: an unknown setting or value is refused with the reason and nothing
 changes, so correct it and send it again. A 409 means no dashboard is open;
@@ -76,7 +76,7 @@ command -v mj
 mj api-info
 ```
 
-`mj api-info` prints the API base URL and the file holding the bearer token.
+`mj api-info` prints the API base URL; `mj api-token` prints the bearer token.
 Both commands must succeed for CLI orchestration.
 
 When `mj` is unusable, use the `mj-agents` MCP tools if your harness lists
@@ -94,14 +94,24 @@ child sessions in the same target and filesystem:
   `task_type` and the parent delegates straightforward work. The user configures model/effort choices globally in Settings →
   Sub-agents; returns `child_session_id` at once, before the child has started
   running.
-- `list_agents` — this parent's children and their status.
+- `list_agents` — this parent's children and their status. An entry's `facts` hold
+  what Mjolnir observed when the child finished (processes its agent left running,
+  its working tree). Read them against the child's own report.
 - `send_message` — send follow-up work to one child. With a worker that supports
-  structured events, a running child receives it at its next tool boundary without its turn being cancelled; an idle child wakes and
-  a parked child starts again. Several messages sent while the child is busy
-  arrive together. Otherwise Mjolnir queues a new turn. A mailbox queue
-  receipt is not child delivery confirmation; do not resend it. `list_agents` shows
-  pending messages and delivery failures, marked `via: mailbox` or `via: turn`.
+  structured events, a running child receives it at its next tool boundary
+  without its turn being cancelled. This includes OpenAI-backed Codex and
+  other supported mid-turn harnesses. Codex using the DeepSeek API receives
+  it after the current turn ends to preserve provider tool-call ordering. An idle child wakes and a parked child starts again. Several
+  messages sent while the child is busy arrive together. When mailbox delivery
+  is unavailable, Mjolnir queues a new turn. The response includes delivery
+  timing when the worker reports it. A mailbox queue receipt is not child
+  delivery confirmation; do not resend it. `list_agents` shows pending messages
+  and delivery failures, marked `via: mailbox` or `via: turn`.
 - `close` — stop a child and keep its conversation.
+- `ask_oracle` — listed when the user configured an oracle model. Consult a
+  strong read-only advisor before a hard-to-reverse decision; send the decision,
+  options and evidence. The oracle keeps its context between questions, and its
+  answer arrives later as a message from Mjolnir.
 
 Finished child reports arrive as messages from Mjolnir. Do independent work
 while children run. When none remains, end your turn with a brief waiting
@@ -165,6 +175,24 @@ Moving work in and out:
   optional `ls`, even with Mjolnir sub-agents disabled. Copies land in the
   calling session's target temporary directory; listings return structured data.
 - `mj put-file` — upload one file into an idle session's workspace.
+
+Project environments:
+
+- A repository declares its tools with mise: `mise.toml` (`[tools]` such as
+  `node = "24"`, and `[bootstrap.packages]` such as `"apt:libssl-dev" =
+  "latest"` for system packages), or the version files it already has
+  (`rust-toolchain.toml`, `.nvmrc`, `.python-version`, `.ruby-version`,
+  `.go-version`, `.tool-versions`). Container sessions install these after the
+  clone, before the agent starts; a failure leaves a notice and the session
+  runs anyway.
+- `mj image build` — build an image from the repository's recipe on a
+  container target's host, push it to the registry named by `[images]
+  repository`, and record it for the project, so later sessions start with the
+  tools preinstalled. Run it from inside the repository; `--target`, `--bundle`
+  and `--name` override the defaults, `--print` shows the generated
+  Containerfile only. An unchanged recipe reuses the published image.
+- `mj image status` — whether each recorded project image still matches the
+  current recipe (`current`, `recipe changed`, or `unknown` without a target).
 
 Diagnosis:
 

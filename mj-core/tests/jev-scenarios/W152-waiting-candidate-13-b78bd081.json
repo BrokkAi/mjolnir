@@ -1,0 +1,168 @@
+{
+  "id": "W152",
+  "title": "waiting candidate 13 b78bd081",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "b78bd081bd6cc3603acc2540775d963f",
+    "session_title": "Verify Claude compaction boundary safety",
+    "reply_position": 1474,
+    "captured_at": "2026-11-01T12:49:32.497Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:27",
+          "role": "assistant",
+          "text": "I’ll trace how relay timestamps and canonical conversation entries are produced, then check whether the proposed cutoff can safely identify an intra-turn native compaction. I’ll keep this read-only and report counterexamples with file references."
+        },
+        {
+          "id": "agent:125",
+          "role": "assistant",
+          "text": "Findings delivered to the parent. The proposed timestamp cutoff cannot guarantee an accurate intra-turn suffix: wall-clock ordering is uncertain, and canonical rows can span the compaction boundary. Exact slicing needs a causal mapping to relay events."
+        },
+        {
+          "id": "agent:204",
+          "role": "assistant",
+          "text": "I’ll check whether Claude tool IDs survive the ACP bridge unchanged and whether a completed canonical tool row really marks a safe point in relay order. I’ll report the minimum checks needed for the cutoff and any cases that still require retaining extra context."
+        },
+        {
+          "id": "agent:278",
+          "role": "assistant",
+          "text": "A matched, finalized Claude tool result can anchor the cutoff, but the canonical tool row’s position marks its creation, not its completion. The cutoff needs the matching terminal update’s relay ordinal, verified bridge ID mapping, and retention of earlier prompts, mailbox messages, or tools whose presence in the native prefix is unproven. I sent the counterexamples and checks to the parent."
+        },
+        {
+          "id": "agent:386",
+          "role": "assistant",
+          "text": "I’ll check the installed bridge package and repository fixtures for the raw Claude tool ID to ACP toolCallId mapping. I’ll keep the search bounded to code and test assets and report only the mapping evidence."
+        },
+        {
+          "id": "agent:473",
+          "role": "assistant",
+          "text": "The installed Claude ACP bridge maps ordinary native `tool_use.id` directly to ACP `toolCallId`. One exception matters for the cutoff: a permission request can emit the canonical tool row **before** the native `tool_use` appears. For an anchor based on row creation position, require evidence that the row was first emitted from the streamed tool use; matching IDs alone is insufficient. I sent the source locations to the parent."
+        },
+        {
+          "id": "agent:591",
+          "role": "assistant",
+          "text": "You’re right about eager creation: cutting before that row retains more context and does not lose later rows. I’ll review only the finalized generic compaction code and tests, focusing on dropped post-boundary state, budget handling, and repeated moves. I won’t inspect the native parser or run Cargo."
+        },
+        {
+          "id": "agent:700",
+          "role": "assistant",
+          "text": "I found one real loss path: on a repeated move, a tool created before the prior handoff and updated afterward keeps its old position, so the generic cutoff can discard its new result. I also flagged that a pasted handoff can be mistaken for a real boundary because detection uses text alone. The findings and file references are with the parent."
+        },
+        {
+          "id": "agent:802",
+          "role": "assistant",
+          "text": "I’ll trace the handoff from cross-harness resume through the worker command and canonical projection, then check whether the old source can still update a tool after that handoff. I’ll use the live path to confirm or revise my earlier finding."
+        },
+        {
+          "id": "agent:936",
+          "role": "assistant",
+          "text": "The live path confirms a significant gap: cross-harness resume installs the generated handoff as hidden prompt context, so it never becomes the canonical User row that the generic extractor searches for. The current tests manufacture that row. I also retract my earlier claim about an old tool updating after handoff in a normal move: the source is sealed and stopped before the fresh destination session receives the handoff. I sent the trace and references to the parent."
+        },
+        {
+          "id": "agent:1057",
+          "role": "assistant",
+          "text": "I’ll review the new durable handoff state and its projection path, then check the generic compaction code for a concrete integration loss or budget regression. I’ll leave the native work in progress alone and won’t run Cargo."
+        },
+        {
+          "id": "agent:1135",
+          "role": "assistant",
+          "text": "I found a production integration miss: ordinary cross-harness resume installs the marked handoff through a relay request that emits no canonical event. The new projector handles only the event-producing startup command, so it never stores `mj_handoff_state` for the ordinary resume path. A later move therefore cannot reuse that handoff. I sent the exact call chain to the parent."
+        },
+        {
+          "id": "agent:1241",
+          "role": "assistant",
+          "text": "I’ll verify the corrected install route and journal test, then review the finalized Claude cutoff and archive-to-backend test for concrete loss paths. I won’t run Cargo or touch the files."
+        },
+        {
+          "id": "agent:1330",
+          "role": "assistant",
+          "text": "The corrected install route now journals and projects the marked handoff, and the verified archive test covers its path into compaction. I found one remaining issue: resume awaits a native archive read of up to 256 MiB before entering its cancellable work, so cancellation can stall until that read and parse finish. I sent the references to the parent."
+        },
+        {
+          "id": "agent:1433",
+          "role": "assistant",
+          "text": "I’ll check only the new cancellation wrapper and parser checkpoints, including whether cleanup waits for the blocking reader. I won’t broaden the review or run tests."
+        },
+        {
+          "id": "agent:1474",
+          "role": "assistant",
+          "text": "Yes. Explicit cancellation now stops parsing promptly and joins the blocking task before returning; it can still wait for one bounded payload read and hash. One limit: dropping the whole future cancels the token but does not join the blocking task. I sent that distinction to the parent."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "Yes. Explicit cancellation now stops parsing promptly and joins the blocking task before returning; it can still wait for one bounded payload read and hash. One limit: dropping the whole future cancels the token but does not join the blocking task. I sent that distinction to the parent.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 0
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-01T12:52:54.019Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-11-01T12:52:55.101Z",
+        "kind": "user",
+        "text": "One bounded final integration check before close: new reserved configuration.values['mj_handoff_state'] must not be sent back to harness as adapter configuration or rendered as a selectable user setti"
+      },
+      {
+        "at": "2026-11-01T12:53:02.400Z",
+        "kind": "agent",
+        "text": "I’ll trace only consumers of `SessionConfiguration.values` that could forward unknown keys to a harness or show them as selectable settings. I’ll report a concrete route if I find one; otherwise I’ll "
+      },
+      {
+        "at": "2026-11-01T12:53:35.768Z",
+        "kind": "agent",
+        "text": "Confirmed: the reserved `mj_handoff_state` key survives canonical storage without becoming a harness setting or a selectable UI option. Restore reads only known model and effort values, and the UI bui"
+      }
+    ]
+  }
+}

@@ -1,0 +1,1 @@
+aws: [ERROR]: An error occurred (ValidationError) when calling the AssumeRole operation: The requested DurationSeconds exceeds the MaxSessionDuration set for this role.

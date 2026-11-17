@@ -52,6 +52,7 @@ pub fn import_safety_issues(targets: &SessionEditTargets) -> Result<ImportSafety
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportedClaudeSession {
+    pub remapped_bundle: Option<ProjectBundle>,
     pub session_id: String,
     pub native_session_id: String,
     pub source_jsonl: PathBuf,
@@ -107,10 +108,5 @@ pub fn harness_config_home(kind: HarnessKind) -> Result<PathBuf> {
             mj_core::path_input::user_home().map(|home| home.join(kind.default_home_leaf()))
         })
         .with_context(|| format!("cannot determine {name} home; set {}", kind.home_env()))?;
-    ensure!(
-        home.is_dir(),
-        "{name} home is not a directory: {}",
-        home.display()
-    );
     Ok(home)
 }

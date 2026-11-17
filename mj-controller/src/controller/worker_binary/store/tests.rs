@@ -40,6 +40,29 @@ fn install(
 #[derive(Default)]
 struct Transfers(AtomicUsize);
 impl CommandExecutor for Transfers {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         if command.purpose == "stage replacement Mjolnir worker" {
             self.0.fetch_add(1, Ordering::Relaxed);
@@ -59,9 +82,18 @@ fn concurrent_sessions_share_one_verified_upload_and_swaps_leave_other_links_unc
     let old = source(temp.path(), "old");
     let new = source(temp.path(), "new");
     let executor = Transfers::default();
+    let others: Vec<_> = (0..2)
+        .map(|n| {
+            let id = format!("{n:032}");
+            (target(temp.path(), &id), id)
+        })
+        .collect();
     std::thread::scope(|scope| {
         scope.spawn(|| install(&executor, &a, first, &old));
         scope.spawn(|| install(&executor, &b, second, &old));
+        for (locator, id) in &others {
+            scope.spawn(|| install(&executor, locator, id, &old));
+        }
     });
     // A repeated install and a normal promotion can both name the inode that
     // is already installed. Plain mv reports these two hard links as an error.
@@ -110,6 +142,7 @@ fn concurrent_sessions_share_one_verified_upload_and_swaps_leave_other_links_unc
         &config,
         &profile,
         None,
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -126,6 +159,99 @@ fn concurrent_sessions_share_one_verified_upload_and_swaps_leave_other_links_unc
     );
     std::fs::remove_dir_all(b_path.parent().unwrap()).unwrap();
     assert!(cached.exists(), "session teardown removed the shared entry");
+}
+
+// A gate wait inside `WithoutDeadline` must not end at the wrapped executor's
+// deadline: queueing behind another upload does not count against a timeout.
+// A real cancellation still ends it.
+// Hard-won: #1550: staging time consumed the caller's deadline, so the following stop never ran
+#[test]
+fn a_gate_wait_outlasts_the_callers_deadline_but_not_a_cancel() {
+    let temp = tempfile::tempdir().unwrap();
+    let id = "66666666666666666666666666666666";
+    let locator = target(temp.path(), id);
+    let store = store_root(&locator, id).unwrap();
+    let gate = store_gate(&locator, store.to_str().unwrap());
+    let held = gate.try_lock("holder", "test hold").expect("a free gate");
+    let caller = targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(1));
+    let waiter_done = std::sync::atomic::AtomicBool::new(false);
+    let (ready, waiting) = std::sync::mpsc::sync_channel(0);
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            ready.send(()).unwrap();
+            let result = lock_gate(&caller, &gate, id, "wait behind the holder").map(|_| ());
+            waiter_done.store(true, Ordering::SeqCst);
+            result
+        });
+        waiting.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !waiter_done.load(Ordering::SeqCst),
+            "the wait ended at the caller's deadline"
+        );
+        drop(held);
+        waiter
+            .join()
+            .unwrap()
+            .expect("the wait proceeds once the gate frees");
+    });
+
+    // The control command gets the budget that staging did not use. A later
+    // long command still times out: dropping the scope really resumes it.
+    let control = targets::CommandSpec::new("sh", ["-c", "sleep 0.2; printf stopped"])
+        .purpose("stop worker after staging");
+    let output = caller.execute(&control).expect("stop still has its budget");
+    assert_eq!(output.status, 0);
+    assert_eq!(output.stdout, b"stopped");
+    let long = targets::CommandSpec::new("sh", ["-c", "sleep 30"]);
+    let error = caller.execute(&long).unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error:#}");
+
+    // A real cancellation ends the wait.
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let canceller = targets::CancellableProcessExecutor::new(cancelled.clone());
+    let held = gate.try_lock("holder", "test hold").expect("a free gate");
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            lock_gate(
+                &targets::WithoutDeadline::new(&canceller),
+                &gate,
+                id,
+                "wait behind the holder",
+            )
+            .map(|_| ())
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        cancelled.store(true, Ordering::SeqCst);
+        assert!(waiter.join().unwrap().is_err());
+    });
+    drop(held);
+    assert!(
+        canceller
+            .execute(&control)
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled")
+    );
+    assert!(
+        targets::WithoutDeadline::new(&canceller)
+            .execute(&control)
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled")
+    );
+    // Cancellation also interrupts a running staging command while paused.
+    cancelled.store(false, Ordering::SeqCst);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(100));
+            cancelled.store(true, Ordering::SeqCst);
+        });
+        let error = targets::WithoutDeadline::new(&canceller)
+            .execute(&long)
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error:#}");
+    });
 }
 
 #[cfg(unix)]
@@ -223,6 +349,29 @@ fn a_filesystem_without_hard_links_still_installs_verified_private_copies() {
         bin: PathBuf,
     }
     impl CommandExecutor for NoLinks {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             let mut command = command.clone();
             command.env.insert(
@@ -246,24 +395,102 @@ fn a_filesystem_without_hard_links_still_installs_verified_private_copies() {
     );
 }
 
+// Hard-won: 7f871fd03: the wait deadline expired during setup before the installer reached the held store gate.
 #[test]
-fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner() {
+fn a_waiting_installer_observes_cancellation_without_cancelling_the_store_owner() {
     use std::sync::mpsc;
     struct HeldUpload {
         reached: mpsc::Sender<()>,
         release: std::sync::Mutex<mpsc::Receiver<()>>,
     }
     impl CommandExecutor for HeldUpload {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             if command.purpose == "stage replacement Mjolnir worker" {
                 self.reached.send(()).unwrap();
-                let _ = self
-                    .release
+                // Keep the original deadlock watchdog, but fail on expiry:
+                // never release the gate as though the waiter had finished.
+                self.release
                     .lock()
                     .unwrap()
-                    .recv_timeout(Duration::from_secs(2));
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("cancellation test waiter did not finish before the deadlock watchdog");
             }
             targets::ProcessExecutor.execute(command)
+        }
+    }
+    #[derive(Default)]
+    struct CancelAtWait(OnceLock<targets::CancellableProcessExecutor>);
+    impl CommandExecutor for CancelAtWait {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            self.0
+                .get()
+                .map_or_else(mj_core::targets::DeadlinePause::none, |executor| {
+                    executor.pause_deadline()
+                })
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            match self.0.get() {
+                Some(executor) => executor.execute(command),
+                None => targets::ProcessExecutor.execute(command),
+            }
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            self.0.get().is_some_and(|executor| executor.is_cancelled())
+        }
+
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            if stage == targets::ProvisionStage::WaitingForWorkerStore {
+                // Cancel only once queued, without racing setup or a clock.
+                self.0.get_or_init(|| {
+                    targets::CancellableProcessExecutor::new(Arc::new(
+                        std::sync::atomic::AtomicBool::new(true),
+                    ))
+                });
+            }
         }
     }
     let temp = tempfile::tempdir().unwrap();
@@ -279,9 +506,13 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
         release: std::sync::Mutex::new(release_rx),
     };
     std::thread::scope(|scope| {
-        let running = scope.spawn(|| install(&owner, &a, first, &bytes));
-        reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let executor = targets::CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
+        // Drop the sender on a setup panic too, so scope can join the owner.
+        let release = release_tx;
+        let owner_bytes = &bytes;
+        let running = scope.spawn(move || install(&owner, &a, first, owner_bytes));
+        // If setup fails, dropping the owner's sender wakes this receive.
+        reached_rx.recv().unwrap();
+        let executor = CancelAtWait::default();
         let result = install_worker_binary(
             &executor,
             &b,
@@ -289,15 +520,141 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
             &WorkerInstall::Host(bytes.clone()),
             "hel",
         );
-        let _ = release_tx.send(());
+        release.send(()).unwrap();
         running.join().unwrap();
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "timed out after 0.05 s while wait for the shared Mjolnir worker binary"
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled while wait to publish a worker build")
         );
         assert!(temp.path().join(first).join("hel").exists());
         assert!(!temp.path().join(second).join("hel").exists());
     });
+}
+
+#[test]
+fn published_builds_install_without_waiting_on_each_other_or_on_an_upload_or_collection() {
+    use std::sync::mpsc;
+    struct Overlap {
+        published_digest: String,
+        expected: usize,
+        arrived: AtomicUsize,
+        overlapped: AtomicUsize,
+        collects: AtomicUsize,
+        reached: std::sync::Mutex<mpsc::Sender<()>>,
+        release: std::sync::Mutex<mpsc::Receiver<()>>,
+    }
+    impl CommandExecutor for Overlap {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            match command.purpose.as_str() {
+                // Another build's upload stays in flight for the whole test.
+                "stage replacement Mjolnir worker" => {
+                    self.reached.lock().unwrap().send(()).unwrap();
+                    let _ = self
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(20));
+                }
+                // Every link of the published build must be in flight at once;
+                // serialized installs would leave each one alone here until its
+                // deadline.
+                "link shared Mjolnir worker into session"
+                    if command
+                        .args
+                        .iter()
+                        .any(|arg| arg.contains(&self.published_digest)) =>
+                {
+                    self.arrived.fetch_add(1, Ordering::SeqCst);
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while self.arrived.load(Ordering::SeqCst) < self.expected
+                        && Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    if self.arrived.load(Ordering::SeqCst) >= self.expected {
+                        self.overlapped.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                "collect unused Mjolnir worker binaries" => {
+                    self.collects.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            targets::ProcessExecutor.execute(command)
+        }
+    }
+    const SESSIONS: usize = 6;
+    let temp = tempfile::tempdir().unwrap();
+    let published = source(temp.path(), "published");
+    let uploading = source(temp.path(), "uploading");
+    let seed = "cccccccccccccccccccccccccccccccc";
+    install(
+        &targets::ProcessExecutor,
+        &target(temp.path(), seed),
+        seed,
+        &published,
+    );
+    let sessions: Vec<_> = (0..SESSIONS)
+        .map(|n| {
+            let id = format!("d{n:031}");
+            (target(temp.path(), &id), id)
+        })
+        .collect();
+    let uploader = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let uploader_target = target(temp.path(), uploader);
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let executor = Overlap {
+        published_digest: mj_core::worker_launch::worker_executable_digest(&published).unwrap(),
+        expected: SESSIONS,
+        arrived: AtomicUsize::new(0),
+        overlapped: AtomicUsize::new(0),
+        collects: AtomicUsize::new(0),
+        reached: std::sync::Mutex::new(reached_tx),
+        release: std::sync::Mutex::new(release_rx),
+    };
+    std::thread::scope(|scope| {
+        let upload = scope.spawn(|| install(&executor, &uploader_target, uploader, &uploading));
+        reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let installs: Vec<_> = sessions
+            .iter()
+            .map(|(locator, id)| scope.spawn(|| install(&executor, locator, id, &published)))
+            .collect();
+        for install in installs {
+            install.join().unwrap();
+        }
+        // The upload is still held: nobody queued behind it.
+        let _ = release_tx.send(());
+        upload.join().unwrap();
+    });
+    assert_eq!(executor.overlapped.load(Ordering::SeqCst), SESSIONS);
+    // Only the upload collects; cached installs skip while it owns the store.
+    assert_eq!(executor.collects.load(Ordering::SeqCst), 1);
 }
 
 // Hard-won: shared-store review: a foreign collector can unlink a fallback source before cp opens it.
@@ -308,6 +665,29 @@ fn fallback_reuploads_a_source_retired_between_link_and_copy_but_preserves_other
         transfers: AtomicUsize,
     }
     impl CommandExecutor for RetiringCopy {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             if command.purpose == "stage replacement Mjolnir worker" {
                 self.transfers.fetch_add(1, Ordering::Relaxed);
@@ -373,6 +753,29 @@ exec /bin/cp "$@"
 fn killed_store_pins_are_swept_on_the_next_install_while_live_pins_survive() {
     struct KillLink;
     impl CommandExecutor for KillLink {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             let mut command = command.clone();
             if command.purpose == "link shared Mjolnir worker into session" {
@@ -467,6 +870,8 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
     sample.filesystems.truncate(1);
     sample.filesystems[0].paths = vec![temp.path().to_string_lossy().into_owned()];
     crate::target_storage::record_samples(&[sample], 1);
+    // The first install above claimed this interval's collection.
+    forget_collections();
     let executor = Transfers::default();
     install(&executor, &locator, id, &bytes);
     let profile = temp.path().join("empty-profile");
@@ -484,6 +889,7 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
         &config,
         &profile,
         None,
+        &[],
     )
     .unwrap();
     super::super::upgrade::replace_target_worker_binary_if_stale(
@@ -509,6 +915,29 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
     assert!(crate::target_storage::is_storage_full(&error), "{error:#}");
     struct NoLinks;
     impl CommandExecutor for NoLinks {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             if command.purpose == "link shared Mjolnir worker into session" {
                 return Ok(targets::CommandOutput {
@@ -523,4 +952,77 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
     let error = install_worker_binary(&NoLinks, &locator, id, &WorkerInstall::Host(bytes), "hel")
         .unwrap_err();
     assert!(crate::target_storage::is_storage_full(&error), "{error:#}");
+}
+
+/// A wait behind a held gate is its own stage, open from the first failed
+/// attempt until the gate is taken, so a lifecycle watching for stalls can
+/// tell a queue from a stuck command. A free gate reports nothing.
+#[test]
+fn a_wait_behind_a_held_store_gate_is_reported_as_a_queue_stage() {
+    #[derive(Default)]
+    struct Stages(Mutex<Vec<(bool, targets::ProvisionStage)>>);
+    impl CommandExecutor for Stages {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            unreachable!("waiting for a gate runs no command: {command:?}");
+        }
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            self.0.lock().unwrap().push((true, stage));
+        }
+        fn stage_finished(&self, stage: targets::ProvisionStage) {
+            self.0.lock().unwrap().push((false, stage));
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let locator = target(temp.path(), "33333333333333333333333333333333");
+    let gate = store_gate(&locator, "queue-stage-test");
+    let stages = Stages::default();
+    drop(lock_gate(&stages, &gate, "free", "take a free gate").unwrap());
+    assert!(stages.0.lock().unwrap().is_empty());
+
+    let held = gate.try_lock("holder", "hold the gate").unwrap();
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            drop(lock_gate(&stages, &gate, "waiter", "wait for the gate").unwrap());
+        });
+        while stages.0.lock().unwrap().is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            *stages.0.lock().unwrap(),
+            vec![(true, targets::ProvisionStage::WaitingForWorkerStore)],
+            "the stage is open while the gate is held"
+        );
+        drop(held);
+        waiter.join().unwrap();
+    });
+    assert_eq!(
+        *stages.0.lock().unwrap(),
+        vec![
+            (true, targets::ProvisionStage::WaitingForWorkerStore),
+            (false, targets::ProvisionStage::WaitingForWorkerStore)
+        ]
+    );
 }

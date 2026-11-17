@@ -153,6 +153,7 @@ impl ProfileHealth {
                     .then(|| {
                         let now_ms = DateTime::<chrono::Utc>::from(now).timestamp_millis();
                         crate::quota::message_reset(&diagnostic.message, now_ms)
+                            .map(|stated| stated.at)
                     })
                     .flatten()
             });
@@ -302,6 +303,7 @@ mod tests {
             code: code.map(str::to_owned),
             http_status,
             reset_at: None,
+            login_fingerprint: None,
         }
     }
 
@@ -485,6 +487,7 @@ mod tests {
         let now_system = SystemTime::from(now);
         let failure = TurnDiagnostic {
             reset_at: Some("23:00 UTC".into()),
+            login_fingerprint: None,
             ..diagnostic("429", Some("limit"), None)
         };
         let expected = SystemTime::from(
@@ -592,7 +595,8 @@ mod tests {
             "You've hit your quota; resets at 6:20pm (America/Chicago)",
             now,
         )
-        .unwrap();
+        .unwrap()
+        .at;
         let mut health = ProfileHealth::default();
         health.record(
             "codex2",

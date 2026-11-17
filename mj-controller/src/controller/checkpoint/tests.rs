@@ -75,9 +75,9 @@ fn managed_worktree_export_capture(
     let worktree_head =
         crate::controller::test_support::test_git(&worktree_root, &["rev-parse", "HEAD"]);
 
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
-    });
+    }));
     let mut state = State::default();
     state.sessions.insert(session_id.into(), session);
     let controller = Controller {
@@ -125,15 +125,15 @@ fn a_plain_project_directory_is_captured_without_git() {
     let session_id = plain.id.clone();
     plain.state = SessionState::Stopped;
     plain.target_template_id = "local-bare".into();
-    plain.target = Some(mj_core::state::TargetLocator::LocalBare {
+    plain.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
-    });
+    }));
     plain.project_directory = Some(directory.path().to_path_buf());
     let mut recorded = project.clone();
     recorded
         .plain_directories
         .insert(recorded.bundle.primary_repo.clone());
-    plain.project = Some(recorded);
+    plain.project = Some(recorded.into());
     let mut state = State::default();
     state.sessions.insert(session_id.clone(), plain);
     let controller = Controller {
@@ -207,12 +207,12 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     }
     let mut state = State::default();
     let mut session = checkpoint_test_session(session_id);
-    session.checkpoint = Some(CheckpointMetadata {
+    session.checkpoint = Some(Box::new(CheckpointMetadata {
         archive_path: directory.path().join(&referenced_name),
         sha256: "c".repeat(64),
         created_at: "2026-08-12T00:00:00Z".into(),
         event_frontier: 7,
-    });
+    }));
     state.sessions.insert(session_id.into(), session);
 
     assert_eq!(
@@ -251,8 +251,8 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
     materialized.applied_event_ordinal = cursor.ordinal;
     materialized.applied_event_digest = cursor.digest.clone();
     ManagedSessionSnapshot {
-        subagent_requests: Vec::new(),
-        subagent_completions: Vec::new(),
+        subagent_requests: Default::default(),
+        subagent_completions: Default::default(),
         subagent_queue_error: None,
         window: mj_core::state::ProjectionWindow::of(&materialized),
         materialized,
@@ -260,6 +260,10 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
         worker_build: None,
         operational: mj_core::relay::RelayOperationalState {
             assessment: None,
+            open_request: None,
+            person_input_through: 0,
+            work_liveness: None,
+            undelivered_mailbox_event_keys: Vec::new(),
             assessment_context: None,
             turn_completion: None,
             continuation: Default::default(),
@@ -280,6 +284,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             .unwrap(),
             capacity_retry: None,
             retry_assessment_pending: false,
+            authentication_retry_waiting: None,
             activity_turn_started_at_ms: None,
             checkpoint_only: false,
             acp_ready: None,
@@ -300,10 +305,11 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             agent_info: None,
             runtime: None,
             steering_supported: None,
+            mailbox_delivery: None,
             turn_controls: None,
-            config_options: Vec::new(),
+            config_options: Vec::new().into(),
             modes: None,
-            available_commands: Vec::new(),
+            available_commands: Vec::new().into(),
             config: BTreeMap::new(),
             active_prompt: None,
             queued_prompts: Vec::new(),
@@ -321,7 +327,8 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             last_harness_turn_started_ordinal: None,
             background_commands: Vec::new(),
             background_work_known: None,
-        },
+        }
+        .into(),
     }
 }
 #[test]
@@ -495,6 +502,29 @@ impl ExportExecutor {
     }
 }
 impl CommandExecutor for ExportExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.purposes.borrow_mut().push(command.purpose.clone());
         Ok(CommandOutput {
@@ -659,21 +689,19 @@ fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
                 .unwrap(),
             spec
         );
+        // The store's collection runs once per interval for the whole process,
+        // so whether this install happened to claim it is not part of the test.
+        let purposes: Vec<_> = executor
+            .purposes
+            .into_inner()
+            .into_iter()
+            .filter(|purpose| purpose != "collect unused Mjolnir worker binaries")
+            .collect();
         assert_eq!(
-            executor.purposes.into_inner(),
+            purposes,
             vec![
                 "export target checkpoint".to_owned(),
                 "remove stale private worker staging".to_owned(),
-                "collect unused Mjolnir worker binaries".to_owned(),
-                "verify shared Mjolnir worker".to_owned(),
-                "create private worker store upload".to_owned(),
-                "stage replacement Mjolnir worker".to_owned(),
-                "match replacement worker to the worker directory owner".to_owned(),
-                "replace installed Mjolnir worker".to_owned(),
-                "make replaced Mjolnir worker executable".to_owned(),
-                "verify uploaded Mjolnir worker".to_owned(),
-                "publish shared Mjolnir worker".to_owned(),
-                "discard private worker store upload".to_owned(),
                 "link shared Mjolnir worker into session".to_owned(),
                 "export target checkpoint".to_owned(),
             ]
@@ -708,6 +736,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::DeferWhileRunning,
+        HarnessKind::Codex,
         false,
         false,
     )
@@ -729,6 +758,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
             &snapshot,
             "checkpoint-1",
             BarrierBusyPolicy::InterruptWhileRunning,
+            HarnessKind::Codex,
             false,
             false,
         )
@@ -738,6 +768,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::InterruptWhileRunning,
+        HarnessKind::Codex,
         true,
         true,
     )
@@ -763,6 +794,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::DeferWhileRunning,
+        HarnessKind::Codex,
         true,
         false,
     )
@@ -780,6 +812,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::DeferWhileRunning,
+        HarnessKind::Codex,
         true,
         false,
     )
@@ -941,6 +974,7 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
 }
 pub(crate) const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
 pub(crate) const LATCH_RELAY_MAX_PROTOCOL: &str = "MJ_TEST_LATCH_RELAY_MAX_PROTOCOL";
+const LATCH_REJECT_PROJECT_MEMORY: &str = "MJ_TEST_LATCH_REJECT_PROJECT_MEMORY";
 pub(crate) const LATCH_RECORD_SUBAGENT_ADMISSION: &str = "MJ_TEST_LATCH_RECORD_SUBAGENT_ADMISSION";
 pub(crate) const LATCH_DROP_ADMISSION_CLOSE_REPLY: &str =
     "MJ_TEST_LATCH_DROP_ADMISSION_CLOSE_REPLY";
@@ -1023,9 +1057,10 @@ fn latch_relay_child_serves_stdio() {
     // trailing newline before the body runs. End that line first so it
     // cannot glue itself onto the first protocol frame.
     println!();
+    let mut resume_discarded = false;
     let checkpoint_only = std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some();
     // Queue-only connections never own or write the control journal.
-    let mut relay = None;
+    let mut relay: Option<mj_worker::relay::DurableRelay> = None;
     let ready_at = Instant::now()
         + Duration::from_millis(
             std::env::var(LATCH_RELAY_STARTUP_DELAY_MS)
@@ -1048,9 +1083,49 @@ fn latch_relay_child_serves_stdio() {
     while let Some(request) =
         mj_core::relay::read_relay_frame(&mut reader).expect("read a relay request")
     {
+        if std::env::var_os(LATCH_REJECT_PROJECT_MEMORY).is_some() {
+            assert!(
+                !request.request.method_name().contains("project_memory"),
+                "idle worker upgrade must not require a project-memory transfer"
+            );
+        }
         let max_protocol = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
             .ok()
-            .and_then(|value| value.parse::<u32>().ok());
+            .and_then(|value| value.parse::<u32>().ok())
+            .or(Some(mj_core::relay::RELAY_CHANGE_WAIT_PROTOCOL));
+        if Path::new(&root).join("upgrade-goal-peer").exists() {
+            use std::io::Write as _;
+            let name = match &request.request {
+                mj_core::relay::RelayRequest::Submit {
+                    command: RelayCommand::BeginCheckpoint { .. },
+                    ..
+                } => "begin_checkpoint",
+                mj_core::relay::RelayRequest::Submit {
+                    command: RelayCommand::CancelTurn,
+                    ..
+                } => "cancel_turn",
+                _ => request.request.method_name(),
+            };
+            let mut log = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(Path::new(&root).join("upgrade-requests.log"))
+                .unwrap();
+            writeln!(log, "{name}").unwrap();
+            if max_protocol
+                .is_some_and(|version| version < mj_core::relay::RELAY_IDLE_GOAL_INTENT_PROTOCOL)
+                && let mj_core::relay::RelayRequest::ReserveIdle { command_id } = &request.request
+            {
+                assert!(
+                    relay.as_ref().is_some_and(|relay| relay
+                        .operational_state()
+                        .checkpoint_barrier
+                        .as_deref()
+                        == Some(command_id.as_str())),
+                    "old worker's initial ReserveIdle rejects goal intent; only accepted-barrier confirmation is valid"
+                );
+            }
+        }
         let payload = match &request.request {
             mj_core::relay::RelayRequest::Hello { supported, .. } => {
                 let negotiated = max_protocol
@@ -1069,6 +1144,7 @@ fn latch_relay_child_serves_stdio() {
                 })
             }
             mj_core::relay::RelayRequest::PollSubagentQueue { .. }
+            | mj_core::relay::RelayRequest::WaitForChange { .. }
             | mj_core::relay::RelayRequest::SubagentRequests => {
                 subagent_connection_response(&request).map(|response| match response.body {
                     mj_core::relay::RelayResponseBody::Ok { payload } => payload,
@@ -1157,7 +1233,9 @@ fn latch_relay_child_serves_stdio() {
             })).unwrap()).unwrap();
             }
             #[cfg(unix)]
-            if running && relay.operational_state().active_prompt.is_none() {
+            if running && relay.operational_state().active_prompt.is_none()
+                && !Path::new(&root).join("cancellation-accepted").exists()
+            {
                 let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
                     request_id: "seed-running-request".into(),
                     protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
@@ -1182,7 +1260,15 @@ fn latch_relay_child_serves_stdio() {
             }
             relay
         });
-        if !checkpoint_only && !configured && Instant::now() >= ready_at {
+        if matches!(&request.request, mj_core::relay::RelayRequest::Submit { command_id, command: RelayCommand::ClearQueuedPrompts } if command_id == "discard-before-ready")
+        {
+            resume_discarded = true;
+        }
+        let discard_ready = !Path::new(&root)
+            .join("resume-discard-before-ready")
+            .exists()
+            || resume_discarded;
+        if !checkpoint_only && !configured && Instant::now() >= ready_at && discard_ready {
             relay
                 .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
                     config_options: Vec::new(),
@@ -1201,6 +1287,52 @@ fn latch_relay_child_serves_stdio() {
                 checkpoint_only || relay.operational_state().native_session_is_ready(),
                 "checkpoint submitted before current ACP startup finished"
             );
+        }
+        if std::env::var("MJ_TEST_QUOTA_BARRIER_RACE").as_deref() == Ok("1") {
+            if matches!(
+                &request.request,
+                mj_core::relay::RelayRequest::Submit {
+                    command: RelayCommand::BeginCheckpoint { .. },
+                    ..
+                }
+            ) {
+                relay
+                    .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+                        started_at_ms: mj_core::clock::epoch_millis(),
+                    })
+                    .unwrap();
+            }
+            assert!(
+                !matches!(
+                    &request.request,
+                    mj_core::relay::RelayRequest::Submit {
+                        command: RelayCommand::CancelTurn,
+                        ..
+                    }
+                ),
+                "automatic quota Move cancelled new work"
+            );
+        }
+        let late_turn = Path::new(&root).join("upgrade-late-turn");
+        if late_turn.exists()
+            && matches!(
+                request.request,
+                mj_core::relay::RelayRequest::Status | mj_core::relay::RelayRequest::Attach { .. }
+            )
+        {
+            std::fs::remove_file(late_turn).unwrap();
+            relay
+                .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+                    started_at_ms: mj_core::clock::epoch_millis(),
+                })
+                .unwrap();
+            relay
+                .record_observation(mj_core::relay::RelayObservation::HarnessTurnSettled {
+                    autonomous: None,
+                    origin: Some("test autonomous completion".into()),
+                    prompt_in_flight: false,
+                })
+                .unwrap();
         }
         #[cfg(unix)]
         hold_named_relay_command(&request.request);
@@ -1260,7 +1392,21 @@ fn latch_relay_child_serves_stdio() {
                 break;
             }
         }
-        let response = if reject_release && requests_checkpoint_release(&request) {
+        let response = if Path::new(&root).join("upgrade-held-reviewer").exists()
+            && matches!(
+                request.request,
+                mj_core::relay::RelayRequest::ReserveIdle { .. }
+            ) {
+            mj_core::relay::RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: request.protocol_version,
+                body: mj_core::relay::RelayResponseBody::Ok {
+                    payload: mj_core::relay::RelayResponsePayload::IdleReservation {
+                        ordinal: None,
+                    },
+                },
+            }
+        } else if reject_release && requests_checkpoint_release(&request) {
             unparseable_request_response(&request)
         } else if matches!(
             request.request,
@@ -1320,6 +1466,7 @@ fn latch_relay_child_serves_stdio() {
                         .record_command_completed(
                             &claimed.command_id,
                             RelayCommandOutcome::Prompt {
+                                work_facts: None,
                                 diagnostic: None,
                                 stop_reason: "end_turn".into(),
                                 usage: None,
@@ -1347,10 +1494,16 @@ fn latch_relay_child_serves_stdio() {
                             RelayCommandOutcome::Cancelled,
                         )
                         .expect("complete the cancellation");
+                    if Path::new(&root).join("unsettled-cancellation").exists() {
+                        std::fs::write(Path::new(&root).join("cancellation-accepted"), b"accepted")
+                            .unwrap();
+                        continue;
+                    }
                     relay
                         .record_command_completed(
                             &prompt_id,
                             RelayCommandOutcome::Prompt {
+                                work_facts: None,
                                 diagnostic: None,
                                 stop_reason: "cancelled".into(),
                                 usage: None,
@@ -1401,41 +1554,129 @@ fn hold_named_relay_command(request: &mj_core::relay::RelayRequest) {
     }
 }
 
-fn record_test_subagent_admission(relay_root: &Path, open: bool) {
-    let queue_path = relay_root
+fn test_subagent_queue_path(relay_root: &Path) -> PathBuf {
+    relay_root
         .parent()
         .expect("relay root parent")
         .join(LATCH_RELAY_SESSION)
-        .join("subagents.json");
-    let mut queue: serde_json::Value = std::fs::read(&queue_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+        .join("subagents.json")
+}
+fn read_test_subagent_queue(path: &Path) -> serde_json::Value {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).expect("parse fixture sub-agent queue"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::json!({"requests": {}, "results": {}})
+        }
+        Err(error) => panic!("read fixture sub-agent queue: {error}"),
+    }
+}
+fn record_test_subagent_admission(relay_root: &Path, open: bool) {
+    let queue_path = test_subagent_queue_path(relay_root);
+    let mut queue = read_test_subagent_queue(&queue_path);
+    let transitions = queue["admission_transitions"].as_array_mut().map(|items| {
+        items.push(serde_json::Value::Bool(open));
+    });
+    if transitions.is_none() {
+        queue["admission_transitions"] = serde_json::json!([open]);
+    }
     queue["mutating_admission_open"] = serde_json::Value::Bool(open);
-    std::fs::write(queue_path, serde_json::to_vec(&queue).unwrap())
+    mj_core::config::atomic_write(&queue_path, &serde_json::to_vec(&queue).unwrap())
         .expect("persist fake worker sub-agent admission");
 }
 fn subagent_connection_response(
     request: &mj_core::relay::RelayRequestEnvelope,
 ) -> Option<mj_core::relay::RelayResponseEnvelope> {
+    let queue_path =
+        std::env::var_os(LATCH_RELAY_ROOT).map(|root| test_subagent_queue_path(Path::new(&root)));
+    let mut queue = queue_path
+        .as_ref()
+        .map(|path| read_test_subagent_queue(path))
+        .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+    let requests = || {
+        queue["requests"]
+            .as_object()
+            .into_iter()
+            .flat_map(|items| items.values())
+            .map(|value| {
+                serde_json::from_value::<mj_core::subagent::SubagentToolRequest>(value.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let results = || {
+        queue["results"]
+            .as_object()
+            .into_iter()
+            .flat_map(|items| items.values())
+            .map(|value| {
+                serde_json::from_value::<mj_core::subagent::SubagentToolResult>(value.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
     let payload = match &request.request {
         mj_core::relay::RelayRequest::PollSubagentQueue { acknowledged } => {
             mj_core::relay::RelayResponsePayload::SubagentQueue {
                 page: mj_core::subagent::SubagentQueuePage {
                     sequence: acknowledged.unwrap_or(0) + 1,
-                    changes: Vec::new(),
+                    changes: requests()
+                        .into_iter()
+                        .map(mj_core::subagent::SubagentQueueChange::Request)
+                        .chain(results().iter().map(|result| {
+                            mj_core::subagent::SubagentQueueChange::Completed(
+                                mj_core::subagent::SubagentCompletion::from(result),
+                            )
+                        }))
+                        .collect(),
                     has_more: false,
                 },
             }
         }
         mj_core::relay::RelayRequest::SubagentRequests => {
             mj_core::relay::RelayResponsePayload::SubagentRequests {
-                requests: Vec::new(),
-                results: Vec::new(),
+                requests: requests(),
+                results: results(),
             }
+        }
+        mj_core::relay::RelayRequest::CompleteSubagentRequest { result } => {
+            let path = queue_path.as_ref().expect("fixture queue root");
+            queue["requests"]
+                .as_object_mut()
+                .unwrap()
+                .remove(&result.request_id);
+            queue["results"].as_object_mut().unwrap().insert(
+                result.request_id.clone(),
+                serde_json::to_value(result).unwrap(),
+            );
+            mj_core::config::atomic_write(path, &serde_json::to_vec(&queue).unwrap()).unwrap();
+            use std::io::Write as _;
+            writeln!(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path.with_extension("deliveries"))
+                    .unwrap(),
+                "{}",
+                result.request_id
+            )
+            .unwrap();
+            mj_core::relay::RelayResponsePayload::SubagentRequestCompleted
         }
         mj_core::relay::RelayRequest::SetSubagentAdmission { open } => {
             mj_core::relay::RelayResponsePayload::SubagentAdmissionChanged { open: *open }
+        }
+        // This fake's queue never changes and its relay is served elsewhere:
+        // hold briefly, as the worker would, and report nothing new.
+        mj_core::relay::RelayRequest::WaitForChange {
+            after_ordinal,
+            state_digest,
+        } => {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            mj_core::relay::RelayResponsePayload::ChangeObserved {
+                latest_ordinal: *after_ordinal,
+                state_digest: state_digest.clone().unwrap_or_default(),
+                subagent_queue_changed: !requests().is_empty() || !results().is_empty(),
+            }
         }
         _ => return None,
     };
@@ -1518,7 +1759,9 @@ pub(crate) fn latch_relay_target(
         spec.env.insert(LATCH_CHECKPOINT_ONLY.into(), "1".into());
     }
     for key in [
+        "MJ_TEST_QUOTA_BARRIER_RACE",
         LATCH_RELAY_MAX_PROTOCOL,
+        LATCH_REJECT_PROJECT_MEMORY,
         LATCH_RECORD_SUBAGENT_ADMISSION,
         LATCH_DROP_ADMISSION_CLOSE_REPLY,
     ] {
@@ -1573,7 +1816,12 @@ async fn latch_a_live_checkpoint(
         .await
         .unwrap();
 
-    let lease = handle.lease_connection().await.unwrap();
+    let lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let mut relay = ControllerRelayLease::Managed {
         handle: handle.clone(),
         lease: Some(lease),
@@ -1619,6 +1867,8 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         IsolatedTest::new(test_name)
             .env(LATCH_TEST_CHILD, "1")
             .env("MJ_INSTANCE", "upgrade-in-flight-test")
+            .env(LATCH_RELAY_MAX_PROTOCOL, "58")
+            .env(LATCH_REJECT_PROJECT_MEMORY, "1")
             .isolated_store(directory.path())
             .run();
         return;
@@ -1628,25 +1878,26 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
     let starts = root.path().join("starts");
     crate::database::save_session(&checkpoint_test_session(LATCH_RELAY_SESSION)).unwrap();
     let channels = crate::session_manager::spawn_session_manager().unwrap();
-    channels
-        .targets
-        .send(vec![latch_relay_target(
-            root.path(),
-            Some(&starts),
-            ReleaseSupport::Supported,
-            true,
-        )])
-        .unwrap();
+    let mut target =
+        latch_relay_target(root.path(), Some(&starts), ReleaseSupport::Supported, true);
+    target.project_memory = Some(crate::session_manager::ProjectMemorySyncTarget {
+        canonical_root: root.path().join("memory"),
+    });
+    channels.targets.send(vec![target]).unwrap();
     let handle = channels
         .control
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
         .await
         .unwrap();
     assert!(
-        IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-            .await
-            .unwrap()
-            .is_none()
+        IdleWorkspaceLease::acquire_for_upgrade(
+            &crate::controller::test_support::session_admission(handle.session_id()),
+            &handle,
+            HarnessKind::Codex
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     handle
         .submit(
@@ -1669,6 +1920,7 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         .unwrap();
     handle.sync_now().await.unwrap();
     let snapshot = handle.view().snapshot.unwrap();
+    assert_eq!(snapshot.operational.relay_protocol_version, Some(58));
     assert!(snapshot.operational.checkpoint_barrier.is_none());
     assert_eq!(
         snapshot.operational.steering.as_ref().unwrap().command_id,
@@ -1680,6 +1932,76 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         "busy deferral must return without detaching or restarting the connection"
     );
     channels.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: 6984aae: live Resume waited for readiness before discarding queued work.
+#[cfg(unix)]
+#[tokio::test]
+async fn live_resume_discards_queue_before_native_readiness() {
+    const CHILD: &str = "MJ_RESUME_DISCARD_READY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            "live_resume_discards_queue_before_native_readiness",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("resume-discard-before-ready"), b"").unwrap();
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    }));
+    crate::database::save_session(&session).unwrap();
+    let controller = Controller {
+        config: Default::default(),
+        state: mj_core::state::State {
+            sessions: [(LATCH_RELAY_SESSION.into(), session)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+    };
+    let target = latch_relay_target(&root, None, ReleaseSupport::Supported, false);
+    let backend = targets::TargetLocator::LocalBare {
+        worker_root: root.to_string_lossy().into_owned(),
+    };
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        LATCH_RELAY_SESSION,
+        "test discard readiness",
+    )
+    .unwrap()
+    .unwrap();
+    let result = owner
+        .scope(tokio::time::timeout(
+            Duration::from_secs(10),
+            controller.observe_started_worker(
+                LATCH_RELAY_SESSION,
+                &targets::ProcessExecutor,
+                super::super::worker_restart::InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &root.to_string_lossy(),
+                    reconnect: &target.spec,
+                    launch: None,
+                    prepared: true,
+                    discard_queued_prompts: Some("discard-before-ready".into()),
+                    swap_admission: None,
+                    messages: &super::super::worker_restart::RESTART_FOR_CHECKPOINT,
+                },
+            ),
+        ))
+        .await;
+    let connection = result
+        .expect("queue discard must unblock native readiness")
+        .unwrap();
+    drop(connection);
 }
 
 #[cfg(unix)]
@@ -1709,7 +2031,7 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
         worker_root: root.clone(),
     };
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
-    session.target = Some(durable_target.clone());
+    session.target = Some(Box::new(durable_target.clone()));
     crate::database::save_session(&session).unwrap();
     let mut target = latch_relay_target(&root, None, ReleaseSupport::Supported, false);
     let restarted = root.join("unexpected-restart");
@@ -1718,7 +2040,7 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["alive\n"]),
+        liveness_probe: CommandSpec::new("printf", ["alive\n"]).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: targets::CommandPlan {
@@ -1727,7 +2049,8 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
                 "touch",
                 [restarted.to_string_lossy().into_owned()],
             )],
-        },
+        }
+        .into(),
     });
     let channels = crate::session_manager::spawn_session_manager().unwrap();
     channels.targets.send(vec![target]).unwrap();
@@ -1778,55 +2101,136 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
     channels.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: #1498: idle goal upgrades must preserve reviewer admission and reject later native turns.
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_upgrade_reservation_releases_after_abandonment() {
     if std::env::var_os(LATCH_TEST_CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
         let test_name = format!(
             "{}::worker_upgrade_reservation_releases_after_abandonment",
             module_path!()
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        IsolatedTest::new(test_name)
-            .env(LATCH_TEST_CHILD, "1")
-            .env("MJ_INSTANCE", "upgrade-in-flight-test")
-            .isolated_store(directory.path())
-            .run();
+        for protocol in [58, 59, 60] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name.clone())
+                .env(LATCH_TEST_CHILD, protocol.to_string())
+                .env("MJ_INSTANCE", "upgrade-in-flight-test")
+                .env(LATCH_RELAY_MAX_PROTOCOL, protocol.to_string())
+                .env(LATCH_REJECT_PROJECT_MEMORY, "1")
+                .isolated_store(directory.path())
+                .run();
+        }
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     let root = tempfile::tempdir().unwrap();
+    let protocol: u32 = std::env::var(LATCH_TEST_CHILD).unwrap().parse().unwrap();
+    std::fs::write(
+        root.path().join("upgrade-goal-peer"),
+        b"scoped legacy upgrade peer",
+    )
+    .unwrap();
     crate::database::save_session(&checkpoint_test_session(LATCH_RELAY_SESSION)).unwrap();
-    let channels = crate::session_manager::spawn_session_manager().unwrap();
-    channels
-        .targets
-        .send(vec![latch_relay_target(
-            root.path(),
-            None,
-            ReleaseSupport::Supported,
-            false,
-        )])
+    let mut relay =
+        mj_worker::relay::DurableRelay::open(root.path(), LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "native-session".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
         .unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta": {
+            "goal":{"objective":"Retain the idle durable goal", "status":"active", "createdAt":42},
+            "execution":{"version":1,"status":"idle"}
+        }
+    })).unwrap()).unwrap();
+    let preserved_goal = relay.operational_state().goal;
+    drop(relay);
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    let mut target = latch_relay_target(root.path(), None, ReleaseSupport::Supported, false);
+    target.project_memory = Some(crate::session_manager::ProjectMemorySyncTarget {
+        canonical_root: root.path().join("memory"),
+    });
+    channels.targets.send(vec![target]).unwrap();
     let handle = channels
         .control
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
         .await
         .unwrap();
     wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
-    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
+    // The peer's private reviewer admission is deliberately absent from its
+    // public activity snapshot. ReserveIdle must still confirm its absence.
+    let reviewer = root.path().join("upgrade-held-reviewer");
+    std::fs::write(&reviewer, b"review capture still running").unwrap();
+    assert!(
+        IdleWorkspaceLease::acquire_for_upgrade(
+            &crate::controller::test_support::session_admission(handle.session_id()),
+            &handle,
+            HarnessKind::Codex
+        )
         .await
         .unwrap()
-        .expect("idle worker");
+        .is_none()
+    );
+    assert!(
+        reviewer.exists(),
+        "deferral must leave admitted review work alive"
+    );
+    handle.sync_now().await.unwrap();
+    assert_eq!(
+        handle.view().snapshot.unwrap().operational.goal,
+        preserved_goal
+    );
+    std::fs::remove_file(reviewer).unwrap();
+    wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
+    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap()
+    .expect("idle worker");
+    assert_eq!(lease.protocol_version(), protocol);
     assert!(lease.verify_for_upgrade().await.unwrap());
+    assert_eq!(
+        lease.lease.connection_mut().operational().goal,
+        preserved_goal
+    );
+    // Native AIR can arrive while the barrier is held. A start and finish
+    // after ready invalidates its original cut even though the worker is idle again.
+    std::fs::write(root.path().join("upgrade-late-turn"), b"start and finish").unwrap();
+    assert!(!lease.verify_for_upgrade().await.unwrap());
+    let operational = lease.lease.connection_mut().operational();
+    assert!(operational.checkpoint_barrier.is_some());
+    assert_eq!(operational.execution, RelayExecutionState::Idle);
+    assert!(operational.harness_turn.is_none());
+    assert_eq!(operational.goal, preserved_goal);
     drop(lease);
     wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
-    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-        .await
-        .unwrap()
-        .expect("abandoned barrier recovered");
+    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap()
+    .expect("abandoned barrier recovered");
     assert!(lease.verify_for_upgrade().await.unwrap());
+    assert_eq!(
+        lease.lease.connection_mut().operational().goal,
+        preserved_goal
+    );
     let first = handle
         .enqueue_submit(
             "first-after-upgrade".into(),
@@ -1852,6 +2256,35 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
         first_ordinal < second_ordinal,
         "queued prompts retain their identity and order"
     );
+    handle.sync_now().await.unwrap();
+    assert_eq!(
+        handle.view().snapshot.unwrap().operational.goal,
+        preserved_goal
+    );
+    let requests = std::fs::read_to_string(root.path().join("upgrade-requests.log")).unwrap();
+    assert!(
+        requests.lines().any(|name| name == "reserve_idle"),
+        "all versions confirm reviewer admission through ReserveIdle"
+    );
+    assert_eq!(
+        requests.lines().any(|name| name == "begin_checkpoint"),
+        protocol < mj_core::relay::RELAY_IDLE_GOAL_INTENT_PROTOCOL
+    );
+    assert!(!requests.lines().any(|name| name == "cancel_turn"));
+    if protocol < mj_core::relay::RELAY_IDLE_GOAL_INTENT_PROTOCOL {
+        let begin = requests
+            .lines()
+            .position(|name| name == "begin_checkpoint")
+            .unwrap();
+        let confirm = requests
+            .lines()
+            .position(|name| name == "reserve_idle")
+            .unwrap();
+        assert!(
+            begin < confirm,
+            "legacy admission establishes the barrier before reviewer confirmation"
+        );
+    }
     channels.shutdown.shutdown().await.unwrap();
 }
 
@@ -2104,8 +2537,8 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
     let mut dispatched = None;
     for attempt in 0.. {
         let snapshot = relay.sync_snapshot().await.unwrap();
-        if let Some(active) = snapshot.operational.active_prompt {
-            dispatched = Some(active);
+        if let Some(active) = &snapshot.operational.active_prompt {
+            dispatched = Some(active.clone());
             break;
         }
         assert!(attempt < 200, "a released barrier still froze ACP dispatch");
@@ -2362,6 +2795,29 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.refused(command)
         }
@@ -2439,25 +2895,20 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
 
     let mut config = Config::default();
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     // Checkpoint export must continue after its original template is removed.
@@ -2503,6 +2954,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     let executor = RecordingExecutor::default();
     let latched = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -2557,12 +3009,18 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         )
         .await
         .unwrap();
-    let mut connection = handle.lease_connection().await.unwrap();
+    let mut connection = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let before = connection.connection_mut().sync().await.unwrap();
     assert_eq!(before.operational.execution, RelayExecutionState::Running);
     connection.release();
     let deferred = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -2576,7 +3034,12 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         matches!(deferred, Err(ref error) if error.downcast_ref::<CheckpointDeferred>().is_some())
     );
     wait_until_the_actor_serves_again(&handle).await;
-    let mut connection = handle.lease_connection().await.unwrap();
+    let mut connection = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let after = connection.connection_mut().sync().await.unwrap();
     assert_eq!(after.operational.execution, RelayExecutionState::Running);
     assert!(after.operational.checkpoint_barrier.is_none());
@@ -2634,6 +3097,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
 
     let changed = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -2726,6 +3190,29 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     }
 
     impl CommandExecutor for StagingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             ProcessExecutor.execute(command)
@@ -2773,23 +3260,18 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     let mut config = Config::default();
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config.bundles.insert(
@@ -2836,6 +3318,7 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     let executor = StagingExecutor::default();
     let deferred = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -2883,6 +3366,7 @@ fn latched_checkpoint(
     completion: CheckpointCompletion,
 ) -> LatchedCheckpoint {
     LatchedCheckpoint {
+        admission: crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
         _worker_owner: crate::worker_lifecycle::WorkerPermit::try_acquire(
             LATCH_RELAY_SESSION,
             "test checkpoint",
@@ -3098,9 +3582,13 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
         .unwrap()
         .operational
         .recovery_floor_ordinal;
-    let mut workspace = IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
-        .await
-        .unwrap();
+    let mut workspace = IdleWorkspaceLease::acquire(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap();
     workspace.verify().await.unwrap();
     drop(workspace);
     wait_until_the_actor_serves_again(&handle).await;
@@ -3113,9 +3601,13 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
             .checkpoint_barrier
             .is_none()
     );
-    let mut workspace = IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
-        .await
-        .unwrap();
+    let mut workspace = IdleWorkspaceLease::acquire(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap();
     let submitting = handle.clone();
     let mut prompt = tokio::spawn(async move {
         submitting
@@ -3145,9 +3637,13 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
     assert!(after.operational.checkpoint_barrier.is_none());
     assert_eq!(after.operational.recovery_floor_ordinal, before);
     assert!(
-        IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
-            .await
-            .is_err(),
+        IdleWorkspaceLease::acquire(
+            &crate::controller::test_support::session_admission(handle.session_id()),
+            &handle,
+            HarnessKind::Codex
+        )
+        .await
+        .is_err(),
         "a queued or running prompt must prevent file injection"
     );
 }
@@ -3211,10 +3707,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "local".into();
     session.project_directory = Some(repository.path().to_owned());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
 
     // `validate_move_checkpoint` re-reads the configuration from disk and
@@ -3224,15 +3720,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: profile_home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    profile_home.clone(),
+                )
             },
         );
         config
@@ -3266,6 +3757,8 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     };
 
     let selection = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -3289,8 +3782,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         selection: selection.clone(),
         source_profile_id: "codex".into(),
         source_target_template_id: "local".into(),
-        source_target: session.target.clone(),
+        source_target: session.target.clone().map(|v| *v),
         source_native_session_id: session.native_session_id.clone(),
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,
@@ -3317,6 +3812,29 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         purposes: std::sync::Mutex<Vec<String>>,
     }
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             ProcessExecutor.execute(command)
@@ -3353,6 +3871,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     let executor = RecordingExecutor::default();
     let deferred = controller
         .suspend_session_for_move(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
@@ -3371,7 +3890,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     );
     let sealed = &controller.state.sessions[LATCH_RELAY_SESSION];
     assert_eq!(sealed.state, SessionState::Closing);
-    assert_eq!(sealed.checkpoint.as_ref(), Some(&checkpoint));
+    assert_eq!(sealed.checkpoint.as_deref(), Some(&checkpoint));
     assert_eq!(sealed.target, session.target);
     assert_eq!(operation.checkpoint.as_ref(), Some(&checkpoint));
     // The durable record has to agree: recovery reads it, not this process.
@@ -3429,6 +3948,29 @@ struct SucceedingExecutor;
 
 #[cfg(unix)]
 impl CommandExecutor for SucceedingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         Ok(CommandOutput {
             status: 0,
@@ -3461,6 +4003,29 @@ impl RestartCheckpointExecutor {
 
 #[cfg(unix)]
 impl CommandExecutor for RestartCheckpointExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.purposes.lock().unwrap().push(command.purpose.clone());
         targets::ProcessExecutor.execute(command)
@@ -3528,7 +4093,7 @@ pub(crate) async fn close_cut_controller(
 /// [`close_cut_controller`], with the stand-in worker holding a running turn
 /// when `running`.
 #[cfg(unix)]
-async fn close_cut_controller_with(
+pub(crate) async fn close_cut_controller_with(
     state: SessionState,
     running: bool,
 ) -> (
@@ -3571,25 +4136,20 @@ async fn close_cut_controller_with(
     session.state = state;
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
-    });
-    session.checkpoint = Some(checkpoint);
+    }));
+    session.checkpoint = Some(Box::new(checkpoint));
     crate::database::save_session(&session).unwrap();
 
     let mut config = Config::default();
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config.bundles.insert(
@@ -3661,6 +4221,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     let (mut controller, channels, _handle) = close_cut_controller(SessionState::Running).await;
     let suspended = controller
         .suspend_session_managed_controlled(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
@@ -3697,6 +4258,29 @@ async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardow
     #[derive(Default)]
     struct RefuseExport(std::sync::Mutex<Option<bool>>);
     impl CommandExecutor for RefuseExport {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             SucceedingExecutor.execute(command)
         }
@@ -3718,6 +4302,7 @@ async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardow
     let executor = RefuseExport::default();
     let error = controller
         .recover_interrupted_close_managed(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
@@ -3759,6 +4344,7 @@ async fn an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn()
     wait_until_the_actor_serves_again(&handle).await;
     let error = controller
         .suspend_session_for_restart(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
@@ -3817,13 +4403,13 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
         .sessions
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap();
-    record.target = Some(TargetLocator::LocalPodman {
+    record.target = Some(Box::new(TargetLocator::LocalPodman {
         container_id: name.clone(),
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
             name: format!("{name}-workspace"),
         },
         borrowed_from: None,
-    });
+    }));
     record.target_runtime = Some(
         (&TargetTemplate::LocalPodman {
             container: serde_json::from_value(serde_json::json!({})).unwrap(),
@@ -3839,6 +4425,29 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
         name: String,
     }
     impl CommandExecutor for BusyEngine {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.purpose.clone());
             let stdout = match command.purpose.as_str() {
@@ -3847,6 +4456,7 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
                     "Config": {"Image":"agent-dev:2.51.0", "Labels": {"dev.mj.managed":"true", "dev.mj.session":LATCH_RELAY_SESSION}},
                     "HostConfig": {}, "Mounts": [], "State": {"Running":true}
                 }]))?,
+                "check the control worker" => b"present\n".to_vec(),
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
                 _ => anyhow::bail!(
                     "a pending upgrade tried to mutate its busy environment: {}",
@@ -3896,6 +4506,7 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
     };
     let error = controller
         .upgrade_container_worker(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &mut plan,
             false,
@@ -3973,7 +4584,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
         false,
     )
     .unwrap();
-    let worker_root = match &target {
+    let worker_root = match &*target {
         TargetLocator::LocalBare { worker_root } => worker_root.clone(),
         other => panic!("expected the retained local target, got {other:?}"),
     };
@@ -4024,6 +4635,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     };
     controller
         .suspend_session_for_restart(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
@@ -4040,7 +4652,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     assert_eq!(sealed.target, Some(target));
     assert_eq!(sealed.last_error, None);
     assert!(sealed.last_checkpoint_error.is_none());
-    assert_eq!(sealed.checkpoint.as_ref(), Some(&old_checkpoint));
+    assert_eq!(sealed.checkpoint.as_deref(), Some(old_checkpoint.as_ref()));
     let intent = crate::database::load_session_restart(LATCH_RELAY_SESSION)
         .unwrap()
         .unwrap();
@@ -4103,6 +4715,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
     let (mut controller, channels, handle) = close_cut_controller(SessionState::Closing).await;
     let suspended = controller
         .recover_interrupted_close_managed(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
@@ -4138,7 +4751,12 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
     // The barrier is gone and the relay was never sealed, so the session can
     // take work again.
     wait_until_the_actor_serves_again(&handle).await;
-    let mut lease = handle.lease_connection().await.unwrap();
+    let mut lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let snapshot = lease.connection_mut().sync().await.unwrap();
     lease.release();
     assert_eq!(snapshot.operational.checkpoint_barrier, None);
@@ -4171,11 +4789,13 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
         config: Default::default(),
         state: State::default(),
     };
-    let entry = controller.checkpoint_session("session-1");
+    let admission = crate::controller::test_support::session_admission("session-1");
+    let entry = controller.checkpoint_session(&admission, "session-1");
     let entry_size = std::mem::size_of_val(&entry);
     drop(entry);
     let executor = RefusingExecutor("not used");
     let latched = controller.checkpoint_session_latched_with_recovery_stage(
+        &admission,
         "session-1",
         &executor,
         None,
@@ -4272,7 +4892,12 @@ async fn a_relay_job_runs_on_the_actors_own_connection_and_defers_to_a_lease() {
         "the job must use the actor's connection, not open another"
     );
 
-    let lease = handle.lease_connection().await.unwrap();
+    let lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let deferred = run_status(&handle).await.unwrap_err();
     assert!(
         crate::session_manager::RelayJobDeferred::marks(&deferred),

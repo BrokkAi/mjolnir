@@ -157,6 +157,13 @@ async fn wait_for_turn(
                     Some(_) => None,
                     None => backend.turn_state(session_id.clone()).await?,
                 };
+                // The backend owns what a child's record and worker view say
+                // about its processes, as it does for every other reader.
+                let child_liveness = if child_report.is_some() {
+                    backend.subagent_work_liveness(session_id.clone()).await
+                } else {
+                    mj_core::subagent::Liveness::default()
+                };
                 let session_facts = {
                     let snapshot = snapshot_rx.borrow();
                     let session = require_session_record(&snapshot, &session_id)?;
@@ -169,8 +176,15 @@ async fn wait_for_turn(
                     );
                     if let Some((handback_tool, report)) = &child_report {
                         let now = mj_core::clock::epoch_millis();
+                        observation.work_liveness = child_liveness.clone();
                         observation.apply_subagent_report(*handback_tool, report, now);
-                        report_deadline = reminder_grace_end(&observation, report, now);
+                        report_deadline = [
+                            reminder_grace_end(&observation, report, now),
+                            hold_give_up_end(&observation, now),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .min();
                     }
                     ApiSession::from(session)
                 };
@@ -268,6 +282,14 @@ fn reminder_grace_end(
     // the reminder turn runs, and that turn's end is the actor's own change.
     let remaining = u64::try_from(remaining).ok().filter(|&ms| ms > 0)?;
     // One millisecond past the end, so the next pass reads it as over.
+    Some(tokio::time::Instant::now() + Duration::from_millis(remaining + 1))
+}
+
+/// When a held child's wait on its own processes ends. Nothing is republished
+/// at that moment, so the wait wakes itself, one millisecond past it.
+fn hold_give_up_end(observation: &WaitObservation, now_ms: i64) -> Option<tokio::time::Instant> {
+    let remaining = observation.hold_give_up_at_ms?.saturating_sub(now_ms);
+    let remaining = u64::try_from(remaining).ok()?;
     Some(tokio::time::Instant::now() + Duration::from_millis(remaining + 1))
 }
 
@@ -370,8 +392,8 @@ pub(super) fn build_observation(
             .find(|failure| failure.session_id.as_deref() == Some(session.id.as_str()))
             .and_then(|failure| failure.error.clone())
             .or_else(|| session.launch_error.clone()),
-        capacity_retry: session.capacity_retry.clone(),
-        quota_recovery: session.quota_recovery.clone(),
+        capacity_retry: session.capacity_retry.as_deref().cloned(),
+        quota_recovery: session.quota_recovery.as_deref().cloned(),
         start_status,
         ..WaitObservation::default()
     };
@@ -379,7 +401,7 @@ pub(super) fn build_observation(
         && view.connected
         && let Some(snapshot) = &view.snapshot
     {
-        observation.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+        observation.background_work = Some(ApiBackgroundWork::from(&*snapshot.operational));
         observation.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
     }
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
@@ -393,14 +415,13 @@ pub(super) fn build_observation(
                 snapshot.materialized.last_activity_at_ms(),
             )
         };
-        // The daemon's continuation check is published as the session's
+        // The daemon's quota check is published as the session's
         // activity on top of the worker's, and that is the state the
         // dashboard shows. The actor's own view never carries it.
         if observation.activity.is_idle()
-            && session.activity_state
-                == Some(mj_core::activity::ActivityState::CheckingContinuation)
+            && session.activity_state == Some(mj_core::activity::ActivityState::CheckingQuota)
         {
-            observation.activity = mj_core::activity::ActivityState::CheckingContinuation;
+            observation.activity = mj_core::activity::ActivityState::CheckingQuota;
         }
         observation
             .pending_elicitations
@@ -419,6 +440,7 @@ pub(super) fn build_observation(
 // Older v1 clients reject unknown fields inside this shared turn type. Usage
 // travels in the new top-level wait field and the dedicated usage endpoint.
 pub(super) fn api_turn_outcome(mut turn: MaterializedTurnOutcome) -> MaterializedTurnOutcome {
+    turn.answered_through = None;
     turn.usage = None;
     turn.diagnostic = None;
     turn

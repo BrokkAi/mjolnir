@@ -24,6 +24,9 @@ use super::worktree::{
 
 pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -36,8 +39,6 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: session_id.into(),
         title: "checkpoint transition".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -48,6 +49,7 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -61,6 +63,8 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -112,7 +116,7 @@ pub(super) fn write_checkpoint_archive_with_native_state(
         Vec::new(),
         vec![mj_checkpoint::archive::NativeArtifact {
             relative_path: PathBuf::from("sessions/native-session.jsonl"),
-            data: b"{\"type\":\"message\"}\n".to_vec(),
+            data: (b"{\"type\":\"message\"}\n".to_vec()).into(),
             mode: 0o600,
         }],
     )
@@ -151,6 +155,7 @@ pub(super) fn write_network_checkpoint_archive(
             unstaged_patch: Vec::new(),
             untracked_tar: Vec::new(),
             operation_payloads: None,
+            linked_worktrees: Vec::new(),
         }],
         Vec::new(),
     )
@@ -215,6 +220,7 @@ pub(crate) fn checkpoint_archive_input(
             command_ledger: None,
             assessment_state: Some(
                 serde_json::to_value(mj_core::assessment::Checkpoint {
+                    open_request: None,
                     version: 1,
                     context: Some(Default::default()),
                     assessment: None,
@@ -305,7 +311,7 @@ pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecor
         },
         &worktree_root.to_string_lossy(),
     );
-    session.managed_worktree = Some(ManagedWorktree {
+    session.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: repository.clone(),
         source_repository: repository,
@@ -313,7 +319,7 @@ pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecor
         branch: format!("mj/{session_id}"),
         target,
         base_commit: None,
-    });
+    }));
     session
 }
 
@@ -411,6 +417,29 @@ pub(super) struct FixtureRemoteExecutor {
 }
 
 impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,
@@ -456,6 +485,29 @@ impl Git231Executor {
 }
 
 impl crate::targets::CommandExecutor for Git231Executor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,
@@ -522,7 +574,7 @@ fn managed_checkout_session(
     session.bundle_id = "remote-project-abcdef".into();
     session.target_template_id = "local-bare".into();
     session.project_directory = Some(worktree.worktree_root.clone());
-    session.managed_worktree = Some(worktree);
+    session.managed_worktree = Some(Box::new(worktree));
     session
 }
 
@@ -533,6 +585,29 @@ fn managed_checkout_session(
 pub(crate) struct RefusingExecutor(pub(crate) &'static str);
 
 impl crate::targets::CommandExecutor for RefusingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,
@@ -583,7 +658,20 @@ impl IsolatedTest {
         let mut command = Command::new(std::env::current_exe().expect("this test binary"));
         command
             .args(["--exact", &name, "--nocapture"])
-            .env("RUST_MIN_STACK", Self::CHILD_STACK_BYTES);
+            .env("RUST_MIN_STACK", Self::CHILD_STACK_BYTES)
+            // The instance name selects the default viewer port and the
+            // store layout, so a child owns it: an inherited one changes
+            // output the child's goldens pin. A test that needs an instance
+            // sets it with `env`.
+            .env_remove("MJ_INSTANCE");
+        // Control commands run a staged current worker, so a child that
+        // exercises them needs a worker source. A test names its own with
+        // `env`, which replaces this one.
+        #[cfg(unix)]
+        command.env(
+            "MJ_WORKER_BINARY",
+            mj_core::test_hooks::fake_worker_dispatcher(),
+        );
         Self { name, command }
     }
 
@@ -595,6 +683,12 @@ impl IsolatedTest {
         value: impl AsRef<std::ffi::OsStr>,
     ) -> Self {
         self.command.env(key, value);
+        self
+    }
+
+    /// Remove a variable from the child, such as the default worker source.
+    pub(crate) fn env_remove(mut self, key: impl AsRef<std::ffi::OsStr>) -> Self {
+        self.command.env_remove(key);
         self
     }
 
@@ -630,4 +724,22 @@ impl IsolatedTest {
         );
         output
     }
+}
+
+/// Explicit owner capability for controller fixtures that run without a daemon.
+pub(crate) fn session_admission(session_id: &str) -> crate::recovery_gate::SessionAdmission {
+    let gate = std::sync::Arc::new(crate::recovery_gate::RecoveryGate::default());
+    crate::recovery_gate::SessionAdmission::Foreground(
+        futures::executor::block_on(gate.enter_foreground(
+            session_id,
+            "test lifecycle",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &std::sync::atomic::AtomicBool::new(false),
+            &crate::targets::ProcessExecutor,
+        ))
+        .unwrap(),
+    )
+}
+pub(crate) fn relay_admission(session_id: &str) -> crate::recovery_gate::RelayLeaseAdmission {
+    futures::executor::block_on(session_admission(session_id).lease(session_id)).unwrap()
 }

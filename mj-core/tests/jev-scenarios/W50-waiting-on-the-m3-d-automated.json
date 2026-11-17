@@ -1,0 +1,512 @@
+{
+  "id": "W50",
+  "title": "Waiting on the M3-d automated task",
+  "category": "waiting-with-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "bc87d30841fd688243ceb6ef17ff80b9",
+    "session_title": "bifrost via claude2",
+    "reply_position": 23156,
+    "captured_at": "2026-10-09T04:29:54.483Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:27",
+          "role": "user",
+          "text": "You are taking over the highest-priority Bifrost work: making taint analysis incremental so a one-line edit on a 353k-line Rust repository (Vector) is re-analyzed in seconds, for a stage head-to-head against stock CodeQL. \n\nRead first, in this order, from /home/jonathan/Projects/bifrost3 (fetch origin; read with `git show origin/<branch>:<path>`):\n2. The design principles: PR #4702, branch docs/name-resolution-chapter, docs/src/content/docs/design/name-resolution.md. The three principles that govern this work: SQLite is the primary cache read by SQL; per-file materialization keyed by blob id turns an edit into O(1); heap caches only to avoid recomputing from SQL, never as the primary store. Owner notes: query performance outranks index-time write cost, but do not materialize what is cheaper to re-derive; Rust first, built as one implementation of a generic engine.\n3. The ExecPlan: branch taint-partial-flows-plan, .agents/plans/taint-per-file-partial-flows.md (commit 13668a5375). It is self-contained: purpose, context, milestones M0-M5, gates, decision log. Merge that branch into each lane's branch so the plan file travels with the work, and keep the plan's Progress / Decision Log / Surprises sections current.\n\nRules the owner set for how you work: you write all design (schema columns, port encoding, invariants) yourself and give children explicit specs; children inventory, measure and implement, never design. \"Highest priority\" means you should parallelize across children where you can usefully do so. Children run builds through normal cargo/mbx (never redirect target/ or bypass mbx), nextest --max-fail 100 with BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 and host cache access. Commits: plain-language multiline messages. PRs: branch from origin/master without tracking, push with an explicit refspec (push.default=upstream sends new branches to master otherwise), draft PR, merge master before opening and before ready, `gh pr ready` when every gate passes, never push to a ready PR without `gh pr ready --undo`; the MergeMarshall queue lands it. \n\nState at handoff (2026-10-08):\n- M0 is running in the previous session as two measurement lanes, I will message you when their results have landed. \n- Other lanes running in the previous session, do not touch their branches: rust-unit-summary-readers (M5 step 2 of the per-unit resolution summary, Rust readers off rust_crate_*), rust-taint-call-target-demand and #4664 (demand-driven call-target and occurrence-target resolution in RQL; these make the per-frontier resolution in M3 cheaper; merge them into your M3 lane when they land), tree-sitter-rust-0.24.5 (grammar gaps on Vector), and model PRs in bifrost-packs / bifrost-premium-packs for std/tokio write identities. Known baseline failures on master: analyzer::rust::selected_reverse::tests::scoped_reverse_uses_prepared_overlay_reference_inventory and analyzer::store::resolution_operation::rust_reverse_rows::tests::reverse_inventory_treats_unexpanded_proc_macros_conservatively.\n- Vector pinned checkout: vectordotdev/vector at eaae4724689f0be9b3d163bec202571aa82f5bcb, copy at /tmp/h2h-targets/vector (copy before editing). CodeQL-faithful cleartext-logging policy and models: /home/jonathan/Projects/bifrost3/.mj/agents/f20b5a894af85903aa86ec3288aa8bd9/. The demo edit: /home/jonathan/Projects/bifrost3/.mj/agents/3f69867455b9082f16415a16e4d72369/leak-edit.patch (CodeQL reports it in 12:59 via build-mode=none; 13:05 diff-informed). Owner latency targets: under 10 s warm in a persistent session, under 1 min in a fresh process. Not sure yet if those are reasonable.\n\nYour sequence: M1 (semantic IR rows per blob at parse time, lowerer stops reading the model overlay, read-through cache, round-trip differential, measurements) -> M2 (partial-flow rows, differential against the solver's intra-procedural propagation) -> M3 (per-query composition over rows, calls resolved only on the frontier, model contracts at call ports; gate = equality with the M0 oracle on all four captures and the Rust CodeQL parity suite, plus timings) -> M4 (diff-scoped mode, three-edit gates, incremental_equivalence cases) -> M5 only if M3 measurements justify it. Each milestone is its own PR. Report to the owner at each milestone with the gate results and the numbers, and ask the owner only for the migration number and anything that changes the Decision Log.\n\nTwo things that aren't in the plan: the #4664 PR was rejected by the queue once (a cross-file Java require-target assertion) and is being fixed in the old session, and the call-target demand branch regressed Rustypaste and is being reworked. Both affect M3's frontier cost, not its correctness."
+        },
+        {
+          "id": "user:906",
+          "role": "user",
+          "text": "also note that we are modestly cost-sensitive; i expect most subtasks can be completed by Haiku (which is now quite intelligent in its 5.5 release); if you need a near-peer though you can use Opus. Sonnet is a weird middle ground that probably doesn't get much use. \n\nfinally: if there's a stray \"nice 10\" rule in the docs, lmk so i can excise it, that doesn't apply to highest-priority work"
+        },
+        {
+          "id": "user:2807",
+          "role": "user",
+          "text": "> On-demand lowering stays memory-only\n\nlet's measure this, unclear to me if this falls into the faster-to-rederive-category (if you have evidence already then great)\n\n> a second tree-sitter parse per blob\n\nwhy can't we combine this work into one parse?\n\n> migration number\n\nthere is no \"reservation\" system, the other agent is confused, we can use 164 for now, it will probably be obsoleted by the time we're done, nbd"
+        },
+        {
+          "id": "user:3220",
+          "role": "user",
+          "text": "what's going to be the long pole? can we subdivide it further?"
+        },
+        {
+          "id": "user:4085",
+          "role": "user",
+          "text": "not 100% sure what's going on but the previous session's id is 0305d10cd40fb1342e5ad6171d6ae993, so if that changed, that's probably the issue"
+        },
+        {
+          "id": "user:4184",
+          "role": "user",
+          "text": "no harness transition is in progress. pls file a bug in https://github.com/BrokkAi/mjolnir/ with both of your session IDs"
+        },
+        {
+          "id": "user:4188",
+          "role": "user",
+          "text": "yours is bc87d30841fd688243ceb6ef17ff80b9"
+        },
+        {
+          "id": "user:4958",
+          "role": "user",
+          "text": "> The pack-authoring drift check fails on the current master base itself\n\nis there an open ticket?"
+        },
+        {
+          "id": "user:5008",
+          "role": "user",
+          "text": "nvm the answer is yes, it's 4613"
+        },
+        {
+          "id": "user:7856",
+          "role": "user",
+          "text": "jesus fuck it's a harness bug you can't send messages sorry"
+        },
+        {
+          "id": "agent:7858",
+          "role": "assistant",
+          "text": "Understood. I'll stop retrying; anything for the previous session goes through you, and I'll keep it short when it does. Waiting on lane C's integration and the lowering triage."
+        },
+        {
+          "id": "agent:8040",
+          "role": "assistant",
+          "text": "One real question came out of integration: a test pinned that a tiny semantic budget refuses to lower a Rust file with 64 structs and no functions, because the lowerer's enumeration of that syntax charges the budget. Served from rows, no enumeration happens in the query, so the artifact completes and the budget charges only the retained census. That is the intended consequence of the design (the budget bounds query work, and the retained census still bounds artifact size), so the Rust case of that test changes expectation, with the reason written next to it. Other languages keep theirs."
+        },
+        {
+          "id": "agent:8088",
+          "role": "assistant",
+          "text": "While lane C finishes the test and the trace, I'll review the integrated branch myself: the read path in the semantic service, the parse-time lowering block, and the missing-analysis predicate."
+        },
+        {
+          "id": "agent:8140",
+          "role": "assistant",
+          "text": "Review of the integrated branch: the read path, the parse-time lowering block (panic caught, every outcome mapped to a head row), the republication predicate, the garbage-collection accounting, and the receiver-type fact emission match the specification. Two cosmetic notes for the final pass, not blockers: the first rows branch discards the cache-wait statistic the lowering path notes, and three functions carry `too_many_arguments` allowances that the parameter growth earned.\n\nWaiting on lane C's last report (budget test and timing trace) and the lowering triage."
+        },
+        {
+          "id": "agent:8242",
+          "role": "assistant",
+          "text": "Lane C dropped on a connection error right after the full semantic suite passed, before committing the test change. Resuming it."
+        },
+        {
+          "id": "agent:8263",
+          "role": "assistant",
+          "text": "Lane C is resumed. Nothing else to request until it or the triage lane reports."
+        },
+        {
+          "id": "agent:8318",
+          "role": "assistant",
+          "text": "API Error: Connection dropped (ECONNRESET)"
+        },
+        {
+          "id": "user:8418",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "agent:8428",
+          "role": "assistant",
+          "text": "Lane C is complete: full semantic suite green, all gates passed, the budget test moved to its own case. Integrating now: merge lane C's branch into the M1 branch, then current master, then run the discovering gates on the result."
+        },
+        {
+          "id": "agent:8456",
+          "role": "assistant",
+          "text": "Both merges were clean. Before the gates: master landed eight PRs in the meantime, so I need to check that no other migration took 0164 and whether the lowerer fix for `chunked_gelf.rs` is in."
+        },
+        {
+          "id": "agent:8936",
+          "role": "assistant",
+          "text": "Status: the M1 gates are in the test phase; the Vector measurement, the capture-binding fix, and nothing else are running. The plan now carries the full M2 specification, so M2 lanes can start as soon as the M1 PR is open.\n\nWaiting on the gate run and the two lanes."
+        },
+        {
+          "id": "user:8974",
+          "role": "user",
+          "text": "how long do you expect the gate run to take? pls set a timer for \"make sure it's healthy/sane\""
+        },
+        {
+          "id": "agent:8979",
+          "role": "assistant",
+          "text": "Expectation: the compile finished at about 17:43 and the first suite (about 2,300 analysis tests) is running now; each later step reuses the build. From lane C's runs of the same commands I expect roughly 60 to 90 minutes total, so completion between 18:45 and 19:15. Setting a health check for 25 minutes from now that reports which step is running and flags anything slow or failing."
+        },
+        {
+          "id": "agent:9167",
+          "role": "assistant",
+          "text": "Health check armed for 25 minutes; the completion waiter is already in place. Nothing else to request until one of them, lane D, or the fix lane reports."
+        },
+        {
+          "id": "agent:10675",
+          "role": "assistant",
+          "text": "Lane D is still waiting on its own release build; no report yet. Still waiting on the gates, lane D, and the fix lane."
+        },
+        {
+          "id": "agent:10933",
+          "role": "assistant",
+          "text": "Still interim from lane D (its release test build is running). Waiting."
+        },
+        {
+          "id": "agent:12382",
+          "role": "assistant",
+          "text": "Lane D's numbers are in. The headline for the owner:\n\n| Measure | master | M1 |\n|---|---|---|\n| Vector cold index, wall | 118.4 s | 156.1 s |\n| Peak RSS | 2.87 GiB | 4.39 GiB |\n| Cache size | 1.51 GiB | 1.88 GiB (semantic rows 401 MB, 13.7 M rows) |\n| Lowering + encode, thread time | none | 84 s + 6 s |\n| Edit of `honeycomb/config.rs`: blob lowered and written | none | 85 ms |\n| Publications | none | 1,496 complete, 4 lowering errors |\n\nOne finding outside this plan matters for the demo target: after the one-line edit, the cheap probe took 16 s against 4.4 s before the edit, and 10.4 s of the gap is Rust crate reconciliation (306 crate scopes re-derived for a body-only edit). That is the early-cutoff path, not the semantic rows, and it alone exceeds the 10 s warm target. Recording the results now."
+        },
+        {
+          "id": "agent:12491",
+          "role": "assistant",
+          "text": "Four of the five gates passed (analysis, core, the full semantic suite, the policy subset); Clippy is the last step running. When it passes I'll push the branch with an explicit refspec and open the draft PR with the numbers above."
+        },
+        {
+          "id": "agent:12841",
+          "role": "assistant",
+          "text": "Health check: healthy. All four test steps passed, Clippy is on the analysis crate (the slow part), 11 tests were marked slow but none failed, load is 71 on 120 CPUs. The completion waiter will report when Clippy finishes; then I push and open the draft PR."
+        },
+        {
+          "id": "agent:13314",
+          "role": "assistant",
+          "text": "All five gates pass: 2,285 + 135 + 1,864 + 46 tests, zero failures, Clippy clean. Opening the draft PR: merge master once more, record the gate, push with an explicit refspec, create."
+        },
+        {
+          "id": "agent:13553",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\nThe M1 numbers show where the cost moved rather than disappeared: lowering every Rust blob once at index time costs 84 s of thread time on Vector (38 s of wall clock on this host), and the rows cost 25% more cache. In exchange the edit path pays 85 ms for the changed blob instead of re-lowering whatever a query touches. The surprise is that the edit path is dominated by something else entirely: Rust crate reconciliation re-deriving 306 crate scopes after a body-only edit, which the early-cutoff design says should not happen.\n`─────────────────────────────────────────────────`\n\n**M1 report.** PR #4746 is open and marked ready for the queue.\n\n**Gates**: 2,285 analysis tests, 135 core, 1,864 semantic suite, 46 policy-suite cases (CodeQL parity, issue 2705, incremental equivalence), Clippy clean. Round trip exact on all 215 fixture files and on 1,302 of 1,480 repository files; the rest fail to lower on master as well.\n\n**Numbers** (Vector, single runs): cold index 156 s vs 118 s; peak RSS 4.39 vs 2.87 GiB; cache +402 MB (13.7 M rows in 40 tables); lowering 84 s plus encoding 6 s of thread time; the one-line edit lowers, encodes and writes its blob in 85 ms; 1,496 of 1,500 blobs publish complete. Rehydrate-versus-relower is still running in lane D.\n\n**Two expectation changes**, both consequences of the design, are described in the PR. **Two decisions still open for you**: the on-demand row write (waiting on the rehydrate numbers), and whether the +25% cache and +32% cold index are acceptable as is or whether M1 should trim the largest tables (events and source mappings) before M2 adds flows.\n\n**Outside this plan but blocking the demo target**: after the edit, 10.4 s of the 16 s probe is `rust_crates.reconcile.waves` re-deriving 306 crate scopes for a body-only change. That alone exceeds the 10 s warm target and belongs to the early-cutoff work, not to taint.\n\n**Running now**: M2-a (projection host refactor, Opus), M2-b (rules, ports, fixpoint, rows, Haiku), the capture-binding lowerer fix, and lane D's last measurement. M3's comparison harness is ready; its oracle covers baseline equivalence only until the previous session recaptures the new-sink case."
+        },
+        {
+          "id": "agent:14162",
+          "role": "assistant",
+          "text": "Lane D is complete. The last number settles the on-demand question's direction: serving an artifact from rows is 5.5 times faster than re-lowering at the median and 44 times at the 95th percentile (the largest file: 3,950 ms to lower, 53 ms to read plus 48 ms to validate). So if the demand path fires for a disk blob at all, writing its rows pays back immediately; how often it fires still needs the policy run in M3. Recording the result locally; the PR is ready, so these plan commits stay off the remote until the M2 branch carries them."
+        },
+        {
+          "id": "agent:14238",
+          "role": "assistant",
+          "text": "M1 measurement is complete and recorded. Running now: M2-a (projection host, Opus), M2-b (rules, ports, fixpoint, rows, Haiku), and the capture-binding lowerer fix. PR #4746 is in the queue. Nothing to request until a lane reports."
+        },
+        {
+          "id": "agent:15330",
+          "role": "assistant",
+          "text": "The capture-binding fix removes all 167 validation failures with no regressions in the semantic and usages suites. Reviewing the diff before cherry-picking it onto master for its own PR."
+        },
+        {
+          "id": "agent:15401",
+          "role": "assistant",
+          "text": "The lowerer fix is PR #4748, dependent on #4746 and ready. State is saved. Running: M2-a (projection host refactor) and M2-b (rules, ports, fixpoint, rows). Nothing to request until they report or you answer the two open M1 questions (cache growth acceptance; the rust-crate reconcile cost on the edit path, which is outside this plan)."
+        },
+        {
+          "id": "user:15455",
+          "role": "user",
+          "text": "+25-30 is fine\n\nnot sure what the other decision is, last i saw was \"waiting on the rehydrate numbers\""
+        },
+        {
+          "id": "agent:15457",
+          "role": "assistant",
+          "text": "Cache growth accepted; recording it. The other item needs no decision from you: the Decision Log already says the on-demand write is added if two conditions hold, and the rehydrate numbers settled the first (rows read 5 to 44 times faster than re-lowering). The second, whether the demand path fires for disk blobs at all, comes out of M3's policy run, and I'll apply the rule then."
+        },
+        {
+          "id": "agent:15488",
+          "role": "assistant",
+          "text": "Recorded. Nothing else is open on M1. Waiting on the two M2 lanes."
+        },
+        {
+          "id": "agent:15576",
+          "role": "assistant",
+          "text": "M2-a landed clean. Its one gap is real: the inert-drop proof resolves types through the workspace, so it cannot run at parse time. Decision: the file-local host answers `false` there, which leaves such a procedure marked open in its stored head; the relation lists and flows are unchanged by it. M3, which has the workspace, recomputes the openness of the procedures it visits with the workspace host's gap predicates alone (no re-projection), so completeness matches the oracle. Recording that and the small type corrections."
+        },
+        {
+          "id": "agent:15693",
+          "role": "assistant",
+          "text": "Both red checks on PR #4746 are master's, not the branch's:\n\n- **quick policy**: subtest 90 of `scripts/full-performance-workflow.test.mjs` (\"manual Hourly runs use the selected GitHub source and retain RC attempts\") fails on master's own CI runs at 4349d9da75 and c7f17a2673 as well. The last master commits touching the Hourly workflow are the #4613 ARM link-capture preparation and the RunsOn rerun change, so it most likely belongs to that work.\n- **Release analyzer validation** (\"Require passing comparison or recorded cold exception\") has failed on every master run today, including 53e61919ae.\n\nThis branch changes nothing under `.github` or the scripts those tests cover (only the schema generator's version constant). The queue shows the PR as in progress; whether MergeMarshall lands a batch while master's checks are red is the queue's rule, not something I should work around. If you know who owns #4613's Hourly test, that is the unblocker.\n\nWaiting on M2-b (merging M2-a and wiring the parse-time partial-flow write)."
+        },
+        {
+          "id": "user:20166",
+          "role": "user",
+          "text": "i think subagents are complete, or possibly interrupted"
+        },
+        {
+          "id": "agent:20169",
+          "role": "assistant",
+          "text": "All lanes have reported; none were interrupted. M2-a and M2-b both landed with their gates green, migration 0165 sits on top of M1's 0164, and the parse-time write now produces partial flows for every Rust blob.\n\nDecisions on M2-b's gaps: (3) the flow into a child closure's capture slot needs a port the vocabulary lacked, so a `CaptureOut` port kind is added; (4) the callee value is not a port, the spec text was wrong; (11) a projection error must keep its message in the head's `detail`; (6) the head's `complete` conflating \"open\" with \"truncated\" is acceptable because M3 recomputes openness anyway; (12) move invalidation is what the solver differential exists to check. Sending M2-b the two small fixes and starting M2-c (differentials and Vector measurement) in parallel."
+        },
+        {
+          "id": "agent:20734",
+          "role": "assistant",
+          "text": "M3 spec is in the plan. Starting the M3 core lane now (it only needs the trait and a fake provider, not your answers), and here are the three decisions it eventually needs from you."
+        },
+        {
+          "id": "agent:20782",
+          "role": "assistant",
+          "text": "Running: M2-b follow-ups (CaptureOut port, error detail), M2-c (solver and host differentials, Vector measurement), M3-a (composition core on Opus). PR #4746 (M1) and #4748 (lowerer fix) are in the queue behind master's own red checks.\n\n**Three M3 decisions for you**, recorded in the plan as owner questions:\n\n1. **Engine selection rule.** During the rollout, a taint policy whose bound endpoints all sit in Rust blobs with complete IR and partial-flow publications, and that uses no store ends or entry points, runs on the composition engine; everything else stays on the ICFG engine. The rule is evaluated once per compile from the inputs, written to the run's execution record, and pinned by a test. It is not a fallback on failure. The design chapter forbids two resolvers with a hidden fallback; this is two engines by explicit rule, retired when every language publishes partial flows. Confirm or redirect.\n2. **Gate for diagnostics.** A sink-first frontier visits a different procedure set than source-rooted regions, so run-incomplete diagnostics will not match the oracle one for one. Proposed gate: findings equal on every capture (sink location, labels, origins, witness step locations), completion type equal, distinct diagnostic codes a subset of the oracle's, parity and incremental-equivalence suites unchanged; diagnostic counts recorded, not gated.\n3. **Stores and entry points** stay on the ICFG engine in M3.\n\nM3-a's core does not depend on these answers; M3-b and M3-c will."
+        },
+        {
+          "id": "agent:20992",
+          "role": "assistant",
+          "text": "M2-c is still running its background builds; no report yet. Waiting on M2-b's follow-up, M2-c, and M3-a."
+        },
+        {
+          "id": "agent:21105",
+          "role": "assistant",
+          "text": "Still interim from M2-c. Waiting."
+        },
+        {
+          "id": "agent:21181",
+          "role": "assistant",
+          "text": "Interim again from M2-c; its release build and differential runs are long. Waiting."
+        },
+        {
+          "id": "agent:21223",
+          "role": "assistant",
+          "text": "Still interim. Waiting on M2-b, M2-c and M3-a."
+        },
+        {
+          "id": "agent:21319",
+          "role": "assistant",
+          "text": "M2-b's follow-ups are in (commit 3b043cbf34), including a real fix it found on the way: capture relations named a captured parameter as a value while seeds used the port, so the carrier index now interns a formal binding as its port. M2-c and M3-a were told to merge that commit when it appeared."
+        },
+        {
+          "id": "agent:21346",
+          "role": "assistant",
+          "text": "Recorded. Waiting on M2-c (differentials, Vector numbers) and M3-a (composition core)."
+        },
+        {
+          "id": "agent:21472",
+          "role": "assistant",
+          "text": "Still interim from M2-c. Waiting."
+        },
+        {
+          "id": "agent:21485",
+          "role": "assistant",
+          "text": "M3-a landed with its gates green and found two real design gaps, both of which I'm resolving now:\n\n- **Heap input ports.** M2 seeds only parameters, receivers and call results, so a callee that reads a field of a parameter the caller tainted has no port to receive that taint, and M3-a had to approximate the other direction by dispatching every call in a visited procedure. The fix is in M2: a `Heap` port rooted at a parameter or receiver is also an input port, seeded at entry, whenever a relation reads from it. Then the backward search answers it through callers like any other entry port, demand-driven.\n- **Call context.** The lane correctly matched returns to the call they came from and let a demand climb to callers only when it originated in that procedure (or at a capture root). That is the intended semantics; the spec text was too loose and is corrected.\n\nThe composition's incompleteness reasons also need a channel to the report; M3-a exposes them."
+        },
+        {
+          "id": "agent:21577",
+          "role": "assistant",
+          "text": "Now starting M3-b, the production provider behind the trait, on a worktree at M3-a's head."
+        },
+        {
+          "id": "agent:21628",
+          "role": "assistant",
+          "text": "Four lanes are running (M2-b heap-input-port follow-up, M2-c differentials and Vector measurement, M3-a's outcome exposure, M3-b production provider). Memory is up to date. Nothing further to request until one reports or you answer the three M3 questions."
+        },
+        {
+          "id": "agent:21781",
+          "role": "assistant",
+          "text": "Still interim from M2-c. Waiting."
+        },
+        {
+          "id": "agent:21802",
+          "role": "assistant",
+          "text": "Interim. Waiting on M2-c, M2-b, M3-a and M3-b."
+        },
+        {
+          "id": "agent:21899",
+          "role": "assistant",
+          "text": "The behavior M3-a flagged is a real flow we need: a callee writing taint into a field of its argument, which the caller later reads. It comes back as a targeted hop, not the per-procedure dispatch that was removed: a demanded location rooted at value `a` in the caller asks only the calls that pass `a` as an actual, resolves those, and demands the callee's matching heap output port."
+        },
+        {
+          "id": "agent:21936",
+          "role": "assistant",
+          "text": "M3-a is resumed on the heap-write hop. Waiting on it, M2-b's heap-input-port commit, M2-c, and M3-b."
+        },
+        {
+          "id": "agent:22196",
+          "role": "assistant",
+          "text": "Interim from M2-c again. Waiting."
+        },
+        {
+          "id": "agent:22319",
+          "role": "assistant",
+          "text": "Still interim. Waiting."
+        },
+        {
+          "id": "agent:22573",
+          "role": "assistant",
+          "text": "Interim. Waiting on all four lanes."
+        },
+        {
+          "id": "agent:22698",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:22755",
+          "role": "assistant",
+          "text": "Interim from M3-b too. Waiting."
+        },
+        {
+          "id": "agent:22772",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:22792",
+          "role": "assistant",
+          "text": "Interim. Waiting on M2-b, M2-c, M3-a and M3-b."
+        },
+        {
+          "id": "agent:22816",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:22831",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:22845",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:22859",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:22872",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:22889",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:22906",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:22925",
+          "role": "assistant",
+          "text": "M2-b's heap input ports are in (e1c1be92b3). Telling the three lanes that consume it."
+        },
+        {
+          "id": "agent:22956",
+          "role": "assistant",
+          "text": "M2-b is complete at e1c1be92b3 and the three consuming lanes have the merge instruction. Waiting on M2-c, M3-a and M3-b."
+        },
+        {
+          "id": "agent:22996",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:23006",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:23018",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:23109",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:23119",
+          "role": "assistant",
+          "text": "Interim. Waiting."
+        },
+        {
+          "id": "agent:23130",
+          "role": "assistant",
+          "text": "M3-a is complete at 20d833026c with the callee-write hop and the M2-b merge, 298 flow tests green. M3-b was told to pick up M3-a's follow-ups as they appear; sending the exact commit."
+        },
+        {
+          "id": "agent:23156",
+          "role": "assistant",
+          "text": "Recorded. Two lanes remain: M2-c (differentials and Vector numbers, which gate M2's PR) and M3-b (production provider). Still waiting on your three M3 decisions for M3-c."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "i think subagents are complete, or possibly interrupted",
+    "assistant_text_tail": "Recorded. Two lanes remain: M2-c (differentials and Vector numbers, which gate M2's PR) and M3-b (production provider). Still waiting on your three M3 decisions for M3-c.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "waiting-language transcript mining",
+    "judgment": "The assistant says M3-c still depends on three M3 decisions from the user; M3-d automation is a separate wait.",
+    "next": "n/a",
+    "input_rationale": "The assistant says M3-c still depends on three M3 decisions from the user; M3-d automation is a separate wait.",
+    "request_message_ids": [
+      "agent:20782",
+      "agent:21628",
+      "agent:23156"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-09T04:30:02.698Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-10-09T04:30:02.703Z",
+        "kind": "agent",
+        "text": "Interim. Waiting."
+      },
+      {
+        "at": "2026-10-09T04:31:22.743Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-10-09T04:31:22.748Z",
+        "kind": "agent",
+        "text": "Interim. Waiting."
+      },
+      {
+        "at": "2026-10-09T04:47:31.766Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-10-09T04:47:31.782Z",
+        "kind": "agent",
+        "text": "Interim. Waiting."
+      }
+    ]
+  }
+}

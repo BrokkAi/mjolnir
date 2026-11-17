@@ -2,12 +2,19 @@ use super::*;
 
 pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
     Router::new()
+        .route("/images/build", post(images::start))
+        .route("/images/status", post(images::status))
+        .route(
+            "/images/operations/{id}",
+            get(images::follow).delete(images::cancel),
+        )
         .route(
             "/sessions/{session_id}/native-agents/{child_id}/history",
             get(native_agent_history),
         )
         .route("/events", get(events::events))
         .route("/github-token", get(github_token))
+        .route("/profiles/login-errors", get(profile_login_errors))
         .route("/profiles/{profile_id}/config", get(profile_config))
         .route(
             "/profiles/{profile_id}/subagent-options",
@@ -20,17 +27,27 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             axum::routing::patch(set_config),
         )
         .route("/workspaces", get(list_workspaces).post(create_workspace))
-        .route("/sessions", get(list_sessions).post(start_session))
+        .route(
+            "/sessions",
+            get(list_sessions)
+                .post(start_session)
+                .layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
+        )
         .route("/sessions/{session_id}", get(get_session))
         .route(
             "/sessions/{session_id}/subagents",
-            get(list_subagents).post(spawn_subagent),
+            get(list_subagents)
+                .post(spawn_subagent)
+                .layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
         )
         .route("/sessions/{session_id}/turn-control", post(turn_control))
-        .route("/sessions/{session_id}/prompt", post(prompt))
+        .route(
+            "/sessions/{session_id}/prompt",
+            post(prompt).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
+        )
         .route(
             "/sessions/{session_id}/message",
-            post(mailbox::send_message),
+            post(mailbox::send_message).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
         )
         .route(
             "/sessions/{session_id}/queued-prompts/clear",
@@ -38,7 +55,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         )
         .route(
             "/sessions/{session_id}/events",
-            post(mailbox::enqueue_event),
+            post(mailbox::enqueue_event).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
         )
         .route("/sessions/{session_id}/transcript", get(transcript))
         .route("/sessions/{session_id}/history", get(transcript_history))
@@ -54,6 +71,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
                 .delete(cancel_container_upgrade),
         )
         .route("/sessions/{session_id}/destroy", post(destroy))
+        .route("/sessions/{session_id}/notices", get(session_notices))
         .route("/sessions/{session_id}/resume", post(resume))
         .route(
             "/sessions/{session_id}/background-tasks/stop",
@@ -67,18 +85,13 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             "/sessions/{session_id}/review",
             get(review_status).post(start_review),
         )
-        .route(
-            "/sessions/{session_id}/review/{resolution}",
-            post(resolve_review),
-        )
+        .route("/sessions/{session_id}/reviews", get(finished_review))
         .route("/sessions/{session_id}/diff", get(diff))
         .route(
             "/sessions/{session_id}/files",
-            get(read_file)
-                .put(write_file)
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize,
-                )),
+            get(read_file).put(write_file).layer(named_body_limit(
+                mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize,
+            )),
         )
         .route("/sessions/{session_id}/elicitations", get(elicitations))
         .route(
@@ -111,6 +124,15 @@ pub(super) async fn require_api_auth(
     request: HttpRequest<axum::body::Body>,
     next: Next,
 ) -> Result<Response, ApiFailure> {
+    // Shutdown is authoritative even for the unauthenticated API probe. A
+    // reconnect must never identify this daemon as healthy after its transfer
+    // streams have been cancelled.
+    if state.shutdown.is_cancelled() {
+        return Err(
+            ApiFailure::unavailable("the daemon is shutting down; reconnect")
+                .with_code(Some(DAEMON_HANDOFF_CODE)),
+        );
+    }
     let bearer = request
         .headers()
         .get(AUTHORIZATION)
@@ -181,6 +203,14 @@ impl Default for SessionListQuery {
 #[serde(deny_unknown_fields)]
 pub(super) struct ProfileConfigQuery {
     pub(super) model: Option<String>,
+    /// Return the catalogue the harness advertises, before the profile's
+    /// `models` allow-list. `mj doctor` compares the two.
+    #[serde(default)]
+    pub(super) unrestricted: bool,
+    /// Answer for a disabled profile too; discovery itself refuses an id the
+    /// configuration does not have.
+    #[serde(default)]
+    pub(super) with_disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

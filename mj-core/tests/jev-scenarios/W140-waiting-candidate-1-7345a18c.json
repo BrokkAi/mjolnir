@@ -1,0 +1,118 @@
+{
+  "id": "W140",
+  "title": "waiting candidate 1 7345a18c",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "7345a18c575c2c420f6c75056b7f1c62",
+    "session_title": "jvm-gate-7770",
+    "reply_position": 488,
+    "captured_at": "2026-10-28T09:47:23.297Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:33",
+          "role": "assistant",
+          "text": "I’ll follow the JVM gate procedure in the detached candidate worktree and keep all run artifacts under `/tmp/lanes/jvm-gates/7770/`. I’ll verify the candidate/base relationship and frozen input checksums before and after, and won’t touch the concurrent lane."
+        },
+        {
+          "id": "agent:109",
+          "role": "assistant",
+          "text": "The candidate is clean at `6cefa6be16f2`, and `git merge-base` confirms the required base `25985e127610`. The frozen root checksum passes. The requested corpus copies already exist; I’m checking their digests and the prior gate’s run layout before building the two archive trees."
+        },
+        {
+          "id": "agent:219",
+          "role": "assistant",
+          "text": "The base archive build is still compiling; it’s isolated under the gate’s `/tmp` tree with the required measure settings. The host is busy, which is expected for this shared machine; the gate uses count comparisons, so I’ll proceed with captures without waiting for a quiet host."
+        },
+        {
+          "id": "agent:342",
+          "role": "assistant",
+          "text": "The first build attempt stopped before producing a binary, and the retry is waiting on Cargo’s measure-profile build lock in the mbx-managed target. I’m checking whether the lock owner clears naturally; I won’t remove the lock or alter Cargo’s target layout because the project instructions assign that cache to mbx."
+        },
+        {
+          "id": "agent:488",
+          "role": "assistant",
+          "text": "Both archive builds are being produced separately, with the candidate still compiling the analysis layer. The earlier base lock was resolved by stopping only my stalled build session; the successful base retry completed, and I’m waiting for the candidate artifact before starting captures."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "Both archive builds are being produced separately, with the candidate still compiling the analysis layer. The earlier base lock was resolved by stopping only my stalled build session; the successful base retry completed, and I’m waiting for the candidate artifact before starting captures.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 0
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-28T09:53:10.833Z",
+        "kind": "agent",
+        "text": "The base-A lifecycle capture completed with the mandated 40-second post-initialize wait, using the same workspace root and a fresh cache. I’m now running candidate and base-B sequentially; then I’ll c"
+      },
+      {
+        "at": "2026-10-28T10:02:04.633Z",
+        "kind": "agent",
+        "text": "Lifecycle checks pass: base A and B are strict-identical, candidate matches both on all 151 request records and 115 JVM operations, and all 2,604 SQL families have identical execution and row counts. "
+      },
+      {
+        "at": "2026-10-28T10:04:10.643Z",
+        "kind": "agent",
+        "text": "The candidate replay130 and nine-answer checks are complete with zero frozen-answer differences. The first manual golden is compiling its test harness from the base archive now; these ignored tests ne"
+      },
+      {
+        "at": "2026-10-28T10:12:36.516Z",
+        "kind": "agent",
+        "text": "The base manual goldens both passed. The candidate work50 test is in the final `brokk-bifrost-tools` test-harness compilation; it has not reported a compiler error, and the candidate source golden wil"
+      },
+      {
+        "at": "2026-10-28T10:15:54.905Z",
+        "kind": "agent",
+        "text": "PASS. The JVM lifecycle, frozen replay, and both manual goldens passed. Full report and artifacts are in `/tmp/lanes/jvm-gates/7770/REPORT.md`."
+      }
+    ]
+  }
+}

@@ -39,12 +39,18 @@ pub(super) async fn enqueue_event(
         .enter("API mailbox event")
         .map_err(|_| ApiFailure::shutdown(&state))?;
     let blocking_admission = admission.clone();
-    let inserted = tokio::task::spawn_blocking(move || {
+    let enqueued = tokio::task::spawn_blocking(move || {
         let _admission = blocking_admission;
         crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, wake, false)
     })
     .await
     .map_err(|error| anyhow::anyhow!("mailbox outbox write task failed: {error}"))??;
+    if enqueued == crate::database::Enqueued::TargetGone {
+        return Err(ApiFailure::not_found(format!(
+            "session {session_id} no longer exists"
+        )));
+    }
+    let inserted = enqueued.inserted();
     Ok((
         StatusCode::ACCEPTED,
         Json(MailboxEventResponse { key, inserted }),
@@ -76,6 +82,8 @@ pub(super) async fn send_message(
             Json(SessionMessageResponse {
                 session_id,
                 via: "turn".into(),
+                mailbox_delivery: None,
+                note: None,
                 turn_id: Some(turn_id),
                 managed_child: false,
             }),

@@ -1,0 +1,14 @@
+{
+  "accepted_at": "2026-11-17T07:40:57.104659+00:00",
+  "rows": 28,
+  "labels": {
+    "caught": 28
+  },
+  "all28_full_outputs_and_frozen_match_rules_near_misses_reviewed": true,
+  "parent_independent_blind_review_sha256": "631a04dd1dce69acb6c2cfa262833fb01fb84d50107616432bb50d58c88f713a",
+  "raw_proposal_sha256": "0864b528e28a32986f85030cd7d2d507445e060bdcc7b2027c818999715cbe85",
+  "parent_changes_from_proposal": [],
+  "decisions_fixed_before_private_arm_attribution": true,
+  "private_key_contents_read": false,
+  "scope_note": "Only the known-defect match is accepted; other findings are not verified. Different Option method trigger meets the same unconditional payload-stripping mechanism; every file-cap claim specifies excess files rather than exact fit."
+}

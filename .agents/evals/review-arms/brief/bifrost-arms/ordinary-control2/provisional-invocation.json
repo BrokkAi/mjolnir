@@ -1,0 +1,30 @@
+{
+  "score_argv": [
+    "/usr/bin/python3",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/score.py",
+    "bifrost-control2"
+  ],
+  "control2_argv": [
+    "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/brief_control2.py",
+    "--arm",
+    "BT",
+    "--verify",
+    "bifrost-control2",
+    "--jobs",
+    "stageB-ordinary-jobs.json"
+  ],
+  "environment": {
+    "REVIEW_ARMS_DIR": "/mnt/optane/review-arms-bifrost-20261116",
+    "REVIEW_ARMS_INSTANCE": "default",
+    "REVIEW_ARMS_REPO": "/mnt/optane/tmp/d2fa-bifrost/bifrost-dev",
+    "REVIEW_ARMS_CORPUS": "/mnt/optane/review-arms-bifrost-20261116/corpus/corpus.jsonl",
+    "REVIEW_ARMS_DIFFS": "/mnt/optane/review-arms-bifrost-20261116/corpus/diffs.jsonl",
+    "REVIEW_ARMS_BUNDLE": "bifrost-dev",
+    "REVIEW_ARMS_REPO_DIR": "bifrost-dev",
+    "REVIEW_ARMS_SETS": "/mnt/optane/review-arms-bifrost-20261116/arms/sets.json",
+    "REVIEW_ARMS_QUOTA_FLOOR": "codex4=25"
+  },
+  "retrieval": "runpy retained original citing_any/text/findings/functions; no duplicate matcher or new scoring rules.",
+  "candidate_count": 8,
+  "handmarks_not_yet_made": true
+}

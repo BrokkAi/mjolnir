@@ -42,21 +42,14 @@ pub async fn run_daemon_process() -> Result<()> {
     // no daemon state behind.
     let owner_pid = owner_pid_to_watch()?;
     let cancellation = crate::termination::Coordinator::install().token();
-    // A container-native daemon runs every command beside itself, inside its
-    // own container. A host daemon routes host work to the node. Tests that
-    // run a daemon in-process never reach this line.
-    if placement() == DaemonPlacement::Host {
-        crate::node_registry::install_command_host(cancellation.clone())?;
-        crate::node_registry::install_host_fs(cancellation.clone())?;
-    }
     let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
+    super::previous_daemon::report_unclean_previous_daemon();
     let database_writer = guard.start_database_writer()?;
     log_startup_phase("open the store", opening);
     let epilogue_started = AtomicBool::new(false);
     let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid, cancellation.clone()).await;
     cancellation.cancel();
-    crate::node_registry::registry().finish().await;
     if !epilogue_started.load(Ordering::Acquire) {
         // Initialization failed before the runtime-owned epilogue existed.
         // The same process-level bound still applies to closing the writer.
@@ -86,7 +79,12 @@ pub(super) async fn run_daemon_runtime(
     owner_pid: Option<u32>,
     cancellation: CancellationToken,
 ) -> Result<()> {
+    let uploads = mj_core::config::data_dir().join("uploads");
+    if tokio::fs::try_exists(&uploads).await? {
+        tokio::fs::remove_dir_all(&uploads).await?;
+    }
     let progress = super::diagnostics::DaemonProgressMonitor::start()?;
+    let startup_began = Instant::now();
     // Before this daemon can start a checkpoint, so every checkpoint file older
     // than this belongs to a checkpoint that no longer runs.
     let started = SystemTime::now();
@@ -127,8 +125,9 @@ pub(super) async fn run_daemon_runtime(
         .await
         .context("earlier sessions' profile home link task failed")?;
     }
-    // The launcher may choose the endpoint and token, so it can hand them to
-    // the node before the daemon is ready; otherwise the daemon picks both.
+    // A container launcher chooses the endpoint and token, because it
+    // publishes the port and writes `daemon.json` itself; otherwise the daemon
+    // picks both.
     let listen = match mj_core::config::env_override("DAEMON_LISTEN") {
         Some(address) => address
             .parse::<SocketAddr>()
@@ -146,7 +145,7 @@ pub(super) async fn run_daemon_runtime(
         protocol_version: PROTOCOL_VERSION,
         pid: std::process::id(),
         address: listener.local_addr()?,
-        token: token.clone(),
+        token,
         started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         // The version, with the revision and build times as semver build
         // metadata that older clients ignore; see `mj_client::build_identity`.
@@ -159,14 +158,6 @@ pub(super) async fn run_daemon_runtime(
         // `/proc`.
         placement: placement(),
     };
-    // Startup recovery can run commands, and commands run on the node, so the
-    // node has to be able to connect before this daemon is ready for clients.
-    let early_accept_stop = CancellationToken::new();
-    let early_accept = tokio::spawn(accept_nodes_while_starting(
-        listener,
-        token,
-        early_accept_stop.clone(),
-    ));
     let workspaces = tokio::task::spawn_blocking(crate::database::list_workspaces)
         .await
         .context("daemon workspace load task panicked")??;
@@ -180,8 +171,8 @@ pub(super) async fn run_daemon_runtime(
     // below have an awaited epilogue just like failures in the serving loop.
     let (delegation_tx, delegation_updates) = crate::session_manager::delegation_channel();
     let manager = crate::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
+    manager.control.update_model_policies(&controller);
     let manager_targets = manager.targets;
-    manager_targets.send_replace(dashboard_worker_targets(&controller));
     let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
@@ -203,6 +194,19 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
+    let failure_runtime = Arc::downgrade(&state);
+    manager_control.install_harness_failure_handler(Arc::new(move |id, failure| {
+        let runtime = failure_runtime.clone();
+        Box::pin(async move {
+            let runtime = runtime
+                .upgrade()
+                .context("daemon stopped before readiness failure could be applied")?;
+            runtime.fail_unready_session(id, failure).await
+        })
+    }));
+    // Install the bounded failure recorder before worker observations start.
+    manager_targets.send_replace(dashboard_worker_targets(&controller));
+    log_relay_actors_launched(&manager_targets.borrow());
     state
         .reviewer_runtime
         .set(Arc::downgrade(&state))
@@ -216,9 +220,14 @@ pub(super) async fn run_daemon_runtime(
             .map(|target| target.session_id.clone())
             .collect(),
     );
+    // Fires once the startup start of Apple's container service has finished,
+    // however it ended, so the image refresher's first look sees the service
+    // as startup left it instead of mid-start.
+    let apple_container_settled = CancellationToken::new();
     let apple_container_startup = spawn_apple_container_startup(
         state.clone(),
         cancellation.clone(),
+        apple_container_settled.clone(),
         config.targets.values().any(|target| {
             matches!(
                 target,
@@ -230,28 +239,61 @@ pub(super) async fn run_daemon_runtime(
     // are shut down before the process-level writer can be closed.
     let bootstrapping = Instant::now();
     let bootstrap = async {
-        let move_operations = blocking(crate::database::load_move_operations).await?;
+        let (move_operations, close_operations) =
+            blocking(crate::database::load_move_recovery).await?;
+        let moves = move_operations.len();
         let move_sessions = move_operations
             .iter()
             .map(|operation| operation.selection.session_id.clone())
             .collect::<BTreeSet<_>>();
-        let mut lifecycle_owned = state.recover_moves(move_operations)?;
+        let move_owners = state
+            .recover_moves(move_operations, &close_operations)
+            .await?;
+        let mut lifecycle_owned = move_owners.moves;
         let restart_intents = blocking(crate::database::load_session_restarts).await?;
+        let restarts = restart_intents.len();
         lifecycle_owned.extend(
             restart_intents
                 .iter()
                 .map(|intent| intent.session_id.clone()),
         );
-        lifecycle_owned.extend(state.recover_restarts(restart_intents)?);
-        lifecycle_owned.extend(move_sessions.iter().cloned());
-        state.resume_retained_cleanups();
-        state.resume_startup_cleanups(true);
+        lifecycle_owned.extend(state.recover_restarts(restart_intents).await?);
+        let create_intents = blocking(crate::database::load_session_create_intents).await?;
+        let creates = create_intents.len();
+        lifecycle_owned.extend(state.recover_creates(create_intents).await?);
+        let (retained_cleanups, startup_cleanups) = {
+            let owner = state.owner();
+            let sessions = &owner.controller().state.sessions;
+            (
+                sessions
+                    .values()
+                    .filter(|session| {
+                        session.state == mj_core::state::SessionState::Stopped
+                            && session.target.is_some()
+                    })
+                    .count(),
+                sessions
+                    .values()
+                    .filter(|session| session.state == mj_core::state::SessionState::StartupCleanup)
+                    .count(),
+            )
+        };
+        state.resume_retained_cleanups().await;
+        state.resume_startup_cleanups(true).await;
+        tracing::info!(
+            moves,
+            restarts,
+            creates,
+            retained_cleanups,
+            startup_cleanups,
+            "daemon startup: recovery of moves, restarts and cleanups queued"
+        );
         state.restore_startup_deliveries(&cancellation).await?;
-        Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned))
+        Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned, move_owners.closes))
     }
     .await;
     log_startup_phase("recover moves and startup deliveries", bootstrapping);
-    let (move_sessions, move_owned) = match bootstrap {
+    let (move_sessions, move_owned, move_closes) = match bootstrap {
         Ok(ownership) => ownership,
         Err(error) => {
             epilogue_started.store(true, Ordering::Release);
@@ -277,7 +319,7 @@ pub(super) async fn run_daemon_runtime(
             );
             record_daemon_cleanup(
                 &mut outcome,
-                "shut down turn review host after bootstrap failure",
+                "shut down code review host after bootstrap failure",
                 state
                     .review_host()
                     .shutdown()
@@ -331,14 +373,15 @@ pub(super) async fn run_daemon_runtime(
             }
         })
     };
-    let mut update_feed = continuation::spawn(state.clone(), manager_updates, cancellation.clone());
-
     let (delegation_services, mut delegation_task) = super::delegation::spawn(
         state.clone(),
         manager_control.clone(),
         delegation_updates,
         cancellation.clone(),
     );
+    // Recovery can inspect the initial turn immediately. Install the quota
+    // owner and its current profile identities before starting that reader.
+    let mut update_feed = continuation::spawn(state.clone(), manager_updates, cancellation.clone());
 
     // CPU publication is bounded and reconstructed from workers. It holds no
     // admission during handoff and exits with the daemon's cancellation token.
@@ -374,6 +417,7 @@ pub(super) async fn run_daemon_runtime(
     // Before the web viewer starts: it shows this service's readings.
     let capacity_service =
         super::capacity::spawn_capacity_service(state.clone(), cancellation.clone());
+    let observe_delivery = super::observe::spawn(state.clone(), cancellation.clone());
 
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
@@ -416,6 +460,7 @@ pub(super) async fn run_daemon_runtime(
                 state.push_notice("", text);
             }
         },
+        apple_container_settled,
         cancellation.clone(),
     );
     let exit_when_idle = mj_core::config::env_override_os("DAEMON_EXIT_WHEN_IDLE").is_some();
@@ -430,13 +475,15 @@ pub(super) async fn run_daemon_runtime(
     // How often the harness readiness wait is looked at. The wait itself is
     // minutes long, so this only bounds how late a failure is noticed, and it
     // reads in-memory state rather than the store.
-    let mut readiness_tick = tokio::time::interval(Duration::from_secs(5));
-    readiness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut progress_tick = tokio::time::interval(Duration::from_secs(1));
     progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut interrupted_close_tasks = Vec::new();
-    for session_id in interrupted_suspend_session_ids(&controller) {
+    for session_id in interrupted_suspend_session_ids(&controller)
+        .into_iter()
+        .chain(move_closes)
+        .collect::<BTreeSet<_>>()
+    {
         if move_owned.contains(&session_id) {
             continue;
         }
@@ -451,7 +498,7 @@ pub(super) async fn run_daemon_runtime(
         let interrupted_close_task = tokio::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {
-                result = recovery_state.suspend_session(session_id.clone()) => result,
+                result = recovery_state.recover_suspension(session_id.clone()) => result,
                 () = recovery_shutdown.cancelled() => return,
             }
             .map(|()| crate::pollers::LifecycleSuccess::Closed)
@@ -469,6 +516,7 @@ pub(super) async fn run_daemon_runtime(
         });
         interrupted_close_tasks.push(interrupted_close_task);
     }
+    let interrupted_closes = interrupted_close_tasks.len();
     // A destroy that failed left its record in `Error` with the target still
     // present; it is finished the way `mj destroy` finishes it. The branch is
     // kept, because whether to delete it was that command's choice and is not
@@ -481,10 +529,7 @@ pub(super) async fn run_daemon_runtime(
         interrupted_close_tasks.push(tokio::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {
-                result = recovery_state.force_destroy_session(
-                    session_id.clone(),
-                    crate::daemon::BranchDisposition::Keep,
-                ) => result,
+                result = recovery_state.recover_destruction(session_id.clone()) => result,
                 () = recovery_shutdown.cancelled() => return,
             }
             .map(|()| crate::pollers::LifecycleSuccess::ForceDestroyed)
@@ -496,6 +541,12 @@ pub(super) async fn run_daemon_runtime(
             });
         }));
     }
+    let interrupted_destroys = interrupted_close_tasks.len() - interrupted_closes;
+    tracing::info!(
+        interrupted_closes,
+        interrupted_destroys,
+        "daemon startup: interrupted closes and destroys resumed"
+    );
     // Whatever is still in an in-flight lifecycle state now has no owner: the
     // moves, the interrupted closes, and the checkpointing rows above are
     // every operation that legitimately resumes. The list comes from the
@@ -505,6 +556,10 @@ pub(super) async fn run_daemon_runtime(
         let unowned = unowned_interrupted_lifecycles(
             &controller,
             &move_owned.union(&move_sessions).cloned().collect(),
+        );
+        tracing::info!(
+            sessions = unowned.len(),
+            "daemon startup: interrupted lifecycles to mark failed"
         );
         (!unowned.is_empty()).then(|| {
             let state = state.clone();
@@ -551,6 +606,10 @@ pub(super) async fn run_daemon_runtime(
     // view watcher instead.
     let tombstone_sweep = {
         let tombstones = tombstone_session_ids(&controller);
+        tracing::info!(
+            sessions = tombstones.len(),
+            "daemon startup: tombstones to discard"
+        );
         (!tombstones.is_empty()).then(|| {
             let state = state.clone();
             let upgrade_work = startup_work.clone();
@@ -620,13 +679,14 @@ pub(super) async fn run_daemon_runtime(
     // hook or the event loop, flows through the same bounded epilogue.
     let mut auto_afk = auto_afk::spawn(state.clone(), cancellation.clone());
     let mut auto_afk_outcome = None;
-    early_accept_stop.cancel();
-    let listener = early_accept
-        .await
-        .context("the startup node acceptor failed")?;
     let mut outcome = async {
         write_metadata(&daemon_metadata_path, &metadata)?;
         reach_test_hook("daemon_metadata_before_listening").await?;
+        tracing::info!(
+            elapsed_ms = startup_began.elapsed().as_millis(),
+            resumed_close_and_destroy_tasks = interrupted_close_tasks.len(),
+            "daemon startup recovery finished"
+        );
         tracing::info!("the daemon is serving");
         drop(startup_work);
         loop {
@@ -665,7 +725,6 @@ pub(super) async fn run_daemon_runtime(
                     progress.phase(ServingPhase::IdleCheck);
                     state.prune_dead_clients();
                     if state.attachments().is_empty() {
-                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }
@@ -675,51 +734,21 @@ pub(super) async fn run_daemon_runtime(
                         && !process_is_alive(owner)
                     {
                         tracing::info!(owner_pid = owner, "daemon owner process exited; shutting down");
-                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }
                 _ = recovery_tick.tick() => {
                     progress.phase(ServingPhase::Recovery);
-                    while let Some(result) = recovery.try_result() {
-                        if let Err(error) = &result.outcome {
-                            // A deferred copy found the agent working. That is
-                            // the normal state of a session in use, so it is
-                            // news, not a fault.
-                            if result.deferred {
-                                tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
-                            } else if result.cancelled {
-                                // The daemon asked for this cancel (a suspend
-                                // or close superseded the copy), so it is not
-                                // a failure of the checkpoint.
-                                tracing::info!(session_id = %result.session_id, %error, reason = "superseded by suspend", "daemon recovery checkpoint cancelled");
-                            } else {
-                                tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
-                            }
-                        }
-                        refresh_runtime_controller(&state).await;
-                    }
-                    while let Some(result) = worker_upgrades.try_result() {
-                        report_worker_upgrade(&state, &result).await;
-                    }
+                    publish_background_results(
+                        &state,
+                        std::iter::from_fn(|| recovery.try_result()),
+                        std::iter::from_fn(|| worker_upgrades.try_result()),
+                    );
                 }
                 _ = background_policy_tick.tick() => {
                     progress.phase(ServingPhase::BackgroundPolicy);
                     state.refresh_background_policies();
-                    state.resume_startup_cleanups(false);
-                }
-                _ = readiness_tick.tick() => {
-                    progress.phase(ServingPhase::Readiness);
-                    // A live session whose harness never advertised itself
-                    // takes no prompt and reports no failure, so nothing else
-                    // ever ends its wait (#1090). The store write runs off
-                    // this loop.
-                    for unready in state.sessions_without_a_usable_harness() {
-                        let state = state.clone();
-                        client_tasks.spawn(async move {
-                            state.fail_unready_session(unready).await;
-                        });
-                    }
+                    state.resume_startup_cleanups(false).await;
                 }
                 completed = interrupted_close_rx.recv() => {
                     progress.phase(ServingPhase::SuspensionRecovery);
@@ -730,7 +759,7 @@ pub(super) async fn run_daemon_runtime(
                         }
                         refresh_runtime_controller(&state).await;
                         if recovered && completed.deferred_cleanup
-                            && let Err(error) = state.start_deferred_cleanup(completed.session_id.clone())
+                            && let Err(error) = state.start_deferred_cleanup(completed.session_id.clone()).await
                         {
                             tracing::warn!(session_id = %completed.session_id, error = format!("{error:#}"), "could not continue cleanup after interrupted close");
                             state.push_notice(
@@ -767,6 +796,33 @@ pub(super) async fn run_daemon_runtime(
                     // continuation service and closes this channel, so a
                     // closed channel is not evidence of a failure.
                     let Some(update) = update? else { break };
+                    if let Some(raw) = update.raw_observation.as_ref()
+                        && raw.native_session_is_ready()
+                        && let Some(build) = update.view.snapshot.as_ref().and_then(|snapshot| snapshot.worker_build.clone())
+                    {
+                        let observation = {
+                            let owner = state.owner();
+                            owner.controller().state.sessions.get(&update.session_id).and_then(|session| {
+                                Some((session.last_profile.clone(), crate::controller::profile_config::observation_check(session.target.as_ref()?)?))
+                            })
+                        };
+                        if let Some((profile, check)) = observation {
+                            let raw = raw.clone();
+                            let state = state.clone();
+                            client_tasks.spawn(async move {
+                                let Ok(_activity) = crate::upgrade::activity("profile choice cache") else { return; };
+                                match crate::controller::profile_config::observe(profile.clone(), build, raw, check).await {
+                                    Ok(true) => {
+                                        if let Some(backend) = state.report_backend.get().and_then(std::sync::Weak::upgrade) {
+                                            backend.profile_catalog().reread_failed(&profile);
+                                        }
+                                    }
+                                    Ok(false) => {},
+                                    Err(error) => tracing::warn!(%error, "could not cache observed profile choices"),
+                                }
+                            });
+                        }
+                    }
                     if let Some((detail, observed_updated_at)) =
                         state.missing_target_record(&update.session_id, &update.view)
                     {
@@ -897,7 +953,7 @@ pub(super) async fn run_daemon_runtime(
     );
     epilogue.record(
         &mut outcome,
-        "shut down turn review host",
+        "shut down code review host",
         state
             .review_host()
             .shutdown()
@@ -940,6 +996,14 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join capacity service",
         capacity_service.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join Brokk Observe delivery",
+        observe_delivery
+            .await
+            .context("Brokk Observe delivery task panicked")
+            .and_then(std::convert::identity),
     );
     if let Some(phone_task) = phone_task {
         epilogue.record(
@@ -1015,6 +1079,24 @@ pub(super) async fn run_daemon_runtime(
 
 /// Log a startup phase that took long enough to matter, so a slow start after
 /// an upgrade records where its time went.
+/// One line naming how many session relay actors the daemon starts at once and
+/// what kind of target each reaches, so a slow start can be read against the
+/// size of its reconnect burst.
+fn log_relay_actors_launched(targets: &[crate::session_manager::RelaySessionTarget]) {
+    let mut by_kind = BTreeMap::<&'static str, usize>::new();
+    for target in targets {
+        let kind = target.worker_recovery.as_ref().map_or("unknown", |plan| {
+            mj_core::targets::locator_kind_name(&plan.source_target)
+        });
+        *by_kind.entry(kind).or_default() += 1;
+    }
+    tracing::info!(
+        actors = targets.len(),
+        by_target_kind = ?by_kind,
+        "daemon startup: session relay actors launched"
+    );
+}
+
 fn log_startup_phase(phase: &'static str, started: Instant) {
     let took = started.elapsed();
     if took >= EpilogueClock::LOGGED_STEP {
@@ -1194,7 +1276,9 @@ pub(super) fn spawn_manager_target_refresher(
                 }
                 owner.pollable_worker_inputs()
             };
-            let config = inputs.controller().config;
+            let controller = inputs.controller();
+            state.session_manager.update_model_policies(&controller);
+            let config = controller.config;
             if auth_profiles.as_ref() != Some(&config.profiles) {
                 let mut cache = auth.clone();
                 let profiles = config.profiles.clone();
@@ -1431,12 +1515,16 @@ fn spawn_store_compatibility_watch(cancellation: CancellationToken) -> tokio::ta
 fn spawn_apple_container_startup(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
+    settled: CancellationToken,
     apple_target_configured: bool,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !cfg!(target_os = "macos") || !apple_target_configured {
+        settled.cancel();
         return None;
     }
     Some(tokio::spawn(async move {
+        // Every way out of this task, a panic included, settles the start.
+        let _settled = settled.drop_guard();
         let command_cancelled = Arc::new(AtomicBool::new(false));
         let executor = CancellableProcessExecutor::new(command_cancelled.clone())
             .with_deadline(Duration::from_secs(90));
@@ -1497,74 +1585,6 @@ pub(super) async fn refresh_runtime_controller(state: &RuntimeState) {
             error = format!("{error:#}"),
             "could not refresh daemon controller state"
         );
-    }
-}
-
-/// Accept node connections while the daemon starts, and nothing else: no
-/// client can use a daemon that has not published itself. Returns the
-/// listener once the daemon is ready to serve everyone on it.
-async fn accept_nodes_while_starting(
-    listener: TcpListener,
-    token: String,
-    stop: CancellationToken,
-) -> TcpListener {
-    let mut connections = tokio::task::JoinSet::new();
-    loop {
-        tokio::select! {
-            biased;
-            _ = stop.cancelled() => break,
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    connections.spawn(serve_while_starting(stream, token.clone()));
-                }
-                Err(error) => tracing::warn!(%error, "could not accept a connection while starting"),
-            },
-            Some(joined) = connections.join_next(), if !connections.is_empty() => {
-                match joined {
-                    Ok(Err(error)) => tracing::debug!(error = format!("{error:#}"), "startup connection ended"),
-                    Err(error) => tracing::warn!(%error, "startup connection task failed"),
-                    Ok(Ok(())) => {}
-                }
-            }
-        }
-    }
-    // An adopted node lives in the registry; a refused client has its answer.
-    connections.detach_all();
-    listener
-}
-
-async fn serve_while_starting(mut stream: TcpStream, token: String) -> Result<()> {
-    let request: RequestEnvelope = read_frame(&mut stream).await?;
-    let request_id = request.request_id;
-    let protocol_version = request.protocol_version;
-    match request.action {
-        DaemonAction::NodeConnect { node_id }
-            if request.token == token && protocol_version == PROTOCOL_VERSION =>
-        {
-            write_response(
-                &mut stream,
-                ResponseEnvelope {
-                    protocol_version,
-                    request_id,
-                    result: Ok(DaemonReply::Done),
-                },
-            )
-            .await?;
-            crate::node_registry::registry()
-                .adopt(stream, node_id)
-                .await
-        }
-        _ => {
-            write_response(
-                &mut stream,
-                ResponseEnvelope {
-                    protocol_version,
-                    request_id,
-                    result: Err("the Mjolnir daemon is still starting".to_owned()),
-                },
-            )
-            .await
-        }
     }
 }
 

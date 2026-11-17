@@ -202,6 +202,7 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
     LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -222,63 +223,38 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource::Direct {
-            key: String::new(),
-            endpoint: String::new(),
-        }),
+        verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     }
 }
 
-/// The worker honors the controller's `muse_auto_review` resolution, carried
-/// in the launch environment's `MUSE_APPROVAL_MODE`: `promptUnmatched` keeps
-/// the reviewer, `allowAll` (or a launch written before the toggle) runs
-/// without permission checks. Guardian Muse always reviews.
+/// Muse's review follows the runtime's policy alone. A launch written by an
+/// older controller for a profile that opted back into review
+/// (`MUSE_APPROVAL_MODE=promptUnmatched`, 2.60 to 2.71) still runs an
+/// unconstrained session without permission checks, and guardian Muse always
+/// reviews.
 #[test]
-fn muse_session_enforcement_follows_the_launch_approval_mode() {
+fn muse_session_enforcement_ignores_a_legacy_launch_approval_mode() {
     let root = std::env::temp_dir();
     let mut spec = launch(&root, root.join("bridge.py"), Default::default());
     spec.harness = HarnessKind::Muse;
     spec.execution_policy = ExecutionPolicy::Unconstrained;
-
-    // No variable (a launch written before the toggle): the no-review default.
-    let enforcement = session_enforcement(&spec).expect("Muse enforces a policy");
-    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
-    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
-
-    spec.environment
-        .insert("MUSE_APPROVAL_MODE".into(), "allowAll".into());
-    let enforcement = session_enforcement(&spec).expect("Muse enforces a policy");
-    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
-    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
-
-    // The controller sets this when the profile opts back into review.
     spec.environment
         .insert("MUSE_APPROVAL_MODE".into(), "promptUnmatched".into());
     let enforcement = session_enforcement(&spec).expect("Muse enforces a policy");
+    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
+    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
+
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    let enforcement = session_enforcement(&spec).expect("guardian enforces a policy");
     assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
     assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
-
-    // Guardian targets always review, whatever the launch carries.
-    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-    for mode in ["allowAll", "promptUnmatched"] {
-        spec.environment
-            .insert("MUSE_APPROVAL_MODE".into(), mode.into());
-        let enforcement = session_enforcement(&spec).expect("guardian enforces a policy");
-        assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
-        assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
-    }
-
-    // Another harness never reads the Muse variable.
-    spec.harness = HarnessKind::Codex;
-    spec.execution_policy = ExecutionPolicy::Unconstrained;
-    let enforcement = session_enforcement(&spec).expect("Codex enforces a policy");
-    assert_eq!(enforcement.acp_mode(), Some("agent-full-access"));
-    assert_eq!(enforcement.acp_setting(), None);
 }
 
 async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
@@ -1391,12 +1367,17 @@ async fn an_unlisted_value_is_refused_with_the_accepted_values() {
 /// change away from Auto mode does the same mapping (`reconcileForModel`).
 /// With `refuse_auto` set, every request for Auto is refused.
 fn claude_auto_mode_harness(root: &std::path::Path, refuse_auto: bool) -> PathBuf {
+    claude_mode_harness(root, refuse_auto, false)
+}
+
+fn claude_mode_harness(root: &std::path::Path, refuse_auto: bool, resume_plan: bool) -> PathBuf {
     let script = root.join("claude_auto_mode.py");
     std::fs::write(
         &script,
         r#"
 import json, sys
 REFUSE_AUTO = __REFUSE_AUTO__
+RESUME_PLAN = __RESUME_PLAN__
 NO_AUTO = ['haiku']
 session, running, model, mode = 'replacement', 'default', 'default', 'default'
 NOTICE = '**Auto mode unavailable:** the selected model does not support Auto mode; using Accept edits instead.'
@@ -1425,8 +1406,13 @@ for line in sys.stdin:
     if method == 'initialize':
         result = {'protocolVersion':1,'agentCapabilities':{'loadSession':True}}
     elif method == 'session/load':
-        error = {'code':-32002,'message':'Resource not found: ' + params['sessionId'],
-                 'data':{'uri':params['sessionId']}}
+        if RESUME_PLAN:
+            model = running = 'sonnet'
+            mode = 'plan'
+            result = {'configOptions':options(),'modes':modes()}
+        else:
+            error = {'code':-32002,'message':'Resource not found: ' + params['sessionId'],
+                     'data':{'uri':params['sessionId']}}
     elif method == 'session/new':
         running = params.get('_meta',{}).get('claudeCode',{}).get('options',{}).get('model') or 'default'
         model, mode = 'default', 'default'
@@ -1460,7 +1446,7 @@ for line in sys.stdin:
         .replace(
             "__REFUSE_AUTO__",
             if refuse_auto { "True" } else { "False" },
-        ),
+        ).replace("__RESUME_PLAN__", if resume_plan { "True" } else { "False" }),
     )
     .unwrap();
     script
@@ -1476,6 +1462,10 @@ struct HaikuFallbackResume {
 }
 
 async fn resume_a_missing_haiku_session(refuse_auto: bool) -> HaikuFallbackResume {
+    resume_haiku_then_switch(refuse_auto, false).await
+}
+
+async fn resume_haiku_then_switch(refuse_auto: bool, switch_model: bool) -> HaikuFallbackResume {
     let root = tempfile::tempdir().unwrap();
     let mut spec = launch(
         root.path(),
@@ -1511,9 +1501,65 @@ async fn resume_a_missing_haiku_session(refuse_auto: bool) -> HaikuFallbackResum
             _ => {}
         }
     }
+    if switch_model {
+        assert_eq!(
+            resumed.mode.as_deref(),
+            Some(if refuse_auto {
+                "default"
+            } else {
+                "acceptEdits"
+            })
+        );
+        commands
+            .send(CommandRequest::SetConfig {
+                request_id: "switch-to-sonnet".into(),
+                key: "model".into(),
+                value: "sonnet".into(),
+            })
+            .await
+            .unwrap();
+        loop {
+            match next(&mut events).await {
+                RuntimeEvent::ConfigApplied { config_options, .. } => {
+                    resumed.mode = surface::config_current_value(&config_options, "mode");
+                    break;
+                }
+                RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+                RuntimeEvent::Warning { message } => resumed.warnings.push(message),
+                RuntimeEvent::Stopped => panic!("the model change ended the session"),
+                _ => {}
+            }
+        }
+    }
     drop(commands);
-    let _ = tokio::time::timeout(Duration::from_secs(10), runtime).await;
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     resumed
+}
+
+// Hard-won: aaa4c484: a model switch left the Auto fallback (acceptEdits) in place
+#[tokio::test]
+async fn switching_from_haiku_to_sonnet_reasserts_guardian_auto_mode() {
+    let resumed = resume_haiku_then_switch(false, true).await;
+    assert_eq!(resumed.mode.as_deref(), Some("auto"));
+}
+
+/// A bridge that refuses Auto keeps its own mode after a model change too:
+/// the reassertion warns again instead of ending the session.
+// Hard-won: 60f44f8: reasserting a refused policy mode after a model change ended the session
+#[tokio::test]
+async fn a_model_change_keeps_a_session_whose_bridge_refuses_the_policy_mode() {
+    let resumed = resume_haiku_then_switch(true, true).await;
+    assert_eq!(resumed.mode.as_deref(), Some("default"));
+    let refusals = resumed
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("this bridge refuses it"))
+        .count();
+    assert_eq!(refusals, 2, "{:?}", resumed.warnings);
 }
 
 /// R8-2: a never-prompted Claude session on haiku could not be resumed. Its
@@ -1566,4 +1612,59 @@ async fn a_mode_the_harness_refuses_for_a_new_session_leaves_its_default_mode_an
         "{}",
         refusals[0]
     );
+}
+
+#[tokio::test]
+async fn resume_and_context_restore_preserve_only_active_plan_under_guardian() {
+    // A bridge that offers Plan only on its `mode` selector saves it among
+    // the selectors, not as the context's mode. A bridge that refuses Auto
+    // would leave a restored bypassPermissions behind; the session takes
+    // Claude's default mode instead.
+    let selector = |value: &str| vec![("mode".to_owned(), value.to_owned())];
+    for (resume_plan, saved_mode, saved_selectors, refuse_auto, expected) in [
+        (true, None, vec![], false, "plan"),
+        (false, Some("plan"), vec![], false, "plan"),
+        (false, None, selector("plan"), false, "plan"),
+        (false, Some("acceptEdits"), vec![], false, "auto"),
+        (false, None, selector("bypassPermissions"), true, "default"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut spec = launch(
+            root.path(),
+            claude_mode_harness(root.path(), refuse_auto, resume_plan),
+            AcceptedSessionConfig {
+                model: Some("sonnet".into()),
+                effort: None,
+            },
+        );
+        spec.harness = HarnessKind::Claude;
+        if resume_plan {
+            spec.resume_session = Some("native-plan".into());
+        }
+        if saved_mode.is_some() || !saved_selectors.is_empty() {
+            spec.context_restore = Some(ContextReset {
+                request_id: "restore".into(),
+                selectors: saved_selectors,
+                mode: saved_mode.map(Into::into),
+            });
+        }
+        let (commands, requests) = mpsc::channel(8);
+        let (events_tx, mut events) = mpsc::channel(64);
+        let runtime = tokio::spawn(run(spec, requests, events_tx));
+        loop {
+            if let RuntimeEvent::SessionConfigured { config_options } = next(&mut events).await {
+                assert_eq!(
+                    surface::config_current_value(&config_options, "mode").as_deref(),
+                    Some(expected)
+                );
+                break;
+            }
+        }
+        drop(commands);
+        tokio::time::timeout(Duration::from_secs(10), runtime)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 }

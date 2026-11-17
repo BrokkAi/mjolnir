@@ -68,6 +68,8 @@ mod tests {
         let path = dir.path().join("quota.sqlite3");
         let mut connection = open(&path).unwrap();
         let mut report = ProfileQuota {
+            paid_credits: None,
+            monthly_price_usd: Some(100),
             banked_resets: None,
             profile_id: "test".into(),
             harness: mj_core::config::HarnessKind::Claude,
@@ -85,11 +87,14 @@ mod tests {
             error: None,
             refreshed_at_epoch_seconds: 1,
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         };
         let mut observed = vec![report.clone()];
         save_report(&mut connection, "account-a", &report).unwrap();
         for banked in [Some(2), Some(0), Some(1), None] {
             report.banked_resets = banked;
+            report.paid_credits =
+                banked.and_then(|balance| mj_client::quota::PaidCredits::limited(balance as f64));
             save_report(&mut connection, "account-a", &report).unwrap();
             observed.push(report.clone());
             assert_eq!(
@@ -99,12 +104,20 @@ mod tests {
                     .banked_resets,
                 banked
             );
+            assert_eq!(
+                load(&connection, "account-a")
+                    .unwrap()
+                    .unwrap()
+                    .paid_credits,
+                report.paid_credits
+            );
         }
         // A fresh, identical reading is evidence of no change, even within
         // the same second. A partial reading must not inherit historical data.
         save_report(&mut connection, "account-a", &report).unwrap();
         observed.push(report.clone());
         report.refreshed_at_epoch_seconds += 600;
+        report.monthly_price_usd = Some(200);
         report.windows[0].resets_at_epoch_seconds = None;
         report.windows.push(crate::quota::QuotaWindow {
             label: "Weekly (model)".into(),
@@ -119,6 +132,7 @@ mod tests {
         save_report(&mut connection, "account-a", &report).unwrap();
         observed.push(report.clone());
         let last_good = load(&connection, "account-a").unwrap().unwrap();
+        assert_eq!(last_good.monthly_price_usd, Some(200));
         assert_eq!(last_good.windows[0].resets_at_epoch_seconds, Some(12345));
         report.error = Some("rate limited".into());
         report.rate_limited_until_epoch_seconds = Some(1500);

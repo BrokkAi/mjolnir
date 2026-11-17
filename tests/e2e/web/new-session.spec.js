@@ -24,7 +24,6 @@ async function mount(page, {
   targets = null,
   containerTarget = defaultContainerTarget,
   extraTargets = [],
-  resourceOptions = {},
   gitIdentity = { name: 'Fixture Author', email: 'fixture@example.test', per_directory: false },
   gitIdentityError = null,
 } = {}) {
@@ -40,7 +39,6 @@ async function mount(page, {
       ], bundles, capacity: [], launch_failures: [],
     },
     snapshots: 0, preflights: [], preflightFailures: 0, actions: [], creates: [], rejectCreate: false,
-    resourceOptionRequests: [], resourceOptions,
     completions: [], discoveries: [], discoveryFailures: 0,
     discover: body => body.kind === 'github' ? {
       entries: [{ name: 'example/app', source: 'https://github.com/example/app', description: 'A useful project', kind: 'repository' }],
@@ -89,12 +87,7 @@ async function mount(page, {
     }
     if (/^\/api\/sessions\/[^/]+\/container-upgrade$/.test(pathname)) return json(state.upgradePreview);
     if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
-    const resourceOptionsMatch = /^\/api\/targets\/([^/]+)\/resource-options$/.exec(pathname);
-    if (resourceOptionsMatch) {
-      const targetId = decodeURIComponent(resourceOptionsMatch[1]);
-      state.resourceOptionRequests.push(targetId);
-      return json(state.resourceOptions[targetId]);
-    }
+
     if (pathname === '/api/preflight/new') {
       const request = route.request().postDataJSON();
       state.preflights.push(request);
@@ -197,7 +190,6 @@ async function captureNewSessionState(output, page, label, state, extra = null) 
   output.push(`subagent selector count: ${await page.locator('#new-subagents').count()}`);
   if (state.actions.length) output.push(`action: POST /api/actions ${JSON.stringify(state.actions)}`);
   if (state.preflights.length) output.push(`request: POST /api/preflight/new ${JSON.stringify(state.preflights)}`);
-  if (state.resourceOptionRequests.length) output.push(`request: GET /api/targets/*/resource-options ${JSON.stringify(state.resourceOptionRequests)}`);
   if (state.completions.length) output.push(`request: POST /api/paths/complete ${JSON.stringify(state.completions)}`);
   if (state.discoveries.length) output.push(`request: POST /api/projects/discover ${JSON.stringify(state.discoveries)}`);
   if (state.creates.length) output.push(`request: POST /api/bundles ${JSON.stringify(state.creates)}`);
@@ -358,7 +350,7 @@ test('golden_viewer_new_session', async ({ context }) => {
     state.snapshot.sessions.push({
       id: 'mounted', title: 'Mounted session', state: 'running', lifecycle: 'live',
       workspace_id: 'test', profile_id: 'alpha', target_id: 'container', is_idle: true,
-      container_cpus: '6', container_memory: '12g', additional_mounts: mounts,
+      resource_allocation: { kind: 'container', cpus: 6, memory_bytes: 12 * 2 ** 30 }, additional_mounts: mounts,
       capabilities: { container_settings: true, restart: true },
     });
     await refresh(page, state);
@@ -369,12 +361,22 @@ test('golden_viewer_new_session', async ({ context }) => {
     await expect(dialog.locator('.mount-row')).toHaveCount(3);
     output.push('=== existing Container settings uses the shared editor ===');
     output.push((await dialog.innerText()).trim());
+    const cpu = dialog.getByLabel('CPUs', { exact: true });
+    await cpu.fill('1.5');
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(dialog.locator(':scope > [role=alert]')).toHaveText('CPU must be a positive whole number.');
+    expect(state.actions).toHaveLength(0);
+    await cpu.fill('6');
+    const sourcesBeforeSave = await page.evaluate(() => window.fixtureEventSources.length);
     await dialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect.poll(() => state.actions.length).toBe(1);
     expect(state.actions[0]).toEqual({
-      action: 'set-container-settings', session_id: 'mounted', cpus: '6', memory: '12g', mounts,
+      action: 'set-container-settings', session_id: 'mounted', resource_allocation: { kind: 'container', cpus: 6, memory_bytes: 12 * 2 ** 30 }, mounts,
     });
     await expect(dialog).toHaveCount(0);
+    // Save closes the dialog before its snapshot refresh lands; a later fixture
+    // change sent before that snapshot would be overwritten by it.
+    await expect.poll(() => page.evaluate(() => window.fixtureEventSources.length)).toBe(sourcesBeforeSave + 1);
     state.snapshot.sessions[0].container_upgrade_supported = true;
     state.upgradePreview = { session_id: 'mounted', source_container_id: 'old-container', current_image: 'agent-dev:2.51.0', current_image_id: 'sha256:previous', target_image: 'agent-dev:2.52.0', target_image_id: 'sha256:selected', available: true, retained_mounts: ['/workspace', '/cache', '/tmp'], warning: 'Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.' };
     await refresh(page, state);
@@ -398,25 +400,6 @@ test('golden_viewer_new_session', async ({ context }) => {
     await expect.poll(() => state.actions.length).toBe(3);
     expect(state.actions[2]).toEqual({ action: 'upgrade-container', request: { selection: state.upgradePreview, acknowledge_writable_layer_loss: true } });
 
-  });
-
-  const ec2Choices = [
-    { kind: 'aws-ec2', instance_type: 'c7i.large', vcpus: 2, memory_bytes: 4294967296 },
-    { kind: 'aws-ec2', instance_type: 'm7i.2xlarge', vcpus: 8, memory_bytes: 34359738368 },
-  ];
-  await withNewSessionPage(context, {
-    extraTargets: [{ id: 'ec2', kind: 'aws-ec2', resource_allocation_kind: 'aws-ec2', requires_project_directory: false }],
-    resourceOptions: { ec2: { options: ec2Choices, default_allocation: ec2Choices[1] } },
-  }, output, 'EC2 resource choice and launch', async (page, state) => {
-    await page.locator('#new-next').click();
-    await page.locator('#new-target').getByRole('radio', { name: /^ec2/ }).check();
-    await expect.poll(() => page.locator('#new-resource-aws').inputValue()).toBe('m7i.2xlarge');
-    await captureNewSessionState(output, page, 'EC2 default resource option', state);
-    await page.locator('#new-resource-aws').selectOption('c7i.large');
-    await page.locator('#new-next').click();
-    await page.getByRole('button', { name: 'existing', exact: true }).click();
-    await expect(page.locator('#new-step')).not.toContainText('Checking project');
-    return startHeldLaunch(page, state);
   });
 
   await withNewSessionPage(context, {}, output, 'host-specific path suggestions and URL source', async (page, state) => {
@@ -458,6 +441,8 @@ test('golden_viewer_new_session', async ({ context }) => {
   ]) {
     await withNewSessionPage(context, {}, output, `delegation ${label}`, async (page, state) => {
       state.snapshot.subagents_configured = configured;
+      state.snapshot.oracle_configured = configured;
+      state.snapshot.last_oracle_choices = { alpha: false };
       state.snapshot.last_subagent_policies = { alpha: { mode: remembered } };
       await refresh(page, state);
       // Restart the draft so the remembered policy is read for this creation.
@@ -468,6 +453,8 @@ test('golden_viewer_new_session', async ({ context }) => {
       await page.getByRole('button', { name: 'existing', exact: true }).click();
       await expect(page.locator('#new-step')).not.toContainText('Checking project');
       const delegation = page.locator('#new-subagents');
+      await expect(page.locator('#new-oracle')).toHaveCount(configured ? 1 : 0);
+      if (configured) await expect(page.locator('#new-oracle')).toHaveValue('disabled');
       await expect(delegation.locator('option[value="mjolnir"]')).toHaveJSProperty('disabled', !configured);
       if (!configured) {
         await expect(delegation).toHaveValue(remembered === 'none' ? 'none' : 'native');
@@ -513,12 +500,14 @@ test('golden_viewer_new_session', async ({ context }) => {
 
   await withNewSessionPage(context, {}, output, 'harness without subagent support', async (page, state) => {
     state.snapshot.subagents_configured = true;
+    state.snapshot.oracle_configured = true;
     await refresh(page, state);
     await page.locator('#new-profile').selectOption('gamma');
     await projectStep(page, 'container');
     await page.getByRole('button', { name: 'existing', exact: true }).click();
     await expect(page.locator('#new-step')).not.toContainText('Checking project');
     await expect(page.locator('#new-subagents option[value="mjolnir"]')).toHaveJSProperty('disabled', true);
+    await expect(page.locator('#new-oracle')).toHaveValue('enabled');
     await captureNewSessionState(output, page, 'review for harness without subagent support', state);
     return startHeldLaunch(page, state);
   });
@@ -761,7 +750,7 @@ test('container sizing enforces the useful minimum and hard remaining RAM', asyn
   await expect(page.locator('#new-next')).toBeDisabled();
   await page.locator('#new-resource-cpus').fill('4');
   await page.locator('#new-resource-memory').fill('9');
-  await expect(page.locator('#new-resource-error')).toContainText('Mac has 7.9 GiB left');
+  await expect(page.locator('#new-resource-error')).toContainText('host has 7.9 GiB left');
   await expect(page.locator('#new-next')).toBeDisabled();
   await page.locator('#new-resource-memory').fill('7.9');
   await expect(page.locator('#new-resource-error')).toHaveText('');
@@ -800,7 +789,7 @@ test('container overcommit warns and remains launchable except for Apple RAM', a
   const cases = [
     { name: 'non-Apple CPU and RAM', hardRam: false, cpu: '6', memory: '20', submits: true, warning: 'This session asks for more CPUs than the 4 left, so busy sessions may run slower, and more RAM than the 16 GiB left' },
     { name: 'Apple CPU', hardRam: true, cpu: '6', memory: '8', submits: true, warning: 'more CPUs than the 4 left, so busy sessions may run slower' },
-    { name: 'Apple RAM', hardRam: true, cpu: '4', memory: '20', submits: false, error: 'Mac has 16 GiB left' },
+    { name: 'Apple RAM', hardRam: true, cpu: '4', memory: '20', submits: false, error: 'host has 16 GiB left' },
   ];
   for (const scenario of cases) {
     const page = await context.newPage();
@@ -878,22 +867,37 @@ test('whole-row taps and in-progress gestures survive unrelated live updates', a
 });
 
 test('raw projects use host-specific recents and preserve edited paths across Back', async ({ page }) => {
-  const state = await mount(page);
+  const state = await mount(page, {
+    targets: [
+      defaultContainerTarget,
+      { id: 'local', kind: 'local', requires_project_directory: true, recent_project_directories: ['/work/recent', '/work/older', ...Array.from({ length: 10 }, (_, index) => `/work/extra-${index}`)] },
+      { id: 'remote', kind: 'ssh', requires_project_directory: true, recent_project_directories: ['/remote/recent'] },
+    ],
+  });
   await projectStep(page, 'local');
   const directory = page.locator('#new-project-directory');
+  const picker = page.locator('#new-recent-project');
   await expect(directory).toHaveValue('/work/recent');
-  await page.getByRole('button', { name: '/work/older', exact: true }).tap();
+  // The picker offers only the ten most recent directories.
+  const options = picker.locator('option:enabled');
+  await expect(options).toHaveCount(10);
+  await expect(options.first()).toHaveText('/work/recent');
+  await expect(options.last()).toHaveText('/work/extra-7');
+  await expect(picker).toHaveValue('/work/recent');
+  await picker.selectOption('/work/older');
   await expect(directory).toHaveValue('/work/older');
   await directory.fill('/work/custom');
+  await expect(picker).toHaveValue('');
   await page.locator('#new-back').click();
   await page.locator('#new-target').getByRole('radio', { name: /^remote/ }).check();
   await page.locator('#new-next').click();
   await expect(directory).toHaveValue('/remote/recent');
-  await expect(page.getByRole('button', { name: '/work/older', exact: true })).toHaveCount(0);
+  await expect(picker.locator('option:enabled')).toHaveCount(1);
   await page.locator('#new-back').click();
   await page.locator('#new-target').getByRole('radio', { name: /^local/ }).check();
   await page.locator('#new-next').click();
   await expect(directory).toHaveValue('/work/custom');
+  await expect(picker).toHaveValue('');
   await directory.fill('');
   await page.locator('#new-next').click();
   await expect(page.locator('#new-error')).toContainText('Name the project directory');

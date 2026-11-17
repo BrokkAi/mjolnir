@@ -2,10 +2,15 @@ use super::*;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -> LaunchSpec {
+pub(super) fn spec(
+    command: PathBuf,
+    environment: BTreeMap<String, String>,
+    cwd: PathBuf,
+) -> LaunchSpec {
     LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -26,14 +31,13 @@ fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -
         initial_model: None,
         harness: HarnessKind::Grok,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource::Direct {
-            key: String::new(),
-            endpoint: String::new(),
-        }),
+        verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     }
 }

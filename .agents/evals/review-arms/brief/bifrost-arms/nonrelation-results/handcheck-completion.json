@@ -1,0 +1,156 @@
+{
+  "recorded_epoch": 1794901129.1208916,
+  "status": "valid raw28 proposal; pending parent review; nofinaldecisions/scoring",
+  "schema_errors": [],
+  "proposal_rows": 28,
+  "exact28ids_once": true,
+  "proposed_label_counts": {
+    "caught": 28
+  },
+  "proposed_changes_from_judges": [],
+  "change_count": 0,
+  "required_why_ids": [],
+  "why_nonempty_where_required": true,
+  "agrees_bool_matches_actualpairedlabels": true,
+  "raw_proposal_path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-handcheck-nonrelation/handcheck/handcheck-proposal.json",
+  "raw_proposal_sha256": "0864b528e28a32986f85030cd7d2d507445e060bdcc7b2027c818999715cbe85",
+  "raw_copy_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-handcheck-driver/handcheck-proposal-raw.json",
+  "input_freeze_sha256": "ceaa68e88f39252553afd2cb1990d22f87aea7abada01e8e6463531e55b8a56c",
+  "unchanged_input_hashes": {
+    "HANDCHECK.md": "daf30d542dfefa14372a72acb41d0163bbe9e28b7bb03623fb302d5d4f6cb1c8",
+    "INSTRUCTIONS.md": "a4297ad9b758fc00e81ecf2fe15b26eb31ad9a4cce6e34f648a1159243ea22d4",
+    "SPEC.md": "424d065e62c57a8d103262017fb2a4b9f401fdb3d02f4b27f6b1f334b2770a4c",
+    "batch-0.json": "071281eb82b012420cace22f55462f0ddbd6af364df333be1cd5b13f8f9c3be2",
+    "batch-1.json": "dfea72f5ac36280270909a8dcbd00b5e7d24fa82e71f40f756e4267ddf3c325d",
+    "handcheck.jsonl": "a60157ffe5239edc8ba6f947c40d3e4e4f18b66917ff321e3efe6de4dc395455"
+  },
+  "protected_prior_artifacts_unchanged": true,
+  "protected_file_count": 290,
+  "runtime_unchanged": true,
+  "sid": "5d22efa6034ffa3a0cd2eb86706cb70a",
+  "actual_profile": "codex4",
+  "actual_config": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "collaboration_mode": "default",
+    "fast-mode": "off"
+  },
+  "pre_prompt_config_from_driver": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "collaboration_mode": "default",
+    "fast-mode": "off"
+  },
+  "lifecycle": "suspended",
+  "last_turn_outcome": {
+    "command_id": "review-arms-513dfae05d805978427a4d71-5d22efa6034f",
+    "accepted_ordinal": 62,
+    "turn_start_position": 63,
+    "completed_ordinal": 305,
+    "completed_at_ms": 1794900960063,
+    "outcome": {
+      "kind": "completed",
+      "stop_reason": "EndTurn"
+    }
+  },
+  "driver_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794900966.7539697
+  },
+  "transcript": {
+    "path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-handcheck-driver/transcript.json",
+    "sha256": "7b8acc646b5979ab5667759ef8f95df070b87a1c722a97c6b857ca982a807873",
+    "pages": 1,
+    "next_after_seq": 299,
+    "latest_seq": 299,
+    "represented_requests": 12,
+    "requests_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-handcheck-driver/tool-requests.json"
+  },
+  "usage_totals": {
+    "cached_read_tokens": {
+      "tokens": 313344,
+      "reported_turns": 1
+    },
+    "cached_write_tokens": {
+      "tokens": 0,
+      "reported_turns": 1
+    },
+    "input_tokens": {
+      "tokens": 52662,
+      "reported_turns": 1
+    },
+    "output_tokens": {
+      "tokens": 2082,
+      "reported_turns": 1
+    },
+    "thought_tokens": {
+      "tokens": 141,
+      "reported_turns": 1
+    },
+    "total_tokens": {
+      "tokens": 368088,
+      "reported_turns": 1
+    }
+  },
+  "usage_coverage": {
+    "recorded_turns": 1,
+    "full_turn_reports": 1,
+    "last_request_reports": 0,
+    "unspecified_reports": 0,
+    "missing_reports": 0,
+    "unfinished_turns": 0,
+    "provider_cost_turns": 0,
+    "estimated_cost_turns": 1,
+    "missing_cost_turns": 0
+  },
+  "usage_by_model": [
+    {
+      "model": "gpt-6.1-sol",
+      "effort": null,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 313344,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 52662,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2082,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 141,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 368088,
+          "reported_turns": 1
+        }
+      }
+    }
+  ],
+  "root_cost_usd_ticks": 1574784000,
+  "estimated_api_cost_usd": 0.1574784,
+  "usage_accounting": "Oneglobalrootonce/SID,completepage;missingpricenullnotzero;APIequivalentnotsubscriptioncharge;nopaginationdoublecount",
+  "quota_before": {
+    "remaining_min_percent": 72,
+    "refreshed_epoch": 1794900772,
+    "age_seconds": 37.12976837158203
+  },
+  "quota_after": {
+    "remaining_percent": [
+      72
+    ],
+    "refreshed_epoch": 1794900772,
+    "age_seconds": 357.1214106082916,
+    "refresh_after_completion": false
+  },
+  "quota_note": "Ordinarycachedvalid/noerror>=25gateunchanged; noextrafreshnessgate/probe/restart/switch;sharednotisolatedconsumption",
+  "stop_boundary": "Nooperatorfactadjudication/finaldecisions/scoring/privatearmkeyread/controls/othermodelroles/secondassessor/replacementprompts/source/build/test/globalconfig/unrelatedsession edits/commit/push."
+}

@@ -5,13 +5,20 @@ use mj_core::subagent::SubagentToolRequest;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DelegationObservation {
-    pub requests: Vec<SubagentToolRequest>,
+    pub requests: mj_core::snapshot_map::SharedSnapshot<Vec<SubagentToolRequest>>,
     pub completed: Vec<String>,
     /// Present only once the worker has resolved this ending, including its
     /// assessment and retries. Completion cannot observe an intermediate stop.
     pub outcome: Option<MaterializedTurnOutcome>,
     pub in_flight: Vec<String>,
     pub credential_signal: Option<CredentialSyncSignal>,
+    /// Whether the processes the last turn left running are still alive, as
+    /// the worker published it. A change re-evaluates a held child.
+    pub work_liveness: Option<mj_core::work_facts::WorkLiveness>,
+    /// Mailbox events the worker accepted and has not handed to the agent. A
+    /// child's park waits for its report to leave this list, so its change is
+    /// an observation of the parent.
+    pub undelivered_mailbox_event_keys: Vec<String>,
 }
 
 impl DelegationObservation {
@@ -46,6 +53,11 @@ impl DelegationObservation {
                 )
                 .collect(),
             credential_signal: snapshot.latest_credential_sync_signal.clone(),
+            work_liveness: snapshot.operational.work_liveness.clone(),
+            undelivered_mailbox_event_keys: snapshot
+                .operational
+                .undelivered_mailbox_event_keys
+                .clone(),
         })
     }
 }
@@ -80,7 +92,7 @@ pub(crate) struct DelegationPublisher {
     generation: u64,
 }
 impl DelegationSender {
-    pub(super) fn register(&self, session: &str) -> Arc<DelegationPublisher> {
+    pub(crate) fn register(&self, session: &str) -> Arc<DelegationPublisher> {
         let mut mailbox = self.mailbox.lock().expect("delegation mailbox poisoned");
         mailbox.next_generation += 1;
         let generation = mailbox.next_generation;
@@ -99,7 +111,7 @@ impl DelegationSender {
     }
 }
 impl DelegationPublisher {
-    pub(super) fn publish(&self, view: &ManagedSessionView) {
+    pub(crate) fn publish(&self, view: &ManagedSessionView) {
         // A disconnected view is not evidence that durable requests disappeared.
         let Some(value) = DelegationObservation::from_view(view) else {
             return;

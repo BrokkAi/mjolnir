@@ -1,12 +1,16 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
-pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
-    close_plan_scoped(locator, session_id, true)
+pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<WorkerControlPlan> {
+    close_plan_scoped(locator, session_id, true, None)
 }
 
 /// A Move can have two generations on one host. Shared session caches remain owned by the destination.
-pub fn retire_move_target_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
-    close_plan_scoped(locator, session_id, false)
+pub fn retire_move_target_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<WorkerControlPlan> {
+    close_plan_scoped(locator, session_id, false, None)
 }
 
 /// Termination needs the durable AWS identity even before SSH has an address.
@@ -40,7 +44,8 @@ fn close_plan_scoped(
     locator: &TargetLocator,
     session_id: &str,
     remove_shared_cache: bool,
-) -> Result<CommandPlan> {
+    stopped: Option<&crate::controller::StoppedWorker<'_>>,
+) -> Result<WorkerControlPlan> {
     verify_locator(locator, session_id)?;
     ensure!(
         !is_borrowed(locator),
@@ -67,17 +72,37 @@ fn close_plan_scoped(
                 container_id: container_id.clone(),
             },
         };
-        let local = close_plan_scoped(&local_locator, session_id, remove_shared_cache)?;
-        return Ok(CommandPlan {
-            description: local.description,
-            commands: local
-                .commands
-                .into_iter()
-                .map(|command| command_over_ssh(command, ssh))
+        let local = close_plan_scoped(&local_locator, session_id, remove_shared_cache, None)?;
+        return WorkerControlPlan::new(
+            format!("close Mjolnir session {session_id}"),
+            local
+                .commands_without_staging()?
+                .iter()
+                .cloned()
+                .map(|command| command_over_ssh(SshTrafficClass::Control, command, ssh).into())
                 .collect(),
-        });
+            locator,
+            session_id,
+        );
     }
 
+    // The engine stops a sandbox's process before it deletes a disk, so
+    // removal needs no more than the sandbox and its two named volumes. A
+    // sandbox has no host Git cache snapshot to remove.
+    if let TargetLocator::SshNitro {
+        ssh, container_id, ..
+    } = locator
+    {
+        return WorkerControlPlan::new(
+            format!("clean up stopped Mjolnir session {session_id}"),
+            nitro_destroy_commands(ssh, container_id)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            locator,
+            session_id,
+        );
+    }
     let session_worker_root = worker_root(locator, session_id)?;
     let session_profile_home = format!(".local/share/hel/profiles/{session_id}");
     if matches!(
@@ -89,7 +114,12 @@ fn close_plan_scoped(
             plan.commands
                 .retain(|command| command.stage != Some(ProvisionStage::CleaningCache));
         }
-        return Ok(plan);
+        return WorkerControlPlan::new(
+            plan.description,
+            plan.commands.into_iter().map(Into::into).collect(),
+            locator,
+            session_id,
+        );
     }
     let command = match locator {
         TargetLocator::LocalBare { .. } => {
@@ -99,18 +129,28 @@ fn close_plan_scoped(
             // replica and native history inside, goes with the worker root;
             // a harness with a nested home keeps its root under the data
             // directory instead.
-            let script = format!(
-                "{}\nrm -rf -- {} {}\n",
-                stop_worker_daemon_script(&session_worker_root),
-                posix_quote(&session_worker_root),
-                posix_quote(&local_nested_profile_root(session_id).to_string_lossy()),
-            );
-            CommandSpec::new("sh", ["-c", script.as_str()]).purpose(
-                "stop the local Mjolnir worker and remove exact local Mjolnir worker state",
-            )
+            let script = stopped
+                .map(|_| ControlScript::without_control(String::new()))
+                .unwrap_or_else(|| kill_worker_daemon_script(&session_worker_root))
+                .map_script(|kill| {
+                    format!(
+                        "{kill}\nrm -rf -- {} {}\n",
+                        posix_quote(&session_worker_root),
+                        posix_quote(&local_nested_profile_root(session_id).to_string_lossy()),
+                    )
+                });
+            script.into_command(|script| {
+                CommandSpec::new("sh", ["-c", script.as_str()]).purpose(if stopped.is_some() {
+                    "remove exact stopped local Mjolnir worker state"
+                } else {
+                    "stop the local Mjolnir worker and remove exact local Mjolnir worker state"
+                })
+            })
         }
         TargetLocator::LocalPodman { .. } => unreachable!("handled above"),
-        TargetLocator::SshDocker { .. } | TargetLocator::SshAppleContainer { .. } => {
+        TargetLocator::SshDocker { .. }
+        | TargetLocator::SshAppleContainer { .. }
+        | TargetLocator::SshNitro { .. } => {
             unreachable!("handled above")
         }
         TargetLocator::LocalDocker { container_id, .. } => {
@@ -187,6 +227,7 @@ exit "$status""#;
                 ],
             )
             .purpose("remove local Docker session container, overlay volumes, and cache state")
+            .into()
         }
         TargetLocator::AppleContainer { container_id, .. } => {
             let script = "status=0; container rm --force \"$1\" || status=$?; if [ \"$status\" -eq 0 ] && [ \"$3\" = true ]; then rm -rf -- \"$HOME/.cache/mjolnir/git/sessions/$2\" || status=$?; fi; exit \"$status\"";
@@ -202,33 +243,40 @@ exit "$status""#;
                 ],
             )
             .purpose("remove Apple session container and Git cache snapshot")
+            .into()
         }
         TargetLocator::AwsEc2 {
             profile,
             region,
             instance_id,
             ..
-        } => terminate_ec2_instance_command(profile, region, instance_id)?,
+        } => terminate_ec2_instance_command(profile, region, instance_id)?.into(),
         TargetLocator::SshBare { ssh, workspace, .. } => {
             // Same ordering constraint as the local bare target: stop the
             // daemon before deleting the root it keeps writing to.
-            let script = format!(
-                "{}\nrm -rf -- {} {} {}\n",
-                stop_worker_daemon_script(&session_worker_root),
-                posix_quote(workspace),
-                posix_quote(&session_worker_root),
-                posix_quote(&session_profile_home),
-            );
-            ssh_command(ssh, ["sh", "-c", script.as_str()]).purpose(
-                "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state",
-            )
+            let script = stopped
+                .map(|_| ControlScript::without_control(String::new()))
+                .unwrap_or_else(|| kill_worker_daemon_script(&session_worker_root))
+                .map_script(|kill| {
+                    format!(
+                        "{kill}\nrm -rf -- {} {} {}\n",
+                        posix_quote(workspace),
+                        posix_quote(&session_worker_root),
+                        posix_quote(&session_profile_home),
+                    )
+                });
+            script.into_command(|script| ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c", script.as_str()]).purpose(
+                if stopped.is_some() { "remove exact stopped SSH session workspace and runtime state" } else { "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state" },
+            ))
         }
         TargetLocator::SshPodman { .. } => unreachable!("handled above"),
     };
-    Ok(CommandPlan {
-        description: format!("close Mjolnir session {session_id}"),
-        commands: vec![command],
-    })
+    WorkerControlPlan::new(
+        format!("close Mjolnir session {session_id}"),
+        vec![command],
+        locator,
+        session_id,
+    )
 }
 
 /// Where a session of a harness with an XDG-nested home (Muse, OpenCode) on
@@ -246,33 +294,55 @@ pub fn local_nested_profile_root(session_id: &str) -> PathBuf {
 pub fn borrowed_worker_cleanup_plan(
     locator: &TargetLocator,
     child_session_id: &str,
-) -> Result<CommandPlan> {
+) -> Result<WorkerControlPlan> {
+    borrowed_worker_cleanup_plan_scoped(locator, child_session_id, None)
+}
+
+fn borrowed_worker_cleanup_plan_scoped(
+    locator: &TargetLocator,
+    child_session_id: &str,
+    stopped: Option<&crate::controller::StoppedWorker<'_>>,
+) -> Result<WorkerControlPlan> {
     verify_locator(locator, child_session_id)?;
     let worker_root = worker_root(locator, child_session_id)?;
-    let mut script = stop_worker_daemon_script(&worker_root);
-    script.push_str(&format!("rm -rf -- {}\n", posix_quote(&worker_root)));
-    if matches!(locator, TargetLocator::LocalBare { .. }) {
-        script.push_str(&format!(
-            "rm -rf -- {}\n",
-            posix_quote(&local_nested_profile_root(child_session_id).to_string_lossy()),
-        ));
+    let script = stopped
+        .map(|_| ControlScript::without_control(String::new()))
+        .unwrap_or_else(|| kill_worker_daemon_script(&worker_root))
+        .map_script(|mut script| {
+            script.push_str(&format!("rm -rf -- {}\n", posix_quote(&worker_root)));
+            if matches!(locator, TargetLocator::LocalBare { .. }) {
+                script.push_str(&format!(
+                    "rm -rf -- {}\n",
+                    posix_quote(&local_nested_profile_root(child_session_id).to_string_lossy()),
+                ));
+            } else {
+                script.push_str(&format!(
+                    "rm -rf -- {} {}\n",
+                    posix_quote(&format!("/var/lib/hel/profiles/{child_session_id}")),
+                    posix_quote(&format!(".local/share/hel/profiles/{child_session_id}")),
+                ));
+            }
+            script
+        });
+    let purpose = if stopped.is_some() {
+        "remove a stopped borrowed-target sub-agent's private worker state"
     } else {
-        script.push_str(&format!(
-            "rm -rf -- {} {}\n",
-            posix_quote(&format!("/var/lib/hel/profiles/{child_session_id}")),
-            posix_quote(&format!(".local/share/hel/profiles/{child_session_id}")),
-        ));
-    }
-    let command = command_on_locator(
+        "stop a borrowed-target sub-agent and remove its private worker state"
+    };
+    let command = script.into_command(|script| {
+        locator_command(
+            SshTrafficClass::Control,
+            locator,
+            vec!["sh".into(), "-c".into(), script],
+        )
+        .purpose(purpose)
+    });
+    WorkerControlPlan::new(
+        format!("clean up sub-agent worker {child_session_id}"),
+        vec![command],
         locator,
         child_session_id,
-        vec!["sh".into(), "-c".into(), script],
-        "stop a borrowed-target sub-agent and remove its private worker state",
-    )?;
-    Ok(CommandPlan {
-        description: format!("clean up sub-agent worker {child_session_id}"),
-        commands: vec![command],
-    })
+    )
 }
 
 pub(super) const PODMAN_CONTAINER_IDENTITY_SCRIPT: &str = r#"set -eu
@@ -299,6 +369,15 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
         !is_borrowed(locator),
         "refusing to operate on a target borrowed from another session; act on the owning session instead"
     );
+    if let TargetLocator::SshNitro {
+        ssh, container_id, ..
+    } = locator
+    {
+        return Ok(Some(CommandPlan {
+            description: format!("quiesce Mjolnir session {session_id}"),
+            commands: vec![nitro_quiesce_command(ssh, container_id)],
+        }));
+    }
     let (ssh, container_id) = match locator {
         TargetLocator::LocalPodman { container_id, .. } => (None, container_id),
         TargetLocator::SshPodman {
@@ -307,10 +386,11 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
         _ => return Ok(None),
     };
     let script = format!(
-        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}\nif podman container inspect \"$container\" >/dev/null 2>&1; then\n    podman stop --time 0 --ignore \"$container\" >/dev/null\n    running=$(podman container inspect --format '{{{{.State.Running}}}}' \"$container\")\n    [ \"$running\" = false ] || {{ echo 'Podman session container is still running' >&2; exit 1; }}\nfi\n"
+        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}if podman container inspect \"$container\" >/dev/null 2>&1; then\n    stop_err=$(podman stop --time 0 --ignore \"$container\" 2>&1 >/dev/null) || true\n    [ -z \"$stop_err\" ] || printf '%s\\n' \"$stop_err\" >&2\n    # `container exists` exits 1 only for a definite absence; 125 is an error.\n    status=0\n    podman container exists \"$container\" || status=$?\n    case $status in\n        0)\n            running=$(podman container inspect --format '{{{{.State.Running}}}}' \"$container\")\n            [ \"$running\" = false ] || {{ echo 'Podman session container is still running' >&2; exit 1; }}\n            ;;\n        1) ;;\n        *)\n            echo 'could not determine whether the Podman session container stopped' >&2\n            exit 1\n            ;;\n    esac\nfi\n"
     );
     let command = match ssh {
         Some(ssh) => ssh_command(
+            SshTrafficClass::Control,
             ssh,
             [
                 "sh",
@@ -333,9 +413,81 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
         ),
     }
     .purpose("stop exact Podman session container without removing storage")
-    .stage(ProvisionStage::StoppingTarget);
+    .stage(ProvisionStage::StoppingTarget)
+    .warn_on_stderr();
     Ok(Some(CommandPlan {
         description: format!("quiesce Mjolnir session {session_id}"),
+        commands: vec![command],
+    }))
+}
+
+/// Stop every writer in an owned container through its engine. Unlike `exec`,
+/// this also proves termination when a container exists but is already stopped.
+/// Podman retains its existing storage-preserving quiescence implementation.
+pub fn stop_container_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<Option<CommandPlan>> {
+    if let Some(plan) = quiesce_plan(locator, session_id)? {
+        return Ok(Some(plan));
+    }
+    let (ssh, container_id, apple) = match locator {
+        TargetLocator::LocalDocker { container_id, .. } => (None, container_id, false),
+        TargetLocator::AppleContainer { container_id, .. } => (None, container_id, true),
+        TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => (Some(ssh), container_id, false),
+        TargetLocator::SshAppleContainer {
+            ssh, container_id, ..
+        } => (Some(ssh), container_id, true),
+        _ => return Ok(None),
+    };
+    let script = if apple {
+        // Apple's default list contains only running containers; a stopped
+        // container remains in `list --all`. Stop only the exact recorded ID.
+        // CLI contract: github.com/apple/container/blob/main/docs/command-reference.md
+        r#"set -eu
+container=$1
+running=$(container list --quiet)
+for id in $running; do
+    if [ "$id" = "$container" ]; then container stop --time 0 "$container" >/dev/null; fi
+done
+running=$(container list --quiet)
+for id in $running; do
+    [ "$id" != "$container" ] || { echo 'Apple session container is still running' >&2; exit 1; }
+done
+"#
+    } else {
+        r#"set -eu
+container=$1
+session=$2
+if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$container" 2>/dev/null); then
+    [ "$identity" = "true|$session" ] || { echo 'refusing to stop a foreign Docker container' >&2; exit 2; }
+    running=$(docker container inspect --format '{{.State.Running}}' "$container")
+    case $running in
+        true) docker stop --time 0 "$container" >/dev/null ;;
+        false) ;;
+        *) echo 'unknown Docker container execution state' >&2; exit 1 ;;
+    esac
+    running=$(docker container inspect --format '{{.State.Running}}' "$container")
+    [ "$running" = false ] || { echo 'Docker session container is still running' >&2; exit 1; }
+else
+    docker info >/dev/null 2>&1 || { echo 'could not determine whether the Docker session container exists' >&2; exit 1; }
+fi
+"#
+    };
+    let command = CommandSpec::new(
+        "sh",
+        ["-c", script, "mj-stop-container", container_id, session_id],
+    )
+    .purpose("confirm owned container writers stopped through the engine")
+    .stage(ProvisionStage::StoppingTarget);
+    let command = match ssh {
+        Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
+        None => command,
+    };
+    Ok(Some(CommandPlan {
+        description: format!("stop environment container {session_id}"),
         commands: vec![command],
     }))
 }
@@ -359,10 +511,10 @@ pub(super) fn podman_cleanup_plan(
         _ => unreachable!("Podman cleanup requires a Podman locator"),
     };
     let remove_container_script = format!(
-        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}\npodman rm --force --ignore \"$container\" >/dev/null\n"
+        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}rm_err=$(podman rm --force --ignore \"$container\" 2>&1 >/dev/null) || true\n[ -z \"$rm_err\" ] || printf '%s\\n' \"$rm_err\" >&2\n# `container exists` exits 1 only for a definite absence; 125 is an error.\nstatus=0\npodman container exists \"$container\" || status=$?\ncase $status in\n    1) ;;\n    0) echo 'Podman session container is still present' >&2; exit 1 ;;\n    *) echo 'could not determine whether the Podman session container was removed' >&2; exit 1 ;;\nesac\n"
     );
     let at_host = |args: Vec<String>| match ssh {
-        Some(ssh) => ssh_command_owned(ssh, args),
+        Some(ssh) => ssh_command_owned(SshTrafficClass::Control, ssh, args),
         None => {
             let mut args = args;
             CommandSpec::new(args.remove(0), args)
@@ -378,7 +530,8 @@ pub(super) fn podman_cleanup_plan(
             session_id.to_owned(),
         ])
         .purpose("remove exact stopped Podman session container")
-        .stage(ProvisionStage::RemovingContainer),
+        .stage(ProvisionStage::RemovingContainer)
+        .warn_on_stderr(),
     ];
     match workspace_storage {
         PodmanWorkspaceLocator::ContainerLayer => {}
@@ -527,11 +680,14 @@ pub fn cleanup_target_is_confirmed_absent(
             podman_absence_command(Some(ssh), container_id, workspace_storage, session_id),
             true,
         ),
+        TargetLocator::SshNitro {
+            ssh, container_id, ..
+        } => (nitro_absence_command(ssh, container_id), true),
         _ => return Ok(false),
     };
     let command = match locator {
         TargetLocator::SshDocker { ssh, .. } | TargetLocator::SshAppleContainer { ssh, .. } => {
-            command_over_ssh(command, ssh)
+            command_over_ssh(SshTrafficClass::Control, command, ssh)
         }
         _ => command,
     };
@@ -623,8 +779,61 @@ esac
         container_temporary_volume_name(container_id),
     ];
     match ssh {
-        Some(ssh) => ssh_command_owned(ssh, args),
+        Some(ssh) => ssh_command_owned(SshTrafficClass::Control, ssh, args),
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
     }
     .purpose("confirm exact Podman session resources are absent")
+}
+
+/// Removal follows completed managed Stop and retains the launch permits.
+/// This authority does not assert containment of arbitrary detached writers.
+pub(crate) struct StoppedCleanupPlan<'a> {
+    _proof: crate::controller::StoppedWorker<'a>,
+    plan: WorkerControlPlan,
+}
+impl StoppedCleanupPlan<'_> {
+    pub(crate) fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
+        self.plan.execute(executor)
+    }
+}
+
+pub(crate) fn close_stopped_target_plan(
+    proof: crate::controller::StoppedWorker<'_>,
+) -> Result<StoppedCleanupPlan<'_>> {
+    ensure!(
+        worker_root(proof.target(), proof.session_id())? == proof.root(),
+        "stopped worker root changed"
+    );
+    let plan = close_plan_scoped(proof.target(), proof.session_id(), true, Some(&proof))?;
+    Ok(StoppedCleanupPlan {
+        _proof: proof,
+        plan,
+    })
+}
+pub(crate) fn retire_stopped_move_target_plan(
+    proof: crate::controller::StoppedWorker<'_>,
+) -> Result<StoppedCleanupPlan<'_>> {
+    ensure!(
+        worker_root(proof.target(), proof.session_id())? == proof.root(),
+        "stopped worker root changed"
+    );
+    let plan = close_plan_scoped(proof.target(), proof.session_id(), false, Some(&proof))?;
+    Ok(StoppedCleanupPlan {
+        _proof: proof,
+        plan,
+    })
+}
+pub(crate) fn stopped_borrowed_worker_cleanup_plan(
+    proof: crate::controller::StoppedWorker<'_>,
+) -> Result<StoppedCleanupPlan<'_>> {
+    ensure!(
+        worker_root(proof.target(), proof.session_id())? == proof.root(),
+        "stopped worker root changed"
+    );
+    let plan =
+        borrowed_worker_cleanup_plan_scoped(proof.target(), proof.session_id(), Some(&proof))?;
+    Ok(StoppedCleanupPlan {
+        _proof: proof,
+        plan,
+    })
 }

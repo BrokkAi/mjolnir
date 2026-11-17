@@ -161,7 +161,7 @@ mod tests {
     fn version_one_handoffs_remain_readable_by_future_builds() {
         // A fixed previous-build document, independent of today's serializer.
         // New fields must be optional so a skipped release can still resume.
-        let resume: UpgradeResume = serde_json::from_str(r#"{
+        let mut resume: UpgradeResume = serde_json::from_str(r#"{
             "version": 1, "workspace_id": "work", "client_id": "terminal-1",
             "drafts": {"drafts": {"session-1": {"text": "unfinished prompt", "inherited_input": "old"}}},
             "questions": {}, "positions": {"session-1": "Bottom"},
@@ -173,6 +173,31 @@ mod tests {
         );
         assert_eq!(resume.read_positions["session-1"], 42);
         assert_eq!(resume.workspace_id, "work");
+        let (revision, draft) = resume.drafts.start("session-1", false).unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(draft.text, "unfinished prompt");
+    }
+
+    #[test]
+    fn handoff_retries_uncertain_revision_without_replaying_acknowledged_text() {
+        let mut drafts = ComposerDraftCache::default();
+        drafts.capture("session", "first".into(), "legacy");
+        let (saved, _) = drafts.start("session", false).unwrap();
+        drafts.complete("session", saved, true);
+        drafts.capture("session", "in flight".into(), "stale legacy");
+        let (uncertain, _) = drafts.start("session", false).unwrap();
+        drafts.capture("session", String::new(), "stale legacy");
+        let json = serde_json::to_vec(&drafts).unwrap();
+        let mut resumed: ComposerDraftCache = serde_json::from_slice(&json).unwrap();
+        assert!(!resumed.is_saving());
+        let (latest, draft) = resumed.start("session", false).unwrap();
+        assert!(latest > uncertain);
+        assert!(draft.text.is_empty());
+        assert!(draft.inherited_input.is_none());
+        resumed.complete("session", latest, true);
+        let mut clean: ComposerDraftCache =
+            serde_json::from_slice(&serde_json::to_vec(&resumed).unwrap()).unwrap();
+        assert!(clean.start("session", true).is_none());
     }
 
     #[test]

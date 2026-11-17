@@ -1,0 +1,89 @@
+{
+  "commits": [
+    {
+      "intro": "695a400f18549624bbcc23f51e65b987160b6f28",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-0703aa39",
+            "f-6faa9d18",
+            "f-5521d498",
+            "f-8b56d0c6"
+          ],
+          "summary": "Explicitly anchored paths lose the type continuation needed for enum variants and associated items.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-rust/src/resolution.rs:973-981 makes bare_qualified_route false for crate/self/super anchors. The new guard at 1114 excludes crate::State::Unit from prefix selection, so 1130-1165 no longer publishes its type-identity receiver transfer; 1173-1208 emits the complete crate/State module route without a prefix reference instead. Enum variants are constructor members in the enum scope (2064-2100), with no root export emitted there. State cannot supply the module export route to Unit. Ordinary lexical resolution is also explicitly skipped for root references (crates/bifrost-analysis/src/analyzer/resolution/fact_lowering.rs:1136-1140). The base selected the final prefix for anchored paths of more than two segments. Later fix 87ac74ee51b6a7ba3dbe561c6254a91665a6f35d restores an anchored type receiver alongside the full module route and adds associated-item regressions. Earlier 66dbb04f894c71fd88b05ab275a6069dda0f4b4c restored only macro callable prefixes.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "95655a5e97784ceaa702a0d069b7853aa6dd2d27",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-e155b123",
+            "f-f0ed883d"
+          ],
+          "summary": "Generated-accessor source lookup accepts static fields for class-level Lombok getter annotations.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, src/searchtools.rs:2392-2425 introduces generated-accessor source lookup, reached on lookup failure at 2689-2694 and on anchored failure at 2585-2593. For @Data class Example { static String name; }, Example.getName selects the field through src/analyzer/usages/get_definition/java.rs:1584-1596, which filters only field kind and boolean compatibility. The class annotation returns all fields immediately at 1601-1605, without checking static modifiers, and the new source surface reports Found although Lombok generates no getter for the static field. This exposes an existing helper defect through a newly supported product lookup. Qualification: the final-field setter example is incorrect: java.rs:1775-1779 recognizes Data only for Getter, so @Data alone does not invent setId. The static getter failure is sufficient to confirm the modifier-filtering problem.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-bc0c1ecc",
+            "f-6f17034e",
+            "f-34fe4ce8",
+            "f-9e09ed68",
+            "f-50ddb406",
+            "f-0487ab34"
+          ],
+          "summary": "C# metadata selectors discard generic arity and can resolve declarations with a different arity.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, src/analyzer/symbol_lookup.rs:397-409 adds query interpretations with numeric metadata arities stripped; 423-439 accepts any digit suffix without retaining its value. collect_fuzzy_matches compares only the resulting name paths (290-307), and resolution_from_matches returns matching FQN definitions without checking type parameters (326-348). Thus N.Widget`2 resolves the source declaration for class Widget<T>, or even nongeneric Widget, through the fuzzy source-lookup path. This normalization was absent in the base. The positive new test at tests/searchtools_definition_selectors.rs:976-1013 exercises this route for correct arities but does not constrain mismatched ones.",
+          "confidence": "high"
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-d1d7a9a0"
+          ],
+          "summary": "Lombok source lookup applies one owner annotation to same-FQN fields from other files.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, src/searchtools.rs:2392-2425 permits multiple owners when their FQN is identical (2403-2406), then invokes the accessor helper for each. src/analyzer/usages/get_definition/java.rs:1587-1591 retrieves fields solely by owner FQN; DefinitionLookupIndex stores and returns all same-FQN declarations (src/analyzer/definition_lookup_index.rs:71,107-108). A class annotation on one owner returns those cross-file fields wholesale (java.rs:1601-1605). With two source roots containing pkg.Widget, only one annotated, an anchor to the unannotated file retains its field in the later source-path filter (searchtools.rs:2421) and reports Found (2589-2592). Without an anchor both fields survive deduplication because their source identities differ. The new source fallback exposes this helper defect in get_symbol_sources.",
+          "confidence": "high"
+        },
+        {
+          "group": "g4",
+          "findings": [
+            "f-b3f81311"
+          ],
+          "summary": "An anchored Lombok lookup rejects globally ambiguous owner names before applying its file anchor.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, src/analyzer/symbol_lookup.rs:19-68 resolves enclosing owners by suffix and returns both resolved and ambiguous candidate lists. With a.Widget and b.Widget, Widget.getName supplies both classes. The new src/searchtools.rs:2404-2406 tests distinct owner FQNs before consulting the anchor, returns empty, and never reaches its only anchor filter at 2421. Therefore a/Widget.java#Widget.getName fails even if that file contains an annotated Widget with a name field. Anchored fallback call sites at 2508-2515 and 2585-2593 pass the anchor but cannot overcome this early return. No generated method declaration exists for ordinary lookup to find. This differs from same-FQN cross-file field contamination.",
+          "confidence": "high"
+        },
+        {
+          "group": "g5",
+          "findings": [
+            "f-b5a0a39f"
+          ],
+          "summary": "Java parent lookup now scans workspace-wide child collections for each uncached usage context.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, src/analyzer/java/mod.rs:272-274 adds parent_of delegating to structural_parent_of. The helper scans self.state.children and visited child vectors (src/analyzer/tree_sitter_analyzer.rs:803-815), then can scan module_children and all file declarations (818-834). Previously Java used the default FQN-prefix/indexed-definition lookup in src/analyzer/i_analyzer.rs:455-469. Java usage enclosing_context invokes parent_of for each distinct reference range, possibly repeatedly through enclosing functions (src/analyzer/usages/java_graph/hits.rs:76-99); its cache uses node byte ranges rather than enclosing declaration identity. Thus distinct references repeatedly pay a workspace-sized parent scan, producing multiplicative reference/declaration work. This deterministic extra work confirms the regression; its precise latency impact was not measured, so medium severity reflects the narrower performance failure.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

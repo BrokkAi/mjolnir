@@ -10,10 +10,7 @@ pub(crate) use mj_core::clock::epoch_seconds;
 
 use mj_client::review::RuntimeReviewView;
 
-use crate::render::{
-    CAPACITY_SAMPLE_STALE_AFTER_SECONDS, checkpoint_age, quota_reset_cells, refresh_age,
-    session_display_clock,
-};
+use crate::render::{checkpoint_age, quota_reset_cells, refresh_age, session_display_clock};
 use crate::{DashboardState, Mode, SupportPane};
 
 /// The values that were visible when the last frame was drawn.
@@ -70,7 +67,6 @@ impl DashboardState {
     /// requested by input or background content, so the next timer checks the
     /// displayed baseline rather than the previous timer check.
     pub fn acknowledge_render(&mut self) {
-        self.viewed_failures.append(&mut self.drawn_failures);
         self.render_change_snapshot.clock = self.current_clock_signature();
         self.render_change_snapshot.animation = self.current_animation_signature();
     }
@@ -106,10 +102,6 @@ impl DashboardState {
                         dialog.opened_at.elapsed().as_millis(),
                     ))
                 }
-                Mode::Setup(setup) => setup
-                    .review_editor
-                    .as_ref()
-                    .and_then(|dialog| dialog.animation_frame()),
                 _ => None,
             },
         }
@@ -229,9 +221,9 @@ impl DashboardState {
         self.capacity_details
             .iter()
             .filter_map(|(id, detail)| {
-                let sampled_at = detail.sampled_at_epoch_seconds?;
-                if detail.probe_error.is_some()
-                    || now.saturating_sub(sampled_at) <= CAPACITY_SAMPLE_STALE_AFTER_SECONDS
+                let sampled_at = detail.state.sampled_at_epoch_seconds?;
+                if detail.state.probe_error.is_some()
+                    || !mj_core::targets::capacity_sample_is_stale(sampled_at, now)
                 {
                     return None;
                 }
@@ -261,7 +253,13 @@ impl DashboardState {
             });
         }
 
-        for (id, quota) in &self.quotas {
+        for row in self.quota_profile_rows() {
+            let Some(quota) = self.quotas.get(row.id) else {
+                continue;
+            };
+            let projected = row.pool.map(|pool| quota.for_antigravity_pool(pool));
+            let quota = projected.as_ref().unwrap_or(quota);
+            let id = row.label();
             if quota.error.is_some() {
                 continue;
             }

@@ -10,7 +10,9 @@ use mj_chat::{
     selection::FrameSurfaces,
     theme,
 };
-use mj_core::usage::{CostUsdTicks, SessionUsageQuery, SessionUsageReport, UsagePeriod};
+use mj_core::usage::{
+    CostUsdTicks, SessionUsageQuery, SessionUsageReport, UsageAgentRole, UsagePeriod,
+};
 use ratatui::{
     Frame,
     layout::{Margin, Rect},
@@ -31,6 +33,8 @@ pub(crate) enum UsageControl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UsageRow {
+    Role(UsageAgentRole),
+    ModelTotal(UsageAgentRole, Option<String>),
     Session(String),
     Model(String, Option<String>),
     Coverage(String),
@@ -50,13 +54,16 @@ pub(crate) struct SessionUsageDialog {
 }
 
 impl DashboardState {
-    pub(crate) fn begin_session_usage_report(&mut self) {
+    pub(crate) fn begin_session_usage_report(&mut self, profile: Option<String>) {
         self.usage_request_generation = self.usage_request_generation.wrapping_add(1);
         let mut form = Dialog::default();
         form.focus(UsageControl::Profile);
         self.mode = Mode::SessionUsageReport(SessionUsageDialog {
             generation: self.usage_request_generation,
-            query: SessionUsageQuery::default(),
+            query: SessionUsageQuery {
+                profile,
+                ..SessionUsageQuery::default()
+            },
             report: None,
             profiles: self.config.profiles.keys().cloned().collect(),
             selected_key: RefCell::new(None),
@@ -252,7 +259,6 @@ pub(crate) fn render(
         UsagePeriod::Weekly => "last 7 days",
         UsagePeriod::Monthly => "last 30 days",
     };
-    let total_area = Rect::new(inner.x, inner.y + 4, inner.width, 1);
     let rows_area = Rect::new(inner.x, inner.y + 6, inner.width, inner.height - 9);
     match &dialog.report {
         None => frame.render_widget(
@@ -272,12 +278,39 @@ pub(crate) fn render(
                     "Total {} · {window} · estimated API USD",
                     dollars(report.cost_usd_ticks, partial),
                 )),
-                total_area,
+                Rect::new(inner.x, inner.y + 4, inner.width, 1),
             );
             let mut lines = Vec::new();
             let mut row_map = Vec::new();
             let mut row_keys = dialog.row_keys.borrow_mut();
             row_keys.clear();
+            if !report.sessions.is_empty() {
+                for agents in &report.agent_usage {
+                    lines.push(Line::styled(
+                        format!(
+                            "{}  {}",
+                            agents.role.label(),
+                            dollars(agents.cost_usd_ticks, partial)
+                        ),
+                        theme::title(false),
+                    ));
+                    row_map.push(Some(row_keys.len()));
+                    row_keys.push(UsageRow::Role(agents.role));
+                    for model in &agents.models {
+                        let cost = dollars(model.cost_usd_ticks, partial);
+                        let name = truncate_to_cells(
+                            model.model.as_deref().unwrap_or("Unknown model"),
+                            usize::from(inner.width).saturating_sub(cost.len() + 4),
+                            Truncate::PLAIN,
+                        );
+                        lines.push(Line::raw(format!("  {name}  {cost}")));
+                        row_map.push(Some(row_keys.len()));
+                        row_keys.push(UsageRow::ModelTotal(agents.role, model.model.clone()));
+                    }
+                    lines.push(Line::default());
+                    row_map.push(None);
+                }
+            }
             for session in &report.sessions {
                 let cost = format!(
                     "{}{}",
@@ -400,6 +433,7 @@ pub(crate) fn render(
         true,
         "Profile",
         PopupSide::Below,
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         &mut form,
         UsageControl::Profile,
     );
@@ -422,6 +456,7 @@ pub(crate) fn render(
         true,
         "Period",
         PopupSide::Below,
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         &mut form,
         UsageControl::Period,
     );

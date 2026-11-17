@@ -21,6 +21,29 @@ impl FakeExecutor {
 }
 
 impl CommandExecutor for FakeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         self.responses.borrow_mut().remove(0)
@@ -32,6 +55,29 @@ impl CommandExecutor for FakeExecutor {
 struct AlwaysFailingExecutor;
 
 impl CommandExecutor for AlwaysFailingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         Ok(CommandOutput {
             status: 1,
@@ -60,51 +106,6 @@ fn failed(stderr: impl AsRef<[u8]>) -> CommandOutput {
 // Hard-won: #1266: a working Claude Bedrock profile was reported as needing subscription login.
 #[test]
 fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
-    // Fixture shapes follow aws-cli v2, EC2 JSON, OpenSSH, and Docker CLI
-    // output; the Podman-limit lines match the production remote probe.
-    let aws = FakeExecutor::new([
-        Ok(output(
-            b"aws-cli/2.15.40 Python/3.11.6 Linux/5.10.205 exe/x86_64 prompt/off\n",
-        )),
-        Ok(output(
-            br#"{"UserId":"AIDAEXAMPLE","Account":"123456789012","Arn":"arn:aws:iam::123456789012:user/doctor"}"#,
-        )),
-        Ok(output(
-            br#"{"LaunchTemplates":[{"LaunchTemplateId":"lt-0123456789abcdef0","LaunchTemplateName":"mjolnir","CreateTime":"2026-01-01T00:00:00+00:00","CreatedBy":"arn:aws:iam::123456789012:user/doctor","DefaultVersionNumber":7,"LatestVersionNumber":7}]}"#,
-        )),
-    ]);
-    let aws_check = aws_target_check(
-        "production",
-        None,
-        "us-east-2",
-        "lt-0123456789abcdef0",
-        &aws,
-    );
-    let aws_commands = aws.commands.borrow();
-    assert_eq!(
-        aws_commands[1]
-            .args
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        [
-            "--profile",
-            "default",
-            "--region",
-            "us-east-2",
-            "sts",
-            "get-caller-identity",
-            "--output",
-            "json",
-        ]
-    );
-    assert!(
-        aws_commands[2]
-            .args
-            .contains(&"--launch-template-ids".to_owned())
-    );
-    drop(aws_commands);
-
     let ssh = RuntimeSshTarget {
         destination: "dev@docker.example.test".to_owned(),
         ssh_args: Vec::new(),
@@ -148,8 +149,75 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     );
     drop(docker_commands);
 
+    // A Nitro host reports the memory pool reserved for sandboxes; a host with
+    // no pool is told how to get one.
+    let nitro_ssh = RuntimeSshTarget {
+        destination: "ec2-user@nitro.example.test".to_owned(),
+        ssh_args: Vec::new(),
+    };
+    let nitro_report = |pool: u64| {
+        format!(
+            r#"{{"engine_version":"2.70.0","state_format":1,"firecracker_version":"1.18.0","kernel_version":"6.18.56-126.188.amzn2023","memory_pool_total_mib":{pool},"memory_pool_free_mib":{free},"slots_in_use":1,"slots_total":80,"cpus":16}}"#,
+            free = pool.saturating_sub(4098)
+        )
+    };
+    let nitro = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(output(nitro_report(49152).as_bytes())),
+        Ok(output(b"sha256:0123456789abcdef\n")),
+    ]);
+    let nitro_check = ssh_nitro_check(
+        "nitro-ready",
+        &nitro_ssh,
+        "ghcr.io/example/dev:1.2.3",
+        &nitro,
+        false,
+    );
+    let nitro_commands = nitro.commands.borrow();
+    assert_eq!(nitro_commands.len(), 3);
+    assert!(
+        nitro_commands
+            .iter()
+            .all(|command| command.program == "ssh")
+    );
+    // The engine runs as root from the installed worker, whose path comes
+    // from one constant, and the verbs reach it unchanged.
+    for (command, verbs) in [
+        (&nitro_commands[1], "'info' '--format' 'json'"),
+        (&nitro_commands[2], "'image' 'inspect' '--format' '{{.Id}}'"),
+    ] {
+        let remote = command.args.last().unwrap();
+        assert!(remote.contains("exec sudo -n \"$HOME/.local/share/hel/microvm/hel\" microvm"));
+        assert!(
+            remote.ends_with(verbs) || remote.contains(verbs),
+            "{remote}"
+        );
+    }
+    drop(nitro_commands);
+    let no_pool = FakeExecutor::new([Ok(output(b"")), Ok(output(nitro_report(0).as_bytes()))]);
+    let nitro_missing_engine = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(failed(
+            "sh: 1: exec: /home/ec2-user/.local/share/hel/microvm/hel: not found",
+        )),
+    ]);
+    let nitro_missing_engine_check = ssh_nitro_check(
+        "nitro-fresh",
+        &nitro_ssh,
+        "ghcr.io/example/dev:1.2.3",
+        &nitro_missing_engine,
+        false,
+    );
+    let nitro_no_pool_check = ssh_nitro_check(
+        "nitro-no-pool",
+        &nitro_ssh,
+        "ghcr.io/example/dev:1.2.3",
+        &no_pool,
+        false,
+    );
+
     let podman = FakeExecutor::new([Ok(output(
-        b"keys.used=174\nkeys.quota=200\nkeys.max=1000\nmaxstartups=10:30:100\n",
+        b"keys.used=174\nkeys.quota=200\nkeys.max=1000\ninotify.max_user_instances=8192\nmaxstartups=10:30:100\n",
     ))]);
     let podman_check = ssh_podman_limits_check("remote-podman", &ssh, &podman);
     let podman_commands = podman.commands.borrow();
@@ -173,18 +241,21 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         "disabled-reviewer".to_owned(),
         HarnessProfile {
             enabled: false,
-            kind: HarnessKind::Codex,
-            home: PathBuf::from("/home/example/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Codex,
+                PathBuf::from("/home/example/.codex"),
+            )
         },
     );
     let subagent_checks = subagent_policy_checks(Ok(&config));
-    let mut checks = vec![aws_check, docker_check, podman_check, missing_ssh_check];
+    let mut checks = vec![
+        docker_check,
+        nitro_check,
+        nitro_missing_engine_check,
+        nitro_no_pool_check,
+        podman_check,
+        missing_ssh_check,
+    ];
     checks.extend(subagent_checks);
 
     // External Git distributions vary their version suffixes. Exercise the
@@ -240,9 +311,6 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
 
     let home = tempfile::tempdir().unwrap();
     let claude = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Claude,
-        home: home.path().to_path_buf(),
         environment: [
             ("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned()),
             ("AWS_PROFILE".to_owned(), "example-bedrock".to_owned()),
@@ -250,11 +318,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         ]
         .into_iter()
         .collect(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
     };
     assert!(crate::setup::harness_is_authenticated_with_executor(
         &claude,
@@ -368,9 +432,6 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
                 "bash: line 1: docker: command not found",
             ),
         ]))),
-        // spot: AWS credentials, then the launch template
-        Ok(output(br#"{"Account":"123456789012"}"#)),
-        Ok(output(b"{}")),
     ]);
     checks.extend(machine_runtime_checks(Ok(&machines), &probes));
     assert!(probes.responses.borrow().is_empty());
@@ -381,8 +442,54 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
             .iter()
             .map(|command| command.program.as_str())
             .collect::<Vec<_>>(),
-        ["ssh", "ssh", "ssh", "aws", "aws"],
+        ["ssh", "ssh", "ssh"],
         "one SSH call per host"
+    );
+
+    for response in [
+        Ok(failed("sudo: a password is required")),
+        Ok(output("maxsessions 10\nmaxstartups 10:30:100\n")),
+        Ok(output("maxsessions 200\nmaxstartups 100:30:300\n")),
+        Ok(output("maxsessions 1000\nmaxstartups 10:30:100\n")),
+        Ok(output("maxsessions 10\nmaxstartups 500:10:1000\n")),
+        Ok(output(
+            "maxsessions 200\nmaxstartups 100:30:300\nusedns yes\n",
+        )),
+    ] {
+        checks.push(sshd::check("remote", &ssh, &FakeExecutor::new([response])));
+    }
+
+    let foreign = if std::env::consts::ARCH == "aarch64" {
+        "linux/amd64"
+    } else {
+        "linux/arm64"
+    };
+    let config_path = home.path().join("project-images.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"version = {version}
+[bundles.assigned]
+primary_repo = "app"
+[[bundles.assigned.repositories]]
+id = "app"
+github = "BrokkAi/mjolnir"
+destination = "app"
+[images.bundles.assigned]
+"{foreign}" = "registry.example.test/project:foreign"
+[targets.native]
+kind = "podman"
+"#,
+            version = mj_core::config::CONFIG_VERSION
+        ),
+    )
+    .unwrap();
+    let assigned = Config::load_from(&config_path).unwrap();
+    // Hard-won: 536fd7df7: doctor warned about foreign-platform images on a native target with no platform key.
+    checks.extend(
+        worker_binary_checks(Ok(&assigned))
+            .into_iter()
+            .filter(|check| check.id.starts_with("worker.native.assigned.")),
     );
 
     for check in &mut checks {
@@ -464,15 +571,10 @@ fn a_config_without_a_bundle_is_ready_for_sessions() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: directory.path().join("codex-home"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            HarnessKind::Codex,
+            directory.path().join("codex-home"),
+        )
     };
     Config {
         profiles: [("work".to_owned(), profile)].into_iter().collect(),
@@ -644,7 +746,7 @@ fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>
     windows,
     ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
 )]
-fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
+fn doctor_accepts_older_shared_container_host_mbx() {
     let config = config_with([
         (
             "podman",
@@ -669,18 +771,15 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
     assert_eq!(checks.len(), 1);
     let check = &checks[0];
     assert_eq!(check.id, "build-cache.local");
-    assert_eq!(check.status, CheckStatus::Warning);
+    assert_eq!(check.status, CheckStatus::Ready);
     assert!(check.detail.contains("1.15.0"));
-    assert!(check.detail.contains(crate::controller::MBX_VERSION));
-    assert!(check.detail.contains("run without the shared build cache"));
-    assert!(check.detail.contains("docker, podman"));
     assert!(
         check
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("Upgrade mbx")
+            .detail
+            .contains("compatible with the shared build cache")
     );
+    assert!(!check.detail.contains("1.30.0"));
+    assert!(check.detail.contains("docker, podman"));
     assert_eq!(executor.commands.borrow().len(), 2);
     assert!(
         all_ready(&checks),
@@ -688,18 +787,11 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
     );
 
     let json = serde_json::to_value(check).unwrap();
-    assert_eq!(json["status"], "warning");
-    assert!(
-        json["remediation"]
-            .as_str()
-            .unwrap()
-            .contains(crate::controller::MBX_VERSION)
-    );
+    assert_eq!(json["status"], "ready");
     let mut human = Vec::new();
     render_human(&checks, &mut human).unwrap();
     let human = String::from_utf8(human).unwrap();
-    assert!(human.contains("warning Build cache on local"));
-    assert!(human.contains("remediation: Upgrade mbx"));
+    assert!(human.contains("ready Build cache on local"));
 }
 
 #[test]
@@ -716,10 +808,7 @@ fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     )]);
     for (response, expected_status, expected_text) in [
         (
-            Ok(output(format!(
-                "/usr/local/bin/mbx\nmbx {}",
-                crate::controller::MBX_VERSION
-            ))),
+            Ok(output("/usr/local/bin/mbx\nmbx 1.22.0")),
             CheckStatus::Ready,
             "compatible",
         ),
@@ -851,13 +940,13 @@ fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
         (
             "docker",
             TargetTemplate::LocalDocker {
-                container: container(mj_core::config::DEFAULT_CONTAINER_IMAGE),
+                container: container(mj_core::config::DEFAULT_SESSION_IMAGE),
             },
         ),
         (
             "podman",
             TargetTemplate::LocalPodman {
-                container: container(mj_core::config::DEFAULT_CONTAINER_IMAGE),
+                container: container(mj_core::config::DEFAULT_SESSION_IMAGE),
             },
         ),
     ]);
@@ -1006,6 +1095,48 @@ fn host_limits_report_pressure_when_keys_reach_the_quota() {
         limits
             .keyring_sentence("dev@example.test")
             .contains("3300 of its 4096")
+    );
+}
+
+// Hard-won: #1540: mj-made EC2 hosts kept Ubuntu's inotify default, and tests
+// starting file watchers failed with EMFILE at about 30 containers.
+#[test]
+fn host_limits_warn_when_inotify_instances_are_low() {
+    let low = parse_host_limits(b"keys.used=10\nkeys.quota=4096\ninotify.max_user_instances=128\n");
+    assert_eq!(low.inotify_max_user_instances, Some(128));
+    assert!(
+        low.inotify_sentence("dev@example.test").contains("is 128"),
+        "{}",
+        low.inotify_sentence("dev@example.test")
+    );
+    let executor = FakeExecutor::new([Ok(output(
+        b"keys.used=10\nkeys.quota=4096\ninotify.max_user_instances=128\nmaxstartups=10:30:100\n",
+    ))]);
+    let check = ssh_podman_limits_check(
+        "remote-podman",
+        &RuntimeSshTarget::from(&ssh_connection()),
+        &executor,
+    );
+    assert_eq!(check.status, CheckStatus::Warning);
+    assert!(
+        check.detail.contains("Too many open files"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .is_some_and(|remediation| remediation.contains("8192")),
+        "{:?}",
+        check.remediation
+    );
+
+    let healthy = parse_host_limits(b"inotify.max_user_instances=8192\n");
+    assert!(
+        !healthy
+            .inotify_max_user_instances
+            .is_some_and(|max| max < INOTIFY_INSTANCES_HEALTHY)
     );
 }
 
@@ -1543,7 +1674,7 @@ fn missing_harness_homes_name_every_supported_agent() {
 
     assert_eq!(
         check.detail,
-        "No Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, or DSH home was found in the default or environment-overridden locations."
+        "No Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, DSH, or Antigravity home was found in the default or environment-overridden locations."
     );
 }
 
@@ -1607,9 +1738,11 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
 /// and could leave a scratch index behind. Doctor tells the user what is there
 /// and how to remove it, and changes nothing itself.
 // Hard-won: #1065: interrupted review captures left large refs and scratch indexes in the user’s repository.
+// Hard-won: #1542: doctor cleanup must retain the managed base's GC root.
 #[test]
 fn review_leftovers_are_reported_and_left_alone() {
-    let repository = tempfile::tempdir().unwrap();
+    use crate::controller::test_support::{committed_repository, test_git};
+    let repository = committed_repository();
     let git_dir = repository.path().join(".git");
     std::fs::create_dir_all(git_dir.join("refs/hel/worktrees/gone")).unwrap();
     std::fs::write(git_dir.join("refs/hel/review-capture"), "a".repeat(41)).unwrap();
@@ -1628,6 +1761,12 @@ fn review_leftovers_are_reported_and_left_alone() {
     let mut packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap();
     packed.push_str(&format!("{} refs/mj/reviewed/tree\n", "e".repeat(40)));
     std::fs::write(git_dir.join("packed-refs"), packed).unwrap();
+    let base_ref = mj_core::targets::HistoryCutoff::BASE_REF;
+    std::fs::write(git_dir.join(base_ref), "f".repeat(41)).unwrap();
+    std::fs::write(git_dir.join(format!("{base_ref}-extra")), "e".repeat(41)).unwrap();
+    let mut packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap();
+    packed.push_str(&format!("{} {base_ref}\n", "f".repeat(40)));
+    std::fs::write(git_dir.join("packed-refs"), packed).unwrap();
     let scratch = git_dir.join("hel-review-index-AbCdEf");
     std::fs::write(&scratch, b"scratch").unwrap();
 
@@ -1639,9 +1778,49 @@ fn review_leftovers_are_reported_and_left_alone() {
             "refs/hel/review-baseline",
             "refs/hel/review-capture",
             "refs/hel/worktrees/gone/review-baseline",
+            "refs/mj/base",
+            "refs/mj/base-extra",
             "refs/mj/review-baseline",
             "refs/mj/reviewed/tree"
         ]
+    );
+    // Both markers are required; an incomplete managed marker is residue too.
+    test_git(repository.path(), &["config", "mj.remoteWorkspace", "true"]);
+    assert_eq!(
+        crate::doctor::review_residue(repository.path()).refs,
+        residue.refs
+    );
+    test_git(
+        repository.path(),
+        &["config", "mj.baseCommit", &"f".repeat(40)],
+    );
+    let managed = crate::doctor::review_residue(repository.path());
+    assert_eq!(
+        managed.refs,
+        residue
+            .refs
+            .iter()
+            .filter(|name| *name != base_ref)
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        git_dir.join(base_ref).exists(),
+        "doctor leaves the managed pin alone"
+    );
+    // Packed-only base pins obey the same ownership rule.
+    std::fs::remove_file(git_dir.join(base_ref)).unwrap();
+    assert_eq!(
+        crate::doctor::review_residue(repository.path()).refs,
+        managed.refs
+    );
+    test_git(
+        repository.path(),
+        &["config", "mj.remoteWorkspace", "false"],
+    );
+    assert_eq!(
+        crate::doctor::review_residue(repository.path()).refs,
+        residue.refs
     );
     assert_eq!(residue.scratch_indexes, std::slice::from_ref(&scratch));
     assert!(
@@ -1684,7 +1863,7 @@ fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
         let mut session = checkpoint_test_session(id);
         session.state = state;
         session.project_directory = Some(root.clone());
-        session.managed_worktree = Some(ManagedWorktree {
+        session.managed_worktree = Some(Box::new(ManagedWorktree {
             kind,
             source_project_directory: project.clone(),
             source_repository: project.clone(),
@@ -1692,7 +1871,7 @@ fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
             branch: format!("mj/{id}"),
             target: ManagedWorktreeTarget::Local,
             base_commit: None,
-        });
+        }));
         session
     };
     let running_clone = managed("a1", ManagedCheckoutKind::Clone, SessionState::Running);
@@ -1808,15 +1987,7 @@ fn doctor_reports_an_inline_token_provider_as_usage_priced() {
     )
     .unwrap();
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
     assert_eq!(
         profile_quota_source(&profile),
@@ -1838,15 +2009,8 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
     config.profiles.insert(
         "plain".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: "/profiles/plain".into(),
             environment: literal,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, "/profiles/plain")
         },
     );
     let referenced = with_secret_resolver(
@@ -1867,15 +2031,8 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
     config.profiles.insert(
         "referenced".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: "/profiles/referenced".into(),
             environment: referenced,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, "/profiles/referenced")
         },
     );
     let mut target = container("ghcr.io/example/agent:latest");
@@ -1984,5 +2141,245 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
             .is_some_and(|fix| fix.contains("container system start") || fix.contains("container")),
         "{:?}",
         check.remediation
+    );
+}
+
+/// A host that does not answer has one problem, not two: its GitHub check
+/// waits for the SSH check to pass, and then runs on the host under the same
+/// strict host-key checking.
+#[test]
+fn ssh_bare_github_check_runs_only_on_a_reachable_host() {
+    let unreachable = FakeExecutor::new([Ok(failed(
+        b"ssh: connect to host example.test port 22: Connection timed out",
+    ))]);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &unreachable);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>(),
+        ["runtime.ssh-bare.builder"]
+    );
+
+    let reachable = FakeExecutor::new([
+        Ok(output(b"")),
+        // Git on the host rewrites neither SSH spelling, so SSH decides.
+        Ok(output(b"git@github.com:octocat/hello-world.git")),
+        Ok(output(b"ssh://git@github.com/octocat/hello-world.git")),
+        Ok(failed(
+            b"Hi octocat! You've successfully authenticated, but GitHub does not provide shell access.",
+        )),
+    ]);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &reachable);
+    assert_eq!(checks[1].id, "github.ssh-bare.builder");
+    assert_eq!(checks[1].status, CheckStatus::Ready);
+    let commands = reachable.commands.borrow();
+    assert_eq!(&commands[3].args[..2], ["-o", "StrictHostKeyChecking=yes"]);
+    assert!(
+        commands[3]
+            .args
+            .last()
+            .unwrap()
+            .contains("'StrictHostKeyChecking=yes' '-o' 'ConnectTimeout=5' 'git@github.com'"),
+        "{:?}",
+        commands[3].args
+    );
+}
+
+// Hard-won: e32a6aeef: the default localhost target, not saved in config.toml, got no GitHub check.
+#[test]
+fn the_default_local_target_gets_a_github_check() {
+    if !crate::targets::HOST_RUNS_WORKERS {
+        return;
+    }
+    let checks = local_bare_github_checks(Ok(&Config::default()), &AlwaysFailingExecutor);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>(),
+        ["github.local-bare.localhost"]
+    );
+}
+
+#[test]
+fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = |role: Option<mj_core::config::AwsRoleConfig>| HarnessProfile {
+        environment: [
+            ("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned()),
+            ("AWS_PROFILE".to_owned(), "work".to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+        aws: role,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
+    };
+    let role = mj_core::config::AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    };
+    let containers: BTreeMap<String, TargetTemplate> = [(
+        "podman".to_owned(),
+        TargetTemplate::LocalPodman {
+            container: container("ghcr.io/example/dev:1"),
+        },
+    )]
+    .into_iter()
+    .collect();
+    let local_only: BTreeMap<String, TargetTemplate> =
+        [("localhost".to_owned(), TargetTemplate::LocalBare)]
+            .into_iter()
+            .collect();
+    let recorded = include_str!("../../tests/fixtures/aws-sts-assume-role.json");
+    let granted = {
+        let mut output: serde_json::Value = serde_json::from_str(recorded).unwrap();
+        output["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
+        serde_json::to_vec(&output).unwrap()
+    };
+    let denied = include_str!("../../tests/fixtures/aws-sts-assume-role-access-denied.txt");
+
+    let mut checks = Vec::new();
+    // No role: sessions on the container target get the host's credentials.
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(None),
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+    // No role, but only raw local sessions, which read the host's files anyway.
+    assert!(
+        aws_scope_check(
+            "bedrock",
+            &profile(None),
+            &local_only,
+            &AlwaysFailingExecutor
+        )
+        .is_empty()
+    );
+    // A role the host's login can assume.
+    let ok = FakeExecutor::new([Ok(output(&granted))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &containers,
+        &ok,
+    ));
+    let probe = ok.commands.borrow();
+    let name = probe[0]
+        .args
+        .windows(2)
+        .find(|args| args[0] == "--role-session-name")
+        .map(|args| args[1].clone())
+        .unwrap();
+    assert!(
+        name.strip_prefix("mj-").is_some_and(|id| id.len() == 32
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+        "{name}"
+    );
+    drop(probe);
+    // A role the host's login cannot assume.
+    let refused = FakeExecutor::new([Ok(failed(denied))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &containers,
+        &refused,
+    ));
+    // A role on a profile that only runs raw local sessions has no effect.
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &local_only,
+        &AlwaysFailingExecutor,
+    ));
+    let mixed_role = role;
+
+    let mixed: BTreeMap<String, TargetTemplate> = [
+        (
+            "podman".to_owned(),
+            TargetTemplate::LocalPodman {
+                container: container("ghcr.io/example/dev:1"),
+            },
+        ),
+        ("localhost".to_owned(), TargetTemplate::LocalBare),
+        (
+            "own-identity".to_owned(),
+            TargetTemplate::LocalDocker {
+                container: ContainerTemplate {
+                    environment: [("AWS_PROFILE".to_owned(), "team".to_owned())]
+                        .into_iter()
+                        .collect(),
+                    ..container("ghcr.io/example/dev:1")
+                },
+            },
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let granted_again = FakeExecutor::new([Ok(output(&granted))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(mixed_role)),
+        &mixed,
+        &granted_again,
+    ));
+
+    // A table on a profile that does not use the AWS chain has no effect;
+    // sessions run, and doctor says so.
+    let not_bedrock = HarnessProfile {
+        aws: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
+    };
+    checks.extend(aws_scope_check(
+        "claude",
+        &not_bedrock,
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+
+    // A role on a Codex profile whose provider configuration cannot be read:
+    // unknown is not "not Bedrock", so doctor asks the same question launch and
+    // the sync do, and reports the read error instead of dismissing the role.
+    let unreadable = tempfile::tempdir().unwrap();
+    std::fs::write(
+        unreadable.path().join("config.toml"),
+        "model_provider = [unterminated",
+    )
+    .unwrap();
+    let unreadable_profile = HarnessProfile {
+        aws: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, unreadable.path().to_path_buf())
+    };
+    checks.extend(aws_scope_check(
+        "codex-bedrock",
+        &unreadable_profile,
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+
+    let mut rendered = Vec::new();
+    render_human(&checks, &mut rendered).expect("render doctor checks");
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "doctor-aws-scope-checks",
+        &String::from_utf8(rendered).unwrap(),
     );
 }

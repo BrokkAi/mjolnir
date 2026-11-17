@@ -1,6 +1,39 @@
 use super::*;
 
+/// What `RuntimeState::cancel_stalled_create` found.
+pub(super) enum CreateProgress {
+    /// No Create is running for the session.
+    NotRunning,
+    /// A Create is running and is either in a stage or recently was.
+    Running,
+    /// A Create has gone past the bound without a stage starting or
+    /// finishing.
+    Stalled {
+        idle: Duration,
+        /// The stages it is in; empty between stages.
+        stages: Vec<String>,
+        /// What the stall check found when it asked the Create to cancel.
+        phase: StalledCreate,
+    },
+}
+
+/// The Create's lifecycle phase when the stall check asked it to cancel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StalledCreate {
+    /// The cancel was accepted.
+    Cancelled,
+    /// A cancel was already under way, so this one added nothing.
+    AlreadyCancelling,
+    /// The Create has committed and cannot be cancelled; it stays with its
+    /// caller.
+    Committed,
+}
+
 impl RuntimeState {
+    pub(crate) fn session_gate(&self) -> &Arc<crate::recovery_gate::RecoveryGate> {
+        &self.recovery_observer.gate
+    }
+
     fn request_lifecycle_cancel(
         &self,
         session_id: &str,
@@ -25,7 +58,7 @@ impl RuntimeState {
             }
         );
         // The control decides: a close that committed first refuses this.
-        if !active.request_cancel() {
+        if !active.request_cancel(session_id, "person cancel from dashboard") {
             ensure!(
                 !(active.control.is_committed()
                     && matches!(active.kind, LifecycleKind::Suspend | LifecycleKind::Restart)),
@@ -154,10 +187,8 @@ impl RuntimeState {
                         active.interrupt_for_shutdown();
                     }
                     let stage = active
-                        .active_stages
-                        .keys()
-                        .next_back()
-                        .map(|stage| stage.label())
+                        .stage_labels()
+                        .pop()
                         .unwrap_or_else(|| "container cleanup".to_owned());
                     (
                         session_id.clone(),
@@ -334,13 +365,27 @@ impl RuntimeState {
         if let Some(busy) = self.session_lifecycle_busy(session_id) {
             return Err(anyhow::Error::new(busy));
         }
+        let session_admission = crate::recovery_gate::SessionAdmission::Foreground(
+            self.recovery_observer
+                .gate
+                .enter_foreground(
+                    session_id,
+                    "checkpoint",
+                    crate::recovery_gate::LifecycleOrigin::Person,
+                    &AtomicBool::new(false),
+                    &ProcessExecutor,
+                )
+                .await?,
+        );
         let session_id = session_id.to_owned();
         // Checkpoint capture and cleanup run synchronous filesystem, database
         // and SSH operations between relay awaits. Keep the whole future,
         // including its destructors, off the daemon's event loop.
         let checkpoint = blocking(move || {
             let mut controller = Controller::load()?;
-            mj_core::runtime::block_on(controller.checkpoint_session(&session_id))?
+            mj_core::runtime::block_on(
+                controller.checkpoint_session(&session_admission, &session_id),
+            )?
         })
         .await?;
         refresh_runtime_controller(self).await;
@@ -522,6 +567,22 @@ impl RuntimeState {
         }
     }
 
+    /// The stages the running lifecycle `operation_id` of `session_id` is in
+    /// now. A waiting upgrade handoff reads this when it names its blockers.
+    /// Empty once that operation has ended or has reported no stage.
+    pub(super) fn lifecycle_stage_labels(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+    ) -> Vec<String> {
+        self.owner()
+            .lifecycle
+            .get(session_id)
+            .filter(|active| active.operation_id == operation_id && active.is_running())
+            .map(ActiveLifecycle::stage_labels)
+            .unwrap_or_default()
+    }
+
     pub(super) fn change_lifecycle_stage(
         &self,
         session_id: &str,
@@ -538,6 +599,7 @@ impl RuntimeState {
             if operation.operation_id != operation_id || !operation.is_running() {
                 return;
             }
+            operation.last_stage_change = tokio::time::Instant::now();
             if active {
                 let started_at = stage
                     .started_at_epoch_seconds()
@@ -566,19 +628,83 @@ impl RuntimeState {
         }
     }
 
+    /// Decide, in one owner critical section, whether the session's running
+    /// Create has stalled, and cancel it when it has. A stall is `bound`
+    /// without a provisioning stage starting or finishing; a Create that is
+    /// queued for a slot or preparing a harness (`ProvisionStage::pauses_stall_clock`)
+    /// is never stalled.
+    ///
+    /// Cancelling is what ends the stall: failing only the reviewer start
+    /// would leave the Create running with its lifecycle admission held, and
+    /// that admission blocks daemon handoff.
+    pub(super) fn cancel_stalled_create(
+        &self,
+        session_id: &str,
+        bound: Duration,
+    ) -> CreateProgress {
+        let mut owner = self.owner();
+        let Some(operation) = owner.lifecycle.get_mut(session_id) else {
+            return CreateProgress::NotRunning;
+        };
+        if operation.kind != LifecycleKind::Create || !operation.is_running() {
+            return CreateProgress::NotRunning;
+        }
+        let idle = operation.last_stage_change.elapsed();
+        if idle < bound
+            || operation
+                .active_stages
+                .keys()
+                .any(ProvisionStage::pauses_stall_clock)
+        {
+            return CreateProgress::Running;
+        }
+        let stages = operation.stage_labels();
+        let phase = if operation.request_cancel(session_id, "create stalled") {
+            StalledCreate::Cancelled
+        } else if matches!(operation.phase, LifecyclePhase::Cancelling) {
+            StalledCreate::AlreadyCancelling
+        } else {
+            StalledCreate::Committed
+        };
+        CreateProgress::Stalled {
+            idle,
+            stages,
+            phase,
+        }
+    }
+
     /// Record something the daemon did on its own, for every attached surface
     /// to report once.
     pub(crate) fn push_notice(&self, session_id: &str, text: impl Into<String>) {
+        self.push_surface_notice(session_id, text.into(), false);
+    }
+
+    /// Only safe, deliberately public text may cross the browser boundary.
+    pub(crate) fn push_public_notice(&self, session_id: &str, text: impl Into<String>) {
+        self.push_surface_notice(session_id, text.into(), true);
+    }
+
+    pub(crate) fn public_notices(&self) -> Vec<RuntimeNotice> {
+        self.notices
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|entry| entry.public)
+            .map(|entry| entry.notice.clone())
+            .collect()
+    }
+
+    fn push_surface_notice(&self, session_id: &str, text: String, public: bool) {
         const RETAINED_NOTICES: usize = 32;
 
         let notice = RuntimeNotice {
             id: self.next_notice_id.fetch_add(1, Ordering::AcqRel),
             session_id: session_id.to_owned(),
-            text: text.into(),
+            text,
         };
         {
             let mut notices = self.notices.lock().unwrap_or_else(PoisonError::into_inner);
-            notices.push_back(notice);
+            notices.push_back(SurfaceNotice { notice, public });
             while notices.len() > RETAINED_NOTICES {
                 notices.pop_front();
             }
@@ -589,23 +715,45 @@ impl RuntimeState {
     /// Connect the quota poller's wake-up channel. The poller is the daemon's
     /// only prober; a surface that wants a fresh reading asks the daemon, and
     /// this is how the ask reaches the poller.
-    pub(crate) fn attach_quota_refresh(&self, refresh: tokio::sync::mpsc::Sender<()>) {
+    pub(crate) fn attach_quota_refresh(
+        &self,
+        refresh: tokio::sync::mpsc::UnboundedSender<super::QuotaRefreshIntent>,
+    ) {
         self.quota
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .refresh = Some(refresh);
     }
 
-    /// Ask the quota poller to probe now. Requests that arrive while one is
-    /// already waiting are one request.
+    /// Ask the quota poller to probe now. The owner coalesces queued intents.
     pub(crate) fn request_quota_refresh(&self) -> Result<()> {
         let quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
         let refresh = quota
             .refresh
             .as_ref()
             .context("the daemon's quota service is not running")?;
-        // A full channel means a refresh is already queued.
-        let _ = refresh.try_send(());
+        refresh
+            .send(super::QuotaRefreshIntent::Force)
+            .context("the daemon's quota service is not running")?;
+        Ok(())
+    }
+
+    /// Ask the quota poller to probe these profiles once, even disabled ones.
+    /// A forced probe answers now, off the profile's schedule, even with a
+    /// fresh report.
+    pub(crate) fn probe_quota_profiles(
+        &self,
+        requests: Vec<crate::quota::QuotaRefreshRequest>,
+        forced: bool,
+    ) -> Result<()> {
+        let quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
+        let refresh = quota
+            .refresh
+            .as_ref()
+            .context("the daemon's quota service is not running")?;
+        refresh
+            .send(super::QuotaRefreshIntent::ProbeProfiles { requests, forced })
+            .context("the daemon's quota service is not running")?;
         Ok(())
     }
 

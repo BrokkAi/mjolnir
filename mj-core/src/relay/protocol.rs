@@ -83,6 +83,177 @@ impl ProjectMemoryWireTree {
     }
 }
 
+/// The complete connection-only project-memory snapshot transferred in
+/// protocol 59. Serializing this value once gives every page the same frozen
+/// baseline and replica, even if either tree changes while pages are read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMemoryWireSnapshot {
+    pub baseline: ProjectMemoryWireTree,
+    pub replica: ProjectMemoryWireTree,
+}
+
+impl ProjectMemoryWireSnapshot {
+    pub fn encode(
+        baseline: ProjectMemorySnapshot,
+        replica: ProjectMemorySnapshot,
+        protocol: u32,
+    ) -> Result<Vec<u8>> {
+        let snapshot = Self {
+            baseline: ProjectMemoryWireTree::encode(baseline, protocol)?,
+            replica: ProjectMemoryWireTree::encode(replica, protocol)?,
+        };
+        serde_json::to_vec(&snapshot).context("serialize project memory transfer snapshot")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<(ProjectMemorySnapshot, ProjectMemorySnapshot)> {
+        let snapshot: Self =
+            serde_json::from_slice(bytes).context("parse project memory transfer snapshot")?;
+        Ok((snapshot.baseline.decode()?, snapshot.replica.decode()?))
+    }
+}
+
+/// Actions carried by the protocol-59 connection-only project-memory transfer
+/// method. `chunk` fields contain standard-base64 encoded serialized bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "action",
+    content = "params",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ProjectMemoryTransferAction {
+    BeginSnapshot,
+    ReadSnapshotPage {
+        transfer_id: u64,
+        offset: u64,
+    },
+    BeginUpload {
+        kind: ProjectMemoryUploadKind,
+        total_bytes: u64,
+    },
+    AppendUpload {
+        transfer_id: u64,
+        offset: u64,
+        chunk: String,
+    },
+    CommitUpload {
+        transfer_id: u64,
+    },
+    Abort {
+        transfer_id: u64,
+    },
+}
+
+/// Semantics applied when a complete project-memory upload is committed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "params",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ProjectMemoryUploadKind {
+    InstallSnapshot,
+    ReplaceTree { expected_replica: TreeVersion },
+}
+
+/// Results returned by protocol-59 project-memory transfer actions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "action",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ProjectMemoryTransferResult {
+    SnapshotStarted {
+        transfer_id: u64,
+        total_bytes: u64,
+    },
+    SnapshotPage {
+        transfer_id: u64,
+        offset: u64,
+        next_offset: u64,
+        complete: bool,
+        chunk: String,
+    },
+    UploadStarted {
+        transfer_id: u64,
+    },
+    UploadProgress {
+        transfer_id: u64,
+        next_offset: u64,
+    },
+    Installed,
+    Replaced {
+        outcome: ReplicaReplaceOutcome,
+    },
+    Aborted {
+        transfer_id: u64,
+    },
+}
+
+/// Largest raw byte slice that fits in a protocol-59 append request, using
+/// the exact serialized envelope overhead and base64 expansion.
+pub fn project_memory_transfer_request_chunk_bytes(
+    protocol_version: u32,
+    request_id: &str,
+) -> Result<usize> {
+    let envelope = RelayRequestEnvelope {
+        request_id: request_id.to_owned(),
+        protocol_version,
+        request: RelayRequest::ProjectMemoryTransfer {
+            action: ProjectMemoryTransferAction::AppendUpload {
+                transfer_id: u64::MAX,
+                offset: u64::MAX,
+                chunk: String::new(),
+            },
+        },
+    };
+    transfer_chunk_capacity(&envelope)
+}
+
+/// Largest raw byte slice that fits in a protocol-59 snapshot-page response,
+/// using the exact serialized envelope overhead and base64 expansion.
+pub fn project_memory_transfer_response_chunk_bytes(
+    protocol_version: u32,
+    request_id: &str,
+) -> Result<usize> {
+    let envelope = RelayResponseEnvelope {
+        request_id: request_id.to_owned(),
+        protocol_version,
+        body: RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: ProjectMemoryTransferResult::SnapshotPage {
+                    transfer_id: u64::MAX,
+                    offset: u64::MAX,
+                    next_offset: u64::MAX,
+                    complete: false,
+                    chunk: String::new(),
+                },
+            },
+        },
+    };
+    transfer_chunk_capacity(&envelope)
+}
+
+fn transfer_chunk_capacity(envelope: &impl Serialize) -> Result<usize> {
+    // The base64 field is empty in the serialized template, so its encoded
+    // length can be added without JSON escaping. Include the newline because
+    // the worker's bounded reader counts it against the frame budget.
+    let overhead = serde_json::to_vec(envelope)?.len().saturating_add(1);
+    let remaining = MAX_FRAME_BYTES
+        .checked_sub(overhead)
+        .context("project memory transfer envelope exceeds relay frame budget")?;
+    let capacity = (remaining / 4) * 3;
+    anyhow::ensure!(
+        capacity > 0,
+        "project memory transfer envelope leaves no room for a chunk"
+    );
+    Ok(capacity)
+}
+
 /// A request on the new controller-to-relay boundary. ACP payloads remain ACP
 /// payloads; only durability and queue-control operations are Hel-specific.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -100,6 +271,10 @@ pub enum RelayRequest {
     Attach {
         after_ordinal: u64,
         after_digest: String,
+        /// The digest of the operational state the controller holds, from
+        /// [`RelayResponsePayload::Attached`]. Protocol 57.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        known_state_digest: Option<String>,
     },
     Acknowledge {
         through_ordinal: u64,
@@ -153,6 +328,11 @@ pub enum RelayRequest {
         expected_replica: TreeVersion,
         tree: ProjectMemoryWireTree,
     },
+    /// Transfer a frozen project-memory snapshot or a compare-and-replace tree
+    /// over bounded connection-only pages. Protocol 59.
+    ProjectMemoryTransfer {
+        action: ProjectMemoryTransferAction,
+    },
     /// Connection-only CPU measurement; never journaled.
     CpuUsage,
     /// Report non-secret metadata for this session's harness credentials.
@@ -191,7 +371,16 @@ pub enum RelayRequest {
     AwsCredentialsState,
     InstallAwsCredentials {
         data: String,
+        /// Which role and session Mjolnir issued these credentials for, kept
+        /// beside the secret. Sent only to workers at protocol 55 or later.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::aws_credentials::AwsCredentialScope>,
     },
+    /// Delete the session's AWS credentials.
+    RemoveAwsCredentials,
+    /// The scope recorded beside the session's AWS credentials, if any, and
+    /// the AWS profile the session was staged with.
+    AwsCredentialsScope,
     /// The host's slopcop login, like the GitHub token, stays on the control
     /// connection, outside the journal.
     SlopcopLoginState,
@@ -215,6 +404,14 @@ pub enum RelayRequest {
     /// Acknowledge the previous page and fetch bounded changes on this connection.
     PollSubagentQueue {
         acknowledged: Option<u64>,
+    },
+    /// Answer once the worker's latest event ordinal or operational state
+    /// digest differs from these, or this connection's sub-agent queue has
+    /// changes it has not polled, or after [`RELAY_CHANGE_WAIT_BOUND`] with
+    /// none of them. Connection-only. Protocol 58.
+    WaitForChange {
+        after_ordinal: u64,
+        state_digest: Option<String>,
     },
     /// Connection-only operator-away control; never journaled as a command.
     SetOperatorAway {
@@ -252,7 +449,6 @@ pub enum RelayRequest {
 #[serde(rename_all = "snake_case")]
 pub enum CaptureScope {
     #[default]
-    TurnDelta,
     PushableCommits,
 }
 
@@ -260,16 +456,8 @@ pub enum CaptureScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params", rename_all = "snake_case")]
 pub enum ReviewerRequest {
-    /// Report what changed in every workspace repository since `baselines`.
-    ///
-    /// A baseline is the `current_tree` id an earlier capture reported, keyed
-    /// by repository root: a Git tag naming the captured tree and the HEAD it
-    /// was taken at, or a bare tree id from an earlier worker. Either is a
-    /// tree-ish. When that baseline is unavailable, the worker uses the
-    /// baseline pinned before its primary harness started. If neither tree is
-    /// available, coverage starts at this capture rather than presenting the
-    /// whole repository as this turn's work. Capture never touches the
-    /// repository's index or working tree.
+    /// Capture committed changes since the push review base. `scope` and
+    /// `baselines` remain on the wire for older workers.
     CaptureDelta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repositories: Option<Vec<std::path::PathBuf>>,
@@ -282,8 +470,19 @@ pub enum ReviewerRequest {
     RecordReviewed {
         trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
     },
-    AdvanceBaseline {
-        trees: std::collections::BTreeMap<std::path::PathBuf, String>,
+    /// Record `trees` as overridden: a push of that tree is allowed, but unlike
+    /// `RecordReviewed` it does not become the base of the next push review.
+    RecordOverridden {
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    },
+    /// Make `commit` the base of the next push review of one repository. The
+    /// worker resolves `path` like a scoped capture (the working directory when
+    /// absent) and `commit` as any revision, and refuses unless the commit's
+    /// tree was recorded as reviewed or overridden.
+    SetReviewBase {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<std::path::PathBuf>,
+        commit: String,
     },
 }
 
@@ -357,8 +556,9 @@ impl ReviewerRequest {
     pub const fn action_name(&self) -> &'static str {
         match self {
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
-            Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
+            Self::RecordOverridden { .. } => "reviewer_record_overridden",
+            Self::SetReviewBase { .. } => "reviewer_set_review_base",
         }
     }
 }
@@ -378,6 +578,7 @@ impl RelayRequest {
             Self::ProjectMemorySnapshot => "project_memory_snapshot",
             Self::InstallProjectMemorySnapshot { .. } => "install_project_memory_snapshot",
             Self::ReplaceProjectMemoryTree { .. } => "replace_project_memory_tree",
+            Self::ProjectMemoryTransfer { .. } => "project_memory_transfer",
             Self::AttachmentPresent { .. } => "attachment_present",
             Self::InstallAttachment { .. } => "install_attachment",
             Self::ReadAttachment { .. } => "read_attachment",
@@ -392,6 +593,8 @@ impl RelayRequest {
             Self::RemoveGithubToken => "remove_github_token",
             Self::AwsCredentialsState => "aws_credentials_state",
             Self::InstallAwsCredentials { .. } => "install_aws_credentials",
+            Self::RemoveAwsCredentials => "remove_aws_credentials",
+            Self::AwsCredentialsScope => "aws_credentials_scope",
             Self::SlopcopLoginState => "slopcop_login_state",
             Self::InstallSlopcopLogin { .. } => "install_slopcop_login",
             Self::RemoveSlopcopLogin => "remove_slopcop_login",
@@ -399,6 +602,7 @@ impl RelayRequest {
             Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::SubagentRequests => "subagent_requests",
             Self::PollSubagentQueue { .. } => "poll_subagent_queue",
+            Self::WaitForChange { .. } => "wait_for_change",
             Self::SetSubagentAdmission { .. } => "set_subagent_admission",
             Self::SetOperatorAway { .. } => "set_operator_away",
             Self::HistoryQuery { .. } => "history_query",
@@ -419,6 +623,9 @@ impl RelayRequest {
             Self::AwsCredentialsState | Self::InstallAwsCredentials { .. } => {
                 super::RELAY_AWS_CREDENTIALS_PROTOCOL
             }
+            Self::RemoveAwsCredentials | Self::AwsCredentialsScope => {
+                super::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL
+            }
             Self::SlopcopLoginState
             | Self::InstallSlopcopLogin { .. }
             | Self::RemoveSlopcopLogin => super::RELAY_SLOPCOP_LOGIN_PROTOCOL,
@@ -434,12 +641,14 @@ impl RelayRequest {
             Self::StopBackgroundTask { .. } => 9,
             Self::SubagentRequests | Self::CompleteSubagentRequest { .. } => 12,
             Self::PollSubagentQueue { .. } => super::RELAY_SUBAGENT_FEED_PROTOCOL,
+            Self::WaitForChange { .. } => super::RELAY_CHANGE_WAIT_PROTOCOL,
             Self::SetSubagentAdmission { .. } => 32,
             Self::SetOperatorAway { .. } => super::RELAY_OPERATOR_AWAY_PROTOCOL,
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
+            Self::ProjectMemoryTransfer { .. } => super::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
                 request:
@@ -451,6 +660,11 @@ impl RelayRequest {
             } => super::RELAY_WORKTREE_REVIEW_PROTOCOL,
             Self::Reviewer {
                 request:
+                    ReviewerRequest::RecordOverridden { .. } | ReviewerRequest::SetReviewBase { .. },
+                ..
+            } => super::RELAY_REVIEW_BASE_PROTOCOL,
+            Self::Reviewer {
+                request:
                     ReviewerRequest::RecordReviewed { .. }
                     | ReviewerRequest::CaptureDelta {
                         scope: CaptureScope::PushableCommits,
@@ -459,7 +673,6 @@ impl RelayRequest {
                 ..
             } => super::RELAY_PUSH_REVIEW_PROTOCOL,
 
-            Self::Reviewer { .. } => 6,
             _ => RELAY_MIN_PROTOCOL_VERSION,
         }
     }
@@ -556,12 +769,109 @@ fn rewrite_protocol_33_event(value: &mut serde_json::Value) -> serde_json::Resul
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// How long a worker holds [`RelayRequest::WaitForChange`] when nothing
+/// changes. It matches the controller's 10 s worker CPU reading, so a quiet
+/// session's waiting connection is proven alive as often as its main one.
+pub const RELAY_CHANGE_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RelayResponseEnvelope {
     pub request_id: String,
     pub protocol_version: u32,
     #[serde(flatten)]
     pub body: RelayResponseBody,
+}
+
+/// Decodes the flattened wire form directly. A derived `flatten` with an
+/// internally tagged body makes serde buffer the whole response, the relay
+/// state and every event, into a generic tree and then decode that tree again.
+/// The daemon decodes a response from every live worker several times a
+/// second, so the copy was most of its relay cost. Here `payload` can only
+/// belong to `Ok` and `error` only to `Error`, so each decodes straight into
+/// its type in whatever order the fields arrive; `result` must agree.
+impl<'de> Deserialize<'de> for RelayResponseEnvelope {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+
+        #[derive(Deserialize, PartialEq)]
+        #[serde(rename_all = "snake_case")]
+        enum Outcome {
+            Ok,
+            Error,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            RequestId,
+            ProtocolVersion,
+            Result,
+            Payload,
+            Error,
+            #[serde(other)]
+            Other,
+        }
+
+        struct EnvelopeVisitor;
+
+        impl<'de> Visitor<'de> for EnvelopeVisitor {
+            type Value = RelayResponseEnvelope;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a relay response")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut request_id = None;
+                let mut protocol_version = None;
+                let mut result = None;
+                let mut body = None;
+                while let Some(key) = map.next_key::<Field>()? {
+                    match key {
+                        Field::RequestId => request_id = Some(map.next_value()?),
+                        Field::ProtocolVersion => protocol_version = Some(map.next_value()?),
+                        Field::Result => result = Some(map.next_value::<Outcome>()?),
+                        Field::Payload | Field::Error if body.is_some() => {
+                            return Err(A::Error::custom(
+                                "relay response has more than one payload or error",
+                            ));
+                        }
+                        Field::Payload => {
+                            body = Some(RelayResponseBody::Ok {
+                                payload: map.next_value()?,
+                            });
+                        }
+                        Field::Error => {
+                            body = Some(RelayResponseBody::Error {
+                                error: map.next_value()?,
+                            });
+                        }
+                        Field::Other => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                let body = body.ok_or_else(|| A::Error::missing_field("payload"))?;
+                let decoded = match &body {
+                    RelayResponseBody::Ok { .. } => Outcome::Ok,
+                    RelayResponseBody::Error { .. } => Outcome::Error,
+                };
+                if result.ok_or_else(|| A::Error::missing_field("result"))? != decoded {
+                    return Err(A::Error::custom(
+                        "relay response result does not match its body",
+                    ));
+                }
+                Ok(RelayResponseEnvelope {
+                    request_id: request_id.ok_or_else(|| A::Error::missing_field("request_id"))?,
+                    protocol_version: protocol_version
+                        .ok_or_else(|| A::Error::missing_field("protocol_version"))?,
+                    body,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(EnvelopeVisitor)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -596,6 +906,25 @@ pub enum RelayResponsePayload {
         events: Vec<RelayEvent>,
         through_ordinal: u64,
         through_digest: String,
+        /// [`super::relay_state_digest`] of `state`, for a controller that
+        /// negotiated protocol 57 to name in its next attach.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state_digest: Option<String>,
+    },
+    /// The answer to [`RelayRequest::WaitForChange`]: the worker's latest event
+    /// ordinal and state digest now, and whether this connection's sub-agent
+    /// queue has changes to poll. Equal values mean the wait ran out.
+    ChangeObserved {
+        latest_ordinal: u64,
+        state_digest: String,
+        subagent_queue_changed: bool,
+    },
+    /// An attach whose `known_state_digest` still matches: the state is the
+    /// one the controller holds, so only the events are sent. Protocol 57.
+    AttachedWithKnownState {
+        events: Vec<RelayEvent>,
+        through_ordinal: u64,
+        through_digest: String,
     },
     Acknowledged {
         through_ordinal: u64,
@@ -613,6 +942,10 @@ pub enum RelayResponsePayload {
         text: Option<String>,
         /// Number of context items leased to the hook.
         count: usize,
+        /// Per-event identities and rendering for durable harness inboxes.
+        /// Additive response data; older hook clients still use `text`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        contexts: Vec<MailboxHookContext>,
     },
     MailboxAcknowledged {
         acknowledged: bool,
@@ -633,6 +966,9 @@ pub enum RelayResponsePayload {
     ProjectMemoryTreeReplaced {
         outcome: ReplicaReplaceOutcome,
     },
+    ProjectMemoryTransfer {
+        result: ProjectMemoryTransferResult,
+    },
     /// Fingerprint and freshness of a session's harness credentials. Neither
     /// value is secret.
     CpuUsage {
@@ -642,6 +978,15 @@ pub enum RelayResponsePayload {
         present: bool,
         fingerprint: String,
         freshness_epoch_ms: Option<i64>,
+    },
+    /// The scope recorded beside a session's AWS credentials, and the AWS
+    /// profile the session was staged with (the section name in its AWS
+    /// configuration, which survives the credentials being withdrawn). Not
+    /// secret.
+    AwsCredentialsScope {
+        scope: Option<crate::aws_credentials::AwsCredentialScope>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
     },
     /// Base64 of a session's credential file. Sent only on the connection
     /// socket, never recorded.
@@ -692,7 +1037,22 @@ pub enum RelayResponsePayload {
         repositories: Vec<RepoDelta>,
     },
     /// The review baselines now name the trees the controller sent.
+    /// Acknowledges `RecordReviewed` and `RecordOverridden`.
     ReviewBaselineAdvanced,
+    /// The repository, commit and tree `SetReviewBase` made the review base.
+    ReviewBaseSet {
+        root: std::path::PathBuf,
+        commit: String,
+        tree: String,
+        #[serde(default = "review_base_changed_default")]
+        changed: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailboxHookContext {
+    pub key: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -837,6 +1197,10 @@ pub fn read_bounded_line(
     }
 }
 
+fn review_base_changed_default() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod project_memory_wire_tests {
     use super::*;
@@ -870,5 +1234,42 @@ mod project_memory_wire_tests {
         };
         gzip.truncate(gzip.len() / 2);
         assert!(ProjectMemoryWireTree::Gzip { gzip }.decode().is_err());
+    }
+}
+
+#[cfg(test)]
+mod response_wire_tests {
+    use super::*;
+
+    /// The worker writes `result` before `payload`; another encoder may not.
+    /// Both orders decode the same, an unknown field is ignored as the derived
+    /// decoder ignored it, and a `result` that contradicts the body is refused.
+    #[test]
+    fn a_relay_response_decodes_in_any_field_order() {
+        let ok = RelayResponseEnvelope {
+            request_id: "r".into(),
+            protocol_version: 7,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::IdleReservation { ordinal: Some(3) },
+            },
+        };
+        let error = unsupported_relay_method_response("r".into(), 7, "nope".into());
+        for expected in [ok, error] {
+            let written = serde_json::to_value(&expected).unwrap();
+            let mut reversed = serde_json::Map::new();
+            reversed.insert("added_later".into(), serde_json::json!({"x": 1}));
+            for (key, value) in written.as_object().unwrap().iter().rev() {
+                reversed.insert(key.clone(), value.clone());
+            }
+            let reversed = serde_json::to_string(&reversed).unwrap();
+            let body = reversed.find("\"payload\"").or(reversed.find("\"error\""));
+            assert!(body < reversed.find("\"result\""), "{reversed}");
+            for text in [serde_json::to_string(&expected).unwrap(), reversed] {
+                let decoded: RelayResponseEnvelope = serde_json::from_str(&text).unwrap();
+                assert_eq!(decoded, expected, "{text}");
+            }
+        }
+        let contradiction = r#"{"request_id":"r","protocol_version":7,"result":"error","payload":{"type":"idle_reservation","data":{"ordinal":null}}}"#;
+        assert!(serde_json::from_str::<RelayResponseEnvelope>(contradiction).is_err());
     }
 }

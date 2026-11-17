@@ -12,8 +12,8 @@
 │                 │Session: ACP pretty name                                                          │                 │
 │                 │Applies when a new environment is explicitly created; Restart keeps current settin│                 │
 │                 │                                                                                  │                 │
-│                 │CPUs:                                                                             │                 │
-│                 │Memory:                                                                           │                 │
+│                 │CPUs: 4                                                                           │                 │
+│                 │Memory (GiB): 8                                                                   │                 │
 │                 │Empty keeps the target's value.                                                   │                 │
 │                 │                                                                                  │                 │
 │                 │Attached directories                                                              │                 │
@@ -40,6 +40,48 @@
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
+=== invalid fractional CPUs (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman                                                                                                        │
+│  │ No messages                                                                                                       │
+│  │              ╭ × Edit container size and mounts ────────────────────────────────────────────────╮                 │
+│                 │Session: ACP pretty name                                                          │                 │
+│                 │Applies when a new environment is explicitly created; Restart keeps current settin│                 │
+│                 │                                                                                  │                 │
+│                 │CPUs: 1.5                                                                         │                 │
+│                 │Memory (GiB): 8                                                                   │                 │
+│                 │Empty keeps the target's value.                                                   │                 │
+│                 │                                                                                  │                 │
+│                 │Attached directories                                                              │                 │
+│                 │  none                                                                            │                 │
+│                 │                                                                                  │                 │
+│                 │Attach host directory:                                                            │                 │
+│                 │Container destination:                                                            │                 │
+│                 │Access: ro · read-only ▾                                                          │                 │
+│                 │                                                                                  │                 │
+│                 │Build cache                                                                       │                 │
+│                 │  /mnt/nvme/mbx                                                                   │  ───────────────╯
+│                 │CPU must be a positive whole number.                                              │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
+│                 │  Cancel     Save                                                                 │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                                                                                                                      │
+│                                                                                                       ───────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+
 === session without build cache (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -55,7 +97,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 │Applies when a new environment is explicitly created; Restart keeps current settin│                 │
 │                 │                                                                                  │                 │
 │                 │CPUs:                                                                             │                 │
-│                 │Memory:                                                                           │                 │
+│                 │Memory (GiB):                                                                     │                 │
 │                 │Empty keeps the target's value.                                                   │                 │
 │                 │                                                                                  │                 │
 │                 │Attached directories                                                              │                 │
@@ -96,7 +138,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │              │Applies when a new environment is explicitly created; Restart keeps │              │
 │              │                                                                    │              │
 │              │CPUs:                                                               │  ion.        │
-│              │Memory:                                                             │              │
+│              │Memory (GiB):                                                       │              │
 │              │Empty keeps the target's value.                                     │              │
 │              │                                                                    │              │
 │              │Attached directories                                                │              │

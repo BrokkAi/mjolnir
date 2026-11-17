@@ -56,6 +56,19 @@ fn managed_setup_keeps_login_intent_through_pending_field_validation() {
     );
     assert_eq!(focused_field(dialog).input.value(), "many");
     assert!(focused_field(dialog).error.is_some());
+    // Hard-won: 2dfa44874: managed setup's own profile template gave a held-open Claude profile the Codex fields.
+    let profile = vec!["profiles".to_owned(), "claude".to_owned()];
+    let shown = visible_keys(&profile, dialog.draft.pointer(&pointer(&profile)).unwrap());
+    assert!(
+        shown.contains(&"claude_permission_mode".to_owned()),
+        "{shown:?}"
+    );
+    assert!(
+        !shown
+            .iter()
+            .any(|key| matches!(key.as_str(), "guardian_review_model" | "codex_profile")),
+        "{shown:?}"
+    );
     replace_text(&mut dashboard, "5");
     let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
     let DashboardAction::SaveSetupAndLogin {
@@ -212,12 +225,12 @@ fn editing_a_profile_disables_sign_in_until_the_change_is_saved() {
 }
 
 #[test]
-fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
+fn disabling_a_profile_keeps_model_based_reviewers() {
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-    dashboard.config.review.profile = Some("codex-1".into());
-    dashboard.config.review.model = Some("review-model".into());
-    dashboard.config.review.effort = Some("high".into());
+    dashboard.config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "review-model".into(),
+        effort: Some("high".into()),
+    }];
     dashboard.begin_setup();
     choose(&mut dashboard, "profiles");
     choose(&mut dashboard, "codex-1");
@@ -234,12 +247,12 @@ fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
         panic!("settings");
     };
     assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], false);
-    assert!(dialog.draft["review"]["profile"].is_null());
-    assert_eq!(dialog.draft["review"]["trigger"], "off");
-    assert_eq!(dialog.draft["review"]["model"], "review-model");
-    assert_eq!(dialog.draft["review"]["effort"], "high");
-    let notice = dialog.notice.as_deref().unwrap();
-    assert!(notice.contains("Code Review"), "{notice}");
+    assert!(dialog.draft["review"].get("trigger").is_none());
+    assert_eq!(
+        dialog.draft["review"]["reviewers"][0]["model"],
+        "review-model"
+    );
+    assert_eq!(dialog.draft["review"]["reviewers"][0]["effort"], "high");
 
     terminal
         .draw(|frame| crate::render::render(frame, &mut dashboard))
@@ -310,7 +323,7 @@ fn detecting_profiles_on_a_machine_without_an_agent_says_so_plainly() {
     assert_eq!(
         notice,
         "No coding agent installation was found on this machine. Add a profile, choose Sign in, \
-         or install Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, or DSH, \
+         or install Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, DSH, or Antigravity, \
          sign in to it once, and choose Detect profiles again."
     );
 }
@@ -338,28 +351,39 @@ fn detecting_profiles_that_all_exist_says_each_agent_already_has_one() {
 }
 
 /// A profile page lists only the settings its kind reads: the guardian review
-/// model and Codex profile belong to Codex alone.
+/// model and Codex profile belong to Codex alone, and the Claude permission
+/// mode to Claude alone. Changing a profile's kind drops the old kind's fields.
 // Hard-won: DSH campaign 2026-10-23: Settings showed guardian and Codex fields for DSH
 #[test]
 fn a_profile_page_hides_codex_only_settings_for_other_kinds() {
-    let keys = |kind: &str| {
+    let path = vec!["profiles".to_owned(), "p".to_owned()];
+    let profile = |kind: &str| {
         let mut draft = json!({"profiles": {"p": {"kind": kind, "home": "/h"}}});
         schema::expand(&mut draft, &mut Vec::new());
-        let path = vec!["profiles".to_owned(), "p".to_owned()];
-        visible_keys(&path, draft.pointer(&pointer(&path)).unwrap())
+        draft
     };
-    let codex_only = ["guardian_review_model", "codex_profile"];
-    assert!(
-        codex_only
-            .iter()
-            .all(|key| keys("codex").contains(&(*key).to_owned()))
-    );
-    for kind in ["claude", "kimi", "grok", "muse", "opencode", "dsh"] {
-        assert!(
-            !keys(kind)
-                .iter()
-                .any(|key| codex_only.contains(&key.as_str())),
-            "{kind}"
-        );
+    let keys = |draft: &Value| visible_keys(&path, draft.pointer(&pointer(&path)).unwrap());
+    let only = [
+        ("codex", "guardian_review_model"),
+        ("codex", "codex_profile"),
+        ("claude", "claude_permission_mode"),
+    ];
+    for kind in ["codex", "claude", "kimi", "grok", "muse", "opencode", "dsh"] {
+        let shown = keys(&profile(kind));
+        for (owner, key) in only {
+            assert_eq!(
+                shown.contains(&key.to_owned()),
+                kind == owner,
+                "{kind} {key}"
+            );
+        }
+    }
+
+    let mut draft = profile("codex");
+    let kind = [path.clone(), vec!["kind".to_owned()]].concat();
+    mj_client::settings::edit::stage(&mut draft, &kind, &json!("claude")).unwrap();
+    let shown = keys(&draft);
+    for (owner, key) in only {
+        assert_eq!(shown.contains(&key.to_owned()), owner == "claude", "{key}");
     }
 }

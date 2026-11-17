@@ -1,0 +1,23 @@
+{
+  "kind": "blind",
+  "name": "bifrost-relation",
+  "diffs": {
+    "python-filescope-enclosing-tie": "P",
+    "cpp-template-inherited-base-signature": "P",
+    "incompatible-semantic-bundle-late-gate": "P",
+    "retained-fill-java-memo-loses-gap": "P",
+    "kotlin-source-constructor-steals-class-header-comment": "P",
+    "mcp-default-advisory-reported-clean": "P",
+    "go-receiver-poisons-package-result-contract-discovery": "P",
+    "python-module-binding-representative-after-event": "P",
+    "jvm-protected-unindexed-hierarchy-denied": "P",
+    "python-module-mutation-repeated-scan-budget": "P",
+    "dependency-failure-drops-independent-model-evidence": "P",
+    "php-indexed-write-reenters-current-rhs": "P",
+    "kotlin-value-class-this-loses-underlying-projection": "P",
+    "go-nilness-ignores-modeled-nonreturn": "P",
+    "java-static-getter-drops-incomplete-route": "P",
+    "unproven-override-family-certifies-empty": "P",
+    "js-synthetic-owner-leaks-file-summary": "P"
+  }
+}

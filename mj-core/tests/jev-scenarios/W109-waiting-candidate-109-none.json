@@ -1,0 +1,297 @@
+{
+  "id": "W109",
+  "title": "Waiting candidate 109 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "4cc0bdc31b12a70a6d9d872ed4b90320",
+    "session_title": "eval33 3501 dsmax",
+    "reply_position": 339243,
+    "captured_at": "2026-10-01T19:58:11.074Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3501: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 0722dea6bcb52ef5335695a701631d157c31cbf4\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn\n[... 2657 bytes omitted from the middle of this message ...]\n|---|---|\n| containers__buildah | go | `vendor/github.com/mattn/go-sqlite3/sqlite3-binding.c` | 9,515,492 |\n| containers__podman-tui | go | same | 9,515,492 |\n| containers__skopeo | go | same | 9,514,430 |\n| clusterpedia-io__clusterpedia | go | same | 9,029,884 |\n| root-gg__plik | go | same | 9,029,884 |\n| balerter__balerter | go | same | 8,469,484 |\n| tdlib__td | cpp | `sqlite/sqlite/sqlite3.c` | 8,274,268 |\n| emweb__wt | cpp | `src/Wt/Dbo/backend/amalgamation/sqlite3.c` | 8,268,891 |\n\n**82 repos in the window carry a C/C++ error span over 50 KB.** Other large offenders include `miniaudio.h` (4,025,780 bytes, in a ts repo) and vendored OpenSSL headers.\n\nGrouped by the language of the *failing file* rather than the window, the family is: c-header 122 repos / 598 occurrences, c 61 / 301, cpp 16 / 80. (The window language is the wrong axis here -- a Go or TypeScript repo reports these because the workspace indexes every language it contains.)\n\n### Why this matters beyond the I1 violation\n\nThis is very likely the same root cause as **#3486**, where `get_symbol_sources` costs 17-46 s per call on repos with vendored C trees and `perf` puts ~57% of CPU in tree-sitter parsing, led by `ts_parser__do_all_potential_reductions` with `ts_parser__recover` present. A file that parses to one multi-megabyte `ERROR` is exactly what makes the GLR recovery path thrash. Fixing the parse may fix the latency; at minimum the two should be investigated together.\n\n### Expected\n\nEither the grammar handles the amalgamation, or the analyzer recognises a total parse failure and records the file as unparsed rather than publishing a declaration range that overlaps an 8 MB error region. Publishing declarations whose ranges sit inside a whole-file `ERROR` means every downstream answer about them is unsound.\n\n### Reproduce\n\nAny of the repos above at their tier-21 pinned heads; the ledger records are at `m4-tier21.jsonl` lines 3304 (buildah), 844 (td), 754 (wt). The full family grouped by failing-file language is in `t21-i1-by-file-language.txt`.\n"
+        },
+        {
+          "id": "agent:15342",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:39327",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:66749",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:67042",
+          "role": "assistant",
+          "text": "Working tree is clean at the required base. Let me capture the before-state evidence and read the routed guidance."
+        },
+        {
+          "id": "agent:68807",
+          "role": "assistant",
+          "text": "The root ERROR wraps a large recovered stack (10K children). Let me re-run binding separately and read the analyzer code seams."
+        },
+        {
+          "id": "agent:87684",
+          "role": "assistant",
+          "text": "Now let me add a temporary evidence driver test (to be removed before the final commit) and start the cold build in the background."
+        },
+        {
+          "id": "agent:91740",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:91930",
+          "role": "assistant",
+          "text": "Build still running. Let me poll it while I re-read the code seams I'll modify."
+        },
+        {
+          "id": "agent:96917",
+          "role": "assistant",
+          "text": "The debug probe ran: both witnesses hit the 10-second parse budget and already return `parse_complete=false`. So the I1 finding must come from a faster (release) production path. Let me examine the fuzzer check and the unparseable path before deciding."
+        },
+        {
+          "id": "agent:115401",
+          "role": "assistant",
+          "text": "Now let me look at the current probe test so I can extend it for before/after evidence with an explicit long budget."
+        },
+        {
+          "id": "agent:118919",
+          "role": "assistant",
+          "text": "Now I'll extend the temporary probe to capture before/after evidence: parse shape + timing, long-budget analysis, and an end-to-end analyzer build on the small fixture."
+        },
+        {
+          "id": "agent:120037",
+          "role": "assistant",
+          "text": "While that compiles, let me check the test helpers used by nearby tests."
+        },
+        {
+          "id": "agent:128065",
+          "role": "assistant",
+          "text": "Before-state evidence is captured. Now let me implement the fix. First, check `salt_before_bump` semantics for the epoch bump."
+        },
+        {
+          "id": "agent:129953",
+          "role": "assistant",
+          "text": "Now add the shared `incomplete_file_state` helper next to `file_state_from_parsed`."
+        },
+        {
+          "id": "agent:130433",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:132281",
+          "role": "assistant",
+          "text": "The handoff is clear. Let me verify the current code placement, then start the incremental build in the background while I read the routed guidance."
+        },
+        {
+          "id": "agent:134635",
+          "role": "assistant",
+          "text": "Now I'll start the incremental test build in a background session while I read the routed guidance."
+        },
+        {
+          "id": "agent:135693",
+          "role": "assistant",
+          "text": "Build finished. Launch the after-fix probe in the background now."
+        },
+        {
+          "id": "agent:139761",
+          "role": "assistant",
+          "text": "After-fix probe confirms the expected shape on both witnesses. Let me capture the before log for comparison."
+        },
+        {
+          "id": "agent:142603",
+          "role": "assistant",
+          "text": "Now I'll write the permanent regression tests. First let me view the exact test insertion area and the comment at the dirty-state skip."
+        },
+        {
+          "id": "agent:149722",
+          "role": "assistant",
+          "text": "Now I'll remove the temporary probe test and add permanent regression tests."
+        },
+        {
+          "id": "agent:154158",
+          "role": "assistant",
+          "text": "The recovered-file publication assertion failed. Let me investigate the store logic before touching the test."
+        },
+        {
+          "id": "agent:161998",
+          "role": "assistant",
+          "text": "Critical discovery: `.c` files use storage key `cpp:c`. Let me check the epoch mapping for that key."
+        },
+        {
+          "id": "agent:164592",
+          "role": "assistant",
+          "text": "The issue is the storage key: `.c` files use the `cpp:c` dialect key. Let me fix the test to use adapter-derived keys."
+        },
+        {
+          "id": "agent:164631",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:165805",
+          "role": "assistant",
+          "text": "Now let me run the focused regression test."
+        },
+        {
+          "id": "agent:166399",
+          "role": "assistant",
+          "text": "Focused test passes. Now format check and start clippy in the background while I review evidence."
+        },
+        {
+          "id": "agent:179646",
+          "role": "assistant",
+          "text": "External load is extreme (load 716 on 96 CPUs, tests blocked 9+ minutes at ~4% CPU). I'll restart the lib suite at reduced concurrency, with measured justification, and log to a file for progress visibility."
+        },
+        {
+          "id": "agent:198734",
+          "role": "assistant",
+          "text": "The fix and focused test are stable, so I'll commit now to protect the work while the long suite runs."
+        },
+        {
+          "id": "agent:200802",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:229591",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:229964",
+          "role": "assistant",
+          "text": "The suite run is compiling the test binary. While it compiles, let me review the committed diff to confirm the details for the report."
+        },
+        {
+          "id": "agent:253235",
+          "role": "assistant",
+          "text": "The suite run finished with two failures in `issue_2275_cpp_sentinel_class_close`, which may be caused by my guard. I need to investigate this carefully. Let me compile a small tree-dump probe against the already-built tree-sitter rlibs to compare the witness and the #2275 fixture structurally."
+        },
+        {
+          "id": "agent:264828",
+          "role": "assistant",
+          "text": "The #2275 tests confirm my guard is too broad: their 660-byte fixture deliberately recovers a sentinel class from a root-ERROR tree, while the issue's family is defined by error spans over 50 KB. Let me verify a large (>50 KB) shrink fixture still produces a root ERROR so I can narrow the guard with a regression test that keeps recovery for small damaged headers."
+        },
+        {
+          "id": "agent:266278",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:300843",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:333873",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:339243",
+          "role": "assistant",
+          "text": "stream disconnected before completion: idle timeout waiting for SSE\n\n"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "e same root cause as **#3486**, where `get_symbol_sources` costs 17-46 s per call on repos with vendored C trees and `perf` puts ~57% of CPU in tree-sitter parsing, led by `ts_parser__do_all_potential_reductions` with `ts_parser__recover` present. A file that parses to one multi-megabyte `ERROR` is exactly what makes the GLR recovery path thrash. Fixing the parse may fix the latency; at minimum the two should be investigated together.\n\n### Expected\n\nEither the grammar handles the amalgamation, or the analyzer recognises a total parse failure and records the file as unparsed rather than publishing a declaration range that overlaps an 8 MB error region. Publishing declarations whose ranges sit inside a whole-file `ERROR` means every downstream answer about them is unsound.\n\n### Reproduce\n\nAny of the repos above at their tier-21 pinned heads; the ledger records are at `m4-tier21.jsonl` lines 3304 (buildah), 844 (td), 754 (wt). The full family grouped by failing-file language is in `t21-i1-by-file-language.txt`.\n",
+    "assistant_text_tail": "stream disconnected before completion: idle timeout waiting for SSE\n\n",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 253235,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "stream disconnected before completion: idle timeout waiting for SSE\n\n"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-01T19:58:25.144Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-01T20:00:22.751Z",
+        "kind": "user",
+        "text": "Judge note. Your previous turn ended with a provider error (a content-safety refusal or a model-at-capacity answer), not with your FINAL REPORT. Nothing in your workspace is lost: continue the task fr"
+      },
+      {
+        "at": "2026-10-01T20:05:34.368Z",
+        "kind": "system",
+        "text": "Interrupted"
+      },
+      {
+        "at": "2026-10-01T20:13:48.284Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-01T21:00:45.298Z",
+        "kind": "user",
+        "text": "Judge note. Your previous turn was cancelled by the harness observer's wall-clock cutoff, which was applied in error: this series limits working time, not wall-clock time, and your working time is und"
+      },
+      {
+        "at": "2026-10-01T21:05:59.343Z",
+        "kind": "agent",
+        "text": "Continuing from the previous state: HEAD is `023941c279` with a temporary uncommitted probe. Let me resolve the anomalous `analyze_ms=0` reading before finalizing."
+      }
+    ]
+  }
+}

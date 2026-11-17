@@ -87,6 +87,9 @@ pub const TEMPORARY_DIRECTORY: &str = "/tmp";
 pub enum ContainerStorage {
     Podman,
     Docker,
+    /// The `mj-worker microvm` engine's state: image bases, per-VM root
+    /// disks and volume disks, on the SSH host.
+    Microvm,
 }
 
 impl ContainerStorage {
@@ -97,6 +100,7 @@ impl ContainerStorage {
         match self {
             Self::Podman => ".local/share/containers",
             Self::Docker => "/var/lib/docker",
+            Self::Microvm => "/var/lib/mj-microvm",
         }
     }
 }
@@ -194,6 +198,12 @@ pub fn session_storage_paths(
         Recorded::SshAppleContainer { host, .. } => {
             (ssh_host_name(host).to_owned(), String::new(), Vec::new())
         }
+        // A Nitro sandbox's disks are sparse files the engine keeps on the host.
+        Recorded::SshNitro { host, .. } => (
+            ssh_host_name(host).to_owned(),
+            ContainerStorage::Microvm.path().to_owned(),
+            Vec::new(),
+        ),
     };
     SessionStoragePaths {
         host,

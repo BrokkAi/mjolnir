@@ -11,6 +11,9 @@ pub(crate) struct SubagentDiscovery {
 /// from the session record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubagentDraft {
+    pub(crate) oracle: bool,
+    pub(crate) oracle_choice: Option<mj_core::config::SubagentChoice>,
+    oracle_configured: bool,
     /// The drafted intent. A harness without sub-agents of its own shows and
     /// submits Native as None; see [`Self::selected`].
     pub(crate) policy: SubagentPolicy,
@@ -22,6 +25,8 @@ pub(crate) struct SubagentDraft {
     harness: Option<mj_core::config::HarnessKind>,
     /// The profile whose remembered policy initialized this draft.
     profile_id: Option<String>,
+    /// Whether the destination target runs with `permissions = "yolo"`.
+    yolo: bool,
 }
 
 /// One entry of the delegation combo box.
@@ -33,6 +38,15 @@ enum DelegationMode {
 }
 
 impl DelegationMode {
+    /// The name the combo box and launch notices give this mode.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Native => "Native",
+            Self::Mjolnir => "Mjolnir",
+            Self::None => "None",
+        }
+    }
+
     fn of(policy: &SubagentPolicy) -> Self {
         match policy {
             SubagentPolicy::Native => Self::Native,
@@ -43,12 +57,26 @@ impl DelegationMode {
 }
 
 impl SubagentDraft {
+    pub(crate) fn oracle_available(&self) -> bool {
+        self.oracle_configured || self.oracle_choice.is_some()
+    }
     pub(crate) fn new(policy: SubagentPolicy) -> Self {
         Self {
+            oracle: true,
             last_mjolnir_policy: policy.uses_mjolnir().then(|| Box::new(policy.clone())),
             policy,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn with_oracle(
+        mut self,
+        enabled: bool,
+        choice: Option<mj_core::config::SubagentChoice>,
+    ) -> Self {
+        self.oracle = enabled;
+        self.oracle_choice = choice;
+        self
     }
 
     /// The entries the combo box lists. Native is hidden for a harness
@@ -116,11 +144,15 @@ impl SubagentDraft {
         self.modes()
             .iter()
             .map(|mode| match mode {
-                DelegationMode::Native => "Native".to_owned(),
                 DelegationMode::Mjolnir => mjolnir.clone(),
-                DelegationMode::None => "None".to_owned(),
+                other => other.label().to_owned(),
             })
             .collect()
+    }
+    /// The combo box's name for the mode of `policy`, as shown for the
+    /// profile's harness.
+    pub(crate) fn policy_label(&self, policy: &SubagentPolicy) -> &'static str {
+        DelegationMode::of(&self.shown(policy)).label()
     }
     pub(crate) fn policy_index(&self) -> usize {
         let mode = DelegationMode::of(&self.selected());
@@ -185,6 +217,10 @@ impl SubagentDraft {
         changed
     }
     pub(crate) fn activate(&mut self, id: WizardControl) -> bool {
+        if id == WizardControl::Oracle && self.oracle_available() {
+            self.combo.open(id, usize::from(!self.oracle));
+            return true;
+        }
         if id != WizardControl::Subagents {
             return false;
         }
@@ -196,10 +232,31 @@ impl SubagentDraft {
             Interaction::ComboBoxCommit(WizardControl::Subagents, selected) => {
                 Some(self.select_policy(*selected))
             }
+            Interaction::ComboBoxCommit(WizardControl::Oracle, selected)
+                if self.oracle_available() =>
+            {
+                let next = *selected == 0;
+                let changed = self.oracle != next;
+                self.oracle = next;
+                Some(changed)
+            }
             _ => None,
         }
     }
     pub(crate) fn declare(&self, form: &mut Dialog<WizardControl>) {
+        if self.oracle_available() {
+            form.declare_with_enabled(
+                WizardControl::Oracle,
+                ControlKind::ComboBox {
+                    len: 2,
+                    selected: self
+                        .combo
+                        .selection(WizardControl::Oracle, usize::from(!self.oracle)),
+                    expanded: self.combo.is_open(WizardControl::Oracle),
+                },
+                true,
+            );
+        }
         form.declare_with_enabled(
             WizardControl::Subagents,
             ControlKind::ComboBox {
@@ -219,8 +276,11 @@ impl SubagentDraft {
         config: &Config,
         snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
         remembered: &SubagentPolicy,
+        remembered_oracle: bool,
+        yolo: bool,
     ) {
         if self.profile_id.as_deref() != Some(profile) {
+            self.oracle = remembered_oracle;
             self.profile_id = Some(profile.to_owned());
             self.chosen_policy = None;
             self.last_mjolnir_policy = remembered
@@ -229,7 +289,7 @@ impl SubagentDraft {
             self.policy = remembered.clone();
             self.combo = ComboBoxState::default();
         }
-        self.update_choices(profile, config, snapshot);
+        self.update_choices(profile, config, snapshot, yolo);
         // Keep the user's intent separate from the available displayed policy.
         let desired = self
             .chosen_policy
@@ -255,8 +315,11 @@ impl SubagentDraft {
         profile: &str,
         config: &Config,
         _snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+        yolo: bool,
     ) {
+        self.yolo = yolo;
         self.harness = config.profiles.get(profile).map(|profile| profile.kind);
+        self.oracle_configured = config.subagents.oracle_configured_for(yolo);
         self.discovery = Some(SubagentDiscovery {
             result: Some(
                 if !config
@@ -264,17 +327,23 @@ impl SubagentDraft {
                     .get(profile)
                     .is_some_and(|p| p.kind.supports_delegation_tools())
                 {
-                    Err("Mjolnir sub-agents need a Claude, Codex, or DSH profile".into())
+                    Err("Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile".into())
                 } else if config
                     .subagents
-                    .effective_choice(
+                    .effective_choice_for(
                         self.last_mjolnir_policy.as_deref().unwrap_or(&self.policy),
                         mj_core::subagent::SubagentTaskType::Straightforward,
+                        yolo,
                     )
                     .is_some()
                 {
-                    // Subtle is optional; straightforward alone enables Mjolnir.
+                    // Subtle and Oracle are optional; straightforward alone enables Mjolnir.
                     Ok(SubagentOptions::default())
+                } else if yolo {
+                    Err(
+                        "Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck \"Use the same subagents on all targets\")"
+                            .into(),
+                    )
                 } else {
                     Err("Set up Mjolnir sub-agents in Settings -> Sub-agents".into())
                 },
@@ -286,20 +355,38 @@ impl SubagentDraft {
 impl DashboardState {
     /// The review step's delegation draft and the profile it is for, when
     /// the open wizard offers the choice.
-    fn review_subagent_draft(&mut self) -> Option<(&mut SubagentDraft, String)> {
+    fn review_subagent_draft(&mut self) -> Option<(&mut SubagentDraft, String, bool)> {
         let applies = matches!(&self.mode, Mode::New(_))
             || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Review && wizard.subagent_choice_applies(self));
         if !applies {
             return None;
         }
-        let profile = match &self.mode {
-            Mode::New(wizard) => self.offered_profiles().nth(wizard.profile)?.0.to_owned(),
-            Mode::Resume(wizard) => wizard.destination_profile(self),
+        let (profile, yolo) = match &self.mode {
+            Mode::New(wizard) => {
+                let target = nth_key(&self.config.targets, wizard.target);
+                (
+                    self.offered_profiles().nth(wizard.profile)?.0.to_owned(),
+                    self.config
+                        .targets
+                        .get(&target)
+                        .is_some_and(TargetTemplate::is_yolo),
+                )
+            }
+            Mode::Resume(wizard) => {
+                let target = nth_key(&self.config.targets, wizard.target);
+                (
+                    wizard.destination_profile(self),
+                    self.config
+                        .targets
+                        .get(&target)
+                        .is_some_and(TargetTemplate::is_yolo),
+                )
+            }
             _ => unreachable!("checked above"),
         };
         match &mut self.mode {
-            Mode::New(wizard) => Some((&mut *wizard.subagents, profile)),
-            Mode::Resume(wizard) => Some((&mut *wizard.subagents, profile)),
+            Mode::New(wizard) => Some((&mut *wizard.subagents, profile, yolo)),
+            Mode::Resume(wizard) => Some((&mut *wizard.subagents, profile, yolo)),
             _ => None,
         }
     }
@@ -314,16 +401,20 @@ impl DashboardState {
         };
         let config = self.config.clone();
         let snapshot = self.profile_capabilities.clone();
-        let (draft, profile) = self.review_subagent_draft()?;
+        let oracle_choices = self.state.last_oracle_choices.clone();
+        let (draft, profile, yolo) = self.review_subagent_draft()?;
+        let remembered_oracle = oracle_choices.get(&profile).copied().unwrap_or(true);
         if creating {
             draft.refresh_create(
                 &profile,
                 &config,
                 &snapshot,
                 remembered.as_ref().expect("Create preference was resolved"),
+                remembered_oracle,
+                yolo,
             );
         } else {
-            draft.update_choices(&profile, &config, &snapshot);
+            draft.update_choices(&profile, &config, &snapshot, yolo);
         }
         None
     }

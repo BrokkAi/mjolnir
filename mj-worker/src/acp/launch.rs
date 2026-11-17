@@ -1,4 +1,81 @@
 use super::*;
+use std::path::Path;
+
+/// One observed identity shared by credential installation and prompt dispatch.
+/// Sampling supplemental recovery evidence never performs filesystem I/O.
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeLoginIdentity(Arc<ClaudeLoginState>);
+
+#[derive(Debug, Default)]
+struct ClaudeLoginState {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    installation: tokio::sync::Mutex<()>,
+    observed: Mutex<(u64, Option<String>)>,
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+impl ClaudeLoginIdentity {
+    pub(crate) fn snapshot(&self) -> (u64, Option<String>) {
+        self.0
+            .observed
+            .lock()
+            .expect("Claude login identity lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn observe(&self, expected: u64, fingerprint: Option<String>) {
+        let mut observed = self
+            .0
+            .observed
+            .lock()
+            .expect("Claude login identity lock poisoned");
+        if observed.0 == expected {
+            observed.1 = fingerprint;
+        }
+    }
+
+    pub(crate) fn installed(&self, fingerprint: Option<String>) {
+        let mut observed = self
+            .0
+            .observed
+            .lock()
+            .expect("Claude login identity lock poisoned");
+        observed.0 = observed
+            .0
+            .checked_add(1)
+            .expect("Claude login revision exhausted");
+        observed.1 = fingerprint;
+    }
+
+    pub(crate) async fn installation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.installation.lock().await
+    }
+}
+
+#[cfg(unix)]
+pub(crate) async fn read_claude_login_fingerprint(path: PathBuf) -> Result<Option<String>> {
+    let (completed, result) = oneshot::channel();
+    // A cancelled file read cannot be interrupted. Keep this read-only thread
+    // outside Tokio's pool, whose shutdown waits for even cancelled blocking
+    // jobs. Dropping its handle lets the worker exit if the filesystem stalls.
+    let _reader = std::thread::Builder::new()
+        .name("claude-login-read".into())
+        .spawn(move || {
+            let read = std::panic::catch_unwind(|| {
+                let (_, bytes) =
+                    mj_core::credentials::read_credential_file(HarnessKind::Claude, &path)?;
+                Ok(mj_core::credentials::claude_access_token_fingerprint(
+                    &bytes,
+                ))
+            });
+            let read = read.unwrap_or_else(|_| Err(anyhow!("Claude login reader panicked")));
+            if let Err(Err(error)) = completed.send(read) {
+                tracing::warn!(%error, "Claude login read failed after its caller stopped");
+            }
+        })
+        .context("start Claude login reader")?;
+    result.await.context("read Claude login identity")?
+}
 
 /// The worker's sub-agent socket and the `mj-agents` role it backs: a parent
 /// delegates through it, a child only hands its report back.
@@ -9,7 +86,8 @@ pub struct SubagentMcpSocket {
     pub agent_mailboxes_enabled: bool,
     /// Whether a parent's spawn tool offers the subtle task type.
     pub subtle_subagents: bool,
-    pub review_gate: bool,
+    /// Whether this launch offers the `mj-review` server beside `mj-agents`.
+    pub review_tools: bool,
     /// False for legacy shared Codex homes, which must retain ACP delivery.
     pub profile_registration: bool,
 }
@@ -28,6 +106,7 @@ impl ReviewerMcpServer {
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
+    pub login_identity: ClaudeLoginIdentity,
     /// Live availability shared with the worker control connection.
     pub operator_away: OperatorAway,
     pub clear_context_request: Option<ContextReset>,
@@ -76,6 +155,12 @@ pub struct LaunchSpec {
     /// idle session reloads once they change. Set when the bridge starts.
     pub imported_logins: Option<super::ImportedLogins>,
     pub execution_policy: ExecutionPolicy,
+    /// The Claude profile's permission mode under configured approvals, from
+    /// the launch config. Read only through `session_enforcement`.
+    pub claude_permission_mode: mj_core::config::ClaudePermissionMode,
+    /// Optional central Brokk Observe guardrail client. The permission
+    /// handler consults it before any automatic approval.
+    pub observe_policy: Option<crate::observe::PolicyClient>,
     pub acp_activity: AcpActivityClock,
     /// When the step the agent is on began. Marked from the same handlers as
     /// `acp_activity`, but only where a new step actually starts.
@@ -116,6 +201,9 @@ impl LaunchSpec {
     }
 }
 
+/// The project-history server's name.
+const MEMORY_MCP_SERVER: &str = "mj-memory";
+
 pub(super) fn project_history_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     if spec
         .project_memory
@@ -139,7 +227,7 @@ pub(super) fn project_history_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     }
     vec![McpServer::Stdio(approve_owned_mcp(
         spec,
-        McpServerStdio::new("mj-memory", spec.command.clone()).args(args),
+        McpServerStdio::new(MEMORY_MCP_SERVER, spec.command.clone()).args(args),
     ))]
 }
 
@@ -170,9 +258,8 @@ pub(super) fn session_request_meta(
     if spec.harness != HarnessKind::Claude {
         return None;
     }
-    // The SDK `result` message ends every model cycle. The worker ends a
-    // prompt at the result that answered it instead of waiting for the
-    // adapter's reply, which the adapter holds while background work runs.
+    // Raw results cover cycles without an AIR task. Foreground prompts end
+    // at PromptResponse, and announced autonomous turns at their task end.
     let mut claude_code = serde_json::Map::from_iter([(
         "emitRawSDKMessages".to_owned(),
         serde_json::json!([
@@ -188,9 +275,7 @@ pub(super) fn session_request_meta(
     if let Some(model) = spec.startup_model() {
         options.insert("model".to_owned(), serde_json::Value::String(model));
     }
-    if let Some(enabled) = spec
-        .harness
-        .execution_enforcement(spec.execution_policy)
+    if let Some(enabled) = super::session_config::session_enforcement(spec)
         .and_then(mj_core::config::ExecutionEnforcement::session_sandbox)
     {
         options.insert(
@@ -198,11 +283,12 @@ pub(super) fn session_request_meta(
             serde_json::json!({ "enabled": enabled }),
         );
     }
-    // TaskStop and TaskOutput stay: they also manage background shell commands.
+    // Hide native discovery, messaging/resumption and workflow orchestration too.
+    // TaskStop stays because it also manages background shell commands.
     if spec.subagent_policy.suppresses_native() {
         options.insert(
             "disallowedTools".to_owned(),
-            serde_json::json!(["Agent", "Task"]),
+            serde_json::json!(["Agent", "Task", "ListAgents", "SendMessage", "Workflow"]),
         );
     }
     if spec.execution_policy == ExecutionPolicy::ConfiguredApprovals {
@@ -226,9 +312,13 @@ pub(super) fn session_request_meta(
         if spec
             .subagent_mcp_socket
             .as_ref()
-            .is_some_and(|socket| socket.review_gate && socket.role.supports_push_gate())
+            .is_some_and(|socket| socket.review_tools)
         {
-            allowed.push("mcp__mj-agents__override_review".into());
+            allowed.extend(
+                mj_core::subagent::REVIEW_MCP_TOOLS
+                    .iter()
+                    .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::REVIEW_MCP_SERVER)),
+            );
         }
         options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
     }
@@ -259,6 +349,7 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
         Vec::new()
     };
     servers.extend(subagent_acp_mcp(spec));
+    servers.extend(review_acp_mcp(spec));
     servers
 }
 
@@ -288,9 +379,6 @@ fn subagent_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
         "--agent-mailboxes-enabled".into(),
         socket.agent_mailboxes_enabled.to_string(),
     ];
-    if socket.review_gate && socket.role.supports_push_gate() {
-        args.push("--review-gate".into());
-    }
     if !socket.subtle_subagents {
         // Only the non-default value is passed, for older workers.
         args.extend(["--subtle-subagents".into(), "false".into()]);
@@ -301,18 +389,53 @@ fn subagent_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
     )))
 }
 
-/// The names of the Mjolnir-owned MCP servers this launch registers over
-/// ACP: project history and delegation. Reviewer servers a person configured
-/// are not Mjolnir's, so they are never in this list.
-pub(super) fn owned_acp_mcp_server_names(spec: &LaunchSpec) -> Vec<String> {
-    project_history_mcp(spec)
-        .into_iter()
-        .chain(subagent_acp_mcp(spec))
-        .filter_map(|server| match server {
-            McpServer::Stdio(server) => Some(server.name),
-            _ => None,
-        })
-        .collect()
+/// The `mj-review` server, when this launch offers it and delivers it over
+/// ACP, on the same terms as `mj-agents`.
+fn review_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
+    if spec.harness == HarnessKind::Claude {
+        return None;
+    }
+    let socket = spec.subagent_mcp_socket.as_ref()?;
+    if socket.profile_registration || !socket.review_tools {
+        return None;
+    }
+    let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
+    let args = socket
+        .role
+        .review_server_args(&socket.path, spec.harness.id());
+    Some(McpServer::Stdio(approve_owned_mcp(
+        spec,
+        McpServerStdio::new(mj_core::subagent::REVIEW_MCP_SERVER, worker).args(args),
+    )))
+}
+
+/// The Mjolnir-owned MCP servers this launch registers over ACP, each with the
+/// tools it lists: project history, delegation and review. Reviewer servers a
+/// person configured are not Mjolnir's, so they are never in this list.
+pub(super) fn owned_acp_mcp_tools(spec: &LaunchSpec) -> Vec<(String, Vec<String>)> {
+    let names = |tools: &[&str]| tools.iter().map(|tool| (*tool).to_owned()).collect();
+    let mut owned = Vec::new();
+    for server in project_history_mcp(spec) {
+        if let McpServer::Stdio(server) = server {
+            // The history server lists its tools only with a history socket.
+            let tools = spec
+                .project_memory
+                .as_ref()
+                .is_some_and(|memory| memory.history_socket.is_some())
+                .then(crate::memory_mcp::tool_names)
+                .unwrap_or_default();
+            owned.push((server.name, tools));
+        }
+    }
+    if let (Some(McpServer::Stdio(server)), Some(socket)) =
+        (subagent_acp_mcp(spec), &spec.subagent_mcp_socket)
+    {
+        owned.push((server.name, names(socket.role.tool_names())));
+    }
+    if let Some(McpServer::Stdio(server)) = review_acp_mcp(spec) {
+        owned.push((server.name, names(mj_core::subagent::REVIEW_MCP_TOOLS)));
+    }
+    owned
 }
 
 /// Only owned registrations opt in; yolo and other harnesses stay unchanged.
@@ -329,6 +452,176 @@ fn approve_owned_mcp(spec: &LaunchSpec, server: McpServerStdio) -> McpServerStdi
     }
 }
 
+/// The project agy runs every ACP conversation in (its log says
+/// "Conversation using project ID: default-cli-project"). agy reads that
+/// project's permission grants from `config/projects/<id>.json` under its
+/// `--gemini-dir`.
+const ANTIGRAVITY_PROJECT_ID: &str = "default-cli-project";
+
+/// Every server name Mjolnir may register, so a grant left by an earlier
+/// launch for a server this launch no longer registers is removed.
+const OWNED_MCP_SERVERS: [&str; 3] = [
+    MEMORY_MCP_SERVER,
+    mj_core::subagent::SUBAGENT_MCP_SERVER,
+    mj_core::subagent::REVIEW_MCP_SERVER,
+];
+
+/// Trust the Mjolnir-owned MCP servers this launch registered over ACP, for
+/// agy in its guardian (Auto) mode, which asks a person before every MCP tool
+/// call. agy names a call `mcp_<server>_<tool>` and the request says nothing
+/// more, so the title cannot tell `mj-agents`/`send_message` from a foreign
+/// server `mj-agents_send`/`message`. agy's own grant rule
+/// `mcp(<server>/*)` names the server, and agy matches it against the server
+/// that owns the tool, so the lookalike still asks (checked against agy 1.5.8;
+/// `tests/e2e/antigravity_owned_mcp_grants.py` repeats the check). That is the
+/// whole mechanism: the worker answers none of agy's permission requests for
+/// these servers. Claude's allowed tools and Codex's server approval mode do
+/// the same for those harnesses.
+///
+/// Also grant reads below the home directory agy sees in its launch environment.
+/// A trailing directory separator allows nested files and keeps sibling paths
+/// outside the grant (checked against agy 1.5.8). This grants no writes or
+/// commands; agy keeps applying its Auto-mode policy to those tools.
+///
+/// Unconstrained targets run agy with `--dangerously-skip-permissions`, which
+/// already approves every call.
+pub(super) fn stage_antigravity_grants(spec: &LaunchSpec) -> Result<()> {
+    if spec.harness != HarnessKind::Antigravity
+        || spec.execution_policy != ExecutionPolicy::ConfiguredApprovals
+    {
+        return Ok(());
+    }
+    let home = spec
+        .environment
+        .get(spec.harness.home_env())
+        .map(|value| spec.harness.home_from_environment(value))
+        .with_context(|| {
+            format!(
+                "the Antigravity launch has no {}, so its permission grants cannot be staged",
+                spec.harness.home_env()
+            )
+        })?;
+    // agy uses Go's os.UserHomeDir: USERPROFILE on Windows, HOME elsewhere.
+    // Its process receives exactly spec.environment, without worker inheritance.
+    let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let user_home = PathBuf::from(spec.environment.get(home_variable).with_context(|| {
+        format!(
+            "the Antigravity launch has no {home_variable}, so its home read grant cannot be staged"
+        )
+    })?);
+    anyhow::ensure!(
+        user_home.is_absolute() && user_home.parent().is_some(),
+        "Antigravity {home_variable} must name an absolute home directory below the filesystem root: {}",
+        user_home.display()
+    );
+    let path = home
+        .join("config/projects")
+        .join(format!("{ANTIGRAVITY_PROJECT_ID}.json"));
+    let existing = match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("parse Antigravity project file {}", path.display()))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read Antigravity project file {}", path.display()));
+        }
+    };
+    // Every home read rule a launch has staged into this profile, so a later
+    // launch with another home removes the earlier rule instead of keeping
+    // both homes readable. It is written before the project file, so a rule
+    // can never reach the project file without being recorded here first.
+    // It lives outside agy's config directory, which agy reads as its own.
+    let staged_path = home.join("mj-home-read-grants.json");
+    let mut staged_reads: Vec<String> = match std::fs::read(&staged_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse {}", staged_path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", staged_path.display()));
+        }
+    };
+    let read_rule = home_read_rule(&user_home)?;
+    if !staged_reads.contains(&read_rule) {
+        staged_reads.push(read_rule.clone());
+        let mut bytes = serde_json::to_vec_pretty(&staged_reads)
+            .context("serialize the staged home read grants")?;
+        bytes.push(b'\n');
+        mj_core::config::atomic_write(&staged_path, &bytes)
+            .with_context(|| format!("write {}", staged_path.display()))?;
+    }
+    let servers = owned_acp_mcp_tools(spec)
+        .into_iter()
+        .map(|(server, _)| server)
+        .collect::<Vec<_>>();
+    let mut project = with_antigravity_grants(existing, &servers, &read_rule, &staged_reads)
+        .with_context(|| format!("update Antigravity project file {}", path.display()))?;
+    project.push(b'\n');
+    mj_core::config::atomic_write(&path, &project)
+        .with_context(|| format!("write Antigravity project file {}", path.display()))
+}
+
+/// agy's rule for reads below `user_home`. The trailing separator keeps
+/// same-prefix siblings such as `/home/al2` outside a grant for `/home/al`.
+fn home_read_rule(user_home: &Path) -> Result<String> {
+    Ok(format!(
+        "read_file({})",
+        user_home
+            .join("")
+            .to_str()
+            .context("Antigravity home is not UTF-8")?
+    ))
+}
+
+/// agy's project file with `mcp(<server>/*)` allowed for `servers` and for no
+/// other Mjolnir server, plus `read_rule` and none of the earlier
+/// `staged_reads`. Other project entries and grants are preserved.
+fn with_antigravity_grants(
+    existing: Option<serde_json::Value>,
+    servers: &[String],
+    read_rule: &str,
+    staged_reads: &[String],
+) -> Result<Vec<u8>> {
+    fn object<'a>(
+        parent: &'a mut serde_json::Map<String, serde_json::Value>,
+        key: &str,
+    ) -> Result<&'a mut serde_json::Map<String, serde_json::Value>> {
+        parent
+            .entry(key)
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| format!("{key} is not a JSON object"))
+    }
+    let rule = |server: &str| format!("mcp({server}/*)");
+    let mut project = existing.unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    let root = project
+        .as_object_mut()
+        .context("the project file is not a JSON object")?;
+    let grants = object(root, "permissionGrants")?;
+    let config = object(grants, "permissionGrants")?;
+    let allow = config
+        .entry("allow")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("allow is not a JSON array")?;
+    let owned = OWNED_MCP_SERVERS.map(rule);
+    allow.retain(|entry| {
+        !entry.as_str().is_some_and(|rule| {
+            rule == read_rule
+                || staged_reads.iter().any(|staged| staged == rule)
+                || owned.iter().any(|owned| owned == rule)
+        })
+    });
+    allow.extend(
+        servers
+            .iter()
+            .map(|server| serde_json::Value::String(rule(server))),
+    );
+    allow.push(serde_json::Value::String(read_rule.to_owned()));
+    serde_json::to_vec_pretty(&project).context("serialize the project file")
+}
+
 fn session_mcp(spec: &LaunchSpec, include_history_tools: bool) -> Vec<McpServer> {
     let mut servers = extra_mcp(spec);
     if include_history_tools {
@@ -337,19 +630,88 @@ fn session_mcp(spec: &LaunchSpec, include_history_tools: bool) -> Vec<McpServer>
     servers
 }
 
+/// Environment variables that name Mjolnir's build-tool cache directories. The
+/// worker adds these to the session's additional directories, and the notice
+/// for directories a harness cannot take uses them to say what was dropped.
+pub(crate) const TOOL_CACHE_DIRECTORY_VARIABLES: [&str; 3] =
+    ["MJ_TOOL_CACHE_DIR", "MJ_NX_HOME_DIR", "MJ_TOOL_CACHE_HOME"];
+
+/// The additional directories one ACP connection can take, and what could not
+/// be passed.
+///
+/// An agent that accepts `additionalDirectories` says so in
+/// `sessionCapabilities`. One that does not rejects a non-empty list and
+/// fails session creation (Grok Build: "a session works only in its cwd",
+/// #1433), so the list is withheld from it and the session starts with its
+/// working directory alone.
+pub(super) struct SessionDirectories {
+    pub accepted: Vec<PathBuf>,
+    /// Set when directories were withheld: what the person should know.
+    pub notice: Option<String>,
+}
+
+impl SessionDirectories {
+    pub(super) fn negotiate(
+        spec: &LaunchSpec,
+        capabilities: &agent_client_protocol::v1::schema::SessionCapabilities,
+    ) -> Self {
+        if capabilities.additional_directories.is_some() || spec.additional_directories.is_empty() {
+            return Self {
+                accepted: spec.additional_directories.clone(),
+                notice: None,
+            };
+        }
+        let tool_cache = TOOL_CACHE_DIRECTORY_VARIABLES
+            .iter()
+            .filter_map(|name| spec.environment.get(*name).map(PathBuf::from))
+            .collect::<Vec<_>>();
+        let described = spec
+            .additional_directories
+            .iter()
+            .map(|directory| {
+                let kind = if spec
+                    .project_memory
+                    .as_ref()
+                    .is_some_and(|memory| &memory.root == directory)
+                {
+                    "project memory"
+                } else if tool_cache.contains(directory) {
+                    "tool cache"
+                } else {
+                    "workspace directory"
+                };
+                format!("{kind} {}", directory.display())
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Self {
+            accepted: Vec::new(),
+            notice: Some(format!(
+                "{} does not accept additional directories over ACP and limits a session to its working directory, so this session starts without them: {described}. The agent may not be able to read or write these directories.",
+                spec.harness.display_name()
+            )),
+        }
+    }
+}
+
 pub(super) fn new_session_request(
     spec: &LaunchSpec,
+    directories: &[PathBuf],
     include_history_tools: bool,
 ) -> NewSessionRequest {
     let request = NewSessionRequest::new(spec.cwd.clone())
-        .additional_directories(spec.additional_directories.clone())
+        .additional_directories(directories.to_vec())
         .meta(session_request_meta(spec, include_history_tools));
     request.mcp_servers(session_mcp(spec, include_history_tools))
 }
 
-pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> LoadSessionRequest {
+pub(super) fn load_session_request(
+    spec: &LaunchSpec,
+    directories: &[PathBuf],
+    session_id: SessionId,
+) -> LoadSessionRequest {
     LoadSessionRequest::new(session_id, spec.cwd.clone())
-        .additional_directories(spec.additional_directories.clone())
+        .additional_directories(directories.to_vec())
         // The servers Mjolnir owns travel on every launch, because a bridge
         // that opens the session again is a new harness process: Codex builds
         // the resumed thread's MCP set from this request and recovers nothing
@@ -361,10 +723,11 @@ pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> 
 
 pub(super) fn resume_session_request(
     spec: &LaunchSpec,
+    directories: &[PathBuf],
     session_id: SessionId,
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(session_id, spec.cwd.clone())
-        .additional_directories(spec.additional_directories.clone())
+        .additional_directories(directories.to_vec())
         .mcp_servers(session_mcp(spec, true))
         .meta(session_request_meta(spec, true))
 }

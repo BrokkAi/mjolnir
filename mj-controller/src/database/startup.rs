@@ -11,6 +11,55 @@ pub struct StartupDelivery {
     pub error: Option<String>,
 }
 
+/// What status readers need from a session's latest startup group, computed
+/// once when the group is loaded, so the daemon keeps no per-step strings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartupGroupStatus {
+    pub group_id: Option<String>,
+    /// The first failed or rejecting step's error, when any step failed.
+    pub failure: Option<Option<String>>,
+    /// Whether any step is still pending, delivering or accepted.
+    pub pending: bool,
+    /// When the last step is done: whether it was an API prompt (or why its
+    /// payload could not be read) and its acceptance ordinal. Parse failures
+    /// stay visible at the same decision point as before.
+    pub last_done: Option<(std::result::Result<bool, String>, Option<u64>)>,
+}
+
+impl StartupGroupStatus {
+    /// `None` when the group has no steps.
+    pub fn of(steps: &[StartupDelivery]) -> Option<Self> {
+        let last = steps.last()?;
+        Some(Self {
+            group_id: last.group_id.clone(),
+            failure: steps
+                .iter()
+                .find(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
+                .map(|step| step.error.clone()),
+            pending: steps
+                .iter()
+                .any(|step| matches!(step.phase.as_str(), "pending" | "delivering" | "accepted")),
+            last_done: (last.phase == "done").then(|| {
+                (
+                    serde_json::from_str::<crate::daemon::StartupStep>(&last.step_json)
+                        .map(|step| matches!(step, crate::daemon::StartupStep::ApiPrompt { .. }))
+                        .map_err(|error| error.to_string()),
+                    last.accepted_ordinal,
+                )
+            }),
+        })
+    }
+}
+
+pub(super) fn load_latest_startup_status_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<StartupGroupStatus>> {
+    Ok(StartupGroupStatus::of(&load_latest_startup_group_with(
+        connection, session_id,
+    )?))
+}
+
 pub fn enqueue_startup_deliveries(
     deliveries: Vec<StartupDelivery>,
 ) -> Result<Vec<StartupDelivery>> {

@@ -223,13 +223,52 @@ impl DashboardState {
         if self.pane_menu.is_some() {
             return self.handle_pane_menu_event(Event::Mouse(mouse));
         }
+        // An open away dialog owns the pointer, so no background menu opens
+        // under it.
         if mouse.kind == MouseEventKind::Down(MouseButton::Right)
             && matches!(self.mode, Mode::Dashboard)
-            && let Some(pane) = self.chat_region_contains(mouse.column, mouse.row)
+            && self.away_dialog().is_none()
         {
-            self.begin_pane_menu(pane);
-            self.record_event_handled();
-            return DashboardAction::None;
+            // A right-clicked profile row offers its load-balancing menu.
+            let quota_hit = self
+                .quota_row_areas
+                .borrow()
+                .iter()
+                .find(|(_, row)| row.contains((mouse.column, mouse.row).into()))
+                .map(|(id, _)| id.clone());
+            if let Some(profile_id) = quota_hit {
+                self.begin_quota_row_menu(&profile_id, (mouse.column, mouse.row));
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            if let Some(workspace_id) = self
+                .workspace_tab_areas
+                .iter()
+                .find(|(_, area)| area.contains((mouse.column, mouse.row).into()))
+                .map(|(workspace_id, _)| workspace_id.clone())
+            {
+                self.begin_workspace_row_menu(&workspace_id, (mouse.column, mouse.row));
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            // A right-clicked session row opens a small menu for that
+            // session, anchored at the click.
+            if let Some((index, _)) = self
+                .session_row_areas
+                .iter()
+                .find(|(_, row)| row.contains((mouse.column, mouse.row).into()))
+                && let Some(id) = self.session_menu_ids.get(*index).cloned()
+                && self.state.sessions.contains_key(&id)
+            {
+                self.begin_session_row_menu(&id, (mouse.column, mouse.row));
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            if let Some(pane) = self.chat_region_contains(mouse.column, mouse.row) {
+                self.begin_pane_menu(pane);
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
         }
         if self.component_modal_open() {
             return self.handle_component_event(crossterm::event::Event::Mouse(mouse));
@@ -352,12 +391,22 @@ impl DashboardState {
         // when it produces no action: the frame the next pointer event is
         // hit-tested against has to be rebuilt after it.
         match mouse.kind {
+            // The Sessions wheel scrolls the list under a fixed selection; the
+            // short Targets and Quota lists move their selection instead.
             MouseEventKind::ScrollUp if rows_visible => {
-                self.scroll_selection_for(hovered, -1);
+                if hovered == Focus::Sessions {
+                    self.scroll_sessions_view(-1);
+                } else {
+                    self.scroll_selection_for(hovered, -1);
+                }
                 self.record_event_handled();
             }
             MouseEventKind::ScrollDown if rows_visible => {
-                self.scroll_selection_for(hovered, 1);
+                if hovered == Focus::Sessions {
+                    self.scroll_sessions_view(1);
+                } else {
+                    self.scroll_selection_for(hovered, 1);
+                }
                 self.record_event_handled();
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -670,7 +719,7 @@ impl DashboardState {
             let confirmation = Confirmation::RecoverFailed {
                 session_id: session.id.clone(),
                 error: session.last_error.clone(),
-                recoverable: session.checkpoint.is_some(),
+                recoverable: session.checkpoint.is_some() || session.target.is_some(),
             };
             self.mode = Mode::Confirm(
                 ConfirmDialog::new(confirmation)
@@ -689,14 +738,22 @@ impl DashboardState {
             }));
             return DashboardAction::None;
         }
-        // A failed session has two reasonable answers - read what it did, or
-        // put it back on a fresh target - and recovery replaces the target, so
-        // the surface asks rather than guessing.
+        // A stopped row is listed only while its failure needs a person; Enter
+        // resumes it, unless the dialog would refuse the same record.
+        if !session.state.is_active() {
+            if let Some(reason) = crate::resume::unresumable_reason(session.state) {
+                self.notices.set(crate::resume::unresumable_notice(reason));
+                return DashboardAction::None;
+            }
+            let session_id = session.id.clone();
+            return self.begin_resume_for(&session_id);
+        }
+        // Failed sessions can be inspected or resumed in their retained environment.
         if session.state == SessionState::Error {
             let confirmation = Confirmation::RecoverFailed {
                 session_id: session.id.clone(),
                 error: session.last_error.clone(),
-                recoverable: session.checkpoint.is_some(),
+                recoverable: session.checkpoint.is_some() || session.target.is_some(),
             };
             self.mode = Mode::Confirm(
                 ConfirmDialog::new(confirmation)

@@ -11,7 +11,7 @@ mj [--instance <name>] [--workspace <name>] [command]
 
 `mj --workspace <name>` with no command opens the dashboard in that workspace. Given before a command that works in a workspace, it applies to that command. It is not a global option: the commands that work in a workspace (`mj new`, `mj acp`, `mj sessions`, `mj events`, `mj resume`, and `mj import`) take `--workspace <name>` after the command name too, and the other commands refuse it there. `mj new` and `mj acp` require it. `mj sessions` and `mj events` show only that workspace when it is given, and every workspace when it is not. `mj import`, and `mj resume --wiki` when it imports another tool's session, put the session in it and need it when the instance has more than one workspace.
 
-`--instance` (`-i`, or `MJ_INSTANCE`) is global and runs a fully isolated copy — configuration, database, daemon, and logs under `instances/<name>` (for example `mj -i dev daemon status`). Hidden worker, broker, daemon-run, and desktop-bootstrap commands are internal implementation interfaces and are intentionally omitted here.
+`--instance` (`-i`, or `MJ_INSTANCE`) is global and runs a fully isolated copy — configuration, database, daemon, and logs under `instances/<name>` (for example `mj -i dev daemon status`). Hidden worker, broker, and daemon-run commands are internal implementation interfaces and are intentionally omitted here.
 
 `mj acp` is listed in `mj --help`. It is the ACP agent a program starts instead
 of a coding harness, and is documented in [ACP agent](/acp-agent/).
@@ -26,10 +26,9 @@ of a coding harness, and is documented in [ACP agent](/acp-agent/).
 | `mj workspaces list [--json]` | List workspaces without a terminal. |
 | `mj workspaces create <name> [--json]` | Create a workspace, or select the one that already has the name. |
 | `mj go [--setup] [--global-default] [<folder>]` | Open the dashboard on a folder (default: the current directory) with its remembered account and target. `--setup` changes that folder's setup; `--global-default` also makes it the default for new projects. |
-| `mj simple [<folder>]` | Open the folder's last running Simple session or start one immediately with the default enabled agent, the local `localhost` target, and an isolated checkout. Automatic turn review is off for the session. Commands are direct Ctrl-key chords with no prefix, so Ctrl+B remains available to tmux. |
-| `mj app` | Open the authenticated web viewer in the separate `mj-desktop` application. |
+| `mj simple [<folder>]` | Open the folder's last running Simple session or start one immediately with the default enabled agent, the local `localhost` target, and an isolated checkout. Commands are direct Ctrl-key chords with no prefix, so Ctrl+B remains available to tmux. |
 
-Use `prefix+q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers `mj app` and browser access.
+Use `prefix+q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers browser access.
 
 `mj simple` is intentionally narrower than `mj go`: it does not show the
 profile, target, project, or review wizard, does not choose a remote or
@@ -83,6 +82,72 @@ mj doctor --smoke
 Doctor checks configuration compatibility, harness authentication, worker binaries, container runtimes, SSH targets, AWS prerequisites, and Apple Container support. Results are classified as ready, warning, fixable, or unsupported.
 
 `--json` emits a machine-readable array. `--smoke` adds real disposable pull/run probes where a target supports them; run it after resolving ordinary fixable checks because it can download an image and provision short-lived resources.
+
+## Publish sessions to Brokk Observe
+
+```text
+mj observe status [--json]
+mj observe export --session <id> [--output <path>]
+```
+
+Mjolnir publishes sessions itself; neither the Claude Code nor the Codex
+Observe plugin is required. Set `OBSERVE_URL` and `OBSERVE_TOKEN`, or put the
+same two values in `~/.config/brokk-observe/config`. Environment variables win
+one at a time, so managed environment settings can override either value.
+`OBSERVE_CONFIG` selects a different configuration file. Start or restart the
+daemon after the values are in place.
+
+Each session is written as a Mjolnir orchestrator session with the selected
+harness, native session id, worker, target, profile, model, git context, parent
+session, prompts, tool calls and results, turn boundaries, usage, and session
+end. Events first enter a durable local spool. Delivery is ordered and retried
+in the background, so an unavailable Observe server never blocks or cancels a
+session. Existing Claude Code or Codex plugin events are correlated by native
+session id and do not create a second top-level session.
+
+On the first configured daemon start, SessionWiki supplies the ids of earlier
+Mjolnir sessions. Mjolnir reads their full canonical transcripts from its own
+checkpoint store, marks them as historical, and publishes them through the same
+idempotent path. Historical events retain their original timestamps and are
+marked imported; they do not raise live alerts or start an automatic audit.
+SessionWiki is the discovery index; it is not used as the raw event source
+because its tool projection is summarized.
+
+`status` reports the active configuration, automatic delivery mode, spool, and
+the last success or failure. `export` is a diagnostic path: it reads a session
+through the daemon and writes the same newline-delimited envelopes to standard
+output or `--output` without uploading them. Re-running an export produces the
+same event identities.
+
+The canonical transcript does not retain a separate native compaction
+boundary or every permission prompt. Those gaps are visible rather than
+invented. Observe records a policy decision and permission outcome when
+Mjolnir enforcement is active. If Mjolnir's full checkpoint has already been
+removed by its archive-retention job, SessionWiki can still find the session
+but its summarized history is not presented as a full audit record. Token
+usage is included when the durable usage rows remain available; a
+checkpoint-only reconstruction does not invent missing usage.
+
+Set `OBSERVE_ENFORCE=true` on the Mjolnir daemon with `OBSERVE_URL` and
+`OBSERVE_TOKEN`, or put all three values in the Observe config file, to enable
+central guardrails. Enforcement currently supports
+DSH only because dsh-acp asks Mjolnir before every command, write, and MCP call.
+Other harnesses may auto-approve tools internally, so Mjolnir refuses their
+sessions rather than claiming protection it cannot provide.
+
+`OBSERVE_TIMEOUT` is the whole-number policy deadline in seconds and defaults
+to 3. A server or network failure selects the harness's one-time allow by
+default; set `OBSERVE_FAIL_CLOSED=true` to select its one-time rejection
+instead. `deny` rejects one call without cancelling the turn, `ask` opens
+Mjolnir's normal permission form, and `warn` is shown in Mjolnir's notices
+before the existing approval behavior continues.
+
+Observe records a runtime decision as enforced only after Mjolnir confirms
+that the permission response was delivered. If that acknowledgement is lost,
+the decision remains visible as a policy match that was not known to have been
+applied. The acknowledgement also records the resulting permission outcome:
+approved, rejected, warned, or cancelled. The Observe token is kept in the
+worker launch configuration and is not added to the harness environment.
 
 ## Authenticate a profile
 
@@ -149,9 +214,8 @@ are not importable yet either.
 | `--allow-dirty` | Proceed when the source Git checkouts have uncommitted changes. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
-| `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
-| `--review-count <count>` | Independent reviewer sessions, overriding the configured count (default 2). 1–3 is reasonable; more has diminishing returns. Used alone selects turn review. |
-| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or a named profile's effort. Auto always uses High. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
+| `--review <off\|push>` | Set the imported session's review mode, overriding global reviewers. |
+| `--reviewer MODEL[:EFFORT]` | Add a reviewer choice; repeat up to three times. The final colon is an effort separator only for `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (for example, `x:0:high` uses model `x:0` and effort `high`). A trailing colon means no effort and removes that colon, so `foo:high:` selects model `foo:high`. Other suffixes, such as `:free` or `:latest`, remain part of the model ID. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import leaves the source checkout and the harness's source transcript unchanged. The imported session starts suspended and is available through `prefix+g`.
@@ -181,6 +245,8 @@ mj move --session <id> [--target <target-id>] [--profile <profile-id>]
         [--subagents native|mjolnir|none]
         [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
         [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
+        [--oracle enabled|disabled]
+        [--subagent-oracle <model>] [--subagent-oracle-effort <effort>]
 mj move-sources --session <id> [--cleanup <operation-id> --yes]
 ```
 
@@ -204,8 +270,17 @@ the matching task choice for this session; each unspecified type uses its global
 choice. Either override implies Mjolnir. The matching
 `--subagent-*-effort` flag requires its model flag. Omitted policy retains
 the session's override. `--subagents none` removes delegation tools entirely;
-it needs a Claude, Codex, or DSH session. A retry of a sealed
+every session accepts it. A retry of a sealed
 Move retains its recorded policy; an explicit different policy is refused.
+
+`--oracle enabled|disabled` turns the session's oracle on or off, and
+`--subagent-oracle M` overrides the oracle model for this session and implies
+`enabled`; neither depends on the delegation policy. `--subagent-oracle-effort`
+requires `--subagent-oracle`, and `adaptive` is invalid. Omitted flags retain the
+session's choice, and turning the oracle off keeps its model override. Combining
+`--subagent-oracle` with `--oracle disabled` is refused. When you ask for the
+oracle but no model is configured or given, the Move still runs with the oracle
+off and says so.
 
 A session that works in a bare checkout on an SSH host cannot move to
 another machine. Its working tree is the checkout itself, so `--target` is
@@ -290,8 +365,10 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
-       [--review <off|turn|push>] [--review-count <count>] [--review-model <name>] [--review-effort <name>]
-       [--review-tier quick|extended] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
+       [--oracle enabled|disabled]
+       [--subagent-oracle <model>] [--subagent-oracle-effort <effort>]
+       [--review <off|push>] [--reviewer MODEL[:EFFORT]]...
+       [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
           [--timeout <seconds>] [--return-on-input] [--json]
@@ -312,15 +389,17 @@ mj resume (--session <id> | --wiki <sessionwiki-id>)
 mj interrupt-turn --session <id> [--json]
 mj review start --session <id> [--json]
 mj review status --session <id> [--json]
-mj review (forward | dismiss | cancel) --session <id> [--json]
+mj review show --session <id> [--review <id>] [--json]
 mj stop-task --session <id> (<task-id> | --all) [--json]
 mj api-info [--json]
+mj api-token
 mj events [--session <id>] [--workspace-id <id>] [--workspace <name>] [--after-seq <seq>]
 mj usage --session <id> [--after-seq <seq>] [--limit <count>] [--json]
 mj put-file --session <id> --path <workspace-relative path> [--overwrite] [--json] <source>|-
 mj elicitations --session <id> [--json]
 mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-file <path>]
-mj models --profile <id> [--model <name>] [--json]
+mj models [--profile <id>] [--model <name> | --unrestricted] [--with-disabled] [--json]
+mj quota [--profile <id>] [--refresh] [--with-disabled] [--json]
 mj set-config --session <id> [--key <key> --value <value>] [--json]
 mj ui pane (sessions | targets | profiles) (minimized | standard | maximized) [--json]
 mj ui show <session-id> [--right | --below] [--json]
@@ -362,15 +441,17 @@ mj new --workspace eval --bundle product --target builder \
 - `mj new --model <name>` chooses the enabled, usable profile offering that
   exact model with the strongest quota headroom relative to its reset times,
   then starts the session on it. It conflicts with
-  `--profile`; the saved default profile breaks quota ties. If `--effort` is
+  `--profile`; profiles named in `[quota] prefer` lead quota ties in the order
+  listed, then the saved default profile. If `--effort` is
   supplied, the selected profile must offer that exact effort for the model or
   the request fails.
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
   Native, or to None for a DSH profile. DSH has no sub-agents of its own, so it
-  refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude, Codex, or DSH profile. Mjolnir requires a Claude, Codex, or DSH parent and a straightforward
-  choice in `[subagents.straightforward]` or a session override. The subtle
-  choice in `[subagents.subtle]` is optional. Configure global defaults in
+  refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; every
+  profile accepts it. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
+  choice in `[subagents.straightforward]`, or `[subagents.yolo.straightforward]`
+  on an SSH bare target with `permissions = "yolo"`, or a session override. The subtle
+  choice in the same set is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.
   `--subagent-straightforward M` and `--subagent-subtle M` override only their
   named task type; an unspecified type uses its global choice. Either implies
@@ -384,15 +465,19 @@ mj new --workspace eval --bundle product --target builder \
   every child uses the straightforward choice, and the parent is told to
   delegate straightforward work.
   Mjolnir chooses an enabled profile offering its model and effort by quota.
-- `mj new --review off|turn|push` sets the session's trigger, overriding
+- `mj new --oracle enabled|disabled` chooses whether the session may consult
+  the oracle, a read-only advisor behind the `ask_oracle` tool. It works with
+  any delegation policy and any harness. Omitted uses the choice last made for
+  the profile, which starts enabled. The oracle needs a model in
+  `[subagents.oracle]` or a session override. `--subagent-oracle M` overrides the
+  model for this session and implies `enabled`; `--subagent-oracle-effort`
+  requires it, and `adaptive` is invalid. Combining `--subagent-oracle` with
+  `--oracle disabled` is refused. When you ask for the oracle without a model,
+  the session starts with the oracle off and says so.
+- `mj new --review off|push` sets the session's review mode, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
-  adopts. `--review-model <name>` and `--review-effort <name>` set reviewer
-  choices; Auto always uses High effort. `--review-count <count>` selects the
-  number of independent reviewers (default 2). 1–3 is reasonable; more has
-  diminishing returns. Without `--review`, any of these options selects `turn`. The deprecated
-  `--review-tier quick|extended` also selects `turn` when used alone, but its
-  value is ignored. See
-  [per-session settings](/turn-review/#per-session-settings).
+  adopts. Repeat `--reviewer MODEL[:EFFORT]` up to three times to choose reviewers. See
+  [per-session settings](/turn-review/#per-session-settings). An empty global reviewer list means no reviewers; choose rows or press **Autoconfigure** in Settings → Code Review.
 - `mj new --no-project-memory` starts the session with no project memory:
   nothing from the workspace's project memory is put in the agent's startup
   context, and the harness is offered no memory directory to write to. Its
@@ -429,9 +514,26 @@ mj new --workspace eval --bundle product --target builder \
   `--overwrite`.
 - `mj fetch` copies a file, or a directory as a zip archive, from a session's
   target to this machine and prints where it landed. See below.
-- `mj models` lists the models and efforts a profile offers.
-- `mj set-config` applies any selectable session setting the harness advertises,
-  such as the model, effort, approval mode, or collaboration mode.
+- `mj models` lists the models and efforts a profile offers, after the profile's
+  `models` allow-list; `--unrestricted` lists everything the harness advertises.
+  Without `--profile` it aggregates every enabled profile: one row per model,
+  normalized across providers, naming the profiles that offer it;
+  `--with-disabled` includes disabled profiles in the aggregate.
+  Usage-priced profiles
+  include known per-million-token rates; subscription and unknown billing modes
+  are labeled without per-token prices. JSON includes a `billing` field and a
+  `price` object or `null` for each model.
+- `mj quota` prints the daemon's latest quota reading for every enabled profile,
+  or one with `--profile`: billing mode, each reported window with what remains
+  and its reset, and how long ago the value was fetched. A profile whose quota
+  cannot be read says why. `--refresh` asks the daemon to probe again and waits
+  for the fresh cycle before printing. `--with-disabled` includes disabled
+  profiles, asking the daemon for a one-off probe of any that have no reading.
+  JSON carries each profile's full report
+  for scripts that back off before a profile runs out.
+- `mj set-config` applies user-settable session settings the harness advertises,
+  such as the model or effort. The target permission policy owns permission
+  settings; use plan mode to enter or leave Plan.
   Without `--key` and `--value` it lists the settings the session's agent
   offers, with their choices.
 - `mj ui` changes what an open dashboard shows, as if you had pressed the keys,
@@ -528,9 +630,8 @@ and `mj message` print is the handle `mj wait --turn` takes, not a count. With `
 - `mj wait --session <id> --turn <turn-id>` waits until that turn has ended and
   says how. The turn ID is the number `mj new` and `mj message` print. A server
   retry of the turn is part of it, but nothing that starts new work is: not a
-  turn the agent starts on its own, background work it left running, or
-  Mjolnir's automatic continuation. When the session is still busy as the wait
-  answers, the first line ends with what it is doing, in the dashboard's words,
+  turn the agent starts on its own, and not background work it left running.
+  When the session is still busy as the wait answers, the first line ends with what it is doing, in the dashboard's words,
   for example
   `turn finished (completed, end of turn) in 5.3s; the session is not idle: [BG 2m10s]`.
   `--json` carries it as `next`.
@@ -604,9 +705,12 @@ which can take a few minutes while a reviewer is chosen and started, and fails
 with the reason when the session is still working, has queued prompts, is a
 sub-agent, or has no usable reviewer. `mj review status` prints the open
 review's status, reviewer role, and verdict, or `no review is open`.
-`mj review dismiss` and `mj review cancel` close the open review, for example a
-failed one, so another can start; `mj review forward` retries a forward the
-primary refused. See [turn review](/turn-review/).
+`mj review show` prints a finished review's per-reviewer output, including each
+reviewer's profile, model, effort, full handback, verdict, and usage. It keeps
+working after the reviewer sessions are destroyed, which happens when their role
+ends. Without `--review` it shows the newest finished review; pass the review id
+a verdict message names to read an earlier one. The conversation prompt stays
+available while the review runs. See [Code review](/turn-review/).
 
 `mj destroy` permanently removes the live session record, environment, and
 recovery archive. Its conversation is indexed in SessionWiki first:
@@ -631,16 +735,19 @@ container, so one session can read evidence another session cites. A relative
 `--path` resolves in the directory the session's agent runs in; an absolute
 one is read as the target spells it. After symlinks are resolved, the path
 must lie in the session's workspace, its sub-agent report directories, or the
-target's temporary directory. A file is copied as it is, up to 16 MiB. A
-directory arrives as a zip archive of at most 16 MiB, made from at most
-128 MiB of files; symlinks inside it are stored as links, not followed. The
+target's temporary directory. A file is copied as it is. A directory arrives
+as a zip archive; symlinks inside it are stored as links, not followed. Fetch
+imposes no size limit. The
 copy lands in `$TMPDIR/mjolnir/<session>/` followed by the path on the target,
 with `.zip` after a directory's name, and `mj fetch` prints that local path.
 For example, `mj fetch --session d8443f17… --path /tmp/rust-veto-cf` prints
 `/tmp/mjolnir/d8443f17…/tmp/rust-veto-cf.zip`. With `--json` it prints the
 local `path`, the `kind` (`file` or `directory`), the `source` path on the
 target, and the `bytes` written. `--stdout` writes the file, or the zip
-archive, to standard output instead.
+archive, to standard output instead. File and archive payloads pass through
+temporary files and I/O chunks rather than whole-payload memory buffers. If
+the daemon restarts during a download, the CLI reconnects and retries it
+automatically; a partial download is never published or written to stdout.
 
 `mj fetch --ls` lists the path on standard output instead of copying it: a
 directory's entries in name order, or the file itself. Each line gives the size
@@ -675,11 +782,11 @@ default role selection or the repeated `--role` selection before paging, and
 returns `next_after_seq` and `latest_seq` with the response. `--finished-only`
 filters agent messages and uses the finished-prefix cursor described above.
 `mj events` always prints JSON lines.
-`mj checkpoint`, `mj login`, `mj app`, `mj go`, `mj setup`, and the
+`mj checkpoint`, `mj login`, `mj go`, `mj setup`, and the
 `mj daemon` commands do not take `--json`. The commands in this section are
 clients for the [HTTP API](/api-reference/), which documents the routes,
 the wait outcomes, the export preconditions, and the bearer token these
-commands read. `mj api-info` prints the base URL and the token file.
+commands read. `mj api-info` prints the base URL; `mj api-token` prints the bearer token.
 
 ## Operator environment variables
 
@@ -693,8 +800,6 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `MJ_WORKER_DIR` | Directory searched for bundled worker binaries. |
 | `MJ_WORKER_URL` | Remote worker URL fallback; it may contain `{target}` and requires `MJ_WORKER_SHA256`. |
 | `MJ_WORKER_SHA256` | Required 64-character hexadecimal digest when `MJ_WORKER_URL` is set. |
-| `MJ_DESKTOP_BINARY` | Explicit `mj-desktop` executable used by `mj app`. |
-| `MJ_CONTROLLER_BINARY` | Explicit controller executable used by companion launchers. |
 | `MJ_VOICE_WORKER` | Explicit local voice-worker executable. |
 | `CODEX_HOME` | Codex home used by setup discovery and native import. |
 | `CLAUDE_CONFIG_DIR` | Claude Code home used by setup discovery and native import. |

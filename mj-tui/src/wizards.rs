@@ -4,7 +4,7 @@ mod projects;
 use projects::{ProjectPicker, ProjectTab};
 mod move_files;
 mod render;
-mod resources;
+pub(crate) mod resources;
 mod subagents;
 pub(crate) use picker::*;
 pub(crate) use render::*;
@@ -36,7 +36,7 @@ use mj_core::config::{
 use mj_core::state::{
     HostContainerSize, MaterializedQueuedPrompt, MoveOperation, MovePreparation,
     ResumeQueueDisposition, SessionResourceAllocation, SessionState, allocation_cpus,
-    allocation_memory, default_container_size, preferred_aws_allocation,
+    allocation_memory, default_container_size,
 };
 
 use mj_chat::components::PathField;
@@ -52,7 +52,7 @@ use crate::widgets::{
     truncate_to_cells,
 };
 
-use crate::{DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index, nth_key};
+use crate::{DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, nth_key};
 
 /// Keep the frame and action row in place while moving between wizard steps.
 fn wizard_modal(frame: &mut Frame<'_>, surfaces: &mut FrameSurfaces, area: Rect) -> Rect {
@@ -82,7 +82,6 @@ pub(crate) enum WizardControl {
     ResourceCpu,
     ResourceMemory,
     RememberContainerSize,
-    ResourceInstance,
     ProjectDirectory,
     RecentProject(usize),
     NewBundleRepositories,
@@ -91,22 +90,20 @@ pub(crate) enum WizardControl {
     RemoveBundle,
     ProjectRecent,
     ProjectGithub,
-    ProjectFolders,
     ProjectUrl,
     ProjectQuery,
     ProjectSearch,
     ProjectResults,
-    ProjectUp,
-    ProjectHome,
-    ProjectOpenFolder,
     ProjectRetry,
     ProjectMultiple,
     ProjectMakePrimary,
     MountSource,
     MountDestination,
     MountAccess,
+    MountHistory,
     ReviewAttachments,
     Subagents,
+    Oracle,
     CreateManagedWorktree,
     DiscardQueue,
     ChooseMoveFiles,
@@ -180,7 +177,6 @@ pub(crate) struct NewWizard {
     project_history_index: usize,
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
     pub(crate) remember_container_size: bool,
-    aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
     pub(crate) resource_editor: ResourceEditor,
     /// Network clone destinations returned by the asynchronous creation
@@ -219,7 +215,6 @@ impl PartialEq for NewWizard {
             && self.project_history_index == other.project_history_index
             && self.resource_allocation == other.resource_allocation
             && self.remember_container_size == other.remember_container_size
-            && self.aws_options == other.aws_options
             && self.sizing_error == other.sizing_error
             && self.resource_editor == other.resource_editor
             && self.remote_repositories == other.remote_repositories
@@ -239,7 +234,8 @@ pub(crate) struct MountWizard {
     pub(crate) access_combo: ComboBoxState<WizardControl>,
     pub(crate) mounts: Vec<AdditionalMount>,
     pub(crate) history: Vec<std::path::PathBuf>,
-    history_index: usize,
+    selected_mount: usize,
+    history_selection: usize,
     /// Sources the target's host reported as unable to hold Podman's overlay,
     /// keyed by the typed source and holding the `filesystem (reason)` label.
     forced_sources: BTreeMap<String, String>,
@@ -257,7 +253,8 @@ impl MountWizard {
             access_combo: ComboBoxState::default(),
             mounts: Vec::new(),
             history,
-            history_index: 0,
+            selected_mount: 0,
+            history_selection: 0,
             forced_sources: BTreeMap::new(),
             error: None,
             editing_mount: None,
@@ -288,6 +285,17 @@ impl MountWizard {
         self.access = self.access.without_overlay();
     }
 
+    pub(crate) fn available_history(&self) -> Vec<&std::path::PathBuf> {
+        self.history
+            .iter()
+            .filter(|source| {
+                !self.mounts.iter().enumerate().any(|(index, mount)| {
+                    Some(index) != self.editing_mount && &mount.source == *source
+                })
+            })
+            .collect()
+    }
+
     fn add_validated_mount(&mut self) {
         let mount = AdditionalMount {
             source: self.source.to_string().into(),
@@ -301,6 +309,7 @@ impl MountWizard {
         }
         self.source.clear();
         self.destination.clear();
+        self.history_selection = 0;
         self.access = MountAccess::Ro;
         self.source.dismiss_completion();
         self.error = None;
@@ -456,7 +465,6 @@ pub(crate) struct ResumeWizard {
     pub(crate) mounts: MountWizard,
 
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
-    aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
     pub(crate) resource_editor: ResourceEditor,
     pub(crate) discard_queue: bool,
@@ -484,7 +492,6 @@ impl PartialEq for ResumeWizard {
             && self.target_step_skipped == other.target_step_skipped
             && self.mounts == other.mounts
             && self.resource_allocation == other.resource_allocation
-            && self.aws_options == other.aws_options
             && self.sizing_error == other.sizing_error
             && self.resource_editor == other.resource_editor
             && self.discard_queue == other.discard_queue
@@ -497,9 +504,10 @@ fn remove_selected_mount(mounts: &mut MountWizard) {
     if mounts.mounts.is_empty() {
         return;
     }
-    mounts.mounts.remove(mounts.history_index);
-    mounts.history_index = mounts
-        .history_index
+    mounts.mounts.remove(mounts.selected_mount);
+    mounts.history_selection = 0;
+    mounts.selected_mount = mounts
+        .selected_mount
         .min(mounts.mounts.len().saturating_sub(1));
 }
 
@@ -508,6 +516,7 @@ fn remove_selected_mount(mounts: &mut MountWizard) {
 fn prepare_mount_editor(mounts: &mut MountWizard) {
     mounts.source.clear();
     mounts.destination.clear();
+    mounts.history_selection = 0;
     mounts.access = MountAccess::Ro;
     mounts.error = None;
     mounts.editing_mount = None;
@@ -520,7 +529,8 @@ fn prepare_selected_mount_editor(mounts: &mut MountWizard) -> bool {
     if mounts.mounts.is_empty() {
         return false;
     }
-    let index = mounts.history_index;
+    let index = mounts.selected_mount;
+    mounts.history_selection = 0;
     let mount = mounts.mounts[index].clone();
     mounts.source = mount.source.to_string_lossy().into_owned().into();
     mounts.destination = mount.destination.to_string_lossy().into_owned().into();
@@ -576,36 +586,6 @@ fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
             mount.destination.display()
         )
     })
-}
-
-fn apply_aws_options(
-    target_id: &str,
-    result: std::result::Result<Vec<SessionResourceAllocation>, String>,
-    options_by_target: &mut BTreeMap<String, Vec<SessionResourceAllocation>>,
-    allocation: &mut Option<SessionResourceAllocation>,
-    sizing_error: &mut Option<String>,
-    previous: Option<&SessionResourceAllocation>,
-    selected_type: Option<&str>,
-) {
-    match result {
-        Ok(options) => {
-            *allocation = if let Some(instance_type) = selected_type {
-                options.iter().find(|option| matches!(option,
-                    SessionResourceAllocation::AwsEc2 { instance_type: candidate, .. } if candidate == instance_type
-                )).cloned()
-            } else {
-                preferred_aws_allocation(&options, previous).cloned()
-            };
-            *sizing_error = allocation.is_none().then(|| {
-                "The selected instance type is unavailable; choose an available type.".into()
-            });
-            options_by_target.insert(target_id.to_owned(), options);
-        }
-        Err(error) => {
-            *allocation = None;
-            *sizing_error = Some(error);
-        }
-    }
 }
 
 impl NewWizard {
@@ -723,7 +703,7 @@ fn bundle_ids_by_recent_creation<'a>(
 
 fn target_label(target: &TargetTemplate) -> &'static str {
     match target {
-        TargetTemplate::LocalBare => "raw localhost",
+        TargetTemplate::LocalBare => "localhost",
         TargetTemplate::LocalPodman { .. } => "local Podman",
         TargetTemplate::LocalDocker { .. } => "local Docker",
         TargetTemplate::AppleContainer { .. } => "Apple container",
@@ -732,6 +712,7 @@ fn target_label(target: &TargetTemplate) -> &'static str {
         TargetTemplate::SshPodman { .. } => "Podman over SSH",
         TargetTemplate::SshDocker { .. } => "Docker over SSH",
         TargetTemplate::SshAppleContainer { .. } => "Apple container over SSH",
+        TargetTemplate::SshNitro { .. } => "EC2 Nitro sandbox",
     }
 }
 
@@ -765,19 +746,26 @@ fn default_resource_destination(
     let basename = default
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("resource"));
+    // EC2 paths are POSIX paths on a Windows controller too.
+    use mj_core::target_path::join;
     let home = if ssh_user == "root" {
         std::path::PathBuf::from("/root")
     } else {
-        std::path::PathBuf::from("/home").join(ssh_user)
+        join(
+            std::path::Path::new("/home"),
+            std::path::Path::new(ssh_user),
+        )
     };
-    let base = home.join("mj-resources").join(basename);
+    let resources = join(&home, std::path::Path::new("mj-resources"));
+    let base = join(&resources, std::path::Path::new(basename));
     if !existing.iter().any(|resource| resource.destination == base) {
         return base;
     }
     for number in 2.. {
-        let candidate = home
-            .join("mj-resources")
-            .join(format!("{}-{number}", basename.to_string_lossy()));
+        let candidate = join(
+            &resources,
+            std::path::Path::new(&format!("{}-{number}", basename.to_string_lossy())),
+        );
         if !existing
             .iter()
             .any(|resource| resource.destination == candidate)

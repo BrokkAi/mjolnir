@@ -2,8 +2,21 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub struct SessionManagerUpdate {
+    /// Daemon-only cache input captured before model-policy projection. Never sent on the wire.
+    pub raw_observation: Option<mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>,
     pub session_id: String,
     pub view: ManagedSessionView,
+}
+
+impl SessionManagerUpdate {
+    /// A view update from a client surface.
+    pub fn from_view(session_id: String, view: ManagedSessionView) -> Self {
+        Self {
+            session_id,
+            view,
+            raw_observation: None,
+        }
+    }
 }
 
 pub(crate) type SessionCpuTable =
@@ -66,12 +79,11 @@ pub enum RemoteSessionRequest {
         session_id: String,
         command_id: String,
         command: RelayCommand,
-        admission: Option<ReviewDeliveryAdmission>,
         reply: oneshot::Sender<std::result::Result<u64, mj_client::session::SubmitFailure>>,
     },
     Sync {
         session_id: String,
-        reply: oneshot::Sender<std::result::Result<(), String>>,
+        reply: oneshot::Sender<Result<()>>,
     },
     RespondElicitation {
         session_id: String,
@@ -89,7 +101,7 @@ pub enum RemoteSessionRequest {
         /// Which reviewing role the action drives; `None` is the default one.
         role: Option<String>,
         action: ReviewerAction,
-        reply: oneshot::Sender<std::result::Result<ReviewerOutcome, String>>,
+        reply: oneshot::Sender<anyhow::Result<ReviewerOutcome>>,
     },
 }
 
@@ -157,13 +169,14 @@ impl RemoteSessionRequest {
             Self::Submit { reply, .. } => {
                 let _ = reply.send(Err(message.to_owned().into()));
             }
-            Self::Sync { reply, .. }
-            | Self::RespondElicitation { reply, .. }
-            | Self::StopBackgroundTask { reply, .. } => {
+            Self::Sync { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!(message.to_owned())));
+            }
+            Self::RespondElicitation { reply, .. } | Self::StopBackgroundTask { reply, .. } => {
                 let _ = reply.send(Err(message.to_owned()));
             }
             Self::Reviewer { reply, .. } => {
-                let _ = reply.send(Err(message.to_owned()));
+                let _ = reply.send(Err(anyhow::anyhow!("{message}")));
             }
         }
     }
@@ -323,6 +336,13 @@ impl Drop for SessionManagerShutdown {
 
 #[derive(Clone)]
 pub(crate) struct CoalescedUpdateSender {
+    pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
+    // Continuation checks can hold a view; keep its newest raw cache input until publication.
+    pub(crate) pending_observations:
+        Arc<Mutex<BTreeMap<String, mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>>>,
+    pub(super) last_raw_options:
+        Arc<Mutex<Option<Arc<Vec<agent_client_protocol::v1::schema::SessionConfigOption>>>>>,
+    pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub(super) cpu: watch::Sender<SessionCpuTable>,
     producers: Arc<Mutex<BTreeMap<String, Arc<()>>>>,
     producer: Option<Arc<UpdateProducer>>,
@@ -378,8 +398,13 @@ pub(super) struct UpdateMailbox {
 }
 
 impl UpdateMailbox {
-    fn enqueue(&mut self, pending: PendingUpdate) {
+    fn enqueue(&mut self, mut pending: PendingUpdate) {
         let session_id = pending.update.session_id.clone();
+        if pending.update.raw_observation.is_none()
+            && let Some(previous) = self.pending.get_mut(&session_id)
+        {
+            pending.update.raw_observation = previous.update.raw_observation.take();
+        }
         // Replacing a pending view keeps its place; a delivered session's
         // next view joins the tail so it cannot overtake waiting sessions.
         if self.pending.insert(session_id.clone(), pending).is_none() {
@@ -423,6 +448,7 @@ impl CoalescedUpdateSender {
             .expect("session update coalescer poisoned")
             .remove(session_id);
         let mut sender = self.clone();
+        sender.last_raw_options = Default::default();
         sender.producer = Some(Arc::new(UpdateProducer {
             cpu: self.cpu.clone(),
             registry: self.producers.clone(),
@@ -464,7 +490,14 @@ impl CoalescedUpdateSender {
         });
     }
 
-    pub(crate) fn send(&self, update: SessionManagerUpdate) {
+    pub(crate) fn send(&self, mut update: SessionManagerUpdate) {
+        if update.raw_observation.is_none() {
+            update.raw_observation = self
+                .pending_observations
+                .lock()
+                .expect("pending observations poisoned")
+                .remove(&update.session_id);
+        }
         let registry = self
             .producers
             .lock()
@@ -532,6 +565,10 @@ pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManag
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (
         CoalescedUpdateSender {
+            harness_failure: Default::default(),
+            pending_observations: Default::default(),
+            last_raw_options: Default::default(),
+            model_policies: watch::channel(BTreeMap::new()).0,
             cpu: watch::channel(SessionCpuTable::new()).0,
             producers: Default::default(),
             producer: None,

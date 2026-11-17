@@ -1,0 +1,83 @@
+{
+  "id": "W174",
+  "title": "waiting candidate 35 01d8880f",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "01d8880feeee8bcc70fd3da093ffd5f7",
+    "session_title": "Run #9447 integrated materialization regression",
+    "reply_position": 88,
+    "captured_at": "2026-11-04T05:36:12.090Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:33",
+          "role": "assistant",
+          "text": "I’ll capture the required clean-tree and environment evidence, run the single specified nextest invocation once, then report the result and source association."
+        },
+        {
+          "id": "agent:88",
+          "role": "assistant",
+          "text": "The specified run is still active; its output is being captured in the scratch directory. I’m waiting on this same invocation and won’t retry it."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "The specified run is still active; its output is being captured in the scratch directory. I’m waiting on this same invocation and won’t retry it.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 0
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-04T05:43:54.332Z",
+        "kind": "system",
+        "text": "Interrupted"
+      }
+    ]
+  }
+}

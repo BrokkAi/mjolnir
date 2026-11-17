@@ -15,7 +15,10 @@ mod attachment;
 mod auto_afk;
 mod composer_drafts;
 pub(crate) mod io;
+mod login_terminal;
+mod loop_stalls;
 mod read_receipts;
+mod shutdown;
 mod startup_prompts;
 mod summary_reads;
 mod usage_report;
@@ -24,7 +27,7 @@ mod workspace_settings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -32,7 +35,7 @@ use crossterm::event::{
 };
 use mj_controller::database::DetachedSessionDraft;
 use mj_core::config::Config;
-use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
+use mj_core::state::{MaterializedSession, SessionRecord};
 use mj_core::subagent::SubagentMetadata;
 
 use mj_chat::chat::ChatElicitationDraft;
@@ -194,12 +197,19 @@ pub(crate) const QUOTA_REFRESHED_NOTICE: &str = "Targets and quotas refreshed.";
 #[derive(Debug)]
 pub(crate) enum DashboardExit {
     Normal,
-    Detached,
+    Detached(DetachedSessions),
     Interrupted,
     Restart {
         target: crate::daemon::UpgradeTarget,
         resume: Box<UpgradeResume>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DetachedSessions {
+    Known(usize),
+    DaemonNotRunning,
+    Unknown,
 }
 
 pub(crate) use mj_client::operations::CriticalOperationTracker;
@@ -212,6 +222,96 @@ fn shutdown_wait_notice(blockers: &[String]) -> Option<String> {
             "Waiting for {} operations to complete before exiting",
             blockers.len()
         )),
+    }
+}
+
+/// When each step of the last dashboard exit began. The dashboard records its
+/// steps; `main` adds the runtime shutdown and logs them all in one line just
+/// before the process exits, so a slow quit names the step that waited.
+#[derive(Debug, Clone, Copy)]
+struct QuitTimings {
+    /// `None` when the loop ended without a quit request.
+    requested_at: Option<Instant>,
+    loop_ended_at: Instant,
+    auto_afk_started_at: Instant,
+    auto_afk_finished_at: Instant,
+    saves_started_at: Instant,
+    saves_finished_at: Instant,
+    session_manager_started_at: Instant,
+    session_manager_finished_at: Instant,
+    dashboard_drop_started_at: Instant,
+    dashboard_drop_finished_at: Instant,
+    returned_at: Instant,
+    attachment_shutdown: Duration,
+    detach_connect: Duration,
+    detach_request: Duration,
+}
+
+static QUIT_TIMINGS: std::sync::Mutex<Option<QuitTimings>> = std::sync::Mutex::new(None);
+
+/// Logs the last dashboard exit's steps. `runtime_shutdown_started` is when
+/// `main` began shutting the runtime down, which ends the teardown step.
+pub(crate) fn log_quit_timings(runtime_shutdown_started: Instant) {
+    let Some(timings) = QUIT_TIMINGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    else {
+        return;
+    };
+    let ms = |from: Instant, to: Instant| to.saturating_duration_since(from).as_millis();
+    let exited_at = Instant::now();
+    let started_at = timings.requested_at.unwrap_or(timings.loop_ended_at);
+    tracing::info!(
+        total_ms = ms(started_at, exited_at),
+        pending_writes_ms = ms(started_at, timings.loop_ended_at),
+        detach_count_ms = ms(timings.loop_ended_at, timings.auto_afk_started_at),
+        auto_afk_ms = ms(timings.auto_afk_started_at, timings.auto_afk_finished_at),
+        terminal_restore_ms = ms(timings.auto_afk_finished_at, timings.saves_started_at),
+        final_saves_ms = ms(timings.saves_started_at, timings.saves_finished_at),
+        session_manager_ms = ms(
+            timings.session_manager_started_at,
+            timings.session_manager_finished_at
+        ),
+        cleanup_ms = ms(
+            timings
+                .saves_started_at
+                .min(timings.session_manager_started_at),
+            timings
+                .saves_finished_at
+                .max(timings.session_manager_finished_at)
+        ),
+        dashboard_drop_ms = ms(
+            timings.dashboard_drop_started_at,
+            timings.dashboard_drop_finished_at
+        ),
+        attachment_shutdown_ms = timings.attachment_shutdown.as_millis(),
+        detach_connect_ms = timings.detach_connect.as_millis(),
+        detach_request_ms = timings.detach_request.as_millis(),
+        teardown_ms = ms(timings.returned_at, runtime_shutdown_started),
+        runtime_shutdown_ms = ms(runtime_shutdown_started, exited_at),
+        quit_requested = timings.requested_at.is_some(),
+        "the dashboard exited"
+    );
+}
+
+/// Record main's sequential attachment teardown in the same exit record as
+/// the dashboard-owned cleanup stages.
+pub(crate) fn record_attachment_teardown(
+    dashboard_drop_finished_at: Instant,
+    attachment_shutdown: Duration,
+    detach_connect: Duration,
+    detach_request: Duration,
+) {
+    if let Some(timings) = QUIT_TIMINGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        timings.dashboard_drop_finished_at = dashboard_drop_finished_at;
+        timings.attachment_shutdown = attachment_shutdown;
+        timings.detach_connect = detach_connect;
+        timings.detach_request = detach_request;
     }
 }
 
@@ -268,6 +368,7 @@ pub(crate) struct DashboardContext {
     daemon_running_again_since: Option<std::time::Instant>,
     /// Terminal input remains owned by this event loop, including during Setup.
     events: Option<event::EventStream>,
+    login: Option<login_terminal::ActiveLogin>,
     /// The startup splash, drawn in place of the dashboard until it has
     /// played out. Everything behind it is already running.
     splash: Option<crate::splash::SplashPlayback>,
@@ -276,6 +377,9 @@ pub(crate) struct DashboardContext {
     /// conversation stays current whether or not it is the one with the
     /// keyboard, and moving between panes is a redraw rather than a rebuild.
     pub(crate) chats: BTreeMap<String, mj_chat::chat::ActiveChat>,
+    /// Live session views published by the controller runtime feed.
+    pub(crate) runtime_sessions:
+        mj_core::snapshot_map::SnapshotMap<String, mj_client::daemon::RuntimeSessionView>,
     /// The last record of each session that left the runtime feed while a
     /// chat still showed it. The feed carries only live sessions, but the
     /// chat still detaches, and this says where its draft and read position
@@ -287,6 +391,7 @@ pub(crate) struct DashboardContext {
     /// form cannot inherit old answers.
     question_drafts: BTreeMap<String, Vec<CachedQuestionDraft>>,
     transcript_positions: BTreeMap<String, mj_chat::chat::TranscriptPosition>,
+    question_targets_seen: BTreeMap<String, BTreeSet<String>>,
     /// Composer text is owned by this terminal once a session is opened. The
     /// inherited shared value is retained only as a compare-and-clear baseline
     /// for the detach persistence task.
@@ -321,9 +426,13 @@ pub(crate) struct DashboardContext {
     /// changed.
     pub(crate) controller_changed: bool,
     pub(crate) quit_detached: bool,
-    shutdown_requested: bool,
+    /// When the person asked to quit; the quit timing log measures from here.
+    shutdown_requested_at: Option<Instant>,
     pub(crate) critical_operations: CriticalOperationTracker,
     critical_operations_changed: watch::Receiver<u64>,
+    /// Built here because it reads the scheduler statistics of the thread
+    /// that opens the dashboard, which is the thread that runs its loop.
+    loop_stalls: loop_stalls::Meter,
     /// What the two-second keep-alive last saw. It never starts a daemon, so
     /// a daemon that goes away stays away until the user asks for it back.
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
@@ -332,8 +441,6 @@ pub(crate) struct DashboardContext {
     /// What the daemon says about quota. The daemon is the only prober; this
     /// process never asks a provider.
     quota: Feed<watch::Receiver<mj_client::quota::QuotaSnapshot>>,
-    review_capabilities:
-        watch::Receiver<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
     profile_capabilities:
         Feed<watch::Receiver<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>>,
     /// The daemon's finished-cycle count when the person last pressed
@@ -342,13 +449,10 @@ pub(crate) struct DashboardContext {
     /// The daemon's finished-cycle count in the latest snapshot.
     pub(crate) quota_cycles: u64,
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
-    /// The active global review choice discovery. New profile/model
-    /// selections cancel the old request before starting another one.
     pub(crate) path_input_job: Option<(String, Arc<AtomicBool>)>,
     /// The completion request in flight, with the draft it was asked for. A
     /// newer request or a changed draft cancels it.
     pub(crate) completion_job: Option<(String, Arc<AtomicBool>)>,
-    pub(crate) review_discovery_cancel: Option<Arc<AtomicBool>>,
     /// The cancellable worker resolving an isolated session's network clone
     /// plan, keyed by the TUI generation that requested it.
     pub(crate) session_preflight_cancel: Option<(u64, Arc<AtomicBool>)>,
@@ -391,10 +495,6 @@ pub(crate) struct DashboardContext {
     capacity_targets_tx: watch::Sender<Vec<DeploymentCapacityTarget>>,
     capacity_triggers_tx: Sender<()>,
     capacity: Feed<Receiver<CapacityPollUpdate>>,
-
-    pub(crate) aws_resource_options_tx: AwsResourceOptionsSender,
-    aws_options: Feed<UnboundedReceiver<AwsResourceOptions>>,
-    pub(crate) resolving_aws_resource_options: BTreeSet<String>,
 
     import_updates_tx: Sender<(u64, ImportProfileOption)>,
     import_profiles: Feed<Receiver<(u64, ImportProfileOption)>>,
@@ -443,18 +543,10 @@ pub(crate) struct DashboardContext {
     polling_records: std::cell::RefCell<surface::PollingRecords>,
 }
 
-/// One deployment target's resolved instance sizes, or why they could not be
-/// resolved.
-type AwsResourceOptions = (
-    String,
-    std::result::Result<Vec<SessionResourceAllocation>, String>,
-);
-type AwsResourceOptionsSender = UnboundedSender<AwsResourceOptions>;
-
 /// One worker publication, kept together while background projections coalesce.
 pub(crate) struct MaterializedProjection {
     materialized: MaterializedSession,
-    assessment: Option<Box<mj_core::assessment::TurnAssessment>>,
+    assessment: Option<std::sync::Arc<mj_core::assessment::TurnAssessment>>,
 }
 
 impl From<MaterializedSession> for MaterializedProjection {
@@ -470,7 +562,7 @@ impl From<mj_core::state::ManagedSessionSnapshot> for MaterializedProjection {
     fn from(snapshot: mj_core::state::ManagedSessionSnapshot) -> Self {
         Self {
             materialized: snapshot.materialized,
-            assessment: snapshot.operational.assessment,
+            assessment: snapshot.operational.assessment.clone(),
         }
     }
 }
@@ -498,6 +590,14 @@ fn enqueue_materialized_projection(
 /// The top level of the Git worktree `mj` was started in, or `None` outside
 /// one. The new-session wizard offers it as the local project.
 fn launch_repository_top_level() -> Option<std::path::PathBuf> {
+    if mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
+        .ok()?
+        .runtime
+        == mj_core::config::DaemonRuntime::Ssh
+    {
+        return None;
+    }
+
     let directory = std::env::current_dir().ok()?;
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -623,10 +723,14 @@ pub(crate) async fn run_dashboard_for_workspace(
     // at once. The first frame is drawn before anything is awaited.
     let mut pacer = FramePacer::new(FRAME_INTERVAL);
     pacer.mark_urgent();
+    // Startup awaited the daemon and restored state before this point; the
+    // first pass starts here, so only the first frame's own work is counted.
+    context.loop_stalls.forget_pass();
     loop {
+        context.loop_stalls.phase(loop_stalls::Phase::Housekeeping);
         context.update_subagent_scope();
         context.reconcile_stored_session_summaries();
-        if !context.shutdown_requested {
+        if context.shutdown_requested_at.is_none() {
             context.refresh_controller_derived_state();
             context.start_sessions_text_search();
         }
@@ -652,15 +756,18 @@ pub(crate) async fn run_dashboard_for_workspace(
         ) {
             pacer.mark_urgent();
         }
+        context.loop_stalls.phase(loop_stalls::Phase::Draw);
         let started = tokio::time::Instant::now();
         if pacer.should_draw(started) {
             context.draw()?;
             pacer.drew(started, tokio::time::Instant::now());
         }
+        context.loop_stalls.phase(loop_stalls::Phase::Notifications);
         // After the frame, so a bell never precedes the row it is about.
         if !pacer.pending() {
             context.emit_notifications()?;
         }
+        context.loop_stalls.phase(loop_stalls::Phase::Housekeeping);
         let now = tokio::time::Instant::now();
         let feed_gate = pacer.feed_gate(now);
         let deferred_frame = pacer.deferred_frame(now);
@@ -673,13 +780,16 @@ pub(crate) async fn run_dashboard_for_workspace(
         // the timers, which fire at most once per period and so cannot
         // starve the feeds after them. Feeds are held until a paced frame
         // could show what they bring.
+        context.loop_stalls.select_started();
         tokio::select! {
             biased;
-            _ = termination.cancelled(), if !context.shutdown_requested => {
+            _ = termination.cancelled(), if context.shutdown_requested_at.is_none() => {
+                context.loop_stalls.woke("termination");
                 context.begin_shutdown(false);
                 pacer.mark_urgent();
             }
             event = next_terminal_event(&mut context.events) => {
+                context.loop_stalls.woke("input");
                 input = true;
                 pacer.mark_urgent();
                 let Some(event) = event else { break };
@@ -687,12 +797,16 @@ pub(crate) async fn run_dashboard_for_workspace(
                 if auto_afk::is_operator_input(&event) {
                     context.auto_afk.input();
                 }
-                if context.shutdown_requested {
+                if context.shutdown_requested_at.is_some() {
                     continue;
                 }
                 // Nothing behind the splash has been seen, so nothing there
                 // should act on input yet.
                 if context.splash.is_some() {
+                    continue;
+                }
+                if context.login.is_some() {
+                    context.login_event(event);
                     continue;
                 }
                 // The user acting is the strongest signal there is about which
@@ -715,7 +829,9 @@ pub(crate) async fn run_dashboard_for_workspace(
                     if previous_consumed
                         && (matches!(event, Event::Mouse(_)) || context.dashboard.modal_open())
                     {
+                        context.loop_stalls.phase(loop_stalls::Phase::Draw);
                         context.draw()?;
+                        context.loop_stalls.phase(loop_stalls::Phase::Arm);
                     }
                     if opening_cancel_event(&event, context.focused_pane_is_opening(), context.dashboard.modal_open()) {
                         context.cancel_chat_open();
@@ -799,18 +915,23 @@ pub(crate) async fn run_dashboard_for_workspace(
             // and keeps extending the selection, the way a held pointer does
             // in a terminal's own selection.
             _ = autoscroll_tick.tick(), if context.autoscroll_request().is_some() => {
+                context.loop_stalls.woke("autoscroll");
                 input = true;
                 pacer.mark_urgent();
                 context.apply_autoscroll()?;
             }
             () = tokio::time::sleep_until(deferred_frame.unwrap_or_else(frame_pacer::never)),
-                if deferred_frame.is_some() => {}
+                if deferred_frame.is_some() => {
+                context.loop_stalls.woke("deferred_frame");
+            }
             _ = splash_tick.tick(), if context.splash.is_some() => {
+                context.loop_stalls.woke("splash");
                 pacer.mark();
             }
             // Poll displayed time values without forcing a frame when none
             // of the visible clocks or countdowns changed.
             _ = clock_tick.tick() => {
+                context.loop_stalls.woke("clock");
                 // Resume search covers the moving "Last active" text, so the
                 // same clock that redraws the dialog rebuilds its rows.
                 context.dashboard.rebuild_resume_rows();
@@ -837,6 +958,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // Input redraws never advance animations. Only visible activity
             // arms this timer; settled conversations keep the slow clock.
             _ = animation_tick.tick(), if context.needs_animation() => {
+                context.loop_stalls.woke("animation");
                 if context.dashboard.animation_changed()
                     || context.visible_chat().is_some_and(|chat| chat.animation_changed())
                 {
@@ -846,12 +968,13 @@ pub(crate) async fn run_dashboard_for_workspace(
             // The keep-alive no longer starts a daemon, so a daemon that is
             // gone has to be visible instead of silently replaced.
             changed = context.daemon_presence.changed() => {
+                context.loop_stalls.woke("daemon_presence");
                 if changed.is_ok() {
                     pacer.mark();
                     let presence = context.daemon_presence.borrow_and_update().clone();
                     match presence {
                         crate::daemon::DaemonPresence::Upgraded(executable) => {
-                            if !context.shutdown_requested {
+                            if context.shutdown_requested_at.is_none() {
                                 restart_executable = Some(executable);
                                 context.request_shutdown();
                             }
@@ -874,79 +997,99 @@ pub(crate) async fn run_dashboard_for_workspace(
                 }
             }
             Some(error) = context.auto_afk.errors.recv() => {
+                context.loop_stalls.woke("auto_afk");
                 context.dashboard.set_failure_notice(error);
                 pacer.mark();
             }
             _ = context.critical_operations_changed.changed(),
-                if context.shutdown_requested => {
+                if context.shutdown_requested_at.is_some() => {
+                context.loop_stalls.woke("critical_operations");
                 pacer.mark_urgent();
             }
             () = context.sidebar_size_persistence.wait(), if context.sidebar_size_persistence.is_running() => {
+                context.loop_stalls.woke("sidebar_size_persistence");
                 pacer.mark();
             }
             () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {
+                context.loop_stalls.woke("pane_size_persistence");
                 pacer.mark();
             }
             () = context.layout_persistence.wait(), if context.layout_persistence.is_running() => {
+                context.loop_stalls.woke("layout_persistence");
                 pacer.mark();
             }
             // The warm chat's own feeds: remote command results, its clipboard
             // and history I/O, dictation, and the session view. They run
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
-            () = paced(feed_gate, pump_chats(&mut context.chats)) => {
+            update = paced(feed_gate, login_terminal::pump(&mut context.login, &mut context.chats)) => {
+                context.loop_stalls.woke("conversation terminals");
                 pacer.mark();
-                // A warm chat may be hidden by another tab or selection.
-                // Only conversations that were on screen advance their read
-                // receipts.
-                context.acknowledge_visible_chats();
+                if let Some(update) = update {
+                    context.accept_login_update(update);
+                } else {
+                    // Only conversations visible in the frame advance receipts.
+                    context.acknowledge_visible_chats();
+                }
             }
             update = paced(feed_gate, context.quota.wait()), if context.quota.is_open() => {
+                context.loop_stalls.woke("quota");
                 context.quota.accept(update);
             }
             update = paced(feed_gate, context.profile_capabilities.wait()), if context.profile_capabilities.is_open() => {
+                context.loop_stalls.woke("profile_capabilities");
                 context.profile_capabilities.accept(update);
             }
             update = paced(feed_gate, context.worker.wait()), if context.worker.is_open() => {
+                context.loop_stalls.woke("worker");
                 context.worker.accept(update);
             }
             update = paced(feed_gate, context.runtime_reviews.wait()), if context.runtime_reviews.is_open() => {
+                context.loop_stalls.woke("runtime_reviews");
                 context.runtime_reviews.accept(update);
             }
             update = paced(feed_gate, context.runtime_notices.wait()), if context.runtime_notices.is_open() => {
+                context.loop_stalls.woke("runtime_notices");
                 context.runtime_notices.accept(update);
             }
             update = paced(feed_gate, context.runtime_ui_requests.wait()), if context.runtime_ui_requests.is_open() => {
+                context.loop_stalls.woke("runtime_ui_requests");
                 context.runtime_ui_requests.accept(update);
             }
             update = paced(feed_gate, context.runtime_config.wait()), if context.runtime_config.is_open() => {
+                context.loop_stalls.woke("runtime_config");
                 context.runtime_config.accept(update);
             }
             update = paced(feed_gate, context.runtime_health.wait()), if context.runtime_health.is_open() => {
+                context.loop_stalls.woke("runtime_health");
                 context.runtime_health.accept(update);
             }
             update = paced(feed_gate, context.runtime_state.wait()), if context.runtime_state.is_open() => {
+                context.loop_stalls.woke("runtime_state");
                 context.runtime_state.accept(update);
             }
             update = paced(feed_gate, context.capacity.wait()), if context.capacity.is_open() => {
+                context.loop_stalls.woke("capacity");
                 context.capacity.accept(update);
             }
-            update = paced(feed_gate, context.aws_options.wait()), if context.aws_options.is_open() => {
-                context.aws_options.accept(update);
-            }
             update = paced(feed_gate, context.import_profiles.wait()), if context.import_profiles.is_open() => {
+                context.loop_stalls.woke("import_profiles");
                 context.import_profiles.accept(update);
             }
             update = paced(feed_gate, context.import_tasks.wait()), if context.import_tasks.is_open() => {
+                context.loop_stalls.woke("import_tasks");
                 context.import_tasks.accept(update);
             }
             update = paced(feed_gate, context.lifecycle.wait()), if context.lifecycle.is_open() => {
+                context.loop_stalls.woke("lifecycle");
                 context.lifecycle.accept(update);
             }
             update = paced(feed_gate, context.dashboard_io.wait()), if context.dashboard_io.is_open() => {
+                context.loop_stalls.woke("dashboard_io");
                 context.dashboard_io.accept(update);
             }
         }
+        context.loop_stalls.phase(loop_stalls::Phase::DrainFeeds);
         if input {
             // The frame that shows this input is drawn before any queued
             // feed message is applied; the next wakeup drains them. Only the
@@ -958,6 +1101,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // the screen even when the timer itself had nothing to show.
             pacer.mark();
         }
+        context.loop_stalls.phase(loop_stalls::Phase::Persistence);
         if let Some(workspace_id) = context.dashboard.active_workspace_id()
             && context.known_workspace_layouts.contains(workspace_id)
             && context
@@ -973,7 +1117,8 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.dashboard.pane_size(mj_tui::SupportPane::Sessions),
         );
         context.save_active_workspace_layout();
-        if !context.shutdown_requested {
+        context.loop_stalls.phase(loop_stalls::Phase::Actions);
+        if context.shutdown_requested_at.is_none() {
             context.apply_chat_outcome(chat_outcome).await;
             actions::apply_dashboard_action(&mut context, action).await?;
             // A settled Git identity check lets the new session it held back
@@ -1008,15 +1153,11 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(check) = context.dashboard.take_availability_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
             }
-            // Settings shows whether each saved profile has a login. Reading
-            // those files belongs off the loop; this is the one place that
+            // Settings shows whether each saved profile has a daemon login.
+            // Request status off the loop; this is the one place that
             // starts it so every surface that opens Settings is covered.
             if let Some(generation) = context.dashboard.take_profile_login_refresh() {
-                io::spawn_profile_login_statuses(
-                    generation,
-                    context.dashboard.config().clone(),
-                    context.dashboard_io_tx.clone(),
-                );
+                io::spawn_profile_login_statuses(generation, context.dashboard_io_tx.clone());
             }
             if let Some((generation, profile_id)) = context.dashboard.take_setup_login() {
                 actions::apply_dashboard_action(
@@ -1028,6 +1169,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                 )
                 .await?;
             }
+            context.loop_stalls.phase(loop_stalls::Phase::Housekeeping);
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.reconcile_conversation_attachments();
@@ -1044,12 +1186,38 @@ pub(crate) async fn run_dashboard_for_workspace(
         {
             context.wiki_search_task = None;
         }
+        context.capture_composer_drafts();
         context.remember_go_selection();
-        if context.shutdown_requested && context.refresh_shutdown_notice() {
+        if context.shutdown_requested_at.is_some() && context.refresh_shutdown_notice() {
             break;
         }
     }
+    let loop_ended_at = Instant::now();
+    // Capture the feed-owned projection at the exit decision, before cleanup
+    // can close feeds or change the dashboard's state.
+    let detached_sessions = match &*context.daemon_presence.borrow() {
+        crate::daemon::DaemonPresence::Missing(_) => DetachedSessions::DaemonNotRunning,
+        crate::daemon::DaemonPresence::Attached
+            if context.runtime_state.is_open()
+                && !context.runtime_state.source_is_closed()
+                && !context.runtime_health.source_is_closed()
+                && context.runtime_health.latest().refresh_error.is_none() =>
+        {
+            let projection = context.runtime_state.latest();
+            let roots =
+                crate::session_roots_from_projection(&projection.records, &projection.subagents);
+            DetachedSessions::Known(
+                roots
+                    .values()
+                    .filter(|session| session.lifecycle.is_dashboard_visible())
+                    .count(),
+            )
+        }
+        _ => DetachedSessions::Unknown,
+    };
+    let auto_afk_started_at = Instant::now();
     context.auto_afk.shutdown().await;
+    let auto_afk_finished_at = Instant::now();
     context.cancel_background_work();
     let quit_detached = context.quit_detached;
     // Hand the terminal back before saying anything on it; the warm chat and
@@ -1063,7 +1231,10 @@ pub(crate) async fn run_dashboard_for_workspace(
         eprintln!("{error}");
     }
     for (id, error) in &context.read_receipts.failures {
-        eprintln!("Could not save read status for {}: {error}", short_id(id));
+        eprintln!(
+            "Could not save read status for {}: {error}",
+            io::session_notice_name(&context.controller.state, id)
+        );
     }
     // All final persistence shares one budget; independent saves run together.
     let deadline = tokio::time::Instant::now() + io::SAVE_ACK_TIMEOUT;
@@ -1077,57 +1248,86 @@ pub(crate) async fn run_dashboard_for_workspace(
         }
         Ok(())
     };
-    let (sidebar, panes, layout, workspace) = tokio::join!(
-        finish_shutdown_save(
-            "sidebar size",
-            deadline,
-            context.sidebar_size_persistence.finish()
-        ),
-        finish_shutdown_save(
-            "workspace pane sizes",
-            deadline,
-            context.pane_size_persistence.finish()
-        ),
-        finish_shutdown_save(
-            "workspace layout",
-            deadline,
-            context.layout_persistence.finish()
-        ),
-        finish_shutdown_save("last workspace", deadline, last_workspace),
-    );
+    let saves = async {
+        tokio::join!(
+            finish_shutdown_save(
+                "sidebar size",
+                deadline,
+                context.sidebar_size_persistence.finish()
+            ),
+            finish_shutdown_save(
+                "workspace pane sizes",
+                deadline,
+                context.pane_size_persistence.finish()
+            ),
+            finish_shutdown_save(
+                "workspace layout",
+                deadline,
+                context.layout_persistence.finish()
+            ),
+            finish_shutdown_save("last workspace", deadline, last_workspace),
+        )
+    };
+    let manager = async {
+        match context.worker_shutdown.take() {
+            Some(shutdown) => shutdown
+                .shutdown()
+                .await
+                .context("shut down dashboard session manager"),
+            None => Ok(()),
+        }
+    };
+    let (saves, manager) = shutdown::overlap_final_cleanup(saves, manager).await;
+    let saves_started_at = saves.started_at;
+    let saves_finished_at = saves.finished_at;
+    let session_manager_started_at = manager.started_at;
+    let session_manager_finished_at = manager.finished_at;
+    let (sidebar, panes, layout, workspace) = saves.output;
     for result in [sidebar, panes, layout, workspace] {
         if let Err(error) = result {
             tracing::warn!(%error, "dashboard final persistence was not confirmed");
             eprintln!("{error:#}");
         }
     }
-    if let Some(shutdown) = context.worker_shutdown.take() {
-        let result = shutdown
-            .shutdown()
-            .await
-            .context("shut down dashboard session manager");
-        if restart_executable.is_some() {
-            if let Err(error) = result {
-                tracing::warn!(%error, "old terminal session manager failed during upgrade handoff");
-            }
-        } else {
-            result?;
+    let restart = restart_executable.zip(resume);
+    let is_restart = restart.is_some();
+    let exit = if let Some((target, resume)) = restart {
+        DashboardExit::Restart {
+            target,
+            resume: Box::new(resume),
         }
+    } else if quit_detached {
+        DashboardExit::Detached(detached_sessions)
+    } else if context.shutdown_requested_at.is_some() {
+        DashboardExit::Interrupted
+    } else {
+        DashboardExit::Normal
+    };
+    let requested_at = context.shutdown_requested_at;
+    let dashboard_drop_started_at = Instant::now();
+    *QUIT_TIMINGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(QuitTimings {
+        requested_at,
+        loop_ended_at,
+        auto_afk_started_at,
+        auto_afk_finished_at,
+        saves_started_at,
+        saves_finished_at,
+        session_manager_started_at,
+        session_manager_finished_at,
+        dashboard_drop_started_at,
+        dashboard_drop_finished_at: dashboard_drop_started_at,
+        returned_at: dashboard_drop_started_at,
+        attachment_shutdown: Duration::ZERO,
+        detach_connect: Duration::ZERO,
+        detach_request: Duration::ZERO,
+    });
+    if let Err(error) = manager.output {
+        if !is_restart {
+            return Err(error);
+        }
+        tracing::warn!(%error, "old terminal session manager failed during upgrade handoff");
     }
-    Ok(
-        if let Some((target, resume)) = restart_executable.zip(resume) {
-            DashboardExit::Restart {
-                target,
-                resume: Box::new(resume),
-            }
-        } else if quit_detached {
-            DashboardExit::Detached
-        } else if context.shutdown_requested {
-            DashboardExit::Interrupted
-        } else {
-            DashboardExit::Normal
-        },
-    )
+    Ok(exit)
 }
 
 mod chat_tasks;
@@ -1213,10 +1413,11 @@ impl DashboardContext {
     /// the launch itself is doing.
     fn ready_for_a_hint(&self) -> bool {
         self.splash.is_none()
+            && self.login.is_none()
             && !self.startup.pick_pending()
             && self.opening_chat_sessions.is_empty()
             && !self.dashboard.modal_open()
-            && !self.shutdown_requested
+            && self.shutdown_requested_at.is_none()
     }
 
     /// Persists how far a warm chat has been read and the draft it holds.
@@ -1408,10 +1609,14 @@ impl DashboardContext {
         let stopped = self.dashboard.take_stopped_by_suspend();
         for session_id in &stopped.sessions {
             self.cancel_chat_open_for(session_id);
-            self.chats.remove(session_id);
+            discard_session_composer(
+                &mut self.dashboard,
+                &mut self.chats,
+                &mut self.composer_drafts,
+                session_id,
+            );
             self.transcript_positions.remove(session_id);
             self.question_drafts.remove(session_id);
-            self.composer_drafts.discard(session_id);
         }
         if let Some(parent_id) = stopped.reopen {
             self.open_chat_session(&parent_id);
@@ -1430,9 +1635,13 @@ impl DashboardContext {
             .collect::<Vec<_>>();
         for session_id in sessions {
             self.cancel_chat_open_for(&session_id);
-            self.chats.remove(&session_id);
+            discard_session_composer(
+                &mut self.dashboard,
+                &mut self.chats,
+                &mut self.composer_drafts,
+                &session_id,
+            );
             self.question_drafts.remove(&session_id);
-            self.composer_drafts.discard(&session_id);
         }
     }
 
@@ -1471,7 +1680,7 @@ impl DashboardContext {
         for (pane, session) in self.dashboard.pane_sessions() {
             self.open_chat_session_into(pane, &session);
         }
-        if let Some(session) = self.dashboard.take_navigation_session() {
+        if let Some(session) = self.dashboard.take_session_to_open() {
             self.open_chat_session(&session);
             self.dashboard.focus_prompt();
         }
@@ -1497,9 +1706,13 @@ impl DashboardContext {
     }
 
     fn begin_shutdown(&mut self, detached: bool) {
-        if self.shutdown_requested {
+        if self.shutdown_requested_at.is_some() {
             return;
         }
+        // Closing this disposable stream never waits for the login process.
+        drop(self.login.take());
+        // Timed from here so saving the drafts below counts toward the quit.
+        let requested_at = Instant::now();
         self.collect_prepared_startup_prompts();
         self.startup_prompts
             .cancel_unadmitted(&mut self.dashboard, &mut self.chats);
@@ -1523,7 +1736,10 @@ impl DashboardContext {
         for session_id in self.chats.keys().cloned().collect::<Vec<_>>() {
             self.record_chat_detach(&session_id);
         }
-        self.shutdown_requested = true;
+        for session_id in self.composer_drafts.session_ids() {
+            self.flush_composer_draft(&session_id, true);
+        }
+        self.shutdown_requested_at = Some(requested_at);
         // Shutdown progress belongs on screen, not behind the splash.
         self.splash = None;
         for (session_id, through) in self.read_receipts.retry_failed() {
@@ -1539,6 +1755,10 @@ impl DashboardContext {
     /// Returns true once every user-authored mutation has reached a durable
     /// boundary. Pure reads and projections are deliberately not blockers.
     fn refresh_shutdown_notice(&mut self) -> bool {
+        if self.composer_drafts.is_saving() {
+            self.dashboard.set_notice("Saving drafts…");
+            return false;
+        }
         if self.read_receipts.is_saving() {
             self.dashboard.set_notice("Saving read status…");
             return false;
@@ -1558,7 +1778,7 @@ impl DashboardContext {
     pub(super) fn acknowledge_visible_chats(&mut self) {
         // Freeze the final receipt set so ongoing worker output cannot keep
         // extending shutdown while its existing saves drain.
-        if self.shutdown_requested {
+        if self.shutdown_requested_at.is_some() || self.login.is_some() {
             return;
         }
         let mut sessions = self.drawn_chat_sessions.clone();
@@ -1616,15 +1836,16 @@ impl DashboardContext {
         } else {
             Duration::ZERO
         };
+        let session_name = self.session_notice_name(&session_id);
         io::spawn_read_receipt_persist(
             self.client_id.clone(),
-            self.controller
-                .state
-                .sessions
-                .get(&session_id)
+            self.chat_session_record(&session_id)
                 .map(|session| session.workspace_id.clone())
                 .unwrap_or_else(|| self.workspace_id.clone()),
-            session_id,
+            io::NamedSession {
+                id: session_id,
+                name: session_name,
+            },
             through,
             retry_delay,
             self.dashboard_io_tx.clone(),
@@ -1679,21 +1900,19 @@ impl DashboardContext {
         );
         dashboard.set_workspace_names(workspace_names);
         dashboard.set_launch_recency(launch_recency);
+        dashboard.set_session_attention(bootstrap.projection.metadata.session_attention.clone());
+        dashboard.set_form_holders(bootstrap.projection.metadata.form_holders.clone());
+        dashboard.set_unread_frontiers(bootstrap.projection.metadata.unread_frontiers.clone());
+        dashboard.set_notification_dismissals(
+            bootstrap
+                .projection
+                .metadata
+                .notification_dismissals
+                .clone(),
+        );
         // Sessions inherit this host's Git author identity; the first new
         // session of the run makes sure there is one.
         dashboard.require_git_identity_check();
-        // Tabs follow creation order, which a restart does not change; the
-        // listing itself leads with the most recently opened workspace.
-        let mut by_creation = workspaces.iter().collect::<Vec<_>>();
-        by_creation.sort_by(|left, right| {
-            (&left.created_at, &left.id).cmp(&(&right.created_at, &right.id))
-        });
-        dashboard.order_workspaces(
-            &by_creation
-                .into_iter()
-                .map(|workspace| workspace.id.clone())
-                .collect::<Vec<_>>(),
-        );
         for (id, sizes) in &layouts {
             dashboard.cache_workspace_pane_sizes(id, *sizes);
         }
@@ -1753,8 +1972,6 @@ impl DashboardContext {
         let lifecycle_operations = BTreeMap::<String, ActiveLifecycleOperation>::new();
         let (capacity_targets_tx, capacity_triggers_tx, capacity_updates_rx) =
             spawn_dashboard_capacity_poller();
-        let (aws_resource_options_tx, aws_resource_options_rx) =
-            tokio::sync::mpsc::unbounded_channel::<AwsResourceOptions>();
         let capacity_targets = controller.deployment_capacity_targets();
         capacity_targets_tx.send_replace(capacity_targets.clone());
         dashboard.set_deployment_capacity_targets(capacity_targets);
@@ -1796,11 +2013,14 @@ impl DashboardContext {
             notices,
             daemon_running_again_since: None,
             events: Some(events),
+            login: None,
             splash: None,
             chats: BTreeMap::new(),
+            runtime_sessions: Default::default(),
             departed_records: BTreeMap::new(),
             question_drafts: BTreeMap::new(),
             transcript_positions: BTreeMap::new(),
+            question_targets_seen: BTreeMap::new(),
             composer_drafts: ComposerDraftCache::default(),
             draft_save_failures: BTreeMap::new(),
             opening_chat_sessions: BTreeMap::new(),
@@ -1815,9 +2035,10 @@ impl DashboardContext {
             drawn_notice_generation: 0,
             controller_changed: true,
             quit_detached: false,
-            shutdown_requested: false,
+            shutdown_requested_at: None,
             critical_operations,
             critical_operations_changed,
+            loop_stalls: loop_stalls::Meter::new(),
             daemon_presence,
             auto_afk: auto_afk::AutoAfkReporter::new(auto_afk_enabled, auto_afk_away),
             quota: Feed::new(quota_rx),
@@ -1826,7 +2047,6 @@ impl DashboardContext {
             target_test_cancel: None,
             path_input_job: None,
             completion_job: None,
-            review_discovery_cancel: None,
             session_preflight_cancel: None,
             worker: Feed::new(worker_updates_rx),
             runtime_state: Feed::new(runtime_state_rx),
@@ -1840,7 +2060,6 @@ impl DashboardContext {
             ui_request_actions: Vec::new(),
             runtime_review_views,
             runtime_config: Feed::new(runtime_config_rx),
-            review_capabilities: capabilities_rx.clone(),
             profile_capabilities: Feed::new(capabilities_rx),
             pending_runtime_updates: Vec::new(),
             remote_lifecycle_operations: BTreeMap::new(),
@@ -1854,9 +2073,6 @@ impl DashboardContext {
             capacity_targets_tx,
             capacity_triggers_tx,
             capacity: Feed::new(capacity_updates_rx),
-            aws_resource_options_tx,
-            aws_options: Feed::new(aws_resource_options_rx),
-            resolving_aws_resource_options: BTreeSet::new(),
             wiki_search_task: None,
             sessions_text_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             usage_report: usage_report::UsageReportLoader::default(),
@@ -2075,54 +2291,58 @@ async fn next_terminal_event(
     }
 }
 
-/// Builds a chat view for one session: its identity, the other sessions it
-/// reports activity for, and its recovery context.
-/// Records what leaving a chat produced — how far the user has read and the
-/// input they left unsent — and persists both in the background. A missing
-/// session is reported rather than fatal: the session itself is unaffected.
-///
-/// The returned handle lets the quit path wait for the write. `None` means
-/// nothing was queued.
-struct DetachedChatState<'a> {
+/// Lifecycle disposal must drop the editor itself before retiring its cached
+/// value, or the next capture would adopt the abandoned standby text again.
+fn discard_session_composer(
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    drafts: &mut ComposerDraftCache,
+    session_id: &str,
+) {
+    chats.remove(session_id);
+    drop(dashboard.take_standby_composer(session_id));
+    drafts.discard(session_id);
+}
+
+/// Queue a draft for a known session even after it leaves the current feed.
+/// Receipt durability is owned separately by ReadReceipts.
+struct TerminalDraftState<'a> {
     client_id: &'a str,
     session_id: &'a str,
-    event_ordinal: u64,
+    revision: u64,
     draft: DetachedSessionDraft,
 }
 
-fn record_chat_detach_state(
-    controller: &mut Controller,
+fn record_terminal_draft_state(
+    controller: &Controller,
     departed: Option<&SessionRecord>,
     dashboard: &mut DashboardState,
-    detached: DetachedChatState<'_>,
+    draft: TerminalDraftState<'_>,
     updates: &UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let workspace_id = if let Some(session) = controller.state.sessions.get_mut(detached.session_id)
+    if controller
+        .state
+        .sessions
+        .get(draft.session_id)
+        .or(departed)
+        .is_none()
     {
-        session.viewed_through_event_ordinal = session
-            .viewed_through_event_ordinal
-            .max(detached.event_ordinal);
-        let workspace_id = session.workspace_id.clone();
-        dashboard.set_state(controller.state.clone());
-        workspace_id
-    } else if let Some(session) = departed {
-        // The session left the feed; only the store needs the update.
-        session.workspace_id.clone()
-    } else {
         dashboard.set_notice(format!(
-            "Could not save draft and read status for {}: unknown session",
-            short_id(detached.session_id)
+            "Could not save draft for {}: unknown session",
+            short_id(draft.session_id)
         ));
         return None;
-    };
-    dashboard.clear_notice();
-    Some(io::spawn_detached_session_state_persist(
-        detached.client_id.to_owned(),
-        workspace_id,
-        detached.session_id.to_owned(),
-        detached.event_ordinal,
-        detached.draft,
+    }
+    let session_name = io::session_notice_name(&controller.state, draft.session_id);
+    Some(io::spawn_terminal_draft_persist(
+        draft.client_id.to_owned(),
+        io::NamedSession {
+            id: draft.session_id.to_owned(),
+            name: session_name,
+        },
+        draft.revision,
+        draft.draft,
         updates.clone(),
         tracker,
     ))

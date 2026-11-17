@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::config::offers_attached_directories;
 
 /// Whether the target step sets a size for `target`: containers get CPU and
 /// memory, EC2 an instance type. Other targets run with what the host has.
@@ -803,7 +804,7 @@ pub(crate) fn render_review_wizard(
         conversion,
     } = view;
     let target = &dashboard.config.targets[target_id];
-    let can_attach = mount_history_host(target).is_some();
+    let can_attach = offers_attached_directories(target);
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Profile: ", theme::muted()),
@@ -980,8 +981,7 @@ pub(crate) fn render_review_wizard(
     }
     // Guardian targets rely on the harness's own approval mode rather than
     // Hel-managed isolation.
-    if (matches!(target, TargetTemplate::LocalBare)
-        || target.permission_mode() == Some(mj_core::config::PermissionMode::Guardian))
+    if target.permission_mode() == Some(mj_core::config::PermissionMode::Guardian)
         && let Some(kind) = dashboard
             .config
             .profiles
@@ -1015,7 +1015,14 @@ pub(crate) fn render_review_wizard(
         }
         row
     });
-    let last_control_row = [worktree_row, subagent_row]
+    let oracle_row = subagents
+        .filter(|wizard| wizard.oracle_available())
+        .map(|_| {
+            let row = lines.len() as u16;
+            lines.push(Line::raw(""));
+            row
+        });
+    let last_control_row = [worktree_row, subagent_row, oracle_row]
         .into_iter()
         .flatten()
         .map(|row| usize::from(row) + 1)
@@ -1038,6 +1045,7 @@ pub(crate) fn render_review_wizard(
     let map_row = |row: u16| offsets[usize::from(row)];
     let worktree_row = worktree_row.map(map_row);
     let subagent_row = subagent_row.map(map_row);
+    let oracle_row = oracle_row.map(map_row);
     let summary_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let list_height = if can_attach {
         u16::try_from(mounts.mounts.len()).unwrap_or(u16::MAX)
@@ -1062,10 +1070,11 @@ pub(crate) fn render_review_wizard(
     let focused_row = match form.focused() {
         Some(WizardControl::CreateManagedWorktree) => worktree_row,
         Some(WizardControl::Subagents) => subagent_row,
+        Some(WizardControl::Oracle) => oracle_row,
         Some(WizardControl::ReviewAttachments) => Some(
             summary_height.saturating_add(
                 mounts
-                    .history_index
+                    .selected_mount
                     .min(mounts.mounts.len().saturating_sub(1)) as u16,
             ),
         ),
@@ -1092,7 +1101,7 @@ pub(crate) fn render_review_wizard(
     }
     let mut expanded_subagent_combo = None;
     if let Some((wizard, row)) = subagents.zip(subagent_row) {
-        let selectors = vec![(
+        let mut selectors = vec![(
             WizardControl::Subagents,
             "Delegation",
             row,
@@ -1100,6 +1109,16 @@ pub(crate) fn render_review_wizard(
             wizard.policy_index(),
             true,
         )];
+        if let Some(oracle_row) = oracle_row {
+            selectors.push((
+                WizardControl::Oracle,
+                "Oracle",
+                oracle_row,
+                vec!["enabled".to_owned(), "disabled".to_owned()],
+                usize::from(!wizard.oracle),
+                true,
+            ));
+        }
         for (id, label, row, values, committed, enabled) in selectors {
             let area = viewport.row(row, 1);
             let label_width = 11.min(area.width);
@@ -1137,6 +1156,7 @@ pub(crate) fn render_review_wizard(
                 enabled,
                 " Values ",
                 PopupSide::Below,
+                ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
                 form,
                 id,
             );
@@ -1164,7 +1184,7 @@ pub(crate) fn render_review_wizard(
             frame,
             list_area,
             &rows,
-            mounts.history_index,
+            mounts.selected_mount,
             form,
             WizardControl::ReviewAttachments,
         );
@@ -1290,6 +1310,7 @@ pub(crate) fn render_review_wizard(
             enabled,
             " Values ",
             PopupSide::Below,
+            ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
             form,
             id,
         );
@@ -1379,6 +1400,7 @@ pub(crate) fn render_access_combo<K: Copy + Eq>(
         true,
         " Access ",
         PopupSide::Below,
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         form,
         id,
     );
@@ -1415,6 +1437,11 @@ pub(crate) fn render_mount_wizard(
         TargetTemplate::AwsEc2 { .. } => {
             "EC2 directories stream as tar.gz through one SSH connection into the destination."
         }
+        // Reachable when a wizard that already holds attachments moves to a
+        // sandbox: the launch drops them and says so.
+        TargetTemplate::SshNitro { .. } => {
+            "Nitro sandboxes cannot attach host directories; these are dropped when the session starts."
+        }
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
             unreachable!("bare targets do not attach resources")
         }
@@ -1436,31 +1463,6 @@ pub(crate) fn render_mount_wizard(
             ))
         }));
     }
-    if form.is_focused(WizardControl::MountSource)
-        && mounts.source.is_empty()
-        && !mounts.history.is_empty()
-    {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            "Recent sources:",
-            Style::default().fg(theme::palette().muted),
-        ));
-        lines.extend(
-            mounts
-                .history
-                .iter()
-                .take(5)
-                .enumerate()
-                .map(|(index, source)| {
-                    let marker = if index == mounts.history_index {
-                        "› "
-                    } else {
-                        "  "
-                    };
-                    Line::raw(format!("{marker}{}", source.display()))
-                }),
-        );
-    }
     if let Some(error) = &mounts.error {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
@@ -1473,7 +1475,13 @@ pub(crate) fn render_mount_wizard(
     let popup = wizard_modal(frame, surfaces, area);
     let lines = wrap_lines(lines, popup.width.saturating_sub(4));
     let info_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-    let total_height = info_height.saturating_add(5);
+    let history = mounts.available_history();
+    let history_height = if history.is_empty() {
+        0
+    } else {
+        2 + history.len().min(5) as u16
+    };
+    let total_height = info_height.saturating_add(5).saturating_add(history_height);
     let inner = DialogShell::padded_inner(popup);
     let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);
@@ -1482,6 +1490,11 @@ pub(crate) fn render_mount_wizard(
         Some(WizardControl::MountSource) => Some(info_height),
         Some(WizardControl::MountDestination) => Some(info_height.saturating_add(2)),
         Some(WizardControl::MountAccess) => Some(info_height.saturating_add(4)),
+        Some(WizardControl::MountHistory) => Some(
+            info_height
+                .saturating_add(7)
+                .saturating_add(mounts.history_selection.min(4) as u16),
+        ),
         _ => None,
     };
     let viewport = form.viewport(body, total_height, focused_row.map(|row| row..row + 1));
@@ -1516,10 +1529,6 @@ pub(crate) fn render_mount_wizard(
         &mounts.source,
         form,
         WizardControl::MountSource,
-    );
-    form.set_field_uses_vertical_keys(
-        WizardControl::MountSource,
-        mounts.source.is_empty() && !mounts.history.is_empty(),
     );
     let destination_row = viewport.row(info_height.saturating_add(2), 1);
     frame.render_widget(
@@ -1572,6 +1581,26 @@ pub(crate) fn render_mount_wizard(
         form,
         WizardControl::MountAccess,
     );
+    if !history.is_empty() {
+        let label = viewport.row(info_height.saturating_add(6), 1);
+        frame.render_widget(
+            Paragraph::new(Line::styled("Recent on this host:", theme::muted())),
+            label,
+        );
+        let rows = history
+            .iter()
+            .map(|path| Line::raw(path.display().to_string()))
+            .collect::<Vec<_>>();
+        let list = viewport.row(info_height.saturating_add(7), rows.len().min(5) as u16);
+        ChoiceList::render(
+            frame,
+            list,
+            &rows,
+            mounts.history_selection.min(rows.len() - 1),
+            form,
+            WizardControl::MountHistory,
+        );
+    }
     Dialog::render_actions(
         frame,
         DialogShell::layout(inner, 1).actions,

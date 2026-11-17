@@ -20,6 +20,7 @@ default = []
 test-hooks = ["mj-core/test-hooks", "mj-controller/test-hooks", "mj-chat/test-hooks"]
 
 [dependencies]
+tempfile.workspace = true
 mj-core.workspace = true
 mj-checkpoint.workspace = true
 mj-client.workspace = true
@@ -54,6 +55,13 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Purge freed daemon pages asynchronously, using jemalloc's normal decay policy.
+# `stats` and `profiling` stay inactive unless `_RJEM_MALLOC_CONF` turns them on
+# for one process (for example `prof:true` or `stats_print:true`), so a live
+# daemon's heap can be measured without a special build.
+tikv-jemallocator = { version = "0.7", features = ["background_threads", "stats", "profiling"] }
+
 [target.'cfg(windows)'.dependencies]
 # Stops an unresponsive daemon through a handle that pins its identity.
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
@@ -71,7 +79,6 @@ libc.workspace = true
 # The store-divergence test migrates the daemon's store from outside the
 # daemon, which is exactly what the incident it reproduces did.
 rusqlite.workspace = true
-tempfile.workspace = true
 # Project cursor-addressed PTY redraws into the screen visible to the user.
 vte = { version = "0.14", default-features = false }
 # `start_paused` drives the force-destroy preemption timeout instantly.

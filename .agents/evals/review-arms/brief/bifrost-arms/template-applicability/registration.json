@@ -1,0 +1,44 @@
+{
+  "registered_at": "2026-11-17T05:16:12.474066+00:00",
+  "metric": "template applicability (reach unmeasured)",
+  "assessment_sessions": 1,
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "profile": "codex4",
+  "source_definition_path": "/mnt/optane/tmp/bf13143-prompts/mvp/h6-results/h6/SYNTHESIS.md",
+  "facts": 17,
+  "provided_label_fields": [
+    "fact",
+    "kind",
+    "query_description"
+  ],
+  "opaque_ids": true,
+  "forbidden_inputs": "bug/issue names, defect/fix/evidence records, repository code, briefs, review outputs, catch verdicts and original H6 outcomes",
+  "engine_queries": 0,
+  "primary_census_sha256": "cec120df43bc890efbfbd5fee79fc2236ff654e1249b3dcb1f9309c054536089",
+  "labels_only_sha256": "ae777f507e37feef1148984f614975443590895027d28c4a6db7102a50c20add",
+  "amended_plan_sha256": "f12b96cb7f5eb9e6eb6ba5a0bfc5e40849b8b02f302da817d016a9cb3d9fce9c",
+  "source_definition_extraction": "literal template columns1\u20134, folded-ID definition and original rule context only; outcomes/status/example scores excluded",
+  "selection_or_membership_change": false,
+  "inputs_frozen_at": "2026-11-17T05:19:28.027388+00:00",
+  "source_definition_sha256": "706ef2a2d77704b0f204f04141b32c14c91862f15754c14e7e230f2e4ad7b439",
+  "definition_sha256": "6e746a4f594b44488911015ca97751a2f677468a03e0abac32687167b9dc6ffa",
+  "allowed_template_ids": [
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6",
+    "T8a",
+    "T8b"
+  ],
+  "no_match": "none",
+  "unit_files": {
+    "INSTRUCTIONS.md": "17f792bbbe9da3b9d01b53962441ce4d37d80364fc9fffba5dcbd9fa267d1431",
+    "facts.json": "ae777f507e37feef1148984f614975443590895027d28c4a6db7102a50c20add",
+    "templates.md": "6e746a4f594b44488911015ca97751a2f677468a03e0abac32687167b9dc6ffa"
+  },
+  "one_session_runner": "existing verify_driver --kind task;codex4/Sol/high;no repository investigation beyond wrapper initialization",
+  "private_key_uploaded": false
+}

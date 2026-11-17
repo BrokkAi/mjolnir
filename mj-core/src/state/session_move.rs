@@ -28,6 +28,12 @@ pub struct MoveSelection {
     /// Delegation policy for the destination. `None` keeps the session's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagents: Option<crate::subagent::SubagentPolicy>,
+    /// Oracle choice for the destination; omitted retains the session value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<bool>,
+    /// Destination oracle model override; omitted retains the session value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_choice: Option<crate::config::SubagentChoice>,
 }
 
 /// What moving a local checkout into an isolated workspace will do, shown
@@ -315,6 +321,13 @@ pub struct MoveOperation {
     pub source_target_template_id: String,
     pub source_target: Option<TargetLocator>,
     pub source_native_session_id: Option<String>,
+    // Additive shape within unshipped breaking store revision 132; no new migration.
+    /// Frozen request inherited by the destination when selection says keep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_resource_allocation: Option<SessionResourceAllocation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_additional_mounts: Vec<AdditionalMount>,
+    /// Applied source settings, used only for source recovery.
     pub source_additional_mounts: Vec<AdditionalMount>,
     pub source_resource_allocation: Option<SessionResourceAllocation>,
     pub destination_target: Option<TargetLocator>,
@@ -336,6 +349,35 @@ pub struct MoveOperation {
 }
 
 impl MoveOperation {
+    /// Capture the two independently owned facts at acceptance of each attempt.
+    pub fn capture_container_settings(&mut self, source: &SessionRecord) {
+        let applied = super::applied_container_settings(source);
+        self.source_resource_allocation = applied.resource_allocation.cloned();
+        self.source_additional_mounts = applied.additional_mounts.to_vec();
+        self.inherited_resource_allocation = if self.selection.resource_allocation.is_none()
+            && !self.selection.clear_resource_allocation
+        {
+            source.resource_allocation.clone()
+        } else {
+            None
+        };
+        self.inherited_additional_mounts = if self.selection.additional_mounts.is_none() {
+            source.additional_mounts.clone()
+        } else {
+            Vec::new()
+        };
+    }
+
+    /// Explicit Resume resolves a cancelled Move by finishing its queue
+    /// without ever admitting it. Its archives are then historical, just as
+    /// for a completed Move, and cannot make a later Move a retry.
+    pub fn is_resolved(&self) -> bool {
+        self.phase == MovePhase::Completed
+            || (self.phase == MovePhase::Cancelled
+                && !self.queue_admission_started
+                && self.queue_admission_finished)
+    }
+
     pub fn retains_source_environment(&self) -> bool {
         self.in_place || self.workspace_transfer.is_some()
     }
@@ -344,8 +386,7 @@ impl MoveOperation {
     }
 
     pub fn retains_checkpoint(&self) -> bool {
-        (self.handoff.is_some() && self.phase == MovePhase::Cancelled)
-            || !matches!(self.phase, MovePhase::Completed | MovePhase::Cancelled)
+        (!self.is_resolved() && (self.handoff.is_some() || self.phase != MovePhase::Cancelled))
             || (self.queue_admission_started && !self.queue_admission_finished)
     }
 
@@ -367,7 +408,7 @@ impl MoveOperation {
     /// reference is removed from the record, so the recovery guidance, the API
     /// and the retry admission all read the loss from here.
     pub fn checkpoint_retained(&self) -> bool {
-        self.phase != MovePhase::Completed && self.restore_artifact().is_some()
+        !self.is_resolved() && self.restore_artifact().is_some()
     }
 
     /// Whether a surface should offer to retry this failed or cancelled Move:
@@ -384,9 +425,7 @@ impl MoveOperation {
     /// Resume would recreate what the Move promised to keep, so only a retried
     /// Move or Destroy may act on the session.
     pub fn holds_source_environment(&self) -> bool {
-        self.retains_source_environment()
-            && self.phase != MovePhase::Completed
-            && self.recovery_session.is_some()
+        self.retains_source_environment() && !self.is_resolved() && self.recovery_session.is_some()
     }
 
     pub fn is_active(&self) -> bool {

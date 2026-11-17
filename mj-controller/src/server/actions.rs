@@ -23,6 +23,27 @@ pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) ->
 // this public action's Rust construction shape inline; boxing would change it.
 #[allow(clippy::large_enum_variant)]
 pub enum ControllerAction {
+    PushSubscribe {
+        subscription: crate::web_push::Subscription,
+    },
+    PushRenew {
+        old_endpoint: String,
+        subscription: crate::web_push::Subscription,
+    },
+    PushUnsubscribe {
+        endpoint: String,
+    },
+    PushTest {
+        endpoint: String,
+    },
+    DismissNotification {
+        session_id: String,
+        target: mj_core::attention::NotificationDismissal,
+    },
+    SetSessionNotificationsIgnored {
+        session_id: String,
+        ignored: bool,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
@@ -57,7 +78,11 @@ pub enum ControllerAction {
         /// Omitted uses the selected profile's subagent setting.
         #[serde(default)]
         subagents: Option<mj_core::subagent::SubagentPolicy>,
-        /// Turn review for this session. Omitted follows `[review]`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oracle: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oracle_choice: Option<mj_core::config::SubagentChoice>,
+        /// Review for this session. Omitted follows `[review]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(deserialize_with = "deserialize_session_review")]
         review: Option<mj_core::config::SessionReview>,
@@ -67,6 +92,9 @@ pub enum ControllerAction {
         /// Exclude this session from GitHub watcher delivery targets.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_github_events: bool,
+        /// Withhold GitHub credentials; inherited by children.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_github_credentials: bool,
         /// Which workspace the session belongs to. Optional on the wire so a
         /// viewer cached from before workspaces reached the phone still parses,
         /// but a controller holding more than one workspace refuses an empty
@@ -125,16 +153,14 @@ pub enum ControllerAction {
         session_id: String,
         workspace_id: String,
     },
-    /// Record the session's container size overrides and attached
-    /// directories. An empty or absent size clears that override, and the
+    /// Record the session's container allocation and attached
+    /// directories. An absent allocation uses the target defaults, and the
     /// mounts list replaces the whole list. Nothing changes inside a running
     /// container: the values are read the next time it is created.
     SetContainerSettings {
         session_id: String,
         #[serde(default)]
-        cpus: Option<String>,
-        #[serde(default)]
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         #[serde(default)]
         mounts: Vec<AdditionalMount>,
     },
@@ -230,12 +256,6 @@ pub enum ControllerAction {
     /// Review the turn this session just finished.
     StartReview {
         session_id: String,
-    },
-    /// Forward the findings, dismiss them, or cancel the open review.
-    ResolveReview {
-        session_id: String,
-        /// `forward`, `dismiss`, or `cancel`.
-        resolution: String,
     },
     RemoveQueuedPrompt {
         session_id: String,
@@ -349,9 +369,11 @@ impl ActionOutcome {
             ),
             Self::Failed { reference } => Some(ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "the controller could not start this action; \
-                     the daemon log records the reason under reference {reference}"
+                crate::daemon::lifecycle_failure_message(
+                    "the controller could not start this action",
+                    None,
+                    None,
+                    reference,
                 ),
             )),
         }
@@ -441,6 +463,8 @@ pub struct PathCompletionRequest {
 
 #[derive(Debug)]
 pub struct NewPreflightRequest {
+    pub profile_id: String,
+    pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
     pub bundle_id: String,
     pub target_id: String,
@@ -505,41 +529,7 @@ pub enum PreflightFailure {
     Controller(String),
 }
 
-/// One configured repository's network clone and publication destinations.
-/// URLs have already been passed through the shared display sanitizer before
-/// they reach a phone.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreflightRepository {
-    pub id: String,
-    pub fetch_url: String,
-    pub default_branch: String,
-    pub push_urls: Vec<String>,
-}
-
-/// What a preflight found. Isolated sessions expose their complete network
-/// source plan so the person can review it before creation. Raw-local targets
-/// leave the plan empty because they use the selected checkout directly;
-/// isolated targets set `local_changes_excluded` to make the copy boundary
-/// explicit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreflightNew {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_directory: Option<PathBuf>,
-    #[serde(default)]
-    pub managed_worktree: mj_core::state::ManagedWorktreeOptions,
-    #[serde(default)]
-    pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
-    #[serde(default)]
-    pub dirty_repositories: Vec<String>,
-    #[serde(default)]
-    pub remote_repositories: Vec<PreflightRepository>,
-    pub local_changes_excluded: bool,
-    /// Why creating this session turns its review off, when it will.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_notice: Option<String>,
-}
+pub use mj_client::daemon::{PreflightNew, PreflightRepository};
 
 /// What a phone asks about, or stores against, its own identity.
 ///
@@ -625,6 +615,10 @@ pub enum BackgroundTaskStopFailure {
     Internal,
 }
 
+/// What a public request that asks for per-turn review is told. Stored
+/// actions that still say `turn` read as `push` instead.
+const TURN_REVIEW_REMOVED: &str = "Per-turn review was removed. Use review.mode \"push\", or omit review to review before push when reviewers are configured.";
+
 pub(super) fn deserialize_session_review<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<mj_core::config::SessionReview>, D::Error> {
@@ -637,6 +631,43 @@ pub(super) fn deserialize_session_review<'de, D: serde::Deserializer<'de>>(
             ) {
                 return Err(serde::de::Error::custom(
                     "review.mode must be inherit, off, turn, or push",
+                ));
+            }
+            serde_json::from_value(value).map_err(serde::de::Error::custom)
+        })
+        .transpose()
+}
+
+/// Public requests accept only current reviewer fields. The durable action
+/// reader above still loads an accepted legacy request after an upgrade.
+pub(super) fn deserialize_api_session_review<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<mj_core::config::SessionReview>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            let mode = value.get("mode").and_then(serde_json::Value::as_str);
+            if mode == Some("turn") {
+                return Err(serde::de::Error::custom(TURN_REVIEW_REMOVED));
+            }
+            if !matches!(mode, Some("inherit" | "off" | "push")) {
+                return Err(serde::de::Error::custom(
+                    "review.mode must be inherit, off, or push",
+                ));
+            }
+            let mode = value
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            let object = value
+                .as_object()
+                .ok_or_else(|| serde::de::Error::custom("review must be an object"))?;
+            if object
+                .keys()
+                .any(|key| key != "mode" && (mode == "off" || key != "reviewers"))
+            {
+                return Err(serde::de::Error::custom(
+                    "review accepts only mode and reviewers",
                 ));
             }
             serde_json::from_value(value).map_err(serde::de::Error::custom)

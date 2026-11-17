@@ -10,6 +10,7 @@
 //! only profile configuration and the relay continuation seed are replaced.
 
 use anyhow::{Context, Result, ensure};
+use mj_core::targets::SshTrafficClass;
 use tokio_util::sync::CancellationToken;
 
 use mj_core::state::{MaterializedSession, SessionState};
@@ -320,9 +321,13 @@ impl Controller {
                 let mut runtime = if mode == InPlaceRestoreMode::Move {
                     mj_core::state::TargetRuntimeSettings::from(&target_template)
                 } else {
-                    record.target_runtime.clone().unwrap_or_else(|| {
-                        mj_core::state::TargetRuntimeSettings::from(&target_template)
-                    })
+                    record
+                        .target_runtime
+                        .as_deref()
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            mj_core::state::TargetRuntimeSettings::from(&target_template)
+                        })
                 };
                 runtime.tool_cache = record
                     .target_runtime
@@ -332,7 +337,7 @@ impl Controller {
                     .target_runtime
                     .as_ref()
                     .and_then(|runtime| runtime.container_settings.clone());
-                record.target_runtime = Some(runtime);
+                record.target_runtime = Some(runtime.into());
                 record.native_session_id =
                     native_continuity.then(|| archive_manifest.session.native_session_id.clone());
                 record.state = SessionState::Provisioning;
@@ -468,16 +473,10 @@ impl Controller {
             .or(restart_intent
                 .as_ref()
                 .and_then(|intent| intent.handoff.as_ref()))
-            .or(previous.checkpoint.as_ref())
+            .or(previous.checkpoint.as_deref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
-        let profile = self
-            .config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?
-            .clone();
-        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+        let profile = self.config.named_profile(profile_id)?.clone();
         let target_template = self
             .config
             .targets
@@ -487,7 +486,9 @@ impl Controller {
         self.validate_muse_resume_destination(previous, profile.kind, target_template_id)?;
         ensure!(
             profile.kind != mj_core::config::HarnessKind::Muse
-                || previous.additional_mounts.is_empty(),
+                || mj_core::state::applied_container_settings(previous)
+                    .additional_mounts
+                    .is_empty(),
             "{} ACP supports one workspace root; attached directories are unsupported",
             profile.kind.display_name()
         );
@@ -503,7 +504,13 @@ impl Controller {
             && previous.state == SessionState::Closing
             && super::super::local_profile_homes::session_has_a_staged_home_of_its_own(previous);
         if !retain_native {
-            crate::controller::worker_binary::preflight_worker_binary(&target_template, executor)?;
+            let worker_target = crate::controller::backend::session_target(
+                &self.config,
+                &previous.bundle_id,
+                target_template_id,
+                executor,
+            )?;
+            crate::controller::worker_binary::preflight_worker_binary(&worker_target, executor)?;
         }
         // The directory the *source* profile owns inside the target. It is
         // read from the record's own profile, before the record names the
@@ -514,6 +521,7 @@ impl Controller {
             super::super::execute_checked(
                 executor,
                 crate::targets::command_on_locator(
+                    SshTrafficClass::Control,
                     &backend,
                     session_id,
                     vec!["test".into(), "-d".into(), worker_root],
@@ -574,7 +582,19 @@ impl Controller {
         previous: &mj_core::state::SessionRecord,
         error: anyhow::Error,
     ) -> Result<anyhow::Error> {
-        self.retain_failed_in_place_restore(session_id, previous, error, "Move")
+        self.retain_failed_in_place_move_with_persist(session_id, previous, error, |record| {
+            crate::database::save_resumed_session(record, None)
+        })
+    }
+
+    pub(in crate::controller) fn retain_failed_in_place_move_with_persist(
+        &mut self,
+        session_id: &str,
+        previous: &mj_core::state::SessionRecord,
+        error: anyhow::Error,
+        persist: impl Fn(&mj_core::state::SessionRecord) -> Result<()>,
+    ) -> Result<anyhow::Error> {
+        self.retain_failed_in_place_restore(session_id, previous, error, "Move", persist)
     }
 
     pub(crate) fn retain_failed_in_place_restart(
@@ -583,7 +603,9 @@ impl Controller {
         previous: &mj_core::state::SessionRecord,
         error: anyhow::Error,
     ) -> Result<anyhow::Error> {
-        self.retain_failed_in_place_restore(session_id, previous, error, "Restart")
+        self.retain_failed_in_place_restore(session_id, previous, error, "Restart", |record| {
+            crate::database::save_resumed_session(record, None)
+        })
     }
 
     fn retain_failed_in_place_restore(
@@ -592,6 +614,7 @@ impl Controller {
         previous: &mj_core::state::SessionRecord,
         error: anyhow::Error,
         owner: &'static str,
+        persist: impl Fn(&mj_core::state::SessionRecord) -> Result<()>,
     ) -> Result<anyhow::Error> {
         crate::worker_lifecycle::run_blocking(
             session_id,
@@ -609,23 +632,23 @@ impl Controller {
                 );
                 let backend =
                     backend_locator(current.target.as_ref().unwrap(), current, &self.config)?;
-                let root = crate::targets::worker_root(&backend, session_id)?;
-                let cleanup = super::super::execute_checked(
-                    &crate::targets::CancellableProcessExecutor::with_timeout(
+                // The plan stages the current worker first, outside the stop's
+                // timeout.
+                let cleanup = crate::targets::stop_worker_plan(
+                    &backend,
+                    session_id,
+                    "stop failed in-place worker while retaining its environment",
+                )
+                .and_then(|plan| {
+                    plan.execute(&crate::targets::CancellableProcessExecutor::with_timeout(
                         std::time::Duration::from_secs(15),
-                    ),
-                    crate::targets::command_on_locator(
-                        &backend,
-                        session_id,
-                        vec![
-                            "sh".into(),
-                            "-c".into(),
-                            crate::targets::stop_worker_daemon_script(&root),
-                        ],
-                        "stop failed in-place worker while retaining its environment",
-                    )?,
-                );
+                    ))
+                });
                 let mut retained = previous.clone();
+                let latest = crate::database::load_session_record(session_id)?
+                    .context("retained session disappeared")?;
+                retained.resource_allocation = latest.resource_allocation;
+                retained.additional_mounts = latest.additional_mounts;
                 retained.state = SessionState::Error;
                 retained.updated_at = now();
                 retained.last_error =
@@ -635,7 +658,7 @@ impl Controller {
                         "{error:#}; stopping retained worker failed: {cleanup_error:#}"
                     ));
                 }
-                crate::database::save_resumed_session(&retained, None)?;
+                persist(&retained)?;
                 self.state.sessions.insert(session_id.to_owned(), retained);
                 cleanup.context("stop retained worker before retry")?;
                 Ok(error)

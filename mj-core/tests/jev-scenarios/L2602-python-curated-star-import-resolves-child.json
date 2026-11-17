@@ -1,0 +1,128 @@
+{
+  "id": "L2602",
+  "title": "Python curated star import resolves child",
+  "category": "still-open-none",
+  "harness": "grok",
+  "source": {
+    "kind": "transcript",
+    "session": "b23ec6df24b9cfcfecb73e0bdb51f26f",
+    "session_title": "eval47 6945 grokxhigh",
+    "reply_position": 9340,
+    "captured_at": "2026-10-28T22:21:26.212Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:24",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #6945: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). Direct unresolved contract questions to the series lead.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 9c4d3f1af65b6f0b83b5b41ce00b477285650716\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nDo not bypass the mbx cargo shim, redirect target/, set CARGO_TARGET_DIR,\nor change shared cache settings.\n\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /worksp\n[... 1146 bytes omitted from the middle of this message ...]\nr/store/resolution_operation/python_demand.rs`: `binding_proofs` builds the star route, `module_locations` reads the name in the package, and `module_name_open_without_binding` keeps it open when a placed child exists. Resolve a curated star name that has no binding and exactly one selected placed child module or package to that child, as a certain binding. A curated name with no binding and no child, every `public_names` star inventory, alternative providers and explicit imports keep today's answers, and an authored binding in `__init__.py` still wins. Witness: a new case under `tests/fixtures/golden/native-python-members/` (test `python_native_members_match_golden` in `tests/suite_semantic/golden_python_native_routes.rs`) with the issue's fixture, a read through the submodule, and those controls. Say whether you changed any epoch or salt, and why.\n\n# Issue\n\nIssue #6945: Native Python: resolve curated __all__ submodule names through star imports\n\nPrecision follow-up from the #6935 review (session 61f0abcc). References #6509.\n\nA curated `__all__` entry can name a placed submodule that has no authored binding. For example, `pkg/__init__.py` contains `__all__ = [\"child\"]` and nothing else, and `pkg/child.py` exists. In that case `from pkg import *` imports `pkg.child` and binds `child` to that submodule (Python reference, the import statement: for each name in `__all__`, a missing attribute is imported as a submodule).\n\nNative Python currently leaves such a name open through `module_name_open_without_binding`. That is sound but conservative. The star route could instead resolve a curated name that is a placed child module or package to the child's container, the same way #6935 resolves from-imports of a package child, and so make reads through it certain.\n\nAcceptance: a fixture with the shape above, where a read of `child` after `from pkg import *` binds `pkg/child.py` as certain. A curated name with no binding and no placed child stays as it is today, and every public_names star inventory keeps today's openness.\n\n"
+        },
+        {
+          "id": "agent:28",
+          "role": "assistant",
+          "text": "I'll start by confirming the checkout is clean and detached at the required commit, then read the repository guidance and the Python star-import resolution path named in the issue."
+        },
+        {
+          "id": "agent:106",
+          "role": "assistant",
+          "text": "The checkout is clean and detached at `9c4d3f1af65b6f0b83b5b41ce00b477285650716`. Next I’ll read the resolution architecture and the Python star-import path the issue names."
+        },
+        {
+          "id": "agent:4400",
+          "role": "assistant",
+          "text": "The star import leaves a curated submodule name open even when exactly one placed child exists. I’ll capture that behavior on a new fixture, then bind that child as a certain target."
+        },
+        {
+          "id": "agent:4850",
+          "role": "assistant",
+          "text": "The pre-fix probe ran and saved the golden output. I’ll read the curated star cases to see which reads stay open."
+        },
+        {
+          "id": "agent:5088",
+          "role": "assistant",
+          "text": "The diagnosis is already in hand: a curated star name reaches the placed child but stays open. I will implement that resolution in the star route, then validate it against the fixture."
+        },
+        {
+          "id": "agent:6991",
+          "role": "assistant",
+          "text": "The child is already selected; the star route then opens the result because the name has no authored binding. I will bind a curated name to that one placed child and leave the other inventories as they are."
+        },
+        {
+          "id": "agent:7378",
+          "role": "assistant",
+          "text": "The bare `child` read is certain now. The attribute through that module still stops at the qualified-member bridge, so I am tracing why that member does not follow the same path as an explicit import."
+        },
+        {
+          "id": "agent:8833",
+          "role": "assistant",
+          "text": "The witness assertions passed. I am comparing the captured output with the existing goldens before accepting the new cases."
+        },
+        {
+          "id": "agent:8933",
+          "role": "assistant",
+          "text": "The curated-star fix is in the tree and the new goldens are installed. Next I’ll confirm the native Python suites, run clippy, then commit."
+        },
+        {
+          "id": "agent:9340",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nNative Python now binds a curated `__all__` star name that has no authored binding and exactly one selected placed child to that child. The Python language epoch and salt are unchanged.\n\n## 1. Confirmed cause\n\n`binding_proofs` already starts a star route for a curated wildcard name. `route_tier` then adds the placed child as a provider edge. `module_name_open_without_binding` is true whenever a parent package has a child module or package of that name, so `module_locations` opened a complete empty attribute read. The child file was reachable and still `complete=false`. That opening is sound for `public_names` and for attribute reads. It is conservative for a curated star name: Python imports a missing `__all__` attribute as the submodule.\n\nOn the base, before the change, the witness read was:\n\n`read_pkg.py:19..24 targets=1 complete=false reasons=[] selected=[\"pkg/child.py:0..11\"]`\n\n## 2. Changes and reasons\n\nBase: `9c4d3f1af65b6f0b83b5b41ce00b477285650716`\nFinal: `20dc40f7670eecf564968429c4b7853586469055` (parent is the base)\n\nThe fix is query-time, in `route_tier` of `crates/bifrost-store/src/analyzer/store/resolution_operation/python_demand.rs`. `module_locations` is unchanged, so attribute reads and `public_names` inventories still open. A curated star name with an empty complete binding inventory and exactly one selected module or package provider is retained as that one container edge and is not opened. An authored binding replaces the provider edges, so the package assignment wins alone. Zero children, several children, an alternative-only child, a module-object dunder, a cancelled or unseen module cell, and every `public_names` inventory stay on the previous path. From-import child resolution is unchanged and does not take this branch.\n\nNo epoch or salt change. Persisted language facts are the same. `epoch.rs` was not edited. The Python salt still ends at `python-declaration-commit-points-7735-2026-10`.\n\nWitness fixtures and assertions live under `tests/fixtures/golden/native-python-members/curated-star-child/`, `curated-star-alternatives/`, and `python_native_members_match_golden` in `tests/suite_semantic/golden_python_native_routes.rs`.\n\n## 3. Exact validation commands and results\n\n```\nJAVA_HOME= BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 BIFROST_OPEN_PACKS_DISABLE=1 eatmydata cargo nextest run --max-fail 100 --test suite_semantic python_native\n```\n\nExit 0. Nextest run `e697d72a-65bd-4bef-969a-0467c679c51a`. 17 passed, 2094 skipped, in 173.583s. That includes `python_native_members_match_golden` (56.327s), the other native route goldens, attribute-space owners, and the native reverse suites.\n\n```\nJAVA_HOME= BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 eatmydata cargo clippy --workspace --all-targets --all-features -- -D warnings\n```\n\nExit 0. Finished in 10m 13s.\n\n`rustfmt --edition 2024 --check` on the two changed Rust files exited 0 before the confirmation run. This is store resolution, not graph or analysis-usage code, so `brokk-bifrost-analysis --lib` was not run. `python_demand.rs` has no crate unit tests of its own.\n\n## 4. Before/after evidence\n\nSame fixture, captured on the base before the edit and again after. The issue names no external repository.\n\n| Read | Before | After |\n|---|---|---|\n| `read_pkg.py:19..24` bare `child` | `targets=1 complete=false` `pkg/child.py:0..11` | `targets=1 complete=true` `pkg/child.py:0..11` |\n| `read_pkg.py:25..30` receiver of `child.marker` | same, `complete=false` | same target, `complete=true` |\n| `read_box.py:19..24` and `:25..30` package child | `complete=false` `box/child/__init__.py:0..11` | `complete=true`, same target |\n| `read_bound.py:21..29` authored | `targets=2` `__init__.py:0..8` and `authored.py:0..11` | `targets=1 complete=true` `bound/__init__.py:0..8` |\n| `read_absent.py:22..29` | `targets=0 complete=true` | unchanged |\n| `read_public.py:22..29` | `targets=2 complete=false` both public files | unchanged |\n| explicit alias, dotted import, `pkg.child` | unchanged | unchanged |\n| unordered `left`/`right` copies | `targets=2 complete=false` both chi\n[... 334 bytes omitted from the middle of this message ...]\nthe demand change, the golden test, and the two fixture trees.\n\nThe attribute token `marker` in `child.marker` and `box`’s `child.marker` stays `targets=0 complete=false` with `qualified-member-policy-bridge-required`. A star import does not lower that attribute as a Python member route, and the synchronous qualified evaluator returns that bridge for every Python qualified route before member resolution. Making `marker` certain would be a shared evaluator change or a lowering change that republishes facts. The certain result is the name `child`, bare and as the receiver. Authored-wins drops the extra child-file target that the open answer used to keep beside the assignment. That matches Python: an existing attribute is not replaced by the submodule.\n\n## 6. Draft GitHub approach comment\n\nA curated `__all__` name with no binding in the package, and exactly one selected placed child module or package, is now a certain binding to that child. After `from pkg import *`, a read of `child` selects `pkg/child.py` with a complete answer, and a package child such as `box/child/__init__.py` is handled the same way. The star route still starts from the wildcard inventory. Certainty is decided when the route reads the name: if the package attribute space is complete and empty for that name, the route keeps only that one child and does not open the result. An authored assignment in `__init__.py` is the only target, so the placed submodule does not also bind. A curated name with no placed child stays a complete empty answer. Every `public_names` star inventory stays open, including when a same-named child file exists. Two unordered concrete copies of the child stay alternative and incomplete, and explicit from-imports and dotted imports are unchanged. The attribute token in `child.marker` still stops at the qualified-member policy bridge. The certain result is the name `child`, including when it is the receiver. No language epoch or salt changed, because persisted facts are the same and only query-time route selection changed."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "grok",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "References #6509.\n\nA curated `__all__` entry can name a placed submodule that has no authored binding. For example, `pkg/__init__.py` contains `__all__ = [\"child\"]` and nothing else, and `pkg/child.py` exists. In that case `from pkg import *` imports `pkg.child` and binds `child` to that submodule (Python reference, the import statement: for each name in `__all__`, a missing attribute is imported as a submodule).\n\nNative Python currently leaves such a name open through `module_name_open_without_binding`. That is sound but conservative. The star route could instead resolve a curated name that is a placed child module or package to the child's container, the same way #6935 resolves from-imports of a package child, and so make reads through it certain.\n\nAcceptance: a fixture with the shape above, where a read of `child` after `from pkg import *` binds `pkg/child.py` as certain. A curated name with no binding and no placed child stays as it is today, and every public_names star inventory keeps today's openness.\n\n",
+    "assistant_text_tail": "the demand change, the golden test, and the two fixture trees.\n\nThe attribute token `marker` in `child.marker` and `box`’s `child.marker` stays `targets=0 complete=false` with `qualified-member-policy-bridge-required`. A star import does not lower that attribute as a Python member route, and the synchronous qualified evaluator returns that bridge for every Python qualified route before member resolution. Making `marker` certain would be a shared evaluator change or a lowering change that republishes facts. The certain result is the name `child`, bare and as the receiver. Authored-wins drops the extra child-file target that the open answer used to keep beside the assignment. That matches Python: an existing attribute is not replaced by the submodule.\n\n## 6. Draft GitHub approach comment\n\nA curated `__all__` name with no binding in the package, and exactly one selected placed child module or package, is now a certain binding to that child. After `from pkg import *`, a read of `child` selects `pkg/child.py` with a complete answer, and a package child such as `box/child/__init__.py` is handled the same way. The star route still starts from the wildcard inventory. Certainty is decided when the route reads the name: if the package attribute space is complete and empty for that name, the route keeps only that one child and does not open the result. An authored assignment in `__init__.py` is the only target, so the placed submodule does not also bind. A curated name with no placed child stays a complete empty answer. Every `public_names` star inventory stays open, including when a same-named child file exists. Two unordered concrete copies of the child stay alternative and incomplete, and explicit from-imports and dotted imports are unchanged. The attribute token in `child.marker` still stops at the qualified-member policy bridge. The certain result is the name `child`, including when it is the receiver. No language epoch or salt changed, because persisted facts are the same and only query-time route selection changed.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 24,
+    "input_rationale": "Eval task: fix committed, validated, report and draft comment delivered. The remaining limitations (qualified-member bridge) are documented findings, with no question or decision for the judge.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

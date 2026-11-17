@@ -62,21 +62,23 @@
   "recorded_verdict": null,
   "expected": {
     "failure": "none",
-    "input": "none",
+    "input": "required",
     "work": "finished",
     "reply": "closing",
     "quiet": null,
-    "action": "finished",
+    "action": "await_input",
     "wrong_actions": [
       "continue",
-      "await_input"
+      "finished",
+      "wait"
     ]
   },
   "known_failure": [],
   "outcome": {
     "mjolnir": "no Jev record",
     "judgment": "right",
-    "next": "user: 'do it' was the approval"
+    "next": "user: 'do it' was the approval",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent. Was input=none, action=finished."
   },
   "context": {
     "after": [

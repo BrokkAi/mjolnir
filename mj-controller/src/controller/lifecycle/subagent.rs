@@ -2,9 +2,11 @@
 
 use super::*;
 use crate::controller::checkpoint::{
-    BarrierBusyPolicy, CHECKPOINT_BARRIER_TIMEOUT, adopt_restarted_checkpoint_relay,
-    connect_checkpoint_relay, wait_for_checkpoint_barrier,
+    BarrierBusyPolicy, BarrierRecovery, BarrierRecoveryOutcome, CHECKPOINT_BARRIER_TIMEOUT,
+    CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART, ControllerRelayLease,
+    adopt_restarted_checkpoint_relay, connect_checkpoint_relay, wait_for_checkpoint_barrier,
 };
+use crate::controller::worker_binary::{WorkerRecovery, worker_recovery};
 
 impl Controller {
     /// Persist the child's final relay events before removing its private
@@ -12,10 +14,11 @@ impl Controller {
     /// closed child is not resumed independently of its parent.
     pub(crate) async fn suspend_subagent_controlled(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
-        before_close: Option<BeforeClose>,
+        mut before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         let close = crate::worker_lifecycle::run(session_id, "close sub-agent", executor, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
@@ -57,37 +60,66 @@ impl Controller {
                     .into_iter()
                     .next()
                     .context("reconnect plan is empty")?;
+                // A reachable relay always has its conversation synchronized,
+                // whatever its root looks like. Only a worker proven dead is
+                // judged by its root.
                 let connected =
-                    connect_checkpoint_relay(session_id, manager, &reconnect, None).await;
-                Some(match connected {
-                    Ok(relay) => relay,
+                    connect_checkpoint_relay(admission, session_id, manager, &reconnect, None)
+                        .await;
+                match connected {
+                    Ok(relay) => Some(relay),
                     Err(error) if crate::session_manager::worker_connect_needs_restart(&error) => {
                         let (backend, worker_root) = self.worker_placement(session_id)?;
-                        let liveness = executor.execute(
-                            &super::super::worker_binary::worker_liveness_command(
-                                &backend,
-                                &worker_root,
-                            ),
+                        let liveness = super::super::worker_binary::probe_worker_liveness(
+                            executor,
+                            &backend,
+                            session_id,
+                            &worker_root,
                         )?;
                         ensure!(
                             liveness.status == 0
                                 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead",
                             "child relay is unreachable, but its worker is not confirmed dead; preserving its private journal: {error:#}"
                         );
-                        let connection = self
-                            .restart_worker_for_checkpoint_only(
+                        // A Create cancelled before its worker reached its
+                        // durable relay leaves no worker root, or a root without
+                        // relay state. There is no journal to synchronize, and a
+                        // checkpoint-only worker would refuse the root, so go
+                        // straight to cleanup. When the probe cannot tell, keep
+                        // the recovery path.
+                        if worker_recovery(executor, &backend, session_id, &worker_root)
+                            == WorkerRecovery::NothingToRecover
+                        {
+                            tracing::info!(
                                 session_id,
-                                executor,
-                                &backend,
-                                &worker_root,
-                                &reconnect,
+                                target = ?previous.target,
+                                worker_root,
+                                "closing a sub-agent whose dead worker left no relay state, without checkpoint recovery"
+                            );
+                            None
+                        } else {
+                            let connection = self
+                                .restart_worker_for_checkpoint_only(
+                                    session_id,
+                                    executor,
+                                    &backend,
+                                    &worker_root,
+                                    &reconnect,
+                                )
+                                .await
+                                .context(
+                                    "recover dead child worker without starting its harness",
+                                )?;
+                            Some(
+                                adopt_restarted_checkpoint_relay(
+                                    admission, session_id, manager, connection,
+                                )
+                                .await?,
                             )
-                            .await
-                            .context("recover dead child worker without starting its harness")?;
-                        adopt_restarted_checkpoint_relay(session_id, manager, connection).await?
+                        }
                     }
                     Err(error) => return Err(error),
-                })
+                }
             } else {
                 None
             };
@@ -98,37 +130,80 @@ impl Controller {
                     snapshot.operational.execution,
                     RelayExecutionState::Closing | RelayExecutionState::Closed
                 ) {
-                    let command_id = if let Some(existing) = snapshot.operational.checkpoint_barrier
-                    {
-                        existing
-                    } else {
-                        let id = new_command_id("child-close-barrier")?;
-                        relay
-                            .connection_mut()
-                            .submit(
-                                id.clone(),
-                                RelayCommand::BeginCheckpoint {
-                                    reason: Some(
-                                        "close sub-agent without archiving its parent's workspace"
-                                            .into(),
-                                    ),
-                                },
-                            )
-                            .await?;
-                        id
+                    let mut restarted_worker = false;
+                    let (command_id, ready) = loop {
+                        let snapshot = relay.connection_mut().sync().await?;
+                        let command_id = if let Some(existing) =
+                            snapshot.operational.checkpoint_barrier.clone()
+                        {
+                            existing
+                        } else {
+                            let id = new_command_id("child-close-barrier")?;
+                            relay
+                                .connection_mut()
+                                .submit(
+                                    id.clone(),
+                                    RelayCommand::BeginCheckpoint {
+                                        reason: Some(
+                                            "close sub-agent without archiving its parent's workspace"
+                                                .into(),
+                                        ),
+                                    },
+                                )
+                                .await?;
+                            id
+                        };
+                        let ready = wait_for_checkpoint_barrier(
+                            relay.connection_mut(),
+                            session_id,
+                            &command_id,
+                            if restarted_worker {
+                                CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART
+                            } else {
+                                CHECKPOINT_BARRIER_TIMEOUT
+                            },
+                            BarrierBusyPolicy::InterruptWhileRunning,
+                            previous.harness_kind,
+                        )
+                        .await;
+                        match ready {
+                            Ok(ready) => break (command_id, ready),
+                            Err(error) if !restarted_worker => {
+                                let (backend, worker_root) = self.worker_placement(session_id)?;
+                                let reconnect = targets::reconnect_plan(&backend, session_id)?
+                                    .commands
+                                    .into_iter()
+                                    .next()
+                                    .context("reconnect plan is empty")?;
+                                let recovery = self
+                                    .recover_checkpoint_barrier(
+                                        session_id,
+                                        executor,
+                                        relay,
+                                        &backend,
+                                        &worker_root,
+                                        &reconnect,
+                                        BarrierRecovery::ChildClose,
+                                        before_close.take(),
+                                        error,
+                                    )
+                                    .await?;
+                                if let BarrierRecoveryOutcome::CloseRejected(error) = recovery {
+                                    self.restore_child_after_uncommitted_close(
+                                        admission, session_id, &previous, relay,
+                                    )
+                                    .await?;
+                                    return Err(error);
+                                }
+                                restarted_worker = true;
+                            }
+                            Err(error) => return Err(error),
+                        }
                     };
-                    let ready = wait_for_checkpoint_barrier(
-                        relay.connection_mut(),
-                        session_id,
-                        &command_id,
-                        CHECKPOINT_BARRIER_TIMEOUT,
-                        BarrierBusyPolicy::InterruptWhileRunning,
-                        previous.harness_kind,
-                    )
-                    .await?;
                     let cursor = ready
                         .operational
                         .checkpoint_ready
+                        .clone()
                         .context("sub-agent close barrier has no ready cursor")?;
                     barrier = Some((command_id, cursor));
                 }
@@ -136,21 +211,13 @@ impl Controller {
             if let Some(before_close) = before_close
                 && let Err(error) = before_close.await
             {
-                if barrier.is_some() {
-                    if let Some(relay) = &mut relay {
-                        relay.cancel_abandoned_barrier().await.context(
-                            "release the barrier of a sub-agent whose close did not commit",
-                        )?;
-                    }
-                    let closing = self.state.sessions[session_id].clone();
-                    let record = self.state.sessions.get_mut(session_id).unwrap();
-                    record.state = state_after_unsealed_close(&previous);
-                    record.updated_at = now();
-                    self.persist_session_transition_or_restore(
-                        session_id,
-                        &closing,
-                        "restore a sub-agent whose close did not commit",
-                    )?;
+                if barrier.is_some()
+                    && let Some(relay) = &mut relay
+                {
+                    self.restore_child_after_uncommitted_close(
+                        admission, session_id, &previous, relay,
+                    )
+                    .await?;
                 }
                 return Err(error);
             }
@@ -170,7 +237,7 @@ impl Controller {
                 // A retry can find an accepted Close whose barrier was not
                 // released before the previous controller disappeared.
                 let snapshot = relay.connection_mut().sync().await?;
-                if let Some(barrier_command_id) = snapshot.operational.checkpoint_barrier {
+                if let Some(barrier_command_id) = snapshot.operational.checkpoint_barrier.clone() {
                     relay
                         .connection_mut()
                         .submit(
@@ -216,5 +283,27 @@ impl Controller {
                 }
             }
         }
+    }
+
+    async fn restore_child_after_uncommitted_close(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        previous: &SessionRecord,
+        relay: &mut ControllerRelayLease,
+    ) -> Result<()> {
+        relay
+            .cancel_abandoned_barrier(admission)
+            .await
+            .context("release the barrier of a sub-agent whose close did not commit")?;
+        let closing = self.state.sessions[session_id].clone();
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.state = state_after_unsealed_close(previous);
+        record.updated_at = now();
+        self.persist_session_transition_or_restore(
+            session_id,
+            &closing,
+            "restore a sub-agent whose close did not commit",
+        )
     }
 }

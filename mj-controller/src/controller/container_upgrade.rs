@@ -12,7 +12,7 @@ impl Controller {
     ) -> Result<bool> {
         crate::worker_lifecycle::run(session_id, "observe legacy Restart worker", executor, async {
             let (backend, root) = self.worker_placement(session_id)?;
-            let output = executor.execute(&super::worker_binary::worker_liveness_command(&backend, &root))?;
+            let output = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &root)?;
             ensure!(output.status == 0, "cannot establish legacy worker liveness; retaining its checkpoint and environment");
             if String::from_utf8_lossy(&output.stdout).trim() == "dead" { return Ok(false); }
             executor.begin_resumable_work()?;
@@ -29,8 +29,10 @@ impl Controller {
     /// Replace an explicitly selected container under the worker's atomic idle
     /// reservation. The private journal and profile are transferred separately from retained
     /// workspace/cache mounts; no checkpoint or worker-root reset is involved.
+    #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
     pub(crate) async fn upgrade_container_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         plan: &mut targets::RetainedContainer,
         recovering: bool,
@@ -39,9 +41,9 @@ impl Controller {
         commit: impl Fn() -> Result<bool> + Send + Sync,
     ) -> Result<()> {
         use super::worker_binary::{
-            WorkerInstall, install_staged_worker_binary, replace_installed_worker_launch_config,
-            stage_worker_binary_for_upgrade, start_worker_durably,
-            stop_worker_after_target_recovery, worker_liveness_command,
+            WorkerInstall, install_staged_worker_binary, probe_worker_liveness,
+            replace_installed_worker_launch_config, stage_worker_binary_for_upgrade,
+            start_worker_durably, stop_worker_after_target_recovery,
         };
         let record = self
             .state
@@ -75,7 +77,7 @@ impl Controller {
                             let recovery = targets::target_recovery_plan(&backend, session_id)?;
                             targets::ensure_recovery_target_running(executor, recovery.as_ref())?;
                         }
-                        let liveness = executor.execute(&worker_liveness_command(&backend, &root))?;
+                        let liveness = probe_worker_liveness(executor, &backend, session_id, &root)?;
                         ensure!(liveness.status == 0, "cannot establish source worker liveness; container retained");
                         if String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
                             ensure!(recovering, "the source worker is unavailable; Restart agent before requesting a container upgrade");
@@ -83,7 +85,7 @@ impl Controller {
                         } else {
                             let handle = while_upgrade_active(executor, manager.wait_for_session(session_id, Duration::from_secs(5))).await?;
                             executor.end_resumable_work("container worker swap")?;
-                            let Some(mut lease) = while_upgrade_active(executor, super::IdleWorkspaceLease::acquire_for_upgrade(&handle, record.harness_kind)).await? else {
+                            let Some(mut lease) = while_upgrade_active(executor, super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, record.harness_kind)).await? else {
                                 executor.begin_resumable_work()?;
                                 return Ok(false);
                             };
@@ -103,7 +105,7 @@ impl Controller {
                     executor.end_resumable_work("replace session container")?;
                     plan.replace(session_id, executor)?;
                     executor.begin_resumable_work()?;
-                    let liveness = executor.execute(&worker_liveness_command(&backend, &root))?;
+                    let liveness = probe_worker_liveness(executor, &backend, session_id, &root)?;
                     ensure!(liveness.status == 0, "cannot establish replacement worker liveness; environment retained");
                     let dead = String::from_utf8_lossy(&liveness.stdout).trim() == "dead";
                     if !plan.control_state_restored {
@@ -153,25 +155,65 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
+        self.recover_removed_container_with_mode(session_id, executor, false, false)
+            .await
+    }
+
+    pub(super) async fn recover_removed_resume_container(
+        &mut self,
+        session_id: &str,
+        discard_queue: bool,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let result = self
+            .recover_removed_container_with_mode(session_id, executor, true, discard_queue)
+            .await;
+        if let Err(error) = &result {
+            let current = self
+                .state
+                .sessions
+                .get_mut(session_id)
+                .context("repair session missing")?;
+            current.state = SessionState::Error;
+            current.last_error = Some(format!(
+                "{error:#}. Storage and current work were kept; retry Resume."
+            ));
+            self.persist_session_state(session_id)?;
+        }
+        result
+    }
+
+    async fn recover_removed_container_with_mode(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        for_resume: bool,
+        discard_queue: bool,
+    ) -> Result<()> {
         let record = self
             .state
             .sessions
             .get(session_id)
             .context("session missing")?
             .clone();
-        let checkpoint = record
-            .checkpoint
-            .as_ref()
-            .context("legacy upgrade has no recovery archive")?;
-        super::resume::verify_resume_checkpoint(session_id, checkpoint)?;
-        let configured = self
-            .config
-            .targets
-            .get(&record.target_template_id)
-            .context("legacy target configuration missing")?;
+        if let Some(checkpoint) = &record.checkpoint {
+            super::resume::verify_resume_checkpoint(session_id, checkpoint)?;
+        } else {
+            ensure!(
+                for_resume && record.native_session_id.is_none(),
+                "The retained workspace was kept but no recovery copy holds the missing parent history. Supply a recovery archive and retry Resume."
+            );
+        }
+        let resolved = backend::session_target(
+            &self.config,
+            &record.bundle_id,
+            &record.target_template_id,
+            executor,
+        )?;
+        let configured = &resolved;
         let mut target = backend::backend_target(
             configured,
-            record.resource_allocation.as_ref(),
+            mj_core::state::applied_container_settings(&record).resource_allocation,
             backend::ContainerOverrides::for_session(&record),
         )?;
         for notice in super::provisioning::enforce_cgroup_capable_limits(&mut target, executor) {
@@ -179,32 +221,29 @@ impl Controller {
         }
         let canonical = match record.target.as_ref() {
             Some(locator) => locator.clone(),
-            None => backend::locator_after_provision_named(
+            None => Box::new(backend::locator_after_provision_named(
                 configured,
                 &target,
                 session_id,
                 None,
                 executor,
                 &targets::resource_name(session_id)?,
-            )?,
+            )?),
         };
         let locator = backend_locator(&canonical, &record, &self.config)?;
         {
             let current = self.state.sessions.get_mut(session_id).unwrap();
             current.target = Some(canonical);
-            current.state = SessionState::Closing;
+            if !for_resume {
+                current.state = SessionState::Closing;
+            }
         }
         self.persist_session_state(session_id)?;
         let (_, template) = target
             .image_host()
             .context("legacy target is not a supported container")?;
-        let mut mounts = record
-            .target_runtime
-            .as_ref()
-            .and_then(|r| r.container_settings.as_ref())
-            .map_or(record.additional_mounts.as_slice(), |s| {
-                s.additional_mounts.as_slice()
-            })
+        let mut mounts = mj_core::state::applied_container_settings(&record)
+            .additional_mounts
             .to_vec();
         // Reattach recorded cache storage without discovery, allocation or
         // release. Historical applied settings contain only user attachments.
@@ -258,13 +297,48 @@ impl Controller {
             session_id,
             &mounts,
             &targets::container_workspace_root(record.container_workspace.as_deref()),
+            for_resume,
             executor,
         )?;
         let current = self.state.sessions.get_mut(session_id).unwrap();
-        current.state = SessionState::Closing;
+        if !for_resume {
+            current.state = SessionState::Closing;
+        }
         self.persist_session_state(session_id)?;
-        self.restore_legacy_container(session_id, restore_repositories, executor)
-            .await
+        if for_resume {
+            ensure!(
+                !restore_repositories,
+                "retained workspace disappeared while replacing its container; recovery copy and any remaining storage were kept"
+            );
+            match super::environment::classify_resume_environment(self, session_id, executor) {
+                super::environment::ResumeEnvironment::CheckoutMissing => self
+                    .recover_missing_checkout(session_id, discard_queue, executor)
+                    .await
+                    .map(|_| ()),
+                super::environment::ResumeEnvironment::WorkerMissing
+                    if record.native_session_id.is_none() =>
+                {
+                    self.repair_existing_environment(
+                        session_id,
+                        super::resume::RetainedWorker::Missing,
+                        discard_queue,
+                        executor,
+                    )
+                    .await
+                    .map(|_| ())
+                }
+                super::environment::ResumeEnvironment::Unknown(error) => Err(error.context(
+                    "replacement storage was kept; retry Resume when its components are reachable",
+                )),
+                _ => self
+                    .recover_missing_parent_data(session_id, discard_queue, executor)
+                    .await
+                    .map(|_| ()),
+            }
+        } else {
+            self.restore_legacy_container(session_id, restore_repositories, executor)
+                .await
+        }
     }
     pub(crate) fn plan_container_upgrade(
         &self,
@@ -282,24 +356,28 @@ impl Controller {
             .as_ref()
             .context("session has no retained container")?;
         let backend = backend_locator(locator, session, &self.config)?;
-        let template = self
-            .config
-            .targets
-            .get(&session.target_template_id)
-            .context("session target configuration is missing")?;
+        let resolved = backend::session_target(
+            &self.config,
+            &session.bundle_id,
+            &session.target_template_id,
+            executor,
+        )?;
+        let template = &resolved;
         let container = match template {
             TargetTemplate::LocalPodman { container }
             | TargetTemplate::LocalDocker { container }
             | TargetTemplate::SshPodman { container, .. }
-            | TargetTemplate::SshDocker { container, .. } => container,
+            | TargetTemplate::SshDocker { container, .. }
+            | TargetTemplate::SshNitro { container, .. } => container,
             _ => bail!("this target does not support storage-preserving container upgrades"),
         };
         let workspace = targets::container_workspace_root(session.container_workspace.as_deref());
         let root = targets::worker_root(&backend, session_id)?;
+        let image = mj_core::state::ContainerSettings::upgrade_image(session, &container.image);
         let plan = targets::inspect_retained_container(
             &backend,
             session_id,
-            &container.image,
+            image,
             operation_id,
             Path::new(&workspace),
             Path::new(&root),
@@ -323,10 +401,9 @@ impl Controller {
         if let Some(settings) = record
             .target_runtime
             .as_mut()
-            .and_then(|r| r.container_settings.as_mut())
+            .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
         {
-            settings.default_image =
-                Some((image == mj_core::config::DEFAULT_CONTAINER_IMAGE).then(|| image.to_owned()));
+            settings.default_image = Some(mj_core::state::ContainerSettings::default_marker(image));
         }
         self.persist_session_state(session_id)
     }

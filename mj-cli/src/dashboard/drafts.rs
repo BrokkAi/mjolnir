@@ -17,6 +17,23 @@ pub(super) fn prepare_attach_draft(
     draft
 }
 
+/// Standby owns the composer while attaching; otherwise the warm chat owns it.
+/// In particular an empty standby must win over an older warm draft.
+pub(super) fn capture_editor_draft(
+    cache: &mut ComposerDraftCache,
+    dashboard: &DashboardState,
+    chats: &BTreeMap<String, mj_chat::chat::ActiveChat>,
+    session_id: &str,
+    inherited: &str,
+) {
+    if let Some(text) = dashboard
+        .standby_prompt_draft(session_id)
+        .or_else(|| chats.get(session_id).map(|chat| chat.draft()))
+    {
+        cache.capture(session_id, text, inherited);
+    }
+}
+
 impl DashboardContext {
     /// Opens the conversation for `session_id` without waiting on the session
     /// manager. Attaching can involve worker/relay I/O, so the result comes
@@ -248,8 +265,7 @@ impl DashboardContext {
                 // pressed the key, so it comes back to the chat rather than
                 // only into the log.
                 let refusal_session = match &request {
-                    mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id }
-                    | mj_chat::chat::ChatDaemonRequest::ResolveTurnReview { session_id, .. } => {
+                    mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
                         Some(session_id.clone())
                     }
                     _ => None,
@@ -269,10 +285,6 @@ impl DashboardContext {
                         mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
                             daemon.start_turn_review(session_id).await
                         }
-                        mj_chat::chat::ChatDaemonRequest::ResolveTurnReview {
-                            session_id,
-                            resolution,
-                        } => daemon.resolve_turn_review(session_id, resolution).await,
                     }
                 }
                 .await;

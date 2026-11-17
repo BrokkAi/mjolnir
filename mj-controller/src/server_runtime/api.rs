@@ -8,6 +8,7 @@
 //! on the async runtime, and a synchronous SQLite read on that thread would
 //! stall unrelated requests.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -31,6 +32,8 @@ use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
 use mj_core::relay::RelayCommand;
 
+mod fetch_transfer;
+mod oracle;
 mod subagent_input;
 
 use crate::daemon::RuntimeState;
@@ -47,6 +50,14 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn workspace_admission(
+        &self,
+        _session_id: String,
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<crate::recovery_gate::SessionAdmission>> {
+        Box::pin(async { bail!("workspace admission is unavailable") })
+    }
+
     fn request_review(
         &self,
         _session_id: String,
@@ -58,13 +69,33 @@ pub trait ExportRuntime: Send + Sync {
     fn override_review(
         &self,
         _session_id: String,
-        _reason: String,
+        _overrides: Vec<mj_core::subagent::ReviewOverride>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async { bail!("push review is unavailable") })
+    }
+
+    fn set_review_baseline(
+        &self,
+        _session_id: String,
+        _commit: String,
+        _path: Option<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
 
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         Default::default()
+    }
+
+    /// The load-balancing preference order from `[quota] prefer`.
+    fn quota_preferences(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Whether a child that can request review is still waiting for its
+    /// verdict. A child's handback or ended turn is not final until it is not.
+    fn child_awaits_review(&self, _child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async { false })
     }
 
     fn queue_startup(
@@ -102,6 +133,12 @@ pub trait ExportRuntime: Send + Sync {
     /// The in-memory record for a session, or `None` when the daemon holds
     /// none.
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord>;
+
+    /// Whether this session's recorded target runs with
+    /// `permissions = "yolo"`. Backends without a daemon have none.
+    fn session_is_yolo_target(&self, _session_id: &str) -> bool {
+        false
+    }
 
     /// Whether a close the daemon admitted is still running for this session.
     ///
@@ -226,6 +263,25 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn workspace_admission(
+        &self,
+        session_id: String,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<crate::recovery_gate::SessionAdmission>> {
+        Box::pin(async move {
+            self.session_gate()
+                .enter_foreground(
+                    &session_id,
+                    "workspace file upload",
+                    crate::recovery_gate::LifecycleOrigin::Person,
+                    &cancelled,
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .map(crate::recovery_gate::SessionAdmission::Foreground)
+        })
+    }
+
     fn request_review(
         &self,
         session_id: String,
@@ -242,18 +298,40 @@ impl ExportRuntime for RuntimeState {
     fn override_review(
         &self,
         session_id: String,
-        reason: String,
+        overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .override_push(&session_id, reason)
+                .override_push(&session_id, overrides)
                 .await
                 .map_err(|error| anyhow!("override_review refused: {}", error.0))
         })
     }
 
+    fn set_review_baseline(
+        &self,
+        session_id: String,
+        commit: String,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async move {
+            self.review_host()
+                .set_push_base(&session_id, commit, path)
+                .await
+                .map_err(|error| anyhow!("set_review_baseline refused: {}", error.0))
+        })
+    }
+
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         self.with_config(|config| config.subagents.clone())
+    }
+
+    fn quota_preferences(&self) -> Vec<String> {
+        self.with_config(|config| config.quota.prefer.clone())
+    }
+
+    fn child_awaits_review(&self, child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async move { RuntimeState::child_awaits_review(self, &child_session_id).await })
     }
 
     fn queue_startup(
@@ -301,6 +379,11 @@ impl ExportRuntime for RuntimeState {
 
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
+    }
+
+    fn session_is_yolo_target(&self, session_id: &str) -> bool {
+        self.session_record(session_id)
+            .is_some_and(|record| record.is_yolo_target(&self.with_config(Clone::clone)))
     }
 
     fn close_is_requested(&self, session_id: &str) -> bool {
@@ -433,6 +516,22 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a restarted sub-agent's session actor has to connect to the
 /// worker the restart already proved ready.
 const UNPARK_ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The daemon accepted a parked child's wake, so its record is `Running` with
+/// a durable boot intent, but the session was not ready for a prompt within
+/// [`UNPARK_ATTACH_TIMEOUT`]. The child is still starting; the wake did not
+/// fail. A caller with a delivery deadline keeps waiting for readiness
+/// instead of reporting the delivery as failed (#1395).
+#[derive(Debug)]
+struct WakeNotReady(String);
+
+impl std::fmt::Display for WakeNotReady {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for WakeNotReady {}
 /// Clap's exit code for a usage failure, which is what a worker binary too old
 /// to know the export subcommands answers.
 const CLAP_USAGE_EXIT_CODE: i32 = 2;
@@ -446,7 +545,9 @@ pub struct ApiBackend {
     /// Latest background-refreshed quota reports, used to rank configured
     /// session and sub-agent profile choices without exposing credential
     /// aliases to their callers.
-    quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
+    quota_reports: Arc<Mutex<crate::quota::QuotaReportMap>>,
+    quota_publications: Option<tokio::sync::watch::Receiver<crate::quota::QuotaReportMap>>,
+    quota_refresh: Option<tokio::sync::mpsc::UnboundedSender<crate::daemon::QuotaRefreshIntent>>,
     /// Profiles whose login the credential sync found refused; session and
     /// sub-agent selection refuse them until their login file changes.
     rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
@@ -466,8 +567,28 @@ struct NotificationChildSnapshot {
     identity: Option<mj_core::subagent::SubagentFinishIdentity>,
 }
 
+#[derive(Debug)]
+pub(crate) enum QuotaRead {
+    Ready(ProfileQuota),
+    Pending(QuotaWait),
+}
+
+#[derive(Debug)]
+pub(crate) struct QuotaWait {
+    receiver: tokio::sync::watch::Receiver<crate::quota::QuotaReportMap>,
+}
+
+impl QuotaWait {
+    pub(crate) async fn wait(mut self) -> Result<()> {
+        self.receiver
+            .changed()
+            .await
+            .context("quota publication owner stopped before the profile was checked")
+    }
+}
+
 impl ApiBackend {
-    async fn discover_profile_candidates(
+    pub(crate) async fn discover_profile_candidates(
         &self,
         mut ids: Vec<(String, mj_core::config::HarnessKind)>,
         candidate_kind: &str,
@@ -504,10 +625,15 @@ impl ApiBackend {
             .lock()
             .map_err(|_| anyhow!("profile health lock poisoned"))?;
         let now = std::time::SystemTime::now();
+        let config = self.profile_catalog.live()?;
         for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
-                    let quota = profile_candidate_quota(quota_reports.get(&profile_id));
+                    let quota = crate::server::api::CandidateQuota::from_report(
+                        quota_reports
+                            .get(&profile_id)
+                            .and_then(|publication| publication.report.as_ref()),
+                    );
                     let unhealthy = choices
                         .models
                         .iter()
@@ -518,6 +644,9 @@ impl ApiBackend {
                                 .map(|mark| (model.value.clone(), mark))
                         })
                         .collect();
+                    let may_consume_credits = config
+                        .enabled_profile(&profile_id)
+                        .is_some_and(|profile| profile.load_balancing_may_consume_credits);
                     candidates
                         .offered
                         .push(crate::server::api::SubagentCandidate {
@@ -525,6 +654,7 @@ impl ApiBackend {
                             harness,
                             choices,
                             quota,
+                            may_consume_credits,
                             unhealthy,
                         });
                 }
@@ -553,6 +683,13 @@ impl ApiBackend {
         Ok(candidates)
     }
 
+    pub(crate) async fn reviewer_candidates(
+        &self,
+    ) -> Result<crate::server::api::SubagentCandidates> {
+        self.discover_profile_candidates(self.profile_catalog.candidates()?, "reviewer")
+            .await
+    }
+
     pub(crate) async fn start_followup_with_id(
         &self,
         session_id: String,
@@ -576,6 +713,8 @@ impl ApiBackend {
             sessions,
             exports,
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
+            quota_publications: None,
+            quota_refresh: None,
             rejected_logins: Arc::default(),
             // Nothing is adopted until the daemon hands its configuration
             // over, so a backend built without one — every test that does not
@@ -587,12 +726,65 @@ impl ApiBackend {
         }
     }
 
-    pub fn with_quota_reports(
+    pub(crate) fn with_quota_reports(
         mut self,
-        quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
+        quota_reports: Arc<Mutex<crate::quota::QuotaReportMap>>,
     ) -> Self {
         self.quota_reports = quota_reports;
         self
+    }
+
+    pub(crate) fn with_quota_publications(
+        mut self,
+        publications: tokio::sync::watch::Receiver<crate::quota::QuotaReportMap>,
+    ) -> Self {
+        self.quota_publications = Some(publications);
+        self
+    }
+
+    pub(crate) fn with_quota_refresh(
+        mut self,
+        refresh: tokio::sync::mpsc::UnboundedSender<crate::daemon::QuotaRefreshIntent>,
+    ) -> Self {
+        self.quota_refresh = Some(refresh);
+        self
+    }
+
+    /// Full poller-owned report, including model-scoped allowances omitted
+    /// from user-facing quota projections.
+    pub(crate) fn quota_report(
+        &self,
+        profile_id: &str,
+        wanted_identity: &str,
+    ) -> Result<QuotaRead> {
+        let publications = self
+            .quota_publications
+            .as_ref()
+            .ok_or_else(|| anyhow!("quota publication source is unavailable"))?;
+        let mut receiver = publications.clone();
+        // Inspect one versioned owner snapshot. A later publication wakes the
+        // returned waiter even if it arrived before the wait started.
+        let current = receiver.borrow_and_update().clone();
+        let config = self.profile_catalog.live()?;
+        if config.enabled_profile(profile_id).is_none() {
+            bail!("quota profile {profile_id:?} is missing or disabled");
+        }
+        match current.get(profile_id) {
+            Some(publication) if publication.cache_identity == wanted_identity => {
+                match publication.effective_report(profile_id) {
+                    Some(report) => Ok(QuotaRead::Ready(report)),
+                    None => Ok(QuotaRead::Pending(QuotaWait { receiver })),
+                }
+            }
+            _ => {
+                self.quota_refresh
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("quota source reconciliation is unavailable"))?
+                    .send(crate::daemon::QuotaRefreshIntent::ReconcileSources)
+                    .map_err(|_| anyhow!("quota owner stopped before source reconciliation"))?;
+                Ok(QuotaRead::Pending(QuotaWait { receiver }))
+            }
+        }
     }
 
     pub fn with_rejected_logins(
@@ -628,26 +820,19 @@ impl ApiBackend {
         })
         .await?;
         let prepared = if let Some((prepared, result)) = stored {
-            if let Some(mut result) = result {
+            if let Some(result) = result {
                 if matches!(
                     prepared.request.action,
                     mj_core::subagent::SubagentToolAction::LegacyWaitAgents
                         | mj_core::subagent::SubagentToolAction::LegacyAwaitChildren
                 ) {
-                    blocking("retire legacy wait", {
+                    return blocking("retire legacy wait", {
                         let parent = parent.clone();
                         let id = request.request_id.clone();
                         move || crate::database::retire_legacy_wait(parent, id)
                     })
-                    .await?;
-                    // Retain the compatibility answer for every delivery retry.
-                    result.result.is_error = false;
-                    result.result.message = serde_json::json!({
-                        "status": "reports_arrive_as_messages",
-                        "next_action": mj_core::subagent::REPORT_NOTIFICATION_NEXT_ACTION
-                    })
-                    .to_string();
-                    result.reported_finishes.clear();
+                    .await?
+                    .context("legacy wait result disappeared before conversion");
                 }
                 return Ok(result);
             }
@@ -851,6 +1036,13 @@ impl ApiBackend {
                 path,
                 ls,
             } => {
+                ensure!(
+                    crate::database::load_subagent(session_id)?.is_none_or(|relation| {
+                        relation.kind != mj_core::subagent::SubagentKind::Oracle
+                            || relation.parent_session_id != parent_session_id
+                    }),
+                    "session {session_id} does not belong to parent {parent_session_id}"
+                );
                 let fetch_error = |error| match error {
                     ExportError::Refused(reason) => anyhow!(reason),
                     ExportError::Failed(error) => error,
@@ -870,32 +1062,18 @@ impl ApiBackend {
                     .map_err(fetch_error)?;
                 if *ls {
                     let listing: mj_checkpoint::archive::SessionListing =
-                        serde_json::from_slice(&fetched.bytes).context("decode the listing")?;
+                        blocking("decode fetched listing", move || {
+                            serde_json::from_reader(fetched.reader()).context("decode the listing")
+                        })
+                        .await?;
                     return Ok(serde_json::to_value(listing)?);
                 }
                 self.require_live_target(parent_session_id)
                     .map_err(fetch_error)?;
-                let layout = export_layout(parent_session_id.to_owned())
-                    .await
-                    .map_err(fetch_error)?;
-                let mut arguments = vec![
-                    "store-fetch".to_owned(),
-                    "--session".to_owned(),
-                    session_id.clone(),
-                    "--source".to_owned(),
-                    fetched.path,
-                    "--length".to_owned(),
-                    fetched.bytes.len().to_string(),
-                ];
-                if fetched.kind == mj_checkpoint::archive::FetchedKind::Directory {
-                    arguments.push("--directory".to_owned());
-                }
-                let output = worker_command_with_input(
-                    layout,
+                let output = fetch_transfer::store(
                     parent_session_id.to_owned(),
-                    arguments,
-                    "session fetched file storage",
-                    Some(fetched.bytes),
+                    session_id.clone(),
+                    fetched,
                 )
                 .await
                 .map_err(fetch_error)?;
@@ -908,15 +1086,25 @@ impl ApiBackend {
                     .request_review(parent_session_id.to_owned(), path.clone())
                     .await
             }
-            SubagentToolAction::OverrideReview { reason } => {
+            SubagentToolAction::AskOracle { message } => {
+                self.ask_oracle(parent_session_id, request, prepared, message)
+                    .await
+            }
+            SubagentToolAction::OverrideReview { overrides } => {
                 self.exports
-                    .override_review(parent_session_id.to_owned(), reason.to_owned())
+                    .override_review(parent_session_id.to_owned(), overrides.clone())
+                    .await
+            }
+            SubagentToolAction::SetReviewBaseline { commit, path } => {
+                self.exports
+                    .set_review_baseline(parent_session_id.to_owned(), commit.clone(), path.clone())
                     .await
             }
             SubagentToolAction::ListProfiles => {
                 anyhow::bail!("list_profiles is no longer available")
             }
             SubagentToolAction::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -931,12 +1119,14 @@ impl ApiBackend {
                         .exports
                         .session_record(parent_session_id)
                         .context("parent session disappeared")?;
+                    let yolo = self.exports.session_is_yolo_target(parent_session_id);
                     let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                     let selection = crate::server::api::resolve_subagent_policy_selection(
                         &backend,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
                         *task_type,
+                        yolo,
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
@@ -985,6 +1175,7 @@ impl ApiBackend {
                 };
                 let relation = self
                     .start_subagent(crate::controller::RegisterSubagentRequest {
+                        no_github_credentials: *no_github_credentials,
                         kind: mj_core::subagent::SubagentKind::Worker,
                         reviewer_launch: None,
                         parent_session_id: parent_session_id.to_owned(),
@@ -1005,9 +1196,16 @@ impl ApiBackend {
                 })
                 .await?
                 .report_dir;
+                let name = live_child_name(
+                    self.exports
+                        .session_record(&relation.child_session_id)
+                        .as_ref(),
+                    &relation.task_name,
+                );
                 Ok(serde_json::json!({
                     "child_session_id":relation.child_session_id,
                     "task_name":relation.task_name,
+                    "name":name,
                     "profile_id":relation.profile_id,
                     "model":relation.model,
                     "effort":relation.effort,
@@ -1020,7 +1218,7 @@ impl ApiBackend {
                     .list_subagents(parent_session_id.to_owned())
                     .await?
                     .into_iter()
-                    .filter(|relation| relation.kind != mj_core::subagent::SubagentKind::Reviewer)
+                    .filter(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker)
                     .collect::<Vec<_>>();
                 let child_ids = relations
                     .iter()
@@ -1031,6 +1229,7 @@ impl ApiBackend {
                     .into_iter()
                     .map(|(id, summary, progress)| (id, (summary, progress)))
                     .collect::<BTreeMap<_, _>>();
+                let now_ms = u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0);
                 let agents = relations
                     .into_iter()
                     .map(|relation| {
@@ -1042,7 +1241,7 @@ impl ApiBackend {
                             last_completed_ordinal: None,
                             report: ReportState::Fallback,
                             awaited_ordinal: None,
-                            answered_ordinal: None,
+                            answer: None,
                             failed_turn: None,
                             login_failure: None,
                             provider_failure: None,
@@ -1055,6 +1254,7 @@ impl ApiBackend {
                             });
                         let (state, _, _) = inputs.status(
                             &relation.child_session_id,
+                            record.as_ref(),
                             subagent_status(
                                 record.as_ref(),
                                 summary,
@@ -1064,15 +1264,38 @@ impl ApiBackend {
                                 progress,
                             ),
                         );
+                        let name = live_child_name(record.as_ref(), &relation.task_name);
                         let mut entry = serde_json::json!({
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
+                            "name":name,
                             "profile_id":relation.profile_id,
                             "effort":relation.effort,
                             "state":state,
                         });
                         inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
+                        mark_promptable(&mut entry, &state, progress, record.as_ref());
+                        if let ReportState::Held {
+                            since_ms,
+                            give_up_at_ms,
+                            waiting_on,
+                            ..
+                        } = &progress.report
+                        {
+                            entry["waiting_on"] = serde_json::json!({
+                                "processes": waiting_on,
+                                "since_ms": since_ms,
+                                "give_up_at_ms": give_up_at_ms,
+                            });
+                        }
+                        if let Some(facts) = progress
+                            .answer
+                            .as_ref()
+                            .and_then(|turn| turn.work_facts.as_ref())
+                        {
+                            entry["facts"] = work_facts_entry(facts, now_ms);
+                        }
                         entry
                     })
                     .collect::<Vec<_>>();
@@ -1088,12 +1311,27 @@ impl ApiBackend {
                     .deliver_subagent_input(child_session_id, message, request)
                     .await?;
                 let via = delivery.via();
+                let mailbox_delivery = if via == "mailbox" {
+                    self.published_mailbox_delivery(child_session_id).await
+                } else {
+                    None
+                };
+                let note = subagent_input::mailbox_delivery_note(mailbox_delivery.as_ref());
                 match delivery {
-                    subagent_input::SubagentInputDelivery::Mailbox => Ok(serde_json::json!({
-                        "child_session_id":child_session_id,
-                        "status":"queued",
-                        "via":via
-                    })),
+                    subagent_input::SubagentInputDelivery::Mailbox => {
+                        let mut result = serde_json::json!({
+                            "child_session_id":child_session_id,
+                            "status":"queued",
+                            "via":via
+                        });
+                        if let Some(mode) = mailbox_delivery {
+                            result["mailbox_delivery"] = serde_json::to_value(mode)?;
+                        }
+                        if let Some(note) = note {
+                            result["note"] = note.into();
+                        }
+                        Ok(result)
+                    }
                     subagent_input::SubagentInputDelivery::Turn { ordinal } => {
                         blocking("record sub-agent prompt", {
                             let child_id = child_session_id.clone();
@@ -1133,17 +1371,30 @@ impl ApiBackend {
                         "status": status,
                         "via": delivery.via,
                     });
+                    if let Some(mode) = delivery.mailbox_delivery {
+                        result["mailbox_delivery"] = serde_json::to_value(mode)?;
+                    }
+                    if let Some(note) = delivery.note {
+                        result["note"] = note.into();
+                    }
                     if let Some(turn_id) = delivery.turn_id {
                         result["turn_id"] = turn_id.into();
                     }
                     Ok(result)
                 } else {
-                    Ok(serde_json::json!({
+                    let mut result = serde_json::json!({
                         "session_id": delivery.session_id,
                         "status": status,
                         "via": delivery.via,
                         "turn_id": delivery.turn_id,
-                    }))
+                    });
+                    if let Some(mode) = delivery.mailbox_delivery {
+                        result["mailbox_delivery"] = serde_json::to_value(mode)?;
+                    }
+                    if let Some(note) = delivery.note {
+                        result["note"] = note.into();
+                    }
+                    Ok(result)
                 }
             }
             SubagentToolAction::LegacyWaitAgents | SubagentToolAction::LegacyAwaitChildren => {
@@ -1189,14 +1440,14 @@ impl ApiBackend {
                 .await?
                 .filter(|record| record.handback_tool)
                 .context("handback is only for a Mjolnir sub-agent that was given the tool")?;
-                let maximum = match record.kind {
-                    mj_core::subagent::SubagentKind::Worker => {
-                        mj_core::subagent::MAX_HANDBACK_CHARS
-                    }
-                    mj_core::subagent::SubagentKind::Reviewer => {
-                        mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
-                    }
-                };
+                // Refusing here means no report exists to release before the
+                // child has read and addressed its verdict.
+                ensure!(
+                    record.kind != mj_core::subagent::SubagentKind::Worker
+                        || !self.exports.child_awaits_review(child_id.clone()).await,
+                    "your review has no verdict yet; wait for it, address it, then hand back"
+                );
+                let maximum = record.kind.max_handback_chars();
                 let characters = message.chars().count();
                 ensure!(
                     characters <= maximum,
@@ -1262,8 +1513,8 @@ impl ApiBackend {
     /// Start a parked child's worker again and wait until its session can
     /// take a prompt. Returns whether there was a park to wait for or undo; a
     /// running child with no park in progress needs nothing and returns
-    /// false. Once wake is accepted, failures leave the active child available
-    /// for ordinary worker recovery.
+    /// false. A proved dead wake returns its failure and leaves the child
+    /// parked for another send; uncertain liveness remains recoverable.
     async fn unpark_child(&self, child_id: &str) -> Result<bool> {
         let parked = self
             .exports
@@ -1309,7 +1560,11 @@ impl ApiBackend {
             .sessions
             .wait_for_session(child_id, UNPARK_ATTACH_TIMEOUT)
             .await
-            .context("the restarted sub-agent did not reattach")?;
+            .map_err(|error| {
+                anyhow::Error::new(WakeNotReady(format!(
+                    "the restarted sub-agent did not reattach: {error:#}"
+                )))
+            })?;
         loop {
             let view = handle.view();
             if view.connected
@@ -1320,11 +1575,12 @@ impl ApiBackend {
             {
                 return Ok(true);
             }
-            ensure!(
-                tokio::time::Instant::now() < deadline,
-                "the restarted sub-agent was not ready for a prompt within {} seconds",
-                UNPARK_ATTACH_TIMEOUT.as_secs()
-            );
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow::Error::new(WakeNotReady(format!(
+                    "the restarted sub-agent was not ready for a prompt within {} seconds",
+                    UNPARK_ATTACH_TIMEOUT.as_secs()
+                ))));
+            }
             let _ = tokio::time::timeout(START_POLL, handle.changed()).await;
         }
     }
@@ -1341,20 +1597,18 @@ impl ApiBackend {
         )>,
         std::collections::BTreeMap<String, StartStatus>,
     )> {
+        // The worker owns whether the processes a finished turn left are still
+        // alive, so each child's liveness is read before its report is judged.
+        let mut live = BTreeMap::new();
+        for id in &ids {
+            live.insert(id.clone(), self.live_work(id).await?);
+        }
         if let Some(committed) = crate::database::committed_state()? {
             let mut starts = BTreeMap::new();
             let summaries = ids
                 .into_iter()
                 .map(|id| {
-                    if let Some(status) = startup_context(
-                        committed
-                            .startup_groups
-                            .get(&id)
-                            .map(Vec::as_slice)
-                            .unwrap_or_default(),
-                    )?
-                    .1
-                    {
+                    if let Some(status) = startup_context(committed.startup_groups.get(&id))?.1 {
                         starts.insert(id.clone(), status);
                     }
                     let summary = committed.turns.get(&id).map(|turn| {
@@ -1371,13 +1625,14 @@ impl ApiBackend {
                             interruption_event_ordinals: Vec::new(),
                         }
                     });
-                    let progress = child_progress(&committed, &id);
+                    let progress = child_progress(&committed, &id, &live[&id]);
                     Ok((id, summary, progress))
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut summaries = summaries;
             self.observe_child_resolution(&mut summaries).await?;
             self.describe_child_profile_failures(&mut summaries).await?;
+            self.settle_renewed_login_failures(&mut summaries).await?;
             return Ok((summaries, starts));
         }
         // An offline backend has no writer publication to observe.
@@ -1385,7 +1640,7 @@ impl ApiBackend {
             ids.into_iter()
                 .map(|id| {
                     let summary = crate::database::load_materialized_session_summary(&id)?;
-                    let progress = load_child_progress(&id)?;
+                    let progress = load_child_progress(&id, &live[&id])?;
                     Ok((id, summary, progress))
                 })
                 .collect::<Result<Vec<_>>>()
@@ -1399,7 +1654,30 @@ impl ApiBackend {
         }
         self.observe_child_resolution(&mut summaries).await?;
         self.describe_child_profile_failures(&mut summaries).await?;
+        self.settle_renewed_login_failures(&mut summaries).await?;
         Ok((summaries, starts))
+    }
+
+    /// What the child's worker says about the processes its last turn left.
+    /// A session that cannot be running has no such processes to wait for; one
+    /// that may be running but has no connected worker view is unknown, which
+    /// is not the same as none.
+    pub(crate) async fn live_work(
+        &self,
+        child_session_id: &str,
+    ) -> Result<mj_core::subagent::Liveness> {
+        if self
+            .exports
+            .session_record(child_session_id)
+            .is_none_or(|record| !record_may_be_running(record.state))
+        {
+            return Ok(mj_core::subagent::Liveness::Known(None));
+        }
+        let view = self
+            .session_handle(child_session_id.to_owned())
+            .await?
+            .map(|handle| handle.view());
+        Ok(liveness_of(view.as_ref()))
     }
 
     async fn observe_child_resolution(
@@ -1411,15 +1689,11 @@ impl ApiBackend {
         )],
     ) -> Result<()> {
         for (id, _, progress) in children {
-            if self.exports.session_record(id).is_none_or(|record| {
-                !matches!(
-                    record.state,
-                    SessionState::Provisioning
-                        | SessionState::Running
-                        | SessionState::Disconnected
-                        | SessionState::Checkpointing
-                )
-            }) {
+            if self
+                .exports
+                .session_record(id)
+                .is_none_or(|record| !record_may_be_running(record.state))
+            {
                 continue;
             }
             let view = self
@@ -1448,6 +1722,68 @@ impl ApiBackend {
         Ok(())
     }
 
+    /// A child whose turn failed on a login that has since been renewed did
+    /// not fail for anything its parent can fix, as long as its worker is
+    /// waiting to resubmit the turn once the new login reaches it. The two
+    /// facts have two owners: the worker says it is waiting (it alone knows
+    /// whether a driver, a question, a goal state or a barrier forbids the
+    /// retry), and this daemon says whether the failed token is still the
+    /// profile's current one, deciding with
+    /// [`mj_core::credentials::classify_authentication_failure`] like the
+    /// credential sync. The child is held unfinished only while both hold, so
+    /// it is neither reported nor parked before the pushed login can arrive.
+    /// A worker that publishes nothing (an older one) never holds a child.
+    async fn settle_renewed_login_failures(
+        &self,
+        children: &mut [(
+            String,
+            Option<mj_core::state::MaterializedSessionSummary>,
+            ChildProgress,
+        )],
+    ) -> Result<()> {
+        for (id, _, progress) in children {
+            let Some(profile_id) = progress.login_failure.clone() else {
+                continue;
+            };
+            let Some(failed) = progress
+                .answer
+                .as_ref()
+                .and_then(|turn| turn.diagnostic.as_ref())
+                .and_then(|diagnostic| diagnostic.login_fingerprint.clone())
+            else {
+                continue;
+            };
+            let waiting = self
+                .session_handle(id.clone())
+                .await?
+                .and_then(|handle| handle.view().snapshot.clone())
+                .and_then(|snapshot| snapshot.operational.authentication_retry_waiting.clone());
+            if waiting.as_deref() != Some(failed.as_str()) {
+                continue;
+            }
+            let config = self.profile_catalog.live()?;
+            let Some(profile) = config.profiles.get(&profile_id) else {
+                continue;
+            };
+            let current = crate::worker_client::current_claude_access_token(profile).await;
+            if mj_core::credentials::classify_authentication_failure(
+                Some(&failed),
+                current.as_deref(),
+            ) == mj_core::credentials::AuthenticationVerdict::LoginRenewed
+            {
+                tracing::info!(
+                    session_id = %id,
+                    %profile_id,
+                    "a child's turn failed on a login that was renewed since; its worker is waiting for the pushed login, so no failure is reported"
+                );
+                progress.login_failure = None;
+                progress.failed_turn = None;
+                progress.turn_pending = true;
+            }
+        }
+        Ok(())
+    }
+
     async fn describe_child_profile_failures(
         &self,
         children: &mut [(
@@ -1466,14 +1802,17 @@ impl ApiBackend {
                 // Older turns may predate stored selections. Prefer the
                 // session's current profile, with the child model as fallback.
                 let child = crate::database::load_subagent(&id)?;
+                let oracle = child
+                    .as_ref()
+                    .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Oracle);
                 Ok(match selection {
-                    Some((profile, model @ Some(_))) => Some((profile, model)),
-                    Some((profile, None)) => child.map(|child| (profile, child.model)),
-                    None => child.map(|child| (child.profile_id, child.model)),
+                    Some((profile, model @ Some(_))) => Some((profile, model, oracle)),
+                    Some((profile, None)) => child.map(|child| (profile, child.model, oracle)),
+                    None => child.map(|child| (child.profile_id, child.model, oracle)),
                 })
             })
             .await?;
-            let Some((profile, model)) = selection else {
+            let Some((profile, model, oracle)) = selection else {
                 continue;
             };
             let health = crate::profile_health::shared()
@@ -1496,17 +1835,27 @@ impl ApiBackend {
                     format!("profile {profile} {fault}: {}", diagnostic.message)
                 });
             if let Some((_, message)) = &mut progress.failed_turn {
-                *message = format!(
-                    "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
-                    description.trim_end_matches('.')
-                );
+                *message = if oracle {
+                    format!(
+                        "{}. Ask again with ask_oracle to start a fresh oracle.",
+                        description.trim_end_matches('.')
+                    )
+                } else {
+                    format!(
+                        "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
+                        description.trim_end_matches('.')
+                    )
+                };
             }
         }
         Ok(())
     }
 
-    /// Resolve every child and the existing finished predicate from one
-    /// current observation for a parent notification.
+    /// Resolve every child that can still be reported, and the existing
+    /// finished predicate, from one current observation for a parent
+    /// notification. A cleanly stopped child is never news (see
+    /// [`subagent_status`]), so its record is not read; a parent can hold
+    /// thousands of them.
     async fn notification_children(
         &self,
         parent_id: &str,
@@ -1515,7 +1864,24 @@ impl ApiBackend {
         Vec<NotificationChildSnapshot>,
     )> {
         let inputs = self.subagent_input_progress(parent_id).await?;
-        let relations = self.list_subagents(parent_id.to_owned()).await?;
+        let parent = parent_id.to_owned();
+        let ids = blocking("list the parent's children", move || {
+            crate::database::list_subagent_ids(&parent)
+        })
+        .await?
+        .into_iter()
+        .filter(|id| {
+            !self
+                .exports
+                .session_record(id)
+                .is_some_and(|record| record.is_cleanly_stopped())
+        })
+        .collect::<Vec<_>>();
+        let parent = parent_id.to_owned();
+        let relations = blocking("load the parent's reportable children", move || {
+            crate::database::list_subagents_among(&parent, &ids)
+        })
+        .await?;
         let ids = relations
             .iter()
             .map(|relation| relation.child_session_id.clone())
@@ -1535,6 +1901,7 @@ impl ApiBackend {
                 let record = self.exports.session_record(&id);
                 let (state, output, finished) = inputs.status(
                     &id,
+                    record.as_ref(),
                     subagent_status(
                         record.as_ref(),
                         summary.as_ref(),
@@ -1544,8 +1911,14 @@ impl ApiBackend {
                         &progress,
                     ),
                 );
-                let identity =
-                    finished.then(|| finish_identity(&state, output.as_deref(), &progress));
+                let identity = report_identity(
+                    &state,
+                    output.as_deref(),
+                    finished,
+                    inputs.last_failed_delivery(&id),
+                    &progress,
+                    relation.reported_finish.as_ref(),
+                );
                 NotificationChildSnapshot {
                     relation,
                     progress,
@@ -1562,25 +1935,83 @@ impl ApiBackend {
 
     /// Commit each new finish and its durable mailbox event together.
     pub(crate) async fn reconcile_parent_reports(&self, parent_id: &str) -> Result<()> {
+        self.reconcile_children(parent_id).await.map(|_| ())
+    }
+
+    /// Reconcile the parent's reports and say, for one child's finish at
+    /// `ordinal`, whether the parent has been told. The report and the
+    /// `reported_finish` marker it moves are written in one transaction, so that
+    /// marker is the fact: it is read from the store after the reconcile, not
+    /// from the committed snapshot, which refreshes after the write returns.
+    pub(crate) async fn reconcile_child_report(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+        ordinal: u64,
+    ) -> Result<ChildReport> {
+        let reconciled = self.reconcile_children(parent_id).await?;
+        if reconciled.parent_closing {
+            return Ok(ChildReport::NotNews("the parent is closing"));
+        }
+        match reconciled.children.get(child_id) {
+            None => self.unreconciled_child_report(parent_id, child_id).await,
+            Some(ChildDisposition::NotNews(why)) => Ok(ChildReport::NotNews(why)),
+            Some(ChildDisposition::NotFinished) => Ok(ChildReport::NotFinished),
+            Some(ChildDisposition::Reported) => {
+                let child = child_id.to_owned();
+                let marker = blocking("read the child's reported finish", move || {
+                    crate::database::load_subagent(&child)
+                })
+                .await?
+                .and_then(|relation| relation.reported_finish);
+                Ok(if marker.is_some_and(|marker| marker.covers(ordinal)) {
+                    ChildReport::Told
+                } else {
+                    ChildReport::Awaiting
+                })
+            }
+        }
+    }
+
+    async fn reconcile_children(&self, parent_id: &str) -> Result<Reconciled> {
+        let mut reconciled = Reconciled::default();
         if self.exports.close_is_requested(parent_id) {
-            return Ok(());
+            reconciled.parent_closing = true;
+            return Ok(reconciled);
         }
         let (inputs, children) = self.notification_children(parent_id).await?;
-        let ready = children
-            .into_iter()
-            .filter(|child| {
-                child.relation.kind != mj_core::subagent::SubagentKind::Reviewer
-                    && !self
-                        .exports
-                        .close_is_requested(&child.relation.child_session_id)
-                    && !matches!(child.state.as_str(), "stopping" | "stopped")
-                    && child.identity.as_ref().is_some_and(|identity| {
-                        child.relation.reported_finish.as_ref() != Some(identity)
-                    })
-            })
-            .collect::<Vec<_>>();
+        // Each child has one of a few ends here: not news (and why), not seen as
+        // finished, held for its facts, or its finish is reported (by an earlier
+        // reconcile or by this one).
+        let mut ready = Vec::new();
+        for child in children {
+            let id = child.relation.child_session_id.clone();
+            let disposition = if child.relation.kind == mj_core::subagent::SubagentKind::Reviewer {
+                ChildDisposition::NotNews("a reviewer is reported by its review")
+            } else if self.exports.close_is_requested(&id) {
+                ChildDisposition::NotNews("a close of the child was requested")
+            } else if matches!(child.state.as_str(), "stopping" | "stopped") {
+                ChildDisposition::NotNews("the child is stopping or stopped")
+            } else if self.exports.child_awaits_review(id.clone()).await {
+                // A child whose review is open is still pending: it may end
+                // turns while it waits, and handback refuses until the verdict.
+                ChildDisposition::NotNews("the child awaits its review's verdict")
+            } else {
+                match &child.identity {
+                    None => ChildDisposition::NotFinished,
+                    Some(identity) if child.relation.reported_finish.as_ref() == Some(identity) => {
+                        ChildDisposition::Reported
+                    }
+                    Some(_) => {
+                        ready.push(child);
+                        continue;
+                    }
+                }
+            };
+            reconciled.children.insert(id, disposition);
+        }
         if ready.is_empty() {
-            return Ok(());
+            return Ok(reconciled);
         }
         let spans = ready
             .iter()
@@ -1596,8 +2027,10 @@ impl ApiBackend {
         })
         .await?;
         let mut notifications = Vec::with_capacity(ready.len());
+        let mut enqueued = Vec::with_capacity(ready.len());
         for child in ready {
             let id = &child.relation.child_session_id;
+            enqueued.push(id.clone());
             let output = if child.state == "completed" {
                 match &child.progress.report {
                     ReportState::Delivered(message) => Some(message.clone()),
@@ -1606,12 +2039,35 @@ impl ApiBackend {
             } else {
                 child.output
             };
-            let mut entry =
-                wait_agent_entry(id, &child.state, output, child.finished, &child.progress);
+            let oracle = child.relation.kind == mj_core::subagent::SubagentKind::Oracle;
+            let mut entry = wait_agent_entry(
+                id,
+                &child.state,
+                output,
+                child.finished,
+                &child.progress,
+                oracle,
+            );
+            entry["child_name"] =
+                live_child_name(child.record.as_ref(), &child.relation.task_name).into();
             entry["task_name"] = child.relation.task_name.into();
             inputs.annotate(id, &mut entry);
             mark_parked(&mut entry, child.record.as_ref());
-            let report = serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
+            mark_promptable(
+                &mut entry,
+                &child.state,
+                &child.progress,
+                child.record.as_ref(),
+            );
+            let report_has_facts = child.finished && !oracle;
+            let mut report =
+                serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
+            // What the child's worker observed when the turn ended is part of the
+            // outcome that ended it, so the report reads it from the same snapshot
+            // as the finish, and nothing waits on it.
+            if report_has_facts {
+                report.facts = Some(finish_facts(&child.progress));
+            }
             notifications.push((
                 child.identity.expect("ready report has a finish identity"),
                 report,
@@ -1622,15 +2078,52 @@ impl ApiBackend {
             crate::database::enqueue_subagent_reports(parent, notifications)
         })
         .await?;
-        Ok(())
+        for id in enqueued {
+            reconciled.children.insert(id, ChildDisposition::Reported);
+        }
+        Ok(reconciled)
+    }
+
+    /// What `reconcile_children` would have said about a child it skipped:
+    /// one that is cleanly stopped, or that is not this parent's child at all.
+    /// The checks keep `reconcile_children`'s order.
+    async fn unreconciled_child_report(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<ChildReport> {
+        let relation = self.owned_relation(parent_id, child_id).await?;
+        Ok(ChildReport::NotNews(match relation {
+            None => "the child is not a worker of this parent",
+            Some(relation) if relation.kind == mj_core::subagent::SubagentKind::Reviewer => {
+                "a reviewer is reported by its review"
+            }
+            Some(_) if self.exports.close_is_requested(child_id) => {
+                "a close of the child was requested"
+            }
+            Some(_) => "the child is stopping or stopped",
+        }))
+    }
+
+    /// The child's relation when it belongs to this parent.
+    async fn owned_relation(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<Option<mj_core::subagent::SubagentRecord>> {
+        let child = child_id.to_owned();
+        Ok(blocking("read the child's relation", move || {
+            crate::database::load_subagent(&child)
+        })
+        .await?
+        .filter(|relation| relation.parent_session_id == parent_id))
     }
 
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
         anyhow::ensure!(
-            self.list_subagents(parent_id.to_owned())
+            self.owned_relation(parent_id, child_id)
                 .await?
-                .iter()
-                .any(|child| child.child_session_id == child_id),
+                .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Worker),
             "session {child_id} does not belong to parent {parent_id}"
         );
         Ok(())
@@ -1644,10 +2137,10 @@ impl ApiBackend {
             let child_id =
                 subagent_input::resolve_session_target(&state, Some(&parent_id), &requested_id)?;
             anyhow::ensure!(
-                state
-                    .subagents
-                    .get(&child_id)
-                    .is_some_and(|relation| { relation.parent_session_id == parent_id }),
+                state.subagents.get(&child_id).is_some_and(|relation| {
+                    relation.parent_session_id == parent_id
+                        && relation.kind == mj_core::subagent::SubagentKind::Worker
+                }),
                 "session {requested_id} does not belong to parent {parent_id}"
             );
             Ok(child_id)
@@ -1655,24 +2148,36 @@ impl ApiBackend {
         .await
     }
 
-    /// Remind a child that ended its turn without handing back a report,
-    /// once, and say whether its reminder is pending. The parent's completion
-    /// report waits for that reminder turn, including after daemon recovery.
+    /// Decide what a child that ended its turn owes before its report can go
+    /// to the parent, and send the one prompt that decision calls for: a
+    /// handback reminder, or, for a child held while processes it started
+    /// run, the follow-up that is due. The parent's completion report waits
+    /// for that prompt's turn, including after daemon recovery.
     ///
-    /// The caller passes the turn and what is queued or running from the live
-    /// snapshot it just saw: the store's copy can lag it, and deciding from an
-    /// older turn could skip a reminder the parent needs.
+    /// The caller passes the turn, the worker's liveness and what is queued
+    /// or running from the live snapshot it just saw: the store's copy can
+    /// lag it, and deciding from an older turn could skip a prompt the parent
+    /// needs.
     pub async fn remind_subagent_to_hand_back(
         &self,
         child_session_id: &str,
         handback_tool: bool,
         last_turn: &mj_core::state::MaterializedTurnOutcome,
+        liveness: &mj_core::subagent::Liveness,
         in_flight: &[String],
-    ) -> Result<bool> {
+    ) -> Result<ReportNudge> {
         // A prompt already queued or running is the child's next task; its
-        // report supersedes this turn's.
+        // report supersedes this turn's. A queued hold follow-up stays judged:
+        // if the queue drops it, the next observation sends it again.
+        if handback_tool
+            && in_flight
+                .iter()
+                .any(|id| mj_core::subagent::hold_follow_up_of(id).is_some())
+        {
+            return Ok(ReportNudge::FollowUpSent);
+        }
         if !handback_tool || !in_flight.is_empty() {
-            return Ok(false);
+            return Ok(ReportNudge::NotOwed);
         }
         let report = blocking("load sub-agent report", {
             let child_id = child_session_id.to_owned();
@@ -1683,34 +2188,60 @@ impl ApiBackend {
             handback_tool,
             &report,
             Some(last_turn),
+            liveness,
             &[],
             mj_core::clock::epoch_millis(),
         );
-        if state != (ReportState::Pending { remind: true }) {
-            return Ok(state == (ReportState::Pending { remind: false }));
-        }
-        let command_id =
-            mj_core::subagent::handback_reminder_command_id(last_turn.completed_ordinal);
+        let (command_id, command) = match state {
+            ReportState::Pending { remind: true } => (
+                mj_core::subagent::handback_reminder_command_id(last_turn.completed_ordinal),
+                RelayCommand::HandbackReminder {
+                    completed_command_id: last_turn.command_id.clone(),
+                    completed_ordinal: last_turn.completed_ordinal,
+                    // Only a worker that knows the field may be sent it.
+                    running: self
+                        .reminder_running_lines(child_session_id, last_turn)
+                        .await,
+                },
+            ),
+            ReportState::Pending { remind: false } => return Ok(ReportNudge::Pending),
+            ReportState::Held {
+                give_up_at_ms,
+                follow_up: None,
+                ..
+            } => return Ok(ReportNudge::Holding { give_up_at_ms }),
+            ReportState::Held {
+                waiting_on,
+                follow_up: Some(kind),
+                ..
+            } => (
+                mj_core::subagent::hold_follow_up_command_id(kind, last_turn.completed_ordinal),
+                RelayCommand::HoldFollowUp {
+                    completed_command_id: last_turn.command_id.clone(),
+                    completed_ordinal: last_turn.completed_ordinal,
+                    kind,
+                    running: match kind {
+                        mj_core::subagent::HoldFollowUpKind::ProcessesExited => Vec::new(),
+                        mj_core::subagent::HoldFollowUpKind::GiveUp => waiting_on,
+                    },
+                },
+            ),
+            ReportState::Delivered(_) | ReportState::Fallback => return Ok(ReportNudge::NotOwed),
+        };
+        let is_follow_up = matches!(command, RelayCommand::HoldFollowUp { .. });
         let submitted = async {
             let handle = self
                 .sessions
                 .session(child_session_id.to_owned())
                 .await
                 .with_context(|| format!("session {child_session_id} is not running"))?;
-            handle
-                .submit(
-                    command_id.clone(),
-                    RelayCommand::HandbackReminder {
-                        completed_command_id: last_turn.command_id.clone(),
-                        completed_ordinal: last_turn.completed_ordinal,
-                    },
-                )
-                .await
+            handle.submit(command_id.clone(), command).await
         }
         .await;
         let child_id = child_session_id.to_owned();
         let for_command_id = last_turn.command_id.clone();
         match submitted {
+            Ok(_) if is_follow_up => Ok(ReportNudge::FollowUpSent),
             Ok(_) => {
                 let reminder = mj_core::subagent::HandbackReminder {
                     command_id: command_id.clone(),
@@ -1721,7 +2252,7 @@ impl ApiBackend {
                     crate::database::record_handback_reminder(&child_id, &reminder)
                 })
                 .await?;
-                Ok(true)
+                Ok(ReportNudge::Pending)
             }
             Err(error) => {
                 if error
@@ -1729,22 +2260,119 @@ impl ApiBackend {
                     .is_some()
                 {
                     // Retry the same guarded command and retained receipt. A lost
-                    // acknowledgement does not prove the reminder was refused.
+                    // acknowledgement does not prove the prompt was refused.
                     return Err(error);
+                }
+                if is_follow_up {
+                    // Only the worker's own refusal says the completion is no
+                    // longer current. Anything else (a worker that cannot take
+                    // a prompt right now, a session that is not running, a
+                    // transport error) did not decide anything: the child stays
+                    // held and the loop retries with backoff.
+                    if error
+                        .downcast_ref::<mj_client::session::Refused>()
+                        .is_none()
+                    {
+                        return Err(error.context("could not prompt a held sub-agent"));
+                    }
+                    tracing::info!(
+                        child_session_id,
+                        error = format!("{error:#}"),
+                        "a held sub-agent moved on before its follow-up; its last turn is reported"
+                    );
+                    blocking("record refused hold follow-up", move || {
+                        crate::database::record_handback_reminder_failed(&child_id, &for_command_id)
+                    })
+                    .await?;
+                    return Ok(ReportNudge::NotOwed);
                 }
                 tracing::warn!(
                     child_session_id,
                     error = format!("{error:#}"),
-                    "could not remind a sub-agent to hand back its report"
+                    "could not prompt a sub-agent to hand back its report"
                 );
                 // Its last message stands as its report when the reminder fails.
                 blocking("record failed handback reminder", move || {
                     crate::database::record_handback_reminder_failed(&child_id, &for_command_id)
                 })
                 .await?;
-                Ok(false)
+                Ok(ReportNudge::NotOwed)
             }
         }
+    }
+
+    /// The processes a handback reminder names, for a child whose worker can
+    /// carry them (relay protocol 67 or later).
+    async fn reminder_running_lines(
+        &self,
+        child_session_id: &str,
+        last_turn: &mj_core::state::MaterializedTurnOutcome,
+    ) -> Vec<String> {
+        let Some(facts) = last_turn.work_facts.as_ref() else {
+            return Vec::new();
+        };
+        let supported = match self.session_handle(child_session_id.to_owned()).await {
+            Ok(Some(handle)) => handle
+                .view()
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.operational.relay_protocol_version)
+                .is_some_and(|version| version >= mj_core::relay::RELAY_WORK_LIVENESS_PROTOCOL),
+            _ => false,
+        };
+        if supported {
+            mj_core::subagent::running_process_lines(facts)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Whether the park of a child that was just reported waits for its
+    /// parent's turn. It does while the processes the child's last turn left
+    /// are alive and the parent is still running the turn that received (or
+    /// will receive) the child's report: the parent may tell the child to
+    /// continue, and a park stops those processes.
+    ///
+    /// The parent's worker owns the delivery facts, read from its live
+    /// snapshot each time; the outbox row says whether it accepted the report.
+    /// A parent that is not running, or a child whose processes are gone,
+    /// opens the gate.
+    pub async fn park_waits_for_parent_turn(
+        &self,
+        parent_session_id: &str,
+        child_session_id: &str,
+        completed_ordinal: u64,
+        liveness: Option<&mj_core::work_facts::WorkLiveness>,
+    ) -> Result<bool> {
+        if !liveness.is_some_and(|liveness| {
+            liveness.completed_ordinal == completed_ordinal && liveness.alive > 0
+        }) {
+            return Ok(false);
+        }
+        if self
+            .exports
+            .session_record(parent_session_id)
+            .is_none_or(|record| record.state != SessionState::Running)
+        {
+            return Ok(false);
+        }
+        let (parent, child) = (parent_session_id.to_owned(), child_session_id.to_owned());
+        let Some(mail) = blocking("load child report mail", move || {
+            crate::database::load_report_mail(&parent, &child)
+        })
+        .await?
+        else {
+            return Ok(false);
+        };
+        let view = self
+            .session_handle(parent_session_id.to_owned())
+            .await?
+            .map(|handle| handle.view());
+        Ok(!report_turn_ended(
+            &mail.key,
+            mail.accepted_ordinal,
+            view.as_ref().and_then(|view| view.snapshot.as_ref()),
+        ))
     }
 
     /// Return the worker's atomic idle reservation outcome. The coordinator
@@ -1796,15 +2424,117 @@ impl ApiBackend {
     }
 }
 
-fn profile_candidate_quota(report: Option<&ProfileQuota>) -> crate::server::api::CandidateQuota {
-    use crate::server::api::CandidateQuota;
-    match report.filter(|report| report.error.is_none()) {
-        Some(report) if report.is_usage_priced() => CandidateQuota::UsagePriced,
-        Some(report) if !report.windows.is_empty() => {
-            CandidateQuota::Windows(report.windows.clone())
+/// Whether a session in this state may have a worker running its turn.
+pub(crate) fn record_may_be_running(state: SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::Provisioning
+            | SessionState::Running
+            | SessionState::Disconnected
+            | SessionState::Checkpointing
+    )
+}
+
+/// The liveness a connected worker view publishes; without one it is unknown.
+pub(crate) fn liveness_of(
+    view: Option<&mj_client::session::ManagedSessionView>,
+) -> mj_core::subagent::Liveness {
+    match view
+        .filter(|view| view.connected)
+        .and_then(|view| view.snapshot.as_ref())
+    {
+        Some(snapshot) => {
+            mj_core::subagent::Liveness::Known(snapshot.operational.work_liveness.clone())
         }
-        _ => CandidateQuota::Unknown,
+        None => mj_core::subagent::Liveness::Unknown,
     }
+}
+
+/// Whether the parent turn that received a child's report has ended: the
+/// parent's worker accepted the event, the snapshot shows that acceptance, the
+/// event is no longer waiting for the agent, and the parent is idle. A parent
+/// that is idle with the event delivered ended the turn it was delivered in;
+/// one with the event still waiting is about to run it.
+fn report_turn_ended(
+    key: &str,
+    accepted_ordinal: Option<u64>,
+    parent: Option<&mj_core::state::ManagedSessionSnapshot>,
+) -> bool {
+    let (Some(accepted), Some(snapshot)) = (accepted_ordinal, parent) else {
+        return false;
+    };
+    snapshot.operational.latest_ordinal >= accepted
+        && !snapshot
+            .operational
+            .undelivered_mailbox_event_keys
+            .iter()
+            .any(|undelivered| undelivered == key)
+        && matches!(
+            snapshot.materialized.execution,
+            MaterializedExecutionState::Idle
+        )
+        && snapshot.materialized.active_turn.is_none()
+        && snapshot.materialized.queued_prompts.is_empty()
+}
+
+/// What a child owes before its report can go to the parent, after the prompt
+/// that was due has been sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportNudge {
+    /// Nothing is owed: report the turn as it stands.
+    NotOwed,
+    /// A reminder is on its way or already ran; the child's next turn is what
+    /// will be judged.
+    Pending,
+    /// A hold follow-up is queued or was just sent. Unlike a reminder it is
+    /// not marked done: a queue that drops it is seen on the next observation
+    /// and it is sent again under the same id.
+    FollowUpSent,
+    /// The child waits on processes it started. Nothing is reported or
+    /// stopped before this time, unless the worker's liveness changes first.
+    Holding { give_up_at_ms: i64 },
+}
+
+/// What makes a child's report new for its parent: its finish, or a message
+/// delivery to it that failed. The failed delivery keeps the child's own
+/// state (#1381); the parent still hears of it, once per failed request, in
+/// a report that carries the state and the `Message <id> failed` line. A
+/// finish that is still unreported travels in the same report.
+///
+/// Whether a failed delivery is news is decided against what the parent was
+/// last told (`reported`). A finished child's identity carries its state, so
+/// every finish after the failure reaches the parent, including one that
+/// settles without a new turn. A child that is not finished has news only if
+/// this failure was never reported: a message queued after it turns a
+/// finished child "running" with nothing new to say.
+fn report_identity(
+    state: &str,
+    output: Option<&str>,
+    finished: bool,
+    failed_delivery: Option<(&str, &str)>,
+    progress: &ChildProgress,
+    reported: Option<&mj_core::subagent::SubagentFinishIdentity>,
+) -> Option<mj_core::subagent::SubagentFinishIdentity> {
+    let Some((request_id, error)) = failed_delivery else {
+        return finished.then(|| finish_identity(state, output, progress));
+    };
+    let detail = format!("Message {request_id}: {error}");
+    if !finished
+        && let Some(
+            reported @ mj_core::subagent::SubagentFinishIdentity::Terminal {
+                detail: Some(reported_detail),
+                ..
+            },
+        ) = reported
+        && *reported_detail == detail
+    {
+        return Some(reported.clone());
+    }
+    Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
+        state: if finished { state } else { "message-failed" }.to_owned(),
+        detail: Some(detail),
+        last_completed_ordinal: progress.last_completed_ordinal,
+    })
 }
 
 fn finish_identity(
@@ -1892,6 +2622,10 @@ fn subagent_status(
             true,
         );
     }
+    // A failed wake owns the output even when an earlier turn delivered a report.
+    if let Some(ChildFailureSource::Wake(failure)) = child_failure_source(record, None) {
+        return ("failed".into(), Some(failure.to_owned()), true);
+    }
     let start_pending = matches!(start, Some(StartStatus::Pending));
     let lifecycle = record.map(|record| record.state);
     // A parked child's worker was stopped only once it was idle, and nothing
@@ -1924,7 +2658,10 @@ fn subagent_status(
                             Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
                             _ => None,
                         })
-                        || matches!(progress.report, ReportState::Pending { .. })) =>
+                        || matches!(
+                            progress.report,
+                            ReportState::Pending { .. } | ReportState::Held { .. }
+                        )) =>
             {
                 ("running".into(), summary.last_agent_message.clone(), false)
             }
@@ -1968,6 +2705,51 @@ fn subagent_status(
     }
 }
 
+/// A child's turns as the readers see them (the committed snapshot, or the
+/// store in a process without the writer): the completion ordinal of its last
+/// finished turn, and whether a turn is running now.
+pub(crate) fn load_child_turns(child_id: &str) -> Result<(Option<u64>, bool)> {
+    let state = match crate::database::committed_state()? {
+        Some(committed) => committed.turns.get(child_id).map(|turn| turn.state.clone()),
+        None => crate::database::load_materialized_turn_outcome(child_id)?,
+    };
+    Ok(state.map_or((None, false), |(_, active, last)| {
+        (last.map(|turn| turn.completed_ordinal), active.is_some())
+    }))
+}
+
+/// What a reconcile found for each of a parent's children.
+#[derive(Default)]
+struct Reconciled {
+    parent_closing: bool,
+    children: BTreeMap<String, ChildDisposition>,
+}
+
+enum ChildDisposition {
+    /// The child's finish is reported, now or earlier.
+    Reported,
+    /// There is no report to make, and why.
+    NotNews(&'static str),
+    /// The reconcile's view of the child is that it has not finished. That is not
+    /// "not news": it can be a child that did finish seen through a view that is
+    /// behind, or one that went on to a newer turn; the caller, which holds the
+    /// ending it asks about, tells which.
+    NotFinished,
+}
+
+/// Whether the parent has been told of one child's finish.
+pub(crate) enum ChildReport {
+    /// The report is enqueued and the child's marker covers the finish.
+    Told,
+    /// There is nothing to tell, for the reason given: the finish is not news.
+    NotNews(&'static str),
+    /// The reconcile does not see the child as finished.
+    NotFinished,
+    /// News, but not reported yet: the readers' snapshot has not caught up with
+    /// the finish, or the enqueue skipped it. Ask again.
+    Awaiting,
+}
+
 /// What the store says about a child's answer to its parent's newest prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChildProgress {
@@ -1982,9 +2764,8 @@ pub(crate) struct ChildProgress {
     pub report: ReportState,
     /// The newest prompt the parent gave the child, by acceptance ordinal.
     pub awaited_ordinal: Option<u64>,
-    /// The newest prompt the child's last finished turn answers; see
-    /// [`mj_core::subagent::answered_ordinal`].
-    pub answered_ordinal: Option<u64>,
+    /// The outcome owning the child's answer.
+    pub answer: Option<mj_core::state::MaterializedTurnOutcome>,
     /// How that turn failed, when it did: `failed` or `interrupted`, and why.
     pub failed_turn: Option<(&'static str, String)>,
     /// The child's profile, when that turn failed because the provider
@@ -2008,7 +2789,7 @@ impl ChildProgress {
             last_completed_ordinal: Some(1),
             report,
             awaited_ordinal: None,
-            answered_ordinal: None,
+            answer: None,
             failed_turn: None,
             login_failure: None,
             provider_failure: None,
@@ -2022,15 +2803,24 @@ impl ChildProgress {
     /// `submitted` is the first prompt's ordinal while startup remembers it.
     fn awaiting_prompt(&self, submitted: Option<u64>) -> bool {
         self.last_completed_ordinal.is_none()
-            || mj_core::subagent::prompt_unanswered(
-                self.awaited_ordinal.max(submitted),
-                self.answered_ordinal,
-            )
+            || self
+                .awaited_ordinal
+                .into_iter()
+                .chain(submitted)
+                .any(|ordinal| {
+                    self.answer
+                        .as_ref()
+                        .is_none_or(|turn| !turn.answers(ordinal))
+                })
     }
 }
 
 /// Derive one child's progress from the writer's coherent committed records.
-fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -> ChildProgress {
+fn child_progress(
+    committed: &crate::database::CommittedState,
+    child_id: &str,
+    liveness: &mj_core::subagent::Liveness,
+) -> ChildProgress {
     let subagent = committed.state.subagents.get(child_id);
     let empty = mj_core::subagent::SubagentReport::default();
     let recorded = committed.subagent_reports.get(child_id).unwrap_or(&empty);
@@ -2041,6 +2831,12 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
         .into_iter()
         .map(|turn| turn.command_id.as_str())
         .collect::<Vec<_>>();
+    let handback_tool = subagent.is_some_and(|record| record.handback_tool);
+    let failure = project_child_failure(
+        child_failure_source(committed.state.sessions.get(child_id), last),
+        subagent.map(|record| record.profile_id.as_str()),
+        turn.and_then(|turn| turn.failed_message.as_deref()),
+    );
     ChildProgress {
         turn_pending: false,
         finished_span: last.and_then(|turn| {
@@ -2049,25 +2845,70 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
         }),
         last_completed_ordinal: last.map(|turn| turn.completed_ordinal),
         report: mj_core::subagent::report_state(
-            subagent.is_some_and(|record| record.handback_tool),
+            handback_tool,
             recorded,
             last,
+            liveness,
             &in_flight,
             mj_core::clock::epoch_millis(),
         ),
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.and_then(mj_core::subagent::answered_ordinal),
-        failed_turn: last.and_then(|last| {
-            mj_core::subagent::failed_turn(
-                last,
-                turn.and_then(|turn| turn.failed_message.as_deref()),
-            )
-        }),
-        login_failure: last
-            .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
-            .and_then(|_| subagent.map(|record| record.profile_id.clone())),
-        provider_failure: last.and_then(provider_failure),
+        answer: last.cloned(),
+        failed_turn: failure.failed_turn,
+        login_failure: failure.login_failure,
+        provider_failure: failure.provider_failure,
         report_dir: recorded.report_dir.clone(),
+    }
+}
+
+/// Select the source before deriving any failure metadata. A wake failure
+/// cannot carry a previous turn's diagnostic, command, or login classification.
+enum ChildFailureSource<'a> {
+    Wake(&'a str),
+    Turn(&'a mj_core::state::MaterializedTurnOutcome),
+}
+
+fn child_failure_source<'a>(
+    record: Option<&'a mj_core::state::SessionRecord>,
+    last: Option<&'a mj_core::state::MaterializedTurnOutcome>,
+) -> Option<ChildFailureSource<'a>> {
+    if let Some(message) = record
+        .filter(|record| record.state == SessionState::Parked)
+        .and_then(|record| record.last_error.as_deref())
+    {
+        return Some(ChildFailureSource::Wake(message));
+    }
+    last.filter(|turn| mj_core::subagent::failed_turn(turn, None).is_some())
+        .map(ChildFailureSource::Turn)
+}
+
+#[derive(Default)]
+struct ChildFailureProjection {
+    failed_turn: Option<(&'static str, String)>,
+    login_failure: Option<String>,
+    provider_failure: Option<(String, mj_core::diagnostic::TurnDiagnostic)>,
+}
+
+fn project_child_failure(
+    source: Option<ChildFailureSource<'_>>,
+    profile: Option<&str>,
+    finished_message: Option<&str>,
+) -> ChildFailureProjection {
+    match source {
+        Some(ChildFailureSource::Wake(message)) => ChildFailureProjection {
+            login_failure: profile
+                .filter(|_| mj_core::credentials::text_reports_auth_failure(message))
+                .map(str::to_owned),
+            ..Default::default()
+        },
+        Some(ChildFailureSource::Turn(turn)) => ChildFailureProjection {
+            failed_turn: mj_core::subagent::failed_turn(turn, finished_message),
+            login_failure: profile
+                .filter(|_| mj_core::subagent::turn_failed_on_login(turn))
+                .map(str::to_owned),
+            provider_failure: provider_failure(turn),
+        },
+        None => ChildFailureProjection::default(),
     }
 }
 
@@ -2083,9 +2924,12 @@ fn provider_failure(
 /// Read a child's progress from the store. Report notifications and
 /// `list_agents` apply this one rule; the session wait and the reminder apply
 /// the same report rule to the turn they saw.
-pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
+pub(crate) fn load_child_progress(
+    child_id: &str,
+    liveness: &mj_core::subagent::Liveness,
+) -> Result<ChildProgress> {
     if let Some(committed) = crate::database::committed_state()? {
-        return Ok(child_progress(&committed, child_id));
+        return Ok(child_progress(&committed, child_id, liveness));
     }
     let subagent = crate::database::load_subagent(child_id)?;
     let handback_tool = subagent.as_ref().is_some_and(|record| record.handback_tool);
@@ -2101,21 +2945,23 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         handback_tool,
         &recorded,
         last.as_ref(),
+        liveness,
         &in_flight,
         mj_core::clock::epoch_millis(),
     );
-    let failed_turn = match last.as_ref() {
-        // Only a failed turn pays for reading its last message.
-        Some(turn) if mj_core::subagent::failed_turn(turn, None).is_some() => {
-            let message = crate::database::load_materialized_finished_turn_message(child_id)?;
-            mj_core::subagent::failed_turn(turn, message.as_deref())
-        }
-        _ => None,
+    let record = crate::database::load_session_record(child_id)?;
+    let source = child_failure_source(record.as_ref(), last.as_ref());
+    // Only the selected turn failure pays for reading its last message.
+    let message = if matches!(source, Some(ChildFailureSource::Turn(_))) {
+        crate::database::load_materialized_finished_turn_message(child_id)?
+    } else {
+        None
     };
-    let login_failure = last
-        .as_ref()
-        .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
-        .and(subagent.map(|record| record.profile_id));
+    let failure = project_child_failure(
+        source,
+        subagent.as_ref().map(|record| record.profile_id.as_str()),
+        message.as_deref(),
+    );
     Ok(ChildProgress {
         turn_pending: false,
         finished_span: last.as_ref().and_then(|turn| {
@@ -2125,10 +2971,10 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         last_completed_ordinal: last.as_ref().map(|turn| turn.completed_ordinal),
         report,
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.as_ref().and_then(mj_core::subagent::answered_ordinal),
-        failed_turn,
-        login_failure,
-        provider_failure: last.as_ref().and_then(provider_failure),
+        answer: last.clone(),
+        failed_turn: failure.failed_turn,
+        login_failure: failure.login_failure,
+        provider_failure: failure.provider_failure,
         report_dir: recorded.report_dir,
     })
 }
@@ -2142,8 +2988,15 @@ fn wait_agent_entry(
     output: Option<String>,
     finished: bool,
     progress: &ChildProgress,
+    oracle: bool,
 ) -> serde_json::Value {
-    let output = output.map(|output| bounded_report(&output));
+    let output = output.map(|output| {
+        if oracle {
+            mj_core::subagent::bounded_oracle_report(&output)
+        } else {
+            bounded_report(&output)
+        }
+    });
     let mut agent = serde_json::json!({
         "child_session_id":id,
         "report_source":report_source(state, &progress.report),
@@ -2155,6 +3008,9 @@ fn wait_agent_entry(
     if output.is_some_and(|(_, truncated)| truncated) {
         agent["truncated"] = serde_json::Value::Bool(true);
     }
+    if oracle {
+        agent["oracle"] = serde_json::Value::Bool(true);
+    }
     if state == "failed"
         && let Some(profile_id) = &progress.login_failure
     {
@@ -2164,12 +3020,55 @@ fn wait_agent_entry(
         });
     }
     if state == "failed"
+        && progress.login_failure.is_none()
         && progress.provider_failure.is_some()
         && let Some((_, summary)) = &progress.failed_turn
     {
         agent["failure"] = serde_json::json!({"kind": "provider_failure", "summary": summary});
     }
     agent
+}
+
+/// The `facts` object of a `list_agents` entry: the lines of what the child's
+/// worker observed when its last turn ended, rendered by the same code as the
+/// mailbox report.
+fn work_facts_entry(facts: &mj_core::work_facts::WorkFacts, now_ms: u64) -> serde_json::Value {
+    serde_json::json!({
+        "finish": {
+            "observed_secs_ago": now_ms.saturating_sub(facts.observed_at_ms) / 1000,
+            "lines": facts.render_lines(),
+        }
+    })
+}
+
+/// The facts a finished child's report carries: what its worker recorded in the
+/// outcome that ended its last turn, or why there are none. A prompt outcome
+/// without them is from a worker that predates the capture; an ending that was
+/// not a completed prompt took no observation.
+fn finish_facts(progress: &ChildProgress) -> mj_core::work_facts::WorkFacts {
+    let Some(turn) = &progress.answer else {
+        return mj_core::work_facts::WorkFacts::unavailable(
+            "the child ended without a completed turn, so its worker did not observe it",
+        );
+    };
+    turn.work_facts.clone().unwrap_or_else(|| {
+        mj_core::work_facts::WorkFacts::unavailable(match turn.outcome {
+            mj_core::state::TurnOutcomeKind::Completed { .. } => {
+                "the child's worker predates this version"
+            }
+            _ => "the turn ended without completing, so its worker took no observation",
+        })
+    })
+}
+
+/// What the session list calls a child now, bounded to one line, or the task
+/// name it was spawned with when the daemon holds no record. A person may
+/// have renamed the child since it was spawned.
+fn live_child_name(record: Option<&mj_core::state::SessionRecord>, task_name: &str) -> String {
+    record.map_or_else(
+        || mj_core::state::bounded_one_line(task_name, mj_core::state::MESSAGE_NAME_CHARS),
+        mj_core::state::SessionRecord::message_name,
+    )
 }
 
 /// Say in a notification or `list_agents` entry that the child is parked: its turn
@@ -2179,6 +3078,27 @@ fn wait_agent_entry(
 fn mark_parked(entry: &mut serde_json::Value, record: Option<&mj_core::state::SessionRecord>) {
     if record.is_some_and(|record| record.state == SessionState::Parked) {
         entry["parked"] = serde_json::Value::Bool(true);
+    }
+}
+
+/// Say in a notification or `list_agents` entry that a child whose last turn
+/// failed or was interrupted can still be given work: `send_message` runs it
+/// again. [`SessionState::can_receive_child_work`] decides this for every
+/// delivery, so this statement and a later `send_message` cannot disagree. A
+/// child whose login the provider refused is repaired first, so it is not
+/// marked.
+fn mark_promptable(
+    entry: &mut serde_json::Value,
+    state: &str,
+    progress: &ChildProgress,
+    record: Option<&mj_core::state::SessionRecord>,
+) {
+    if matches!(state, "failed" | "interrupted")
+        && progress.failed_turn.is_some()
+        && progress.login_failure.is_none()
+        && record.is_some_and(|record| record.state.can_receive_child_work())
+    {
+        entry["promptable"] = serde_json::Value::Bool(true);
     }
 }
 
@@ -2201,59 +3121,48 @@ async fn load_startup_context(session_id: String) -> Result<(Option<String>, Opt
     // other durable records, so a status read costs no store connection. A
     // `mj wait` reads this on every revision it wakes for. Only a process
     // without the writer reads the store.
-    let steps = match crate::database::committed_state()? {
-        Some(committed) => committed
-            .startup_groups
-            .get_shared(&session_id)
-            .unwrap_or_default(),
-        None => Arc::new(
+    let status = match crate::database::committed_state()? {
+        Some(committed) => committed.startup_groups.get_shared(&session_id),
+        None => {
             blocking("read durable startup status", move || {
                 crate::database::load_latest_startup_group(&session_id)
+                    .map(|steps| crate::database::StartupGroupStatus::of(&steps).map(Arc::new))
             })
-            .await?,
-        ),
+            .await?
+        }
     };
-    startup_context(&steps)
+    startup_context(status.as_deref())
 }
 
 fn startup_context(
-    steps: &[crate::database::StartupDelivery],
+    status: Option<&crate::database::StartupGroupStatus>,
 ) -> Result<(Option<String>, Option<StartStatus>)> {
-    let group_id = steps.last().and_then(|step| step.group_id.clone());
-    if let Some(step) = steps
-        .iter()
-        .find(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
-    {
+    let Some(status) = status else {
+        return Ok((None, None));
+    };
+    let group_id = status.group_id.clone();
+    if let Some(error) = &status.failure {
         return Ok((
             group_id,
             Some(StartStatus::Failed {
-                message: step
-                    .error
+                message: error
                     .clone()
                     .unwrap_or_else(|| "session startup was rejected".to_owned()),
             }),
         ));
     }
-    if steps
-        .iter()
-        .any(|step| matches!(step.phase.as_str(), "pending" | "delivering" | "accepted"))
-    {
+    if status.pending {
         return Ok((group_id, Some(StartStatus::Pending)));
     }
-    let Some(last) = steps.last() else {
-        return Ok((group_id, None));
-    };
-    if last.phase == "done"
-        && matches!(
-            serde_json::from_str::<crate::daemon::StartupStep>(&last.step_json)?,
-            crate::daemon::StartupStep::ApiPrompt { .. }
-        )
+    if let Some((api_prompt, accepted_ordinal)) = &status.last_done
+        && *api_prompt
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
     {
         return Ok((
             group_id,
             Some(StartStatus::Submitted {
-                turn_id: last
-                    .accepted_ordinal
+                turn_id: accepted_ordinal
                     .context("completed startup prompt has no acceptance ordinal")?,
             }),
         ));
@@ -2527,6 +3436,10 @@ async fn write_workspace_file(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), ExportError> {
     use std::sync::atomic::Ordering;
+    let session_admission = exports
+        .workspace_admission(session_id.clone(), cancelled.clone())
+        .await
+        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     let record = exports
         .session_record(&session_id)
         .ok_or_else(|| ExportError::Refused("unknown session".into()))?;
@@ -2541,9 +3454,13 @@ async fn write_workspace_file(
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
-    let mut lease = crate::controller::IdleWorkspaceLease::acquire(&handle, record.harness_kind)
-        .await
-        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
+    let mut lease = crate::controller::IdleWorkspaceLease::acquire(
+        &session_admission,
+        &handle,
+        record.harness_kind,
+    )
+    .await
+    .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
@@ -2567,9 +3484,14 @@ async fn write_workspace_file(
         if overwrite {
             argv.push("--overwrite".into());
         }
-        let command =
-            targets::command_on_locator(&layout.backend, &session_id, argv, "session file write")?
-                .with_sensitive_stdin(bytes);
+        let command = targets::command_on_locator(
+            SshTrafficClass::Bulk,
+            &layout.backend,
+            &session_id,
+            argv,
+            "session file write",
+        )?
+        .with_sensitive_stdin(bytes);
         CancellableProcessExecutor::new(worker_cancelled)
             .with_deadline(EXPORT_TIMEOUT)
             .execute(&command)
@@ -2619,13 +3541,7 @@ async fn worker_command_with_input(
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, ExportError> {
     let output: CommandOutput = export_blocking(purpose, move || {
-        let binary = format!(
-            "{}/hel",
-            targets::worker_root(&layout.backend, &session_id)?
-        );
-        let mut argv = vec![binary, "worker".to_owned()];
-        argv.extend(arguments);
-        let mut command = targets::command_on_locator(&layout.backend, &session_id, argv, purpose)?;
+        let mut command = worker_command_spec(layout, &session_id, arguments, purpose)?;
         if let Some(input) = input {
             command = command.with_sensitive_stdin(input);
         }
@@ -2633,6 +3549,24 @@ async fn worker_command_with_input(
     })
     .await?;
     worker_output(output, purpose)
+}
+
+fn worker_command_spec(
+    layout: SessionExportLayout,
+    session: &str,
+    arguments: Vec<String>,
+    purpose: &'static str,
+) -> Result<mj_core::targets::CommandSpec> {
+    let binary = format!("{}/hel", targets::worker_root(&layout.backend, session)?);
+    let mut argv = vec![binary, "worker".into()];
+    argv.extend(arguments);
+    targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        &layout.backend,
+        session,
+        argv,
+        purpose,
+    )
 }
 
 fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, ExportError> {
@@ -2675,8 +3609,43 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn subagent_work_liveness(
+        &self,
+        child_session_id: String,
+    ) -> BoxFuture<'_, mj_core::subagent::Liveness> {
+        Box::pin(async move {
+            // A lookup that fails says nothing about the child's processes.
+            self.live_work(&child_session_id)
+                .await
+                .unwrap_or(mj_core::subagent::Liveness::Unknown)
+        })
+    }
+
+    fn profile_login_errors(&self) -> Result<BTreeMap<String, String>> {
+        Ok(self
+            .quota_reports
+            .lock()
+            .map_err(|_| anyhow!("profile quota reports lock poisoned"))?
+            .iter()
+            .filter_map(|(id, publication)| {
+                publication
+                    .login_error
+                    .clone()
+                    .map(|error| (id.clone(), error))
+            })
+            .collect())
+    }
+
     fn subagent_config(&self) -> BoxFuture<'_, Result<mj_core::config::SubagentConfig>> {
         Box::pin(async move { Ok(self.exports.subagent_config()) })
+    }
+
+    fn session_is_yolo_target(&self, session_id: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(self.exports.session_is_yolo_target(&session_id)) })
+    }
+
+    fn quota_preferences(&self) -> BoxFuture<'_, Result<Vec<String>>> {
+        Box::pin(async move { Ok(self.exports.quota_preferences()) })
     }
 
     fn wait_revision(&self, session_id: &str) -> Result<Option<u64>> {
@@ -2795,13 +3764,44 @@ impl SubagentBackend for ApiBackend {
                     .capabilities(&[profile])
                     .await?
                     .remove(0)),
-                model => crate::controller::profile_config::discover(profile, model, refresh).await,
+                model => {
+                    // A forced refresh bypasses the catalogue's cache, not its
+                    // allow-list: an explicit request cannot select a model the
+                    // picker hides.
+                    let (mut choices, default) = refreshed_profile_choices(model, |model| {
+                        crate::controller::profile_config::discover(profile.clone(), model, refresh)
+                    })
+                    .await?;
+                    let selected = choices.model.clone();
+                    choices.model = default;
+                    let allowed = self.profile_catalog.allowed_models(&profile);
+                    choices = choices.restricted_to(&allowed);
+                    choices.model = selected;
+                    Ok(choices)
+                }
             }
+        })
+    }
+
+    fn unrestricted_profile_config(
+        &self,
+        profile: String,
+    ) -> BoxFuture<'_, Result<mj_core::worker_launch::ProfileConfig>> {
+        Box::pin(async move {
+            self.profile_catalog
+                .unrestricted_capabilities(&profile)
+                .await
         })
     }
 
     fn warm_profile_capabilities(&self, config: &mj_core::config::Config) {
         self.profile_catalog.ensure(config);
+    }
+
+    fn profile_capabilities_snapshot(
+        &self,
+    ) -> Option<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot> {
+        Some(self.profile_catalog.snapshot().into_inner())
     }
 
     fn subagent_candidates(
@@ -2811,6 +3811,162 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             let ids = self.profile_catalog.candidates()?;
             self.discover_profile_candidates(ids, "sub-agent").await
+        })
+    }
+
+    fn reviewer_candidates(&self) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(ApiBackend::reviewer_candidates(self))
+    }
+
+    fn reviewer_candidates_for_model(
+        &self,
+        model: String,
+        tried: Vec<String>,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            use futures::StreamExt;
+            let mut pending = futures::stream::FuturesUnordered::new();
+            for (id, _) in self.profile_catalog.candidates()? {
+                let catalog = &self.profile_catalog;
+                pending.push(async move {
+                    let result = catalog.capabilities(std::slice::from_ref(&id)).await;
+                    (id, result)
+                });
+            }
+            while let Some((id, result)) = pending.next().await {
+                if !tried.contains(&id)
+                    && let Ok(choices) = result
+                    && choices.iter().any(|choice| {
+                        mj_core::model_catalog::resolve(&choice.models, &model).is_some()
+                    })
+                {
+                    drop(pending);
+                    let mut candidates = self.reviewer_ready_candidates(model).await?;
+                    candidates
+                        .offered
+                        .retain(|candidate| !tried.contains(&candidate.profile_id));
+                    candidates.unavailable.retain(|(id, _)| !tried.contains(id));
+                    return Ok(candidates);
+                }
+            }
+            anyhow::bail!("no further enabled reviewer profile offers model {model:?}")
+        })
+    }
+
+    fn reviewer_autoconfigure_candidates(
+        &self,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            use futures::StreamExt;
+            let ids = self.profile_catalog.candidates()?;
+            let mut pending = futures::stream::FuturesUnordered::new();
+            for (id, _) in &ids {
+                let id = id.clone();
+                let catalog = &self.profile_catalog;
+                pending.push(async move {
+                    let result = catalog.capabilities(std::slice::from_ref(&id)).await;
+                    (id, result)
+                });
+            }
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            let mut answered = Vec::new();
+            let mut models = Vec::new();
+            while let Ok(Some((id, result))) =
+                tokio::time::timeout_at(deadline, pending.next()).await
+            {
+                if let Ok(choices) = result {
+                    for choice in choices {
+                        models.extend(choice.models);
+                    }
+                    answered.push(id);
+                    if mj_core::review::autoconfigure::autoconfigure(
+                        &mj_core::review::autoconfigure::merged_model_offers(&models),
+                        |_| None,
+                    )
+                    .is_some()
+                    {
+                        break;
+                    }
+                }
+            }
+            drop(pending);
+            self.discover_profile_candidates(
+                ids.into_iter()
+                    .filter(|(id, _)| answered.contains(id))
+                    .collect(),
+                "reviewer",
+            )
+            .await
+        })
+    }
+
+    fn reviewer_ready_candidates(
+        &self,
+        _model: String,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            // Remove refused logins before the shared selector resolves the
+            // requested alias once over the remaining ready profiles.
+            let ids = self.profile_catalog.ready_candidates("")?;
+            let config = self.profile_catalog.live()?;
+            let snapshot = self.profile_catalog.snapshot();
+            let rejected = self
+                .rejected_logins
+                .lock()
+                .map_err(|_| anyhow!("refused logins lock poisoned"))?;
+            let quota_reports = self
+                .quota_reports
+                .lock()
+                .map_err(|_| anyhow!("profile quota reports lock poisoned"))?;
+            let health = crate::profile_health::shared()
+                .lock()
+                .map_err(|_| anyhow!("profile health lock poisoned"))?;
+            let now = std::time::SystemTime::now();
+            let mut candidates = crate::server::api::SubagentCandidates::default();
+            for (profile_id, harness) in ids {
+                if let Some(reason) = rejected.refusal(&profile_id) {
+                    candidates.unavailable.push((profile_id, reason));
+                    continue;
+                }
+                let Some(profile) = config.enabled_profile(&profile_id) else {
+                    continue;
+                };
+                let Some(entry) = snapshot
+                    .profiles
+                    .get(&profile.capabilities_key(&profile_id))
+                else {
+                    continue;
+                };
+                let mj_core::profile_capabilities::CapabilityState::Ready(choices) = &entry.choices
+                else {
+                    continue;
+                };
+                let unhealthy = choices
+                    .models
+                    .iter()
+                    .filter_map(|model| {
+                        health
+                            .unhealthy(&profile_id, &model.value, now)
+                            .cloned()
+                            .map(|mark| (model.value.clone(), mark))
+                    })
+                    .collect();
+                candidates
+                    .offered
+                    .push(crate::server::api::SubagentCandidate {
+                        profile_id: profile_id.clone(),
+                        harness,
+                        choices: choices.clone(),
+                        quota: crate::server::api::CandidateQuota::from_report(
+                            quota_reports
+                                .get(&profile_id)
+                                .and_then(|publication| publication.report.as_ref()),
+                        ),
+                        may_consume_credits: profile.load_balancing_may_consume_credits,
+                        unhealthy,
+                    });
+            }
+            Ok(candidates)
         })
     }
 
@@ -2944,6 +4100,17 @@ impl SubagentBackend for ApiBackend {
                 .await?;
             Ok(turn)
         })
+    }
+
+    fn record_user_prompt(
+        &self,
+        session_id: String,
+        command_id: String,
+        text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(super::actions::record_user_prompt(
+            session_id, command_id, text,
+        ))
     }
 
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, Result<String>> {
@@ -3098,11 +4265,7 @@ impl SubagentBackend for ApiBackend {
     ) -> BoxFuture<'_, std::result::Result<FetchedPath, ExportError>> {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
-            let layout = export_layout(session_id.clone()).await?;
-            let arguments = fetch_arguments(&layout, &path, mode)?;
-            let output =
-                worker_command(layout, session_id, arguments, "session file fetch").await?;
-            FetchedPath::decode(output).map_err(ExportError::Failed)
+            fetch_transfer::read(session_id, path, mode).await
         })
     }
 
@@ -3180,7 +4343,7 @@ impl SubagentBackend for ApiBackend {
                 .session_record(&session_id)
                 .and_then(|record| record.target);
             if target.as_ref().is_some_and(|target| {
-                !matches!(target, mj_core::state::TargetLocator::LocalBare { .. })
+                !matches!(&**target, mj_core::state::TargetLocator::LocalBare { .. })
             }) && let Some(token) =
                 crate::controller::renew_session_github_app_token(session_id.clone())
                     .await
@@ -3291,6 +4454,25 @@ impl SubagentBackend for ApiBackend {
             })
         })
     }
+}
+
+// Refresh the default before selecting a model, so the exemption belongs to
+// this discovery rather than the catalogue from before the refresh.
+async fn refreshed_profile_choices<F, Fut>(
+    model: Option<String>,
+    mut discover: F,
+) -> Result<(mj_core::worker_launch::ProfileConfig, Option<String>)>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<mj_core::worker_launch::ProfileConfig>>,
+{
+    let choices = discover(None).await?;
+    let default = choices.model.clone();
+    let choices = match model {
+        Some(model) => discover(Some(model)).await?,
+        None => choices,
+    };
+    Ok((choices, default))
 }
 
 #[cfg(test)]

@@ -132,11 +132,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Stopped  podman  codex-                                                                                                                 │
 │  │ No messages yet        ╭ × Choose a project ──────────────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
-│                           │   ●Recent     GitHub     Folders     Paste URL                                   │                           │
+│                           │   ●Recent     GitHub     URL or Path                                             │                           │
 │                           │                                                                                  │                           │
-│                           │ Pick up a recent project, or find another on GitHub or in Folders.               │                           │
+│                           │ Pick up a recent project, or find another on GitHub or by URL or path.           │                           │
 │                           │                                                                                  │                           │
-│                           │ No recent projects yet. Choose GitHub or Folders above to get started.           │                           │
+│                           │ No recent projects yet. Choose GitHub or URL or path above to get started.       │                           │
 │                           │                                                                                  │                           │
 │                           │ ☐ Use several repositories together                                              │                           │
 │                           │                                                                                  │                           │
@@ -400,12 +400,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
   ╭ × Choose a project ──────────────────────────────────╮
   │                                                      │
-  │   ●Recent     GitHub     Folders     Paste URL       │
+  │   ●Recent     GitHub     URL or Path                 │
   │                                                      │
   │ Pick up a recent project, or find another on GitHub  │
-  │ or in Folders.                                       │
+  │ or by URL or path.                                   │
   │                                                      │
-  │ No recent projects yet. Choose GitHub or Folders     │
+  │ No recent projects yet. Choose GitHub or URL or path │
   │ above to get started.                                │
   │                                                      │
   │ ☐ Use several repositories together                  │
@@ -688,7 +688,7 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │                                                                                  │                           │
 │                           │ Profile: codex-1                                                                 │                           │
 │                           │ Project directory: /work/project                                                 │                           │
-│                           │ Target: localhost (raw localhost)                                                │                           │
+│                           │ Target: localhost (localhost)                                                    │                           │
 │                           │ Compute: fixed/default resources                                                 │                           │
 │                           │                                                                                  │                           │
 │                           │ ☐ Create isolated checkout                                                       │                           │
@@ -727,8 +727,8 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                                                                                                                          │
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   localhost  raw localhost  —       —                                            │                           │
+│                           │   TARGET     KIND       CPU     MEM (GiB)     STATUS                             │                           │
+│                           │   localhost  localhost  —       —                                                │                           │
 │                           │                                                                                  │                           │
 │                           │ Machine nas has no runtime: it did not answer. `ssh nas true` failed:            │                           │
 │                           │ Connection timed out. Check that nas is up.                                      │                           │
@@ -809,9 +809,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                                                                                                                          │
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   localhost  raw localhost  —       —                                            │                           │
-│                           │   podman     local Podman   —       —                                            │                           │
+│                           │   TARGET     KIND          CPU     MEM (GiB)     STATUS                          │                           │
+│                           │   localhost  localhost     —       —                                             │                           │
+│                           │   podman     local Podman  —       —                                             │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -891,10 +891,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                                                                                                                          │
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   docker     local Docker   —       —                                            │                           │
-│                           │   localhost  raw localhost  —       —                                            │                           │
-│                           │   podman     local Podman   —       —                                            │                           │
+│                           │   TARGET     KIND          CPU     MEM (GiB)     STATUS                          │                           │
+│                           │   docker     local Docker  —       —                                             │                           │
+│                           │   localhost  localhost     —       —                                             │                           │
+│                           │   podman     local Podman  —       —                                             │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1099,9 +1099,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Stopped  localhost/proj                                                                                                                 │
 │  │ No messages yet        ╭ × Resume · 2/3 new target ───────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
-│                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   localhost  raw localhost  —       —                                            │                           │
-│                           │   podman     local Podman   —       —                                            │                           │
+│                           │   TARGET     KIND          CPU     MEM (GiB)     STATUS                          │                           │
+│                           │   localhost  localhost     —       —                                             │                           │
+│                           │   podman     local Podman  —       —                                             │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1171,7 +1171,7 @@ action: None
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
-action: MoveSession { subagents: None, workspace_selection: WorkspaceSelection { exclusions: [], acknowledge_large_transfer: false }, session_id: "session-1", profile_id: "codex-1", target_template_id: "machine", additional_mounts: [], resource_allocation: None, clear_resource_allocation: true, preparation_request_id: Some(1), queue: Some(Discard) }
+action: MoveSession { subagents: None, oracle: None, oracle_choice: None, workspace_selection: WorkspaceSelection { exclusions: [], acknowledge_large_transfer: false }, session_id: "session-1", profile_id: "codex-1", target_template_id: "machine", additional_mounts: [], resource_allocation: None, clear_resource_allocation: true, preparation_request_id: Some(1), queue: Some(Discard) }
 === move_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -1266,9 +1266,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  localhost/project                                                                                                                 │
 │  │ No messages yet        ╭ × Move · 2/3 new target ─────────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
-│                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   localhost  raw localhost  —       —                                            │                           │
-│                           │   podman     local Podman   —       —                                            │                           │
+│                           │   TARGET     KIND          CPU     MEM (GiB)     STATUS                          │                           │
+│                           │   localhost  localhost     —       —                                             │                           │
+│                           │   podman     local Podman  —       —                                             │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1307,9 +1307,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                                              │
 │                                     ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                                     │
 │                                     │                                                                                  │                                     │
-│                                     │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                                     │
-│                                     │   localhost  raw localhost  —       —                                            │                                     │
-│                                     │   podman     local Podman   —       —                                            │                                     │
+│                                     │   TARGET     KIND          CPU     MEM (GiB)     STATUS                          │                                     │
+│                                     │   localhost  localhost     —       —                                             │                                     │
+│                                     │   podman     local Podman  —       —                                             │                                     │
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
@@ -1349,9 +1349,9 @@ selection: podman (the next visible row; docker is hidden)
 │                                                                                                                                                              │
 │                                     ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                                     │
 │                                     │                                                                                  │                                     │
-│                                     │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                                     │
-│                                     │   localhost  raw localhost  —       —                                            │                                     │
-│                                     │   podman     local Podman   4       8                                            │                                     │
+│                                     │   TARGET     KIND          CPU     MEM (GiB)     STATUS                          │                                     │
+│                                     │   localhost  localhost     —       —                                             │                                     │
+│                                     │   podman     local Podman  4       8                                             │                                     │
 │                                     │ ☐ Save as default sizing                                                         │                                     │
 │                                     │ Host totals unavailable; resource limits cannot be checked.                      │                                     │
 │                                     │                                                                                  │                                     │
@@ -1386,9 +1386,9 @@ selection: podman (the next visible row; docker is hidden)
 ╭ Sessions ───────────────                                                                                                                 │
 │ Create   Open   Filter:   ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │No sessions yet            │                                                                                  │                           │
-│Create new work or open a  │   TARGET  KIND           CPU     MEM (GiB)     STATUS                            │                           │
-│                           │   bare    raw localhost  —       —                                               │                           │
-│                           │   podman  local Podman   —       —                                               │                           │
+│Create new work or open a  │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                           │
+│                           │   bare    localhost     —       —                                                │                           │
+│                           │   podman  local Podman  —       —                                                │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1419,9 +1419,9 @@ selection: podman (the next visible row; docker is hidden)
 ╭ Sessions ───────────────                                                                                                                 │
 │ Create   Open   Filter:   ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │No sessions yet            │                                                                                  │                           │
-│Create new work or open a  │   TARGET  KIND           CPU     MEM (GiB)     STATUS                            │                           │
-│                           │   bare    raw localhost  —       —                                               │                           │
-│                           │   podman  local Podman   —       —                                               │                           │
+│Create new work or open a  │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                           │
+│                           │   bare    localhost     —       —                                                │                           │
+│                           │   podman  local Podman  —       —                                                │                           │
 │                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
 │                           │                                                                                  │                           │

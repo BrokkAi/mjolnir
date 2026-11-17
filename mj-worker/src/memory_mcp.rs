@@ -34,6 +34,15 @@ fn serve<R: io::BufRead, W: io::Write + Send + Sync + 'static>(
     )
 }
 
+/// The tools the server lists when it has a history socket, which is what a
+/// harness that asks before an MCP tool is allowed.
+pub fn tool_names() -> Vec<String> {
+    history::tool_definitions()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
 fn definitions(history: bool) -> Vec<Value> {
     if history {
         history::tool_definitions()

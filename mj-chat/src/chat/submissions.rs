@@ -12,6 +12,8 @@ pub(super) struct PendingSubmission {
     represented: bool,
     finished: bool,
     recorded_at_ms: i64,
+    #[serde(default)]
+    submitted_after: Option<u64>,
     #[serde(skip)]
     started_at: Option<std::time::Instant>,
 }
@@ -47,7 +49,23 @@ fn represents_submission(stable_id: &str, id: &str) -> bool {
     })
 }
 
+pub(super) fn is_inline_submission_entry(entry: &ChatEntry) -> bool {
+    entry.source.0.is_none()
+        && entry
+            .message_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("local-submission:"))
+}
+
 impl PendingSubmission {
+    fn is_inline(&self) -> bool {
+        self.finished && !self.represented && self.status.starts_with("Delivery unconfirmed")
+    }
+
+    fn can_resend(&self) -> bool {
+        self.is_inline() && self.startup_origin.is_none()
+    }
+
     /// A `/clear` the relay runs as a context reset, not as a prompt.
     fn is_context_clear(&self) -> bool {
         self.kind == SubmissionKind::Prompt
@@ -85,8 +103,10 @@ impl ChatState {
                 move_operation_id: prompt.move_operation_id,
             }),
             recorded_at_ms: mj_core::clock::epoch_millis(),
+            submitted_after: Some(self.latest_seq),
             started_at: None,
         });
+        self.sync_inline_submissions();
     }
     pub fn startup_retry_prompts(&self) -> Vec<(super::StartupPrompt, Option<String>)> {
         self.pending_submissions
@@ -108,13 +128,30 @@ impl ChatState {
     pub(super) fn settle_startup_receipt(&mut self, command_id: &str) {
         self.pending_submissions
             .retain(|pending| pending.id != command_id || pending.startup_origin.is_none());
+        self.sync_inline_submissions();
     }
 
     pub(super) fn restore_submissions(&mut self, pending: Vec<PendingSubmission>) {
         self.pending_submissions = pending;
         for pending in &mut self.pending_submissions {
             pending.finished = true;
-            pending.status = "Delivery unconfirmed".into();
+            if !pending.status.starts_with("Delivery unconfirmed") {
+                pending.status = "Delivery unconfirmed".into();
+            }
+            // Older saved receipts have no frontier. Choose their anchor once
+            // on restore from the timestamps of the available durable entries.
+            pending.submitted_after.get_or_insert_with(|| {
+                self.entries
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .recorded_at_ms
+                            .is_some_and(|at| at <= pending.recorded_at_ms)
+                    })
+                    .map(|entry| entry.start_seq)
+                    .max()
+                    .unwrap_or(0)
+            });
             pending.represented = self
                 .queued_prompts
                 .iter()
@@ -129,6 +166,7 @@ impl ChatState {
         }
         self.pending_submissions
             .retain(|pending| !pending.represented);
+        self.sync_inline_submissions();
     }
 
     pub(super) fn begin_submission(
@@ -138,6 +176,18 @@ impl ChatState {
         payload: PromptPayload,
         status: &str,
     ) {
+        // A retry remains the same submission, including its original anchor.
+        if let Some(pending) = self
+            .pending_submissions
+            .iter_mut()
+            .find(|pending| pending.id == id)
+        {
+            pending.finished = false;
+            pending.status = status.into();
+            pending.started_at = Some(std::time::Instant::now());
+            self.sync_inline_submissions();
+            return;
+        }
         self.pending_submissions.push(PendingSubmission {
             id,
             kind,
@@ -147,12 +197,124 @@ impl ChatState {
             represented: false,
             finished: false,
             recorded_at_ms: mj_core::clock::epoch_millis(),
+            submitted_after: Some(self.latest_seq),
             started_at: Some(std::time::Instant::now()),
         });
         self.invalidate_render_cache();
     }
 
+    pub(super) fn recoverable_submission_id(&self) -> Option<&str> {
+        self.pending_submissions
+            .iter()
+            .rev()
+            .find(|pending| pending.can_resend())
+            .map(|pending| pending.id.as_str())
+    }
+
+    pub(super) fn dismiss_submission(&mut self, id: &str) {
+        self.composer_runtime.receipt_preparations.remove(id);
+        self.pending_submissions
+            .retain(|pending| pending.id != id || !pending.can_resend());
+        self.sync_inline_submissions();
+    }
+
+    pub(super) fn prepare_receipt_retry(&mut self, id: &str, session_id: &str) -> bool {
+        if self.composer_runtime.receipt_preparations.contains_key(id) {
+            return true;
+        }
+        let Some(receipt) = self
+            .pending_submissions
+            .iter_mut()
+            .find(|pending| pending.id == id && pending.can_resend())
+        else {
+            return false;
+        };
+        if !receipt
+            .payload
+            .images
+            .iter()
+            .any(|image| image.image.reference.is_none())
+        {
+            return false;
+        }
+        let mut payload = receipt.payload.clone();
+        let command_id = id.to_owned();
+        let session_id = session_id.to_owned();
+        let updates = self.composer_runtime.tx.clone();
+        let task = tokio::spawn(async move {
+            let result = async {
+                for image in &mut payload.images {
+                    if image.image.reference.is_none() {
+                        image.image = composer::prepare_attachment(
+                            &session_id,
+                            composer::AttachmentSource::Clipboard(image.image.clone()),
+                        )
+                        .await?;
+                    }
+                }
+                Ok(payload)
+            }
+            .await;
+            if let Err(error) =
+                updates.send(composer::ComposerIoUpdate::ReceiptPrepared { command_id, result })
+            {
+                tracing::debug!(%error, "receipt preparation result dropped because composer closed");
+            }
+        });
+        self.composer_runtime
+            .receipt_preparations
+            .insert(id.to_owned(), composer::RemoteResultForwarder(Some(task)));
+        self.sync_inline_submissions();
+        true
+    }
+
+    pub(super) fn finish_receipt_preparation(
+        &mut self,
+        id: &str,
+        result: Result<PromptPayload, String>,
+    ) {
+        self.composer_runtime.receipt_preparations.remove(id);
+        let Some(receipt) = self
+            .pending_submissions
+            .iter_mut()
+            .find(|pending| pending.id == id && pending.can_resend())
+        else {
+            return;
+        };
+        match result {
+            Ok(payload) => {
+                receipt.payload = payload;
+                self.composer_runtime
+                    .prepared_receipt_retries
+                    .push_back(id.to_owned());
+            }
+            Err(error) => {
+                receipt.status = format!("Delivery unconfirmed: image preparation failed: {error}")
+            }
+        }
+        self.sync_inline_submissions();
+    }
+
+    pub(super) fn resend_submission(&self, id: &str) -> Option<remote::ChatRemoteOperation> {
+        let pending = self
+            .pending_submissions
+            .iter()
+            .find(|pending| pending.id == id && pending.can_resend())?;
+        Some(match pending.kind {
+            SubmissionKind::Prompt => remote::ChatRemoteOperation::Prompt {
+                command_id: pending.id.clone(),
+                text: pending.payload.text.clone(),
+                images: pending.payload.images.clone(),
+            },
+            SubmissionKind::Shell => remote::ChatRemoteOperation::RunShell {
+                command_id: pending.id.clone(),
+                command: pending.payload.text.clone(),
+            },
+        })
+    }
+
     pub(super) fn reconcile_submissions(&mut self, session: &MaterializedSession) {
+        let mut inline_retired = false;
         for pending in &mut self.pending_submissions {
             if session
                 .queued_prompts
@@ -166,11 +328,15 @@ impl ChatState {
                 if let Some(started) = pending.started_at.take() {
                     self.submission_renders.push((pending.id.clone(), started));
                 }
+                inline_retired |= pending.is_inline();
                 pending.represented = true;
             }
         }
         self.pending_submissions
             .retain(|pending| !(pending.represented && pending.finished));
+        if inline_retired {
+            self.sync_inline_submissions();
+        }
     }
 
     /// Returns false when authoritative state already confirmed this operation.
@@ -193,7 +359,7 @@ impl ChatState {
         if represented || !accepted || pending.is_context_clear() {
             self.pending_submissions.remove(index);
         }
-        self.invalidate_render_cache();
+        self.sync_inline_submissions();
         !represented
     }
 
@@ -206,7 +372,7 @@ impl ChatState {
         }
         self.pending_submissions
             .retain(|pending| !(pending.represented && pending.finished));
-        self.invalidate_render_cache();
+        self.sync_inline_submissions();
     }
 
     pub(super) fn unconfirm_submission(&mut self, id: &str, error: &str) {
@@ -220,7 +386,69 @@ impl ChatState {
         }
         self.pending_submissions
             .retain(|pending| !(pending.represented && pending.finished));
+        self.sync_inline_submissions();
+    }
+
+    /// Materialize local terminal receipts at their owner-recorded frontier.
+    /// These entries never enter the durable projection or the pinned rows.
+    pub(super) fn sync_inline_submissions(&mut self) {
+        let position =
+            (self.anchor != TranscriptAnchor::Bottom).then(|| self.transcript_position());
+        let previous_len = self.entries.len();
+        self.entries
+            .retain(|entry| !is_inline_submission_entry(entry));
+        let removed = self.entries.len() != previous_len;
+        let recoverable = self.recoverable_submission_id();
+        let inline = self
+            .pending_submissions
+            .iter()
+            .filter(|pending| pending.is_inline())
+            .map(|pending| {
+                let text = if pending.kind == SubmissionKind::Shell {
+                    format!("!{}", pending.payload.text)
+                } else {
+                    pending.payload.text.clone()
+                };
+                let status = if self
+                    .composer_runtime
+                    .receipt_preparations
+                    .contains_key(&pending.id)
+                {
+                    "Delivery unconfirmed: preparing images…"
+                } else {
+                    &pending.status
+                };
+                let mut text = format!("{text}\n\n{status}");
+                if !self.standby && recoverable == Some(pending.id.as_str()) {
+                    text.push_str("\nCtrl-Alt-R resend · Ctrl-Alt-D dismiss");
+                }
+                let mut entry =
+                    ChatEntry::plain(pending.submitted_after.unwrap_or(0), ChatRole::User, text)
+                        .with_recorded_at(Some(pending.recorded_at_ms));
+                entry.message_id = Some(format!("local-submission:{}", pending.id));
+                entry
+            })
+            .collect::<Vec<_>>();
+        if inline.is_empty() && !removed {
+            self.invalidate_render_cache();
+            return;
+        }
+        for entry in inline {
+            let at = self
+                .entries
+                .partition_point(|existing| existing.start_seq <= entry.start_seq);
+            self.entries.insert(at, entry);
+        }
         self.invalidate_render_cache();
+        if let Some(position) = position {
+            self.restore_transcript_position(position);
+        }
+    }
+
+    pub(super) fn has_inline_submissions(&self) -> bool {
+        self.pending_submissions
+            .iter()
+            .any(PendingSubmission::is_inline)
     }
 
     pub(super) fn submission_status(&self, entry: &ChatEntry) -> Option<&str> {
@@ -234,7 +462,7 @@ impl ChatState {
     pub(super) fn submission_entries(&self) -> impl Iterator<Item = ChatEntry> + '_ {
         self.pending_submissions
             .iter()
-            .filter(|pending| !pending.represented)
+            .filter(|pending| !pending.represented && !pending.is_inline())
             .map(|pending| {
                 let text = if pending.kind == SubmissionKind::Shell {
                     format!("!{}", pending.payload.text)
@@ -293,6 +521,68 @@ mod tests {
             accepted_ordinal: Some(1),
         });
         session
+    }
+
+    #[test]
+    fn a_refused_local_resend_preserves_the_unconfirmed_receipt() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        queue_chat_remote_operation(
+            &tx,
+            ChatRemoteOperation::Prompt {
+                command_id: "original".into(),
+                text: "hello".into(),
+                images: Vec::new(),
+            },
+            &mut chat,
+        );
+        chat.unconfirm_submission("original", "connection reset");
+        chat.set_input("next draft".into());
+        let retry = chat.resend_submission("original").unwrap();
+        queue_chat_remote_operation(&tx, retry, &mut chat);
+        assert_eq!(chat.recoverable_submission_id(), Some("original"));
+        assert_eq!(chat.pending_submissions.len(), 1);
+        assert_eq!(chat.input, "next draft");
+    }
+
+    // Hard-won: #1514: failed legacy receipt installation must remain retryable.
+    #[tokio::test]
+    async fn failed_receipt_preparation_preserves_bytes_identity_and_visible_draft() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let payload = PromptPayload::with_image("old receipt", crate::chat::tests::test_image());
+        chat.begin_submission(
+            "original".into(),
+            SubmissionKind::Prompt,
+            payload.clone(),
+            "Sending…",
+        );
+        chat.unconfirm_submission("original", "connection reset");
+        chat.set_input("new draft".into());
+        assert!(chat.prepare_receipt_retry("original", "receipt-failure"));
+        assert!(
+            transcript_text(&mut chat, 100)
+                .join("\n")
+                .contains("preparing images")
+        );
+        assert!(!chat.encoded_draft().contains("preparing images"));
+        chat.apply_composer_update(composer::ComposerIoUpdate::ReceiptPrepared {
+            command_id: "original".into(),
+            result: Err("install refused".into()),
+        });
+        assert_eq!(chat.input, "new draft");
+        assert_eq!(chat.pending_submissions[0].payload, payload);
+        assert!(
+            chat.pending_submissions[0]
+                .status
+                .contains("install refused")
+        );
+        assert!(chat.composer_runtime.prepared_receipt_retries.is_empty());
+        let saved = chat.encoded_draft();
+        let mut reopened = ChatState::new(&snapshot(), &[]);
+        reopened.restore_draft(saved);
+        assert_eq!(reopened.recoverable_submission_id(), Some("original"));
+        assert_eq!(reopened.pending_submissions[0].payload, payload);
+        assert!(reopened.prepare_receipt_retry("original", "receipt-failure"));
     }
 
     #[test]

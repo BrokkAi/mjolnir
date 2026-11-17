@@ -1,0 +1,274 @@
+{
+  "id": "L2302",
+  "title": "macro-validation",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "b4d2dfee8a480d70cbb28293287c0db1",
+    "session_title": "eval39 3625 astraxhigh",
+    "reply_position": 2478,
+    "captured_at": "2026-10-13T12:01:56.065Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3625: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 8edee00ee857f21b8493cf38fe3f03fc32738bbd\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports.\nDelegation policy for this lane: this session has Mjolnir sub-agent\ntools (spawn, wait, send_input, list_agents, close); use them. Children come\nin two types, fixed by the harness: `straightforward` is GPT-6 Luna at effort\nhigh (locating code, running suites, implementing a settled design); `subtle`\nis GPT-6.1 Sol at effort high (ambiguous diagnosis, design choices, work with\na high risk of subtle bugs). Choose the type by the difficulty of the task, not\nthe length of the brief. Treat both as strong senior engineers, not as you.\nWork this way:\n1. Start by spawning investigators, two to four in parallel, one question each,\n   with file excerpts and the acceptance criteria. Do not read the repository\n   yourself for a question you have assigned; read the handback, then only the\n   files it names.\n2. Implement through children by default: split your agreed design into slices\n   with a spec, files and tests each, and dispatch them in parallel. Keep a\n   slice yourself only when it needs your whole context, when the setup a\n   child would need exceeds doing it yourself, or when a child has already\n   failed it once; say which, in one sentence, when you keep it.\n3. When a handback is wrong or incomplete, re-task that child once with the\n   specific correction and the failing evidence. If the second handback is\n   still wrong, take the slice over yourself and note it in your report.\n4. Delegate suite, lint and format runs: \"run these suites; report only\n   failures, with test names, a one-line reason and the log path each\". Run a\n   suite yourself only to reproduce one failure a child reported. Rerun\n   nothing a child ran green.\n5. Put the design, file excerpts and acceptance criteria in the spawn\n   instruction. Use send_input to answer a child's question or give a\n   correction, not for progress checks.\n6. After you spawn, call wait once for every outstanding child with the default\n   timeout (return_when any when the next step depends on whichever finishes\n   first). The brief's five-minute limit on shell commands does not apply to\n   wait. Do not poll: every wait, and every poll of a shell cell that runs a\n   wait, re-sends your whole context.\n7. Keep for yourself: the design, the review of the \n[... 5262 bytes omitted from the middle of this message ...]\nlippy and fmt on changed files. Say whether your change affects persisted facts or only query-time semantics, and handle the matching version or epoch.\n\n# Issue\n\nIssue #3625: Rust: place feature-gated modules in their library with activation obligations instead of Detached (gate 2 unowned_sources follow-up)\n\n## Summary\n\nA Rust source that no Cargo target's module walk reaches gets a `Detached` profile (`crates/bifrost-rust/src/selected_context.rs`, `detached_profile_for_source`): its own single-file crate root with default cfg atoms, no features and no dependencies. Inside such a file `crate::` names the detached root rather than the library, nothing it declares is exported by the library, and the crate narrowing declines to narrow detached keys.\n\nOn the 2026-09-21 census (Bifrost corpus) 33 sources were owned only by a detached topology: 21 files behind a non-default feature (`bifrost-semantic-packs/src/summary_foundry/*` x16, `summary_foundry_demand.rs`, `summary_foundry_fixtures.rs`, `python_module.rs`, two benchmark rollout files), 7 `tests/fixtures/` data files, and 5 feature-gated test modules. The count is being remeasured after the 2015 library-discovery correction (cs2, e2767e7d5).\n\n## Owner decision (2026-09-22)\n\nFeature-gated placement is a follow-up, not part of #2771. For the flip, gate 2's `unowned_sources` is defined as files no Cargo target owns, with `tests/fixtures/` excluded as analyzer input data; the remaining feature-gated files are recorded as a named gap pointing here.\n\n## Work\n\nFollow a cfg-gated `mod name;` for placement so the file becomes a module of its library carrying an activation obligation for the feature (the producer already lowers cfg-gated inline modules with activation obligations, d89e14f83), rather than landing in Detached. Placement under the union of features with per-region activation; rust-analyzer's equivalent is `cargo metadata` features with an all-features mode. Rotates `RUST_CRATE_DERIVATION_VERSION`; read `.agents/docs/architecture-and-analyzer-store.md` first.\n\n"
+        },
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I’ll verify the clean detached base first, then delegate the placement, lookup, and regression investigations. I’ll keep all work local and commit the validated fix on detached HEAD.\n"
+        },
+        {
+          "id": "agent:81",
+          "role": "assistant",
+          "text": "The checkout is clean and detached at `8edee00ee857f21b8493cf38fe3f03fc32738bbd`. Three investigators are checking persisted placement, conditional lookup and usages, and the regression harness. I’m reading the architecture contracts before settling the design.\n"
+        },
+        {
+          "id": "agent:169",
+          "role": "assistant",
+          "text": "The acceptance criteria require both ownership and activation to be preserved: the file must belong to its library while its declarations stay absent from selected exports. The regressions will check exact lookup targets, conditions, usages, and edit/rebuild agreement.\n"
+        },
+        {
+          "id": "agent:263",
+          "role": "assistant",
+          "text": "The existing store fixture confirms the current behavior: it expects `dep/src/off.rs` to have a Detached topology and an `inactive_placement` gap in the library. A new multi-crate golden regression is being prepared to capture the lost `crate::` target before production changes begin.\n"
+        },
+        {
+          "id": "agent:343",
+          "role": "assistant",
+          "text": "The lookup investigation found a second part of the fix: owning the file correctly is not enough. Definition and usage queries must also inherit the region’s feature condition, including when the reference has no local `cfg`. I’ll carry that condition through the existing resolver and preserve the selected Cargo features.\n"
+        },
+        {
+          "id": "agent:461",
+          "role": "assistant",
+          "text": "I’ve settled the persistence design: add crate-owned source-placement rows with inherited `cfg` conditions, and keep selected exports separate. The placement digest will participate in summary validity so edits beneath a disabled feature refresh the owning crate. This changes derived context and the schema; the existing blob extraction facts are sufficient.\n"
+        },
+        {
+          "id": "agent:537",
+          "role": "assistant",
+          "text": "Implementation is split between storage, query composition, and the feature-condition evaluator. They are preparing changes while the base regression runs. I’ll write the architecture note myself because it needs to describe how those three pieces fit together.\n"
+        },
+        {
+          "id": "agent:594",
+          "role": "assistant",
+          "text": "The baseline regression is still running; production edits are waiting for its evidence. The current checkout still has the `summary_foundry` feature gate, but the brief doesn’t identify every file in the historical census. I’ll report current witness coverage separately from the old count.\n"
+        },
+        {
+          "id": "agent:681",
+          "role": "assistant",
+          "text": "The new regression failed on the unchanged production base: `crate::root_target()` in `dep/src/off.rs` returned `no_definition`, and the usage query found only the active application caller. That captures the concrete failure, so implementation can proceed.\n"
+        },
+        {
+          "id": "agent:796",
+          "role": "assistant",
+          "text": "The storage and query changes are now being integrated. The regressions will check that nested regions retain the gate, ordinary callers cannot see disabled exports, and edits beneath the gate produce the same context as a fresh build.\n"
+        },
+        {
+          "id": "agent:891",
+          "role": "assistant",
+          "text": "The golden now covers an imported alias as well as direct and nested `crate::` references. It also checks that gated usage hits retain conditional activation evidence and that the dependent application cannot resolve the disabled export.\n"
+        },
+        {
+          "id": "agent:942",
+          "role": "assistant",
+          "text": "Implementation is still in progress. The cache validity change is included: an inactive-source edit must refresh the owner’s topology link even when its selected exports are unchanged. Targeted checks will run before the required crate, integration, schema, Clippy, and formatting checks.\n"
+        },
+        {
+          "id": "agent:1017",
+          "role": "assistant",
+          "text": "The implementation now covers persisted placement, summary invalidation, conditional lookup, and reverse usage confirmation. The focused builds and tests are running. After their handbacks, I’ll review the combined diff for export leakage and stale context before starting the broader validation.\n"
+        },
+        {
+          "id": "agent:1084",
+          "role": "assistant",
+          "text": "The schema consistency checks passed: a fresh schema matches the migration chain, and its recorded digest matches. The Rust checks are still working through the shared Cargo build lock.\n"
+        },
+        {
+          "id": "agent:1151",
+          "role": "assistant",
+          "text": "Review found an edge case in the new evaluator: it currently allows a missing feature to become true, but cannot make a selected feature false for a `not(feature = ...)` region. The ownership contract includes that case, so I’ll correct it and add a regression before acceptance.\n"
+        },
+        {
+          "id": "agent:1233",
+          "role": "assistant",
+          "text": "The query review shows separate handling for ordinary callers and conditional regions. Same-crate lookups inside a conditional region can use its authored declarations; dependent callers still use selected exports. An independent reviewer is checking activation isolation and ambiguous placements while the builds continue.\n"
+        },
+        {
+          "id": "agent:1316",
+          "role": "assistant",
+          "text": "The build wrapper has stalled: the active analysis invocations have spent over ten minutes in `mbx-rustc` without starting a compiler, leaving the other checks queued. I’ll stop those validation invocations and use the brief’s authorized plain-Cargo fallback. I won’t move targets or change cache settings.\n"
+        },
+        {
+          "id": "agent:1422",
+          "role": "assistant",
+          "text": "Independent review found two more corrections: some readers still require summary version 7 while the writer now publishes version 8, and the new ownership rows can admit both `foo.rs` and `foo/mod.rs` for one route. I’ll align the version predicates and keep that ambiguous route from becoming proven ownership.\n"
+        },
+        {
+          "id": "agent:1492",
+          "role": "assistant",
+          "text": "I’ll make the small reader-version correction myself because it crosses the storage and query assignments. The evaluator child is fixing the negative-feature case. The remaining checks have resumed with plain Cargo.\n"
+        },
+        {
+          "id": "agent:1571",
+          "role": "assistant",
+          "text": "The ownership and query changes are implemented. Validation is still running. Review caught three edge cases—stale summary-version filters, negative feature conditions, and ambiguous module files—which are being corrected before the final suite runs."
+        },
+        {
+          "id": "agent:1644",
+          "role": "assistant",
+          "text": "The regression already fails on the required base: `crate::root_target()` in the gated file finds no definition, and its usages are omitted. The new store test also checks source, gate, and module-path edits against a fresh build while keeping the dependent crate’s selected surface unchanged."
+        },
+        {
+          "id": "agent:1743",
+          "role": "assistant",
+          "text": "The fix persists derived source placements and their cfg conditions. It advances the cache schema to 176, the Rust summary version to 8, and the crate derivation version. File-local extraction facts are unchanged, so the Rust extraction epoch stays as it is."
+        },
+        {
+          "id": "agent:1832",
+          "role": "assistant",
+          "text": "The focused store run exposed a representation mismatch: the parser stores feature predicates as canonical cfg atoms, but the new helper recognized only key/value predicates. The cfg child now has that correction. The producer and extraction epoch can remain unchanged."
+        },
+        {
+          "id": "agent:1889",
+          "role": "assistant",
+          "text": "The module walk now requires a unique file for each authored route. If both `foo.rs` and `foo/mod.rs` exist, it leaves ownership unresolved. Separate explicit routes to a file can still retain their own activation conditions."
+        },
+        {
+          "id": "agent:1958",
+          "role": "assistant",
+          "text": "The required integration and persistence checks are queued behind the shared Cargo build. Separately, the base witness run is analyzing the actual `summary_foundry` files so the before/after evidence covers more than the small regression fixture."
+        },
+        {
+          "id": "agent:2011",
+          "role": "assistant",
+          "text": "The Rust crate suite passed, but its new tests used synthetic predicates and missed the parser’s canonical representation. I’m taking over this small boundary fix after the cfg handbacks missed it, and will add coverage using predicates produced by tree-sitter before validation resumes."
+        },
+        {
+          "id": "agent:2125",
+          "role": "assistant",
+          "text": "Core validation finished with 439 passes and two failures in unwritable-directory tests. Both expected permission errors but opened SQLite successfully. A child is checking those exact tests on the required base before I classify them. The cache schema check passed."
+        },
+        {
+          "id": "agent:2179",
+          "role": "assistant",
+          "text": "The canonical-atom fix is in place, with tests now obtaining their predicates through the real parser. Full analysis-library validation, workspace Clippy, and formatting are proceeding. Query validation is checking that the repaired ownership reaches definition and usage results."
+        },
+        {
+          "id": "agent:2241",
+          "role": "assistant",
+          "text": "Formatting moved two locations in the new fixture. I’m updating those query coordinates directly; the small adjustment needs no separate implementation handoff. The baseline failure remains recorded against the original fixture locations."
+        },
+        {
+          "id": "agent:2303",
+          "role": "assistant",
+          "text": "The corrected Rust library suite passes: 388 tests, with three skipped. Both core permission failures also reproduce on the exact base commit, so they are pre-existing in this container. They will be listed explicitly in the final report."
+        },
+        {
+          "id": "agent:2359",
+          "role": "assistant",
+          "text": "The remaining gates cover the analysis library, Rust navigation/import/usage regressions, persistence, and workspace Clippy. The real-source witness run is also still active. I’m keeping that measurement separate from the issue’s historical count of 33, since that count describes an older checkout."
+        },
+        {
+          "id": "agent:2433",
+          "role": "assistant",
+          "text": "The Rust symbol suite has finished with 37 passes and one failure involving macro item-wrapper alternatives. That behavior is outside this issue’s intended change, so it needs investigation before the fix can be accepted."
+        },
+        {
+          "id": "agent:2478",
+          "role": "assistant",
+          "text": "I’m making an implementation checkpoint now. Validation is still open, including the macro regression and the golden output. The final commit will include any remaining corrections and close the plan."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "I’m making an implementation checkpoint now. Validation is still open, including the macro regression and the golden output. The final commit will include any remaining corrections and close the plan.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Mid-task progress note in an eval lane: validation and the final commit are the agent's own remaining steps, with sub-agents still running. Nothing is asked of the judge at this point (the later permission question at 2970 comes after this reply).",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-13T12:04:55.746Z",
+        "kind": "system",
+        "text": "Subagent \"Validate Rust integration and persistence suites\" (6ff6ce2a) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-13T12:04:57.005Z",
+        "kind": "system",
+        "text": "Subagent \"Finish feature-region golden and required usage regression suites\" (3a68dca1) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-13T12:04:57.127Z",
+        "kind": "user",
+        "text": "One or more sub-agents finished. Call wait to collect their reports."
+      },
+      {
+        "at": "2026-10-13T12:05:16.697Z",
+        "kind": "agent",
+        "text": "The Rust import/analyzer regressions, persistence suite, and Rust issue suite passed. The symbol suite still has the macro item-wrapper failure. Some query files changed during the analyzer build, so "
+      },
+      {
+        "at": "2026-10-13T12:05:22.535Z",
+        "kind": "user",
+        "text": "One or more sub-agents finished. Call wait to collect their reports."
+      },
+      {
+        "at": "2026-10-13T12:07:49.660Z",
+        "kind": "agent",
+        "text": "The new golden now passes direct conditional navigation. It stopped at an alias query placed in indentation; that location is corrected and validation is retrying. I also found a likely cause of the m"
+      }
+    ]
+  }
+}

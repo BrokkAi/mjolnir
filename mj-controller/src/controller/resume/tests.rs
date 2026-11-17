@@ -55,9 +55,9 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     let mut child = parent.clone();
     child.id = "fresh-child".into();
     child.state = SessionState::Running;
-    child.target = Some(TargetLocator::LocalBare {
+    child.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: child_directory.path().join(&child.id),
-    });
+    }));
     let relation = mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
@@ -99,6 +99,29 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
     }
     struct SourceExists;
     impl CommandExecutor for SourceExists {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 0,
@@ -112,9 +135,9 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
     let id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(id);
     session.state = SessionState::Stopped;
-    session.checkpoint = Some(
+    session.checkpoint = Some(Box::new(
         crate::controller::test_support::write_network_checkpoint_archive(directory.path(), id, 0),
-    );
+    ));
     let bundle = ProjectBundle {
         primary_repo: "project".into(),
         repositories: vec![ProjectRepository {
@@ -126,7 +149,7 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
         }],
     };
     let project = crate::project_catalog::snapshot(&bundle, &SourceExists, true).unwrap();
-    session.project = Some(project.clone());
+    session.project = Some(project.clone().into());
     crate::database::store_catalog_project("project", &project, true).unwrap();
     crate::database::save_session(&session).unwrap();
     let config = Config {
@@ -168,54 +191,64 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
 /// A person choosing a container for a local session has to see what the
 /// move does before it happens, and a person resuming the same session in
 /// place must not be asked anything.
+// Hard-won: c77d71fc3 review: a retained failed target skipped conversion confirmation.
 #[tokio::test]
 async fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() {
-    let (checkout, _remote_parent, remote) = checkout_with_network_remote();
-    std::fs::write(checkout.path().join("untracked.txt"), "u".repeat(2048)).unwrap();
-    let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
-    let mut config = resume_compatibility_config();
-    config
-        .bundles
-        .insert(session.bundle_id.clone(), local_bundle(checkout.path()));
-    session.checkpoint = Some(mj_core::state::CheckpointMetadata {
-        archive_path: checkout.path().join("unused.hel.zip"),
-        sha256: "a".repeat(64),
-        created_at: "2026-09-14T00:00:00Z".into(),
-        event_frontier: 3,
-    });
-    let session_id = session.id.clone();
-    let controller = Controller {
-        config,
-        state: State {
-            sessions: [(session_id.clone(), session)].into_iter().collect(),
-            ..State::default()
-        },
-    };
-    let executor = FixtureRemoteExecutor { remote };
+    for failed in [false, true] {
+        let (checkout, _remote_parent, remote) = checkout_with_network_remote();
+        std::fs::write(checkout.path().join("untracked.txt"), "u".repeat(2048)).unwrap();
+        let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+        if failed {
+            session.state = SessionState::Error;
+            session.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: checkout.path().join("missing-worker"),
+            }));
+        }
+        let mut config = resume_compatibility_config();
+        config
+            .bundles
+            .insert(session.bundle_id.clone(), local_bundle(checkout.path()));
+        session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+            archive_path: checkout.path().join("unused.hel.zip"),
+            sha256: "a".repeat(64),
+            created_at: "2026-09-14T00:00:00Z".into(),
+            event_frontier: 3,
+        }));
+        let session_id = session.id.clone();
+        let controller = Controller {
+            config,
+            state: State {
+                sessions: [(session_id.clone(), session)].into_iter().collect(),
+                ..State::default()
+            },
+        };
+        let executor = FixtureRemoteExecutor { remote };
 
-    let converting = controller
-        .preflight_resume_repository_sources(&session_id, "podman", &executor)
-        .await
-        .unwrap();
-    let ResumeRepositorySourcePreflight::ConvertingRawCheckout { receipt, preview } = converting
-    else {
-        panic!("a container destination converts the checkout, got {converting:?}");
-    };
-    assert_eq!(receipt.session_id, session_id);
-    assert_eq!(preview.fetch_url, FIXTURE_FETCH_URL);
-    assert_eq!(preview.untracked_files, 1);
-    assert!(preview.host_checkout_retained);
+        let converting = controller
+            .preflight_resume_repository_sources(&session_id, "podman", &executor)
+            .await
+            .unwrap();
+        let ResumeRepositorySourcePreflight::ConvertingRawCheckout { receipt, preview } =
+            converting
+        else {
+            panic!("a container destination converts the checkout, got {converting:?}");
+        };
+        assert_eq!(receipt.session_id, session_id);
+        assert_eq!(preview.fetch_url, FIXTURE_FETCH_URL);
+        assert_eq!(preview.untracked_files, 1);
+        assert!(preview.host_checkout_retained);
 
-    assert!(
-        matches!(
-            controller
-                .preflight_resume_repository_sources(&session_id, "local-bare", &executor)
-                .await
-                .unwrap(),
-            ResumeRepositorySourcePreflight::Ready(_)
-        ),
-        "resuming in place asks nothing"
-    );
+        assert!(
+            matches!(
+                controller
+                    .preflight_resume_repository_sources(&session_id, "local-bare", &executor)
+                    .await
+                    .unwrap(),
+                ResumeRepositorySourcePreflight::Ready(_)
+            ),
+            "resuming in place asks nothing"
+        );
+    }
 }
 
 const RESUME_ROLLBACK_TEST_CHILD: &str = "MJ_RESUME_ROLLBACK_TEST_CHILD";
@@ -262,7 +295,7 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
     let checkpoint = write_checkpoint_gate_archive(&archive_directory, session_id, 7);
     let repository = committed_repository();
     let mut session = managed_worktree_session(repository.path(), session_id);
-    session.checkpoint = Some(checkpoint);
+    session.checkpoint = Some(Box::new(checkpoint));
 
     let profile_home = data_directory.join("profile");
     std::fs::create_dir_all(&profile_home).unwrap();
@@ -272,15 +305,10 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
     config.profiles.insert(
         "claude".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Claude,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Claude,
+                profile_home,
+            )
         },
     );
     let mut controller = Controller {
@@ -332,19 +360,19 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Stopped;
-    session.checkpoint = Some(
+    session.checkpoint = Some(Box::new(
         super::super::test_support::write_network_checkpoint_archive(
             directory.path(),
             session_id,
             0,
         ),
-    );
+    ));
     let mut config = resume_compatibility_config();
     config.bundles.insert(
         "project".into(),
         super::super::test_support::local_bundle(repository.path()),
     );
-    let controller = Controller {
+    let mut controller = Controller {
         config,
         state: State {
             sessions: [(session_id.into(), session)].into_iter().collect(),
@@ -367,6 +395,61 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     };
     assert_eq!(mismatch.missing_commit, "a".repeat(40));
     assert!(!repository.path().join(".mj/worktrees").exists());
+    // Hard-won: 055d8a772 review: a stale locator hid source confirmation.
+    struct MissingTarget;
+    impl CommandExecutor for MissingTarget {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if command.purpose == "check for Mjolnir session container" {
+                return Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            ProcessExecutor.execute(command)
+        }
+    }
+    let row = controller.state.sessions.get_mut(session_id).unwrap();
+    row.state = SessionState::Error;
+    row.target = Some(Box::new(TargetLocator::LocalPodman {
+        container_id: targets::resource_name(session_id).unwrap(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    }));
+    assert!(matches!(
+        controller
+            .preflight_resume_repository_sources_with_token(
+                session_id,
+                "local-bare",
+                None,
+                &MissingTarget
+            )
+            .unwrap(),
+        ResumeRepositorySourcePreflight::RepositoryMoved(_)
+    ));
 }
 
 #[tokio::test]
@@ -374,11 +457,11 @@ async fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(session_id);
-    session.checkpoint = Some(write_checkpoint_gate_archive(
+    session.checkpoint = Some(Box::new(write_checkpoint_gate_archive(
         directory.path(),
         session_id,
         3,
-    ));
+    )));
     session.bundle_id = "remote-project-a66373eef659f856".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some("/mnt/optane/bifrost-fird".into());
@@ -515,6 +598,29 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
     }
 
     impl CommandExecutor for ConcurrentSourceExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.purpose == "check checkpoint base commit" {
                 self.source_checks.wait();
@@ -540,7 +646,7 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
         })
         .to_vec();
     let mut session = checkpoint_test_session(session_id);
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let mut controller = Controller {
         config: Config {
             bundles: BTreeMap::from([(
@@ -624,6 +730,29 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.clone());
             Ok(CommandOutput {
@@ -695,12 +824,59 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
         ]
     );
     let source_check = &commands[1];
-    assert!(
-        source_check
-            .args
-            .iter()
-            .any(|argument| argument == "credential.helper=")
-    );
+    // Ask real Git which helper answers under the check's own configuration.
+    // A host that rewrites github.com to a mirror makes Git ask about the
+    // mirror; the token must reach only GitHub, and the host's helper must
+    // still answer for the mirror.
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join(".gitconfig");
+    std::fs::write(
+        &config,
+        "[credential]\n\thelper = \"!f() { echo username=host; echo password=host-helper; }; f\"\n",
+    )
+    .unwrap();
+    let config_arguments = source_check
+        .args
+        .iter()
+        .take_while(|argument| *argument != "-C")
+        .cloned();
+    let fill = |host: &str| {
+        let mut command = CommandSpec::new(
+            "git",
+            config_arguments
+                .clone()
+                .chain(["credential".to_owned(), "fill".to_owned()]),
+        )
+        .with_sensitive_stdin(format!("protocol=https\nhost={host}\n\n").into_bytes());
+        command.clear_env = true;
+        command.env.extend(source_check.env.clone());
+        command.env.extend([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            (
+                "HOME".into(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "GIT_CONFIG_GLOBAL".into(),
+                config.to_string_lossy().into_owned(),
+            ),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    // Hard-won: #1460: the base-commit check handed the GitHub token to any host Git asked about.
+    let github = fill("github.com");
+    assert!(github.contains("password=secret-token\n"), "{github}");
+    let mirror = fill("mirror.example");
+    assert!(mirror.contains("password=host-helper\n"), "{mirror}");
+    assert!(!mirror.contains("secret-token"), "{mirror}");
     assert_eq!(
         source_check
             .env
@@ -762,7 +938,7 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
     let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 3);
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Lost;
-    session.checkpoint = Some(checkpoint);
+    session.checkpoint = Some(Box::new(checkpoint));
     let previous = session.clone();
     let profile_home = directory.path().join("profile");
     std::fs::create_dir_all(&profile_home).unwrap();
@@ -770,15 +946,10 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config
@@ -816,6 +987,30 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
         "{detail}"
     );
     assert_eq!(controller.state.sessions[session_id], previous);
+    controller.config.targets.insert("retired-ec2".into(), serde_json::from_value(serde_json::json!({
+        "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+    })).unwrap());
+    let error = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(controller.resume_session_controlled(
+            session_id,
+            "codex",
+            "retired-ec2",
+            SessionResumeOptions {
+                additional_mounts: None,
+                resource_allocation: None,
+                discard_queue: false,
+            },
+            &RefusingExecutor("retired EC2 resume must not execute a command"),
+        ))
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
+        "{error:#}"
+    );
+    assert_eq!(controller.state.sessions[session_id], previous);
 }
 /// Records what it ran and blocks every command on a barrier sized to
 /// both lanes, so a run only finishes if the second lane started before
@@ -826,6 +1021,29 @@ struct BarrierExecutor {
 }
 
 impl CommandExecutor for BarrierExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.seen.lock().unwrap().push(command.purpose.clone());
         self.barrier.wait();
@@ -1110,6 +1328,29 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.purpose.clone());
             Ok(CommandOutput {
@@ -1143,6 +1384,9 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
 #[test]
 fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
+        oracle_choice: None,
+        oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
         launch_base: None,
@@ -1155,8 +1399,6 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: "0123456789abcdef0123456789abcdef".into(),
         title: "imported session".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -1167,6 +1409,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman-old".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -1180,6 +1423,8 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     };
@@ -1191,11 +1436,11 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let mut cleaned = previous.clone();
     cleaned.state = SessionState::Error;
     cleaned.last_profile = "codex-new".into();
-    cleaned.target = Some(partial_target.clone());
+    cleaned.target = Some(Box::new(partial_target.clone()));
     let destination: TargetTemplate =
         serde_json::from_str(r#"{"kind":"local-podman","image":"test"}"#).unwrap();
     let destination_runtime = mj_core::state::TargetRuntimeSettings::from(&destination);
-    cleaned.target_runtime = Some(destination_runtime.clone());
+    cleaned.target_runtime = Some(destination_runtime.clone().into());
 
     let failure =
         apply_failed_resume_rollback(&mut cleaned, &previous, "worker upload failed", None);
@@ -1213,8 +1458,8 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let mut cleanup_failed = previous.clone();
     cleanup_failed.state = SessionState::Error;
     cleanup_failed.last_profile = "codex-new".into();
-    cleanup_failed.target = Some(partial_target.clone());
-    cleanup_failed.target_runtime = Some(destination_runtime.clone());
+    cleanup_failed.target = Some(Box::new(partial_target.clone()));
+    cleanup_failed.target_runtime = Some(destination_runtime.clone().into());
     let partial_checkout = crate::controller::test_support::managed_raw_session(
         mj_core::state::ManagedWorktreeTarget::Local,
     );
@@ -1230,8 +1475,11 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
 
     assert_eq!(cleanup_failed.state, SessionState::Error);
     assert_eq!(cleanup_failed.last_profile, "codex-new");
-    assert_eq!(cleanup_failed.target, Some(partial_target));
-    assert_eq!(cleanup_failed.target_runtime, Some(destination_runtime));
+    assert_eq!(cleanup_failed.target, Some(Box::new(partial_target)));
+    assert_eq!(
+        cleanup_failed.target_runtime,
+        Some(destination_runtime.into())
+    );
     assert_eq!(
         cleanup_failed.project_directory,
         partial_checkout.project_directory
@@ -1272,9 +1520,33 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     #[derive(Default)]
     struct FailingPreflightExecutor {
         mounts_during_provisioning: Mutex<Option<Vec<AdditionalMount>>>,
+        admission_notified: std::sync::atomic::AtomicBool,
     }
 
     impl CommandExecutor for FailingPreflightExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             // Provisioning probes the mount source's filesystem before it
             // builds the run arguments; a local disk keeps the overlay.
@@ -1286,6 +1558,11 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
                 });
             }
             assert_eq!(command.program, "podman");
+            assert!(
+                self.admission_notified
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                "provisioning preceded durable acceptance"
+            );
             let mut observed = self.mounts_during_provisioning.lock().unwrap();
             if observed.is_none() {
                 let durable = crate::database::load_state().unwrap();
@@ -1327,7 +1604,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
 
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Stopped;
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     session.additional_mounts = vec![AdditionalMount {
         source: PathBuf::from("/host/old"),
         destination: PathBuf::from("/mnt/old"),
@@ -1345,15 +1622,10 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config.bundles.insert(
@@ -1400,18 +1672,46 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
         .unwrap();
     let executor = FailingPreflightExecutor::default();
     let error = runtime
-        .block_on(controller.resume_session_controlled(
-            session_id,
-            "codex",
-            "podman",
-            SessionResumeOptions {
-                additional_mounts: Some(resumed_mounts.clone()),
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &executor,
-        ))
+        .block_on(
+            controller.resume_session_controlled_with_repository_preflight_and_admission(
+                session_id,
+                "codex",
+                "podman",
+                SessionResumeOptions {
+                    additional_mounts: Some(resumed_mounts.clone()),
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                None,
+                &executor,
+                || {
+                    let durable = crate::database::load_state().unwrap();
+                    let accepted = &durable.sessions[session_id];
+                    assert_eq!(accepted.state, SessionState::Provisioning);
+                    assert_eq!(accepted.last_profile, "codex");
+                    assert_eq!(accepted.target_template_id, "podman");
+                    assert_eq!(accepted.additional_mounts, resumed_mounts);
+                    assert!(
+                        executor
+                            .mounts_during_provisioning
+                            .lock()
+                            .unwrap()
+                            .is_none()
+                    );
+                    assert!(
+                        !executor
+                            .admission_notified
+                            .swap(true, std::sync::atomic::Ordering::SeqCst)
+                    );
+                },
+            ),
+        )
         .unwrap_err();
+    assert!(
+        executor
+            .admission_notified
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
     let detail = format!("{error:#}");
     assert!(
         detail.contains("podman is temporarily unavailable"),
@@ -1421,7 +1721,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     assert!(!detail.contains("unknown session"), "{detail}");
     assert_eq!(
         executor.mounts_during_provisioning.into_inner().unwrap(),
-        Some(resumed_mounts)
+        Some(resumed_mounts.clone())
     );
 
     let retained = controller.state.sessions.get(session_id).unwrap();
@@ -1434,10 +1734,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     let durable_session = durable.sessions.get(session_id).unwrap();
     assert_eq!(durable_session.state, SessionState::Stopped);
     assert_eq!(durable_session.checkpoint, previous.checkpoint);
-    assert_eq!(
-        durable_session.additional_mounts,
-        previous.additional_mounts
-    );
+    assert_eq!(durable_session.additional_mounts, resumed_mounts);
     assert_eq!(
         crate::database::load_materialized_session(session_id).unwrap(),
         Some(expected_projection)
@@ -1473,6 +1770,29 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     struct FailAfterWorktreeRestore;
 
     impl CommandExecutor for FailAfterWorktreeRestore {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if matches!(command.program.as_str(), "git" | "mkdir") {
                 return ProcessExecutor.execute(command);
@@ -1492,9 +1812,14 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     let checkpoint = write_checkpoint_gate_archive(&archive_directory, session_id, 7);
     let repository = committed_repository();
     let mut session = managed_worktree_session(repository.path(), session_id);
-    session.checkpoint = Some(checkpoint);
+    session.checkpoint = Some(Box::new(checkpoint));
     let worktree = session.managed_worktree.clone().unwrap();
-    retire_managed_worktree(&ProcessExecutor, &worktree).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &ProcessExecutor,
+        &worktree,
+        crate::controller::BranchDisposition::Keep,
+    )
+    .unwrap();
     assert!(!worktree.worktree_root.exists());
 
     let profile_home = data_directory.join("profile");
@@ -1503,15 +1828,10 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     let mut controller = Controller {
@@ -1671,6 +1991,29 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     struct GitWithoutPodmanExecutor;
 
     impl CommandExecutor for GitWithoutPodmanExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.program == "git" {
                 return ProcessExecutor.execute(command);
@@ -1706,9 +2049,12 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
         }],
     };
     session.bundle_id = "bifrost".into();
-    session.project =
-        Some(crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap());
-    session.checkpoint = Some(checkpoint.clone());
+    session.project = Some(
+        crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false)
+            .unwrap()
+            .into(),
+    );
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let worktree = session.managed_worktree.clone().unwrap();
     let previous = session.clone();
 
@@ -1718,15 +2064,10 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config.save().unwrap();
@@ -1798,7 +2139,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
 
     let retained = controller.state.sessions.get(session_id).unwrap();
     assert_eq!(retained.state, SessionState::Stopped);
-    assert_eq!(retained.checkpoint, Some(checkpoint.clone()));
+    assert_eq!(retained.checkpoint, Some(Box::new(checkpoint.clone())));
     assert_eq!(retained.project_directory, previous.project_directory);
     assert_eq!(retained.managed_worktree, previous.managed_worktree);
     assert_eq!(retained.bundle_id, previous.bundle_id);
@@ -1810,7 +2151,10 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
         "the previous archive is what the rolled-back record names"
     );
     let durable = crate::database::load_state().unwrap();
-    assert_eq!(durable.sessions[session_id].checkpoint, Some(checkpoint));
+    assert_eq!(
+        durable.sessions[session_id].checkpoint,
+        Some(Box::new(checkpoint))
+    );
     // The conversion archive is litter once the resume has failed, and the
     // directory it was written in proves the conversion really ran.
     let sessions = mj_core::config::sessions_dir();
@@ -1981,15 +2325,8 @@ exit 0
         config.profiles.insert(
             profile_id.into(),
             HarnessProfile {
-                enabled: true,
-                kind: harness,
-                home: home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
                 legacy_subagents: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(harness, home.clone())
             },
         );
         config
@@ -2008,13 +2345,13 @@ exit 0
     session.harness_kind = harness;
     session.last_profile = profile_id.into();
     session.target_template_id = "local-bare".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     session.project_directory = Some(checkout.clone());
     session.state = SessionState::Provisioning;
     session.native_session_id = Some("native-session".into());
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
     crate::database::save_materialized_session(&archived_projection).unwrap();
     let stopped = mj_core::subagent::StoppedSubagent {
@@ -2034,6 +2371,13 @@ exit 0
             ..State::default()
         },
     };
+    // Automatic eligibility may change while a session is suspended.
+    controller
+        .config
+        .profiles
+        .get_mut(profile_id)
+        .unwrap()
+        .enabled = false;
     let profile = controller.config.profiles[profile_id].clone();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2292,4 +2636,550 @@ fn only_the_archived_unused_session_may_be_replaced_on_resume() {
         "fresh",
         Some("another")
     ));
+}
+
+// Hard-won: 94d7 resume: failed Resume deleted the container its live sub-agents used.
+#[test]
+fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
+    const CHILD: &str = "MJ_RESUME_PRESENT_ENVIRONMENT_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new("controller::resume::tests::failed_resume_keeps_present_and_unknown_environments_without_an_archive")
+            .env(CHILD, "1").isolated_store(directory.path())
+            .env("MJ_WORKER_BINARY", directory.path().join("unavailable-worker"))
+            .run();
+        return;
+    }
+    struct Engine {
+        exists_status: i32,
+        commands: Mutex<Vec<String>>,
+    }
+    impl CommandExecutor for Engine {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(command.purpose.clone());
+            let (status, stdout) = match command.purpose.as_str() {
+                "check for Mjolnir session container" => (self.exists_status, Vec::new()),
+                "inspect Mjolnir session container" => (0, serde_json::to_vec(&serde_json::json!([{
+                    "Config": {"Labels": {"dev.mj.managed": "true", "dev.mj.session": "0123456789abcdef0123456789abcdef"}},
+                    "State": {"Status": "running"}
+                }])).unwrap()),
+                "probe Mjolnir worker daemon liveness" => (0, b"dead\n".to_vec()),
+                "probe retained environment directory" => (0, b"present\n".to_vec()),
+                "probe Mjolnir worker root" => (0, b"recoverable\n".to_vec()),
+                _ => anyhow::bail!("injected harness preparation failure: {}", command.purpose),
+            };
+            Ok(CommandOutput {
+                status,
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut parent = checkpoint_test_session(id);
+    parent.state = SessionState::Error;
+    parent.checkpoint = None;
+    parent.target = Some(Box::new(TargetLocator::LocalPodman {
+        container_id: crate::targets::resource_name(id).unwrap(),
+        borrowed_from: None,
+        workspace_storage: Default::default(),
+    }));
+    crate::database::save_session(&parent).unwrap();
+    let original = crate::database::session_environment(id).unwrap().unwrap();
+    let mut controller = Controller {
+        config: resume_compatibility_config(),
+        state: State {
+            sessions: [(id.into(), parent.clone())].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    let engine = Engine {
+        exists_status: 0,
+        commands: Mutex::default(),
+    };
+    controller
+        .rollback_failed_resume(
+            id,
+            &parent,
+            Some(&original),
+            false,
+            anyhow::anyhow!("failure before creating a destination"),
+            &engine,
+        )
+        .unwrap();
+    assert!(engine.commands.lock().unwrap().is_empty());
+    assert_eq!(
+        crate::database::session_environment(id)
+            .unwrap()
+            .unwrap()
+            .placement
+            .target,
+        original.placement.target
+    );
+    // Rollback settles its attempt as stopped; probe each condition from Error.
+    controller.state.sessions.insert(id.into(), parent.clone());
+    crate::database::save_session(&parent).unwrap();
+    for status in [0, 125, 1] {
+        let engine = Engine {
+            exists_status: status,
+            commands: Mutex::default(),
+        };
+        let error = runtime
+            .block_on(controller.resume_session_controlled(
+                id,
+                "codex",
+                "podman",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &engine,
+            ))
+            .unwrap_err();
+        let error = format!("{error:#}");
+        if status == 125 {
+            assert!(error.contains("Retry Resume"), "{error}");
+        }
+        if status == 1 {
+            assert!(error.contains("no checkpoint"), "{error}");
+        }
+        if status == 0 {
+            assert!(!error.contains("no checkpoint"), "{error}");
+        }
+        if status == 1 {
+            assert!(controller.state.sessions[id].target.is_none());
+            assert_eq!(controller.state.sessions[id].state, SessionState::Lost);
+            let view = crate::server::ViewerSnapshot::from_config_state(
+                &controller.config,
+                &controller.state,
+                1,
+            );
+            assert!(!view.sessions[0].capabilities.resume);
+            assert!(view.sessions[0].capabilities.destroy);
+        } else {
+            assert_eq!(controller.state.sessions[id].target, parent.target);
+        }
+        let environment = crate::database::session_environment(id).unwrap().unwrap();
+        assert_eq!(environment.id, original.id);
+        assert_eq!(environment.phase, original.phase);
+        assert_eq!(environment.placement.target, original.placement.target);
+        let commands = engine.commands.lock().unwrap();
+        assert!(
+            commands
+                .iter()
+                .all(|purpose| !purpose.contains("remove") && !purpose.contains("stop")),
+            "{commands:?}"
+        );
+    }
+    // A new placement stops being disposable when its boot owner is admitted,
+    // including a lost launch acknowledgement before Running was published.
+    parent.state = SessionState::Provisioning;
+    controller.state.sessions.insert(id.into(), parent.clone());
+    crate::database::save_session(&parent).unwrap();
+    let owner =
+        crate::worker_lifecycle::WorkerPermit::try_acquire(id, "resume rollback boot regression")
+            .unwrap()
+            .unwrap();
+    owner.scope_blocking(|| {
+        let intent = crate::database::WorkerRestartIntent {
+            operation_id: owner.operation_id().into(),
+            target: *parent.target.clone().unwrap(),
+            desired_build: String::new(),
+        };
+        crate::database::begin_worker_restart(id, &intent).unwrap();
+        let engine = Engine {
+            exists_status: 0,
+            commands: Mutex::default(),
+        };
+        controller
+            .rollback_failed_resume(
+                id,
+                &parent,
+                None,
+                false,
+                anyhow::anyhow!("lost startup acknowledgement"),
+                &engine,
+            )
+            .unwrap();
+        assert!(engine.commands.lock().unwrap().is_empty());
+        assert_eq!(controller.state.sessions[id].state, SessionState::Error);
+        assert_eq!(controller.state.sessions[id].target, parent.target);
+        crate::database::finish_worker_restart(id, &intent.operation_id).unwrap();
+    });
+}
+
+// Hard-won: c77d71fc3 review: an intact stopped Apple container was never started by Resume.
+#[test]
+fn resume_starts_retained_apple_containers_before_probing_their_worker() {
+    const CHILD: &str = "MJ_RESUME_APPLE_START_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new("controller::resume::tests::resume_starts_retained_apple_containers_before_probing_their_worker")
+            .env(CHILD, "1").isolated_store(directory.path()).run();
+        return;
+    }
+    struct AppleEngine {
+        container: String,
+        remote: bool,
+        running: Mutex<bool>,
+        fail_start: bool,
+        commands: Mutex<Vec<String>>,
+    }
+    impl CommandExecutor for AppleEngine {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program == "ssh", self.remote);
+            self.commands.lock().unwrap().push(command.purpose.clone());
+            let mut running = self.running.lock().unwrap();
+            let (status, stdout) = match command.purpose.as_str() {
+                "check retained Apple container before Restart" => {
+                    (0, format!("{}\n", self.container))
+                }
+                "list running retained Apple containers for Resume" => (
+                    0,
+                    if *running {
+                        format!("{}\n", self.container)
+                    } else {
+                        String::new()
+                    },
+                ),
+                "start retained Apple container for Resume" => {
+                    if self.fail_start {
+                        (1, String::new())
+                    } else {
+                        *running = true;
+                        (0, String::new())
+                    }
+                }
+                "probe retained environment directory" => (0, "present\n".into()),
+                "probe Mjolnir worker root" => (0, "recoverable\n".into()),
+                "check the control worker" => {
+                    assert!(
+                        *running,
+                        "control worker check ran inside a stopped container"
+                    );
+                    (0, "present\n".into())
+                }
+                "probe Mjolnir worker daemon liveness" => {
+                    assert!(*running, "worker probe ran inside a stopped container");
+                    (0, "dead\n".into())
+                }
+                other => anyhow::bail!("unexpected operation {other}"),
+            };
+            Ok(CommandOutput {
+                status,
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let id = "0123456789abcdef0123456789abcdef";
+    for remote in [false, true] {
+        for (running, fail_start) in [(false, false), (true, false), (false, true)] {
+            let mut config = resume_compatibility_config();
+            config.profiles.insert(
+                "codex".into(),
+                HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap()).join("codex"),
+                ),
+            );
+            let TargetTemplate::LocalPodman { container } = config.targets["podman"].clone() else {
+                unreachable!()
+            };
+            let template = if remote {
+                TargetTemplate::SshAppleContainer {
+                    container,
+                    ssh: mj_core::config::SshConnection {
+                        host: "apple.invalid".into(),
+                        user: None,
+                        identity_file: None,
+                        extra_args: Vec::new(),
+                    },
+                }
+            } else {
+                TargetTemplate::AppleContainer { container }
+            };
+            config.targets.insert("apple".into(), template);
+            let container_id = targets::resource_name(id).unwrap();
+            let mut session = checkpoint_test_session(id);
+            session.state = SessionState::Error;
+            session.target_template_id = "apple".into();
+            session.target = Some(Box::new(if remote {
+                TargetLocator::SshAppleContainer {
+                    host: "apple.invalid".into(),
+                    container_id: container_id.clone(),
+                    borrowed_from: None,
+                }
+            } else {
+                TargetLocator::AppleContainer {
+                    container_id: container_id.clone(),
+                    borrowed_from: None,
+                }
+            }));
+            let controller = Controller {
+                config,
+                state: State {
+                    sessions: [(id.into(), session)].into_iter().collect(),
+                    ..State::default()
+                },
+            };
+            let engine = AppleEngine {
+                container: container_id,
+                remote,
+                running: Mutex::new(running),
+                fail_start,
+                commands: Mutex::default(),
+            };
+            let condition = crate::controller::environment::classify_resume_environment(
+                &controller,
+                id,
+                &engine,
+            );
+            if fail_start {
+                assert!(matches!(
+                    condition,
+                    crate::controller::environment::ResumeEnvironment::Unknown(_)
+                ));
+                assert!(
+                    !engine
+                        .commands
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|name| name.contains("worker daemon liveness"))
+                );
+            } else {
+                assert!(matches!(
+                    condition,
+                    crate::controller::environment::ResumeEnvironment::WorkerMissing
+                ));
+            }
+            assert_eq!(
+                engine
+                    .commands
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "start retained Apple container for Resume"),
+                !running
+            );
+        }
+    }
+}
+
+// Hard-won: 4c7ea3e31 review: a reachable bare host hid a deleted worker root from archive recovery.
+#[cfg(unix)]
+#[test]
+fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
+    use crate::controller::environment::{ResumeEnvironment, classify_resume_environment};
+    use crate::controller::worker_binary::{WorkerRecovery, worker_recovery};
+    const CHILD: &str = "MJ_RESUME_BARE_ROOT_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new("controller::resume::tests::resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots")
+            .env(CHILD, "1").isolated_store(directory.path()).run();
+        return;
+    }
+    // Execute the actual listing/liveness scripts. The SSH host shell is run
+    // locally so both its quoting and its home-relative root are exercised.
+    struct HostShell {
+        home: PathBuf,
+    }
+    impl CommandExecutor for HostShell {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert!(matches!(
+                command.purpose.as_str(),
+                "probe retained target before Restart"
+                    | "probe Mjolnir worker root"
+                    | "probe Mjolnir worker daemon liveness"
+                    | "check the control worker"
+                    | "probe retained environment directory"
+            ));
+            let mut local = if command.program == "ssh" {
+                CommandSpec::new(
+                    "sh",
+                    vec!["-c".into(), command.args.last().unwrap().clone()],
+                )
+            } else {
+                command.clone()
+            };
+            local.cwd = Some(self.home.clone());
+            ProcessExecutor.execute(&local)
+        }
+    }
+    let id = "0123456789abcdef0123456789abcdef";
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let relative = if remote {
+            PathBuf::from(format!(".local/share/hel/workers/{id}"))
+        } else {
+            PathBuf::from("worker's retained roots").join(id)
+        };
+        let root = home.path().join(&relative);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut session = checkpoint_test_session(id);
+        session.state = SessionState::Error;
+        session.native_session_id = None;
+        let checkout = home.path().join("current-checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        session.project_directory = Some(checkout.clone());
+        session.target_template_id = if remote { "ssh-bare" } else { "local-bare" }.into();
+        session.target = Some(Box::new(if remote {
+            TargetLocator::SshBare {
+                host: "builder".into(),
+                workspace: home.path().join("workspace").join(id),
+                worker_id: None,
+            }
+        } else {
+            TargetLocator::LocalBare {
+                worker_root: root.clone(),
+            }
+        }));
+        let mut config = resume_compatibility_config();
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().join("profile-config"),
+            ),
+        );
+        let mut controller = Controller {
+            config,
+            state: State {
+                sessions: [(id.into(), session)].into_iter().collect(),
+                ..State::default()
+            },
+        };
+        let executor = HostShell {
+            home: home.path().into(),
+        };
+        match classify_resume_environment(&controller, id, &executor) {
+            ResumeEnvironment::WorkerMissing => {}
+            ResumeEnvironment::Unknown(error) => panic!("remote={remote}: {error:#}"),
+            _ => panic!("remote={remote}: empty root was not classified for repair"),
+        }
+        let (backend, worker_root) = controller.worker_placement(id).unwrap();
+        assert_eq!(
+            worker_recovery(&executor, &backend, id, &worker_root),
+            WorkerRecovery::NothingToRecover
+        );
+        controller
+            .state
+            .sessions
+            .get_mut(id)
+            .unwrap()
+            .native_session_id = Some("retained-native".into());
+        // Hard-won: 98a60381e: an old bootstrap seed cannot establish current relay state.
+        let stale_seed = root.join(mj_core::relay::RESTORED_RELAY_SEED_FILE);
+        std::fs::write(&stale_seed, b"old bootstrap input").unwrap();
+        assert_eq!(
+            worker_recovery(&executor, &backend, id, &worker_root),
+            WorkerRecovery::NothingToRecover
+        );
+        std::fs::remove_file(stale_seed).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+        assert!(matches!(
+            classify_resume_environment(&controller, id, &executor),
+            ResumeEnvironment::ParentDataMissing
+        ));
+        // Missing ancestors prove runtime absence, never checkout loss.
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+        assert!(matches!(
+            classify_resume_environment(&controller, id, &executor),
+            ResumeEnvironment::ParentDataMissing
+        ));
+        std::fs::remove_dir_all(&checkout).unwrap();
+        assert!(matches!(
+            classify_resume_environment(&controller, id, &executor),
+            ResumeEnvironment::Absent
+        ));
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        // The other caller keeps its existing no-relay recovery semantics.
+        assert_eq!(
+            worker_recovery(&executor, &backend, id, &worker_root),
+            WorkerRecovery::NothingToRecover
+        );
+        // A present non-directory is evidence of an unusable lookup, not loss.
+        std::fs::write(&root, "keep this unexpected file").unwrap();
+        assert!(matches!(
+            classify_resume_environment(&controller, id, &executor),
+            ResumeEnvironment::Unknown(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&root).unwrap(),
+            "keep this unexpected file"
+        );
+    }
 }

@@ -22,6 +22,9 @@ impl Drop for DropFlag {
 
 fn session_record(id: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -43,10 +46,9 @@ fn session_record(id: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "target-1".into(),
         resource_allocation: None,
-        container_cpus: None,
-        container_memory: None,
         state: SessionState::Running,
         archived: false,
         target: None,
@@ -58,6 +60,8 @@ fn session_record(id: &str) -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
         additional_mounts: Vec::new(),
@@ -67,6 +71,10 @@ fn session_record(id: &str) -> SessionRecord {
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
         assessment: None,
+        open_request: None,
+        person_input_through: 0,
+        work_liveness: None,
+        undelivered_mailbox_event_keys: Vec::new(),
         assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),
@@ -84,6 +92,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         goal: Default::default(),
         capacity_retry: None,
         retry_assessment_pending: false,
+        authentication_retry_waiting: None,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,
         session_id: session_id.into(),
@@ -105,10 +114,11 @@ fn operational(session_id: &str) -> RelayOperationalState {
         agent_info: None,
         runtime: None,
         steering_supported: None,
+        mailbox_delivery: None,
         turn_controls: None,
-        config_options: Vec::new(),
+        config_options: Vec::new().into(),
         modes: None,
-        available_commands: Vec::new(),
+        available_commands: Vec::new().into(),
         config: BTreeMap::new(),
         active_prompt: None,
         queued_prompts: Vec::new(),
@@ -134,10 +144,12 @@ fn runtime_view(
     projection_digest: &str,
 ) -> daemon::RuntimeSessionView {
     daemon::RuntimeSessionView {
+        attention: Default::default(),
+        policy_config_keys: Vec::new(),
         session_id: session_id.into(),
         projection_ordinal,
         projection_digest: projection_digest.into(),
-        operational: Some(operational(session_id)),
+        operational: Some(operational(session_id).into()),
         latest_credential_sync_signal: None,
         connected: true,
         error: None,
@@ -221,6 +233,8 @@ async fn runtime_feed_publishes_records_snapshot_before_session_projection() {
         RuntimeFeedUpdate::Snapshot(snapshot) => {
             assert_eq!(snapshot.records.len(), 1);
             assert_eq!(snapshot.records["session-1"].id, "session-1");
+            // Hard-won: b417a7c: the snapshot lost its live views, so chats dropped their policy keys
+            assert!(snapshot.sessions.contains_key("session-1"));
         }
         RuntimeFeedUpdate::Session { .. } | RuntimeFeedUpdate::SessionRemoved(_) => {
             panic!("session projection preceded its snapshot")

@@ -1,0 +1,108 @@
+{
+  "id": "W170",
+  "title": "waiting candidate 31 6c6abc7f",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "6c6abc7fb1a3f7f1a05cdfb788b072c5",
+    "session_title": "native-route-ctor-check",
+    "reply_position": 73,
+    "captured_at": "2026-10-27T15:46:24.754Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:33",
+          "role": "assistant",
+          "text": "I’ll verify the lane HEAD and inspect the existing reproduction harness, then build and run the four requested CLI cases without modifying the repository."
+        },
+        {
+          "id": "agent:73",
+          "role": "assistant",
+          "text": "The lane is at the requested commit (`39fda1b1c3a23eff4d416a3d33e2757cb17729c8`). The test-support build is still compiling the CLI and language crates; once it completes I’ll preserve that binary and run the same direct and wrapped-constructor workspaces under both routes."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "The lane is at the requested commit (`39fda1b1c3a23eff4d416a3d33e2757cb17729c8`). The test-support build is still compiling the CLI and language crates; once it completes I’ll preserve that binary and run the same direct and wrapped-constructor workspaces under both routes.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 0
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-27T15:57:36.029Z",
+        "kind": "system",
+        "text": "Work interrupted: relay restarted while the ACP command was in flight; it was not replayed"
+      },
+      {
+        "at": "2026-10-27T15:57:36.036Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-27T15:57:36.036Z",
+        "kind": "system",
+        "text": "Work interrupted by session restart"
+      },
+      {
+        "at": "2026-10-27T15:57:54.647Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-27T15:57:55.682Z",
+        "kind": "user",
+        "text": "Your session was interrupted by a host restart, not by me. Please resume where you stopped: finish the test-support build in the 7202 lane (rerun the same cargo command; mbx keeps finished artifacts),"
+      },
+      {
+        "at": "2026-10-27T15:58:00.513Z",
+        "kind": "agent",
+        "text": "Resuming at the interrupted build. I’ll rerun the same Cargo command in lane 7202, copy the completed binary to the requested path, and continue with the four checks."
+      }
+    ]
+  }
+}

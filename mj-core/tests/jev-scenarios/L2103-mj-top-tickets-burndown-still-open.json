@@ -1,0 +1,358 @@
+{
+  "id": "L2103",
+  "title": "mj top tickets burndown still-open label",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "1872507e4d7eeafd43b66594471ab0a3",
+    "session_title": "import-hel via claude3",
+    "reply_position": 8721,
+    "captured_at": "2026-10-07T18:08:24.310Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "1. go through open tickets w/ no impact or effort and tag them appropriately\n\n2. rank the top 10 by cost:benefit"
+        },
+        {
+          "id": "user:410",
+          "role": "user",
+          "text": "Change 1 to low impact. And create low/low to Have web UI suggest a keyboard that has carriage return available."
+        },
+        {
+          "id": "user:575",
+          "role": "user",
+          "text": "3 should be fixed, The problem is MJ was using full host cores count when creating internal Tokio pools"
+        },
+        {
+          "id": "user:758",
+          "role": "user",
+          "text": "Close 8 as won't fix. We're removing the byfrost dependency separately."
+        },
+        {
+          "id": "user:853",
+          "role": "user",
+          "text": "Okay, I think we've got a good list now, but they're all kind of messy, so let's do them one at a time. Research and give me your plan for number one."
+        },
+        {
+          "id": "user:1330",
+          "role": "user",
+          "text": "I'd like the full fix. Also, merge and push to origin/master as we land fixes. Then give me your plan for the next one."
+        },
+        {
+          "id": "user:2282",
+          "role": "user",
+          "text": "yes, close 1200 and 1120, then evaluate what changed in cc bridge from 0.84 to 0.86"
+        },
+        {
+          "id": "user:2651",
+          "role": "user",
+          "text": "Yes, you have the ball, push when complete, then tee up the next MJ issue"
+        },
+        {
+          "id": "user:3216",
+          "role": "user",
+          "text": "Defer 1188. Comment with your analysis but move on to the next"
+        },
+        {
+          "id": "user:3555",
+          "role": "user",
+          "text": "why does 1211 require sw support, don't we control what we send to it?"
+        },
+        {
+          "id": "user:3703",
+          "role": "user",
+          "text": "bleh\n\ni'm about 90% convinced we should clean subagent transcripts out of the native side as well"
+        },
+        {
+          "id": "user:3886",
+          "role": "user",
+          "text": "dude the problem is i'm trying not to fork sessionwiki, i have my own repo only to upstream from"
+        },
+        {
+          "id": "user:4100",
+          "role": "user",
+          "text": "what option could we provide in 1211 that is not mj-specific?"
+        },
+        {
+          "id": "user:4297",
+          "role": "user",
+          "text": "but since we create mj subagents over acp those won't be natively marked subagent"
+        },
+        {
+          "id": "user:4442",
+          "role": "user",
+          "text": "ugh, this is a god damn mess\n\nso our options are a fragile and somewhat clunky path regex, or forking sw?\n\n(yeah config file ids is even worse, fuck that)"
+        },
+        {
+          "id": "user:4512",
+          "role": "user",
+          "text": "god damn it why the fuck do you think that a solution that only works for non default profiles is a solution at all, it isn't"
+        },
+        {
+          "id": "user:4649",
+          "role": "user",
+          "text": "checking my understanding: when you're talking about native sw sync you mean something someone manually invokes?"
+        },
+        {
+          "id": "user:4731",
+          "role": "user",
+          "text": "ok. in that case i think \"just filter them out in mj\" is fine, let's do that"
+        },
+        {
+          "id": "user:4761",
+          "role": "user",
+          "text": "for 1210 let's go ahead and contribute a role filter option upstream"
+        },
+        {
+          "id": "user:5230",
+          "role": "user",
+          "text": "do it"
+        },
+        {
+          "id": "user:5444",
+          "role": "user",
+          "text": "i guess \"raw\" vs \"bundle\" is still a fucking mess\n\nmy repeatedly stated goal is that raw = bundle of one that attaches to an unmanaged checkout, idk why that's so hard to standardize on, if there's structural reasons that doesn't work let's come up w a better design instead of banging our heads against a wall"
+        },
+        {
+          "id": "user:5872",
+          "role": "user",
+          "text": "fable, anything you'd change first?"
+        },
+        {
+          "id": "user:6051",
+          "role": "user",
+          "text": "what is Attached vs Borrowed?"
+        },
+        {
+          "id": "user:6166",
+          "role": "user",
+          "text": "cool, i like it. do the derived-checkout spike pls"
+        },
+        {
+          "id": "user:6580",
+          "role": "user",
+          "text": "> Store the checkout instead of deriving it\n\nwdym? Unless there's something fragile going on, I would generally say that when we're in a situation that's not performance sensitive, deriving is better than denormalizing."
+        },
+        {
+          "id": "user:6706",
+          "role": "user",
+          "text": "that sounds reasonable, yes"
+        },
+        {
+          "id": "user:7020",
+          "role": "user",
+          "text": "yes but create a ticket for the breaking migration"
+        },
+        {
+          "id": "user:7314",
+          "role": "user",
+          "text": "yes"
+        },
+        {
+          "id": "agent:7338",
+          "role": "assistant",
+          "text": "The research says #1203's main request already landed in `a643b16f5` on 2026-09-30, the day after the incident in the issue. That claim decides the plan, so I'm checking the commit myself."
+        },
+        {
+          "id": "agent:7358",
+          "role": "assistant",
+          "text": "Research for #1203 is done. The main request already shipped, in `a643b16f5` (\"Retain delegation usage and own failed startup cleanup durably\", v2.25.0). That commit landed at 18:27 UTC on 2026-09-30, four hours after the issue was filed, and the issue was never closed.\n\n**Already in place (confirmed in code and history):**\n- **Usage survives deletion.** Migration 67 moved usage and cost rows under the durable `session_contexts` instead of the session row. That means `DELETE FROM sessions`, which every cleanup path ends with, no longer cascades to them (`mj-controller/src/database/schema.rs:385-423`).\n- **The parent link survives.** A new `subagent_accounting` table keeps each child's parent and task name. It's separate from `subagent_sessions`, which stays the record of live children only.\n- **Tree totals exist.** `mj usage --parent <session>` totals a parent and all descendants, including children that were already cleaned up (`mj-controller/src/database/usage.rs:269-321`). It reports partial, missing and unfinished coverage honestly.\n- **The model and effort are saved when a turn starts**, so they're known even if the turn never finishes.\n- **Tests already cover it:** child and parent deletion with tree retention (`usage.rs:384-473`), and top-level deletion (`schema.rs:1994-2046`).\n\n**Not covered by that commit:**\n- **The 8 lost children from 2026-09-29.** Their rows and native logs were deleted before the fix shipped, and they can't be recovered.\n- **Turns still running at cleanup.** Usage is recorded when a turn completes. A child stopped mid-turn shows that turn as unfinished, with no tokens. That's the open #1228 (and #1106 for Claude turns that hit the session limit), not retention.\n- **`list_agents` doesn't show cleaned-up children.** This was the issue's lower-priority request. `mj usage --parent` already answers the cost question, so this would be for visibility only.\n\n**Plan:** close #1203 as fixed by `a643b16f5`, with a comment that maps each request to the code above. If you want cleaned-up children in `list_agents`, I'll file that as a separate low-impact issue rather than keep #1203 open for it.\n\nShould I close it? And do you want the `list_agents` issue filed?"
+        },
+        {
+          "id": "user:7519",
+          "role": "user",
+          "text": "yes to close, no it shouldn't show cleaned-up children"
+        },
+        {
+          "id": "agent:7530",
+          "role": "assistant",
+          "text": "I closed #1203 as fixed by `a643b16f5` (v2.25.0) and removed its `agent-in-progress` label. The closing comment maps each request to the code that covers it. It also says the 2026-09-29 children can't be recovered, that a turn stopped mid-way still lacks tokens (#1228, #1106), and that `list_agents` deliberately won't show cleaned-up children.\n\nThat leaves one issue from the original top 10: #1204, the spawn tool changes. It covers dropping the files and context parameters, reusing children, and fitting the tool description under Claude's limit. It's assigned to you. Should I research it and bring a plan?"
+        },
+        {
+          "id": "user:7580",
+          "role": "user",
+          "text": "pull first, then yes"
+        },
+        {
+          "id": "agent:7620",
+          "role": "assistant",
+          "text": "Every item in #1204 already shipped in v2.25.0, mostly in `040678042` (\"Simplify delegation assignments and parent tool guidance\", 2026-09-30). I checked each one in the code:\n\n1. **`files` removed.** `spawn` rejects it with \"put context and file, symbol, line-range or earlier-report pointers in instructions\" (`mj-worker/src/subagent_mcp.rs:400-408`), and its schema doesn't advertise it (test at `:724`).\n2. **`context` removed** by the same check. The daemon can still render both fields for a request a parent had already sent before the upgrade, which matches the repo rule about not dropping accepted requests (`mj-controller/src/server/api/subagents.rs:751-797`).\n3. **Reuse guidance added.** The delegation policy, including \"give follow-up work through send_input to an idle child\", moved into the MCP server's initialization instructions. Claude Code shows those in full. You can see them in this very session.\n4. **Descriptions fit.** A test keeps every tool description within 1,800 bytes (`subagent_mcp.rs:702`), with the mechanics in the description and the policy in the instructions.\n5. **The smaller items:**\n   - **Failed spawns now close themselves.** A child whose startup fails is marked `StartupCleanup` and torn down by one owner, which then archives it (`mj-controller/src/controller/provisioning.rs:217-240`, from `a643b16f5`). Tests cover it (`lifecycle/tests.rs:777, 1877`).\n   - **\"Closing loses usage\"** was #1203, fixed in the same release.\n   - **The repeated policy** now lives only in the server instructions.\n\nShould I close #1204 as fixed in v2.25.0? That would finish the original top 10. Of those ten, five were fixed in this session (#1192, #1225, #1211, #1221, plus the bridge bump), four had already been fixed earlier (#1161, #1120, #1203, #1204), #1189 was won't-fix, and #1188 and #1210 are deferred or waiting on upstream."
+        },
+        {
+          "id": "user:7760",
+          "role": "user",
+          "text": "close it out. then repeat the tag-and-scan for a new top ten"
+        },
+        {
+          "id": "agent:7768",
+          "role": "assistant",
+          "text": "I closed #1204. Five open issues have no impact or effort label: #1243, #1230, #1229, #1228 and #1226. I'm reading them now."
+        },
+        {
+          "id": "agent:7812",
+          "role": "assistant",
+          "text": "All 54 open issues now have impact and effort labels.\n\n## New top 10 by cost:benefit\n\nI used the same scoring as before: impact (high 3, medium 2, low 1) divided by effort (S 1, M 2, L 4), with ties broken by severity. The last column says whether I can pick an issue up. `AGENTS.md` says not to take issues assigned to someone else, and some need a Windows machine or a Mac, which this container doesn't have.\n\n| Rank | # | Issue | Impact / Effort | Owner | Can I take it? |\n|---|---|---|---|---|---|\n| 1 | 1226 | Adding a project fails because of an unrelated stale project | medium / S | — | **Yes** |\n| 2 | 1229 | Container sessions indexed in SessionWiki with an empty project | medium / S | — | **Yes** |\n| 3 | 1238 | SSH targets unverified on native Windows without ControlMaster | medium / S | — | No: needs Windows |\n| 4 | 1240 | Windows CI compiles tests but never runs them | high / M | foundev | No: foundev is working on it |\n| 5 | 1236 | Windows controller can't resolve the Linux worker binaries | high / M | foundev | No: assigned |\n| 6 | 1237 | Docker Desktop targets unverified on native Windows | high / M | — | No: needs Windows |\n| 7 | 1135 | macOS launch verification | high / M | jbellis | No: needs a Mac |\n| 8 | 1243 | TUI box covers the prompt pane | medium / M | foundev | No: foundev is working on it |\n| 9 | 1230 | Pasted image paths sent as text (2.0 regression) | medium / M | foundev | No: assigned |\n| 10 | 1232 | Profile capability hydration fails on native Windows | medium / M | foundev | No: assigned |\n\nMost of the high-scoring work is Windows support that foundev owns or that needs a Windows machine. In practice, the queue I can work through here is:\n\n1. **#1226** and **#1229.** Both are S, and both issues already describe the fix.\n2. **#1228** (high / L), the 92% usage undercount. It's the most valuable unassigned issue, but it needs a design.\n3. **Medium / M work that isn't assigned or blocked:** none is left. #1218 is foundev's, #1213 is an mbx issue, #1210 waits on upstream, #1188 is deferred, and #1106, #1121 and #1122 depend on upstream.\n\nSeparately, **#1215** is still open. I said on day one that it's likely fixed by `24c9dc10` (v2.27.0), but it hasn't been checked on a current build. With your OK I'll close it with that evidence, and it can be reopened if it shows up again.\n\nShould I start on #1226 and #1229? Both are small and independent, so I'd run them in parallel and push each one when it's done."
+        },
+        {
+          "id": "user:7991",
+          "role": "user",
+          "text": "ok, you can take 1 and 2, push as you finish"
+        },
+        {
+          "id": "user:7995",
+          "role": "user",
+          "text": "and yes close 1215"
+        },
+        {
+          "id": "agent:8034",
+          "role": "assistant",
+          "text": "#1226 is done. The full controller suite (1,894 tests), workspace clippy and fmt pass. Reviewing the shared helper before I commit:"
+        },
+        {
+          "id": "agent:8169",
+          "role": "assistant",
+          "text": "The push went out, but `git pull` merged new upstream commits first, and I pushed that merge without checking it. Checking now whether upstream touched the same files:"
+        },
+        {
+          "id": "agent:8186",
+          "role": "assistant",
+          "text": "Upstream brought two tool-summary changes and touched none of the files in #1229. To be safe, I'm running clippy on the pushed merge."
+        },
+        {
+          "id": "agent:8204",
+          "role": "assistant",
+          "text": "Both fixes are pushed and both issues are closed. I also closed #1215.\n\n**#1226: adding a project no longer fails because of an unrelated stale project** (`28b8e2df8`).\n- One helper now decides how the reuse search treats a configured repository whose Git identity can't be read. That project doesn't count as a match, the search continues, and a WARN names the project, repository, path and error so the stale entry is still visible.\n- The exact-reuse search, bundle matching during import, and the refresh after reuse all use that helper.\n- An invalid source that you type still fails as `InvalidSource`.\n- I checked that GitHub-only bundles behave as before: the old code didn't match them in this search either.\n- Validation: an isolated test with one stale project, the full controller suite (1,894 tests), clippy and fmt.\n\n**#1229: container sessions are now searchable by repository name** (`ef95e720b`).\n- Each session is indexed under the directory the agent works in, taken from `State::checkout`. Raw checkouts keep their directory. Bundle workspaces use the workspace root plus the primary repository's folder, for example `/workspace/<id>/bifrost`.\n- The folder path is built the same way the API's file export builds the agent's working directory, so the two can't disagree.\n- Existing index rows update without a manual reindex. The new format makes the background sync reparse every mj session once, not only container sessions. That's a one-time cost on large stores, and it doesn't block the daemon.\n- A session whose bundle information is gone keeps an empty project, as before.\n- Validation: real-index tests, the full controller suite in its own worktree, and the sessionwiki and bundle tests, clippy and fmt again on the combined tree.\n\n**#1215:** closed as fixed by `24c9dc10` (v2.27.0). The comment says it hasn't been rechecked on a live session.\n\n**One slip:** for #1229, `git pull` merged two new upstream commits, and I pushed that merge (`29aad597b`) before checking it. I checked afterwards: those commits only change tool summaries and don't touch any file in either fix, and workspace clippy passes on the pushed merge. I didn't rerun the test suites on that merge.\n\n**Next:** none of the remaining items in the new top 10 are available to me here. They're Windows work assigned to foundev, or need a Windows machine or a Mac. The most valuable unassigned issue is **#1228**, where `mj usage` misses about 92% of tokens on interrupted turns (high / L). It needs a design for saving usage per request as a turn runs. Should I research it and bring a plan?"
+        },
+        {
+          "id": "agent:8420",
+          "role": "assistant",
+          "text": "That notification was the old handback from the sessionwiki agent, which I'd already acted on, so I closed that agent. Checking on its PR turned up news: upstream merged it.\n\n- **[youdie006/sessionwiki#40](https://github.com/youdie006/sessionwiki/pull/40) is merged and released in 0.32.0** (crates.io and Homebrew). The maintainer measured `--role user,assistant` on a real 20 GB index: 0.3 s, against 1.3 s without the filter.\n- **That unblocks #1210.** mj can now bump sessionwiki from 0.30.1 to 0.32.0. Resume search would then use `search_with_roles` limited to user and assistant messages, and `conversation_matches` and the transcript rebuild would be deleted.\n- **The bump changes search behaviour.** 0.31.0 changed multi-word search to require every word (#37). Resume search will match differently for multi-word queries.\n- **It also changes the index schema.** mj refuses to open an index written at a different schema version, so it won't rebuild a cache the standalone tool relies on. I need to check whether 0.31 or 0.32 changed `SCHEMA_VERSION`. If they did, the bump has to be coordinated with your installed `sessionwiki` command, so the shared index isn't rebuilt or locked out.\n\nThat makes two candidates for next: **#1210** (medium / M, now unblocked) and **#1228** (high / L, needs a design). Which should I take?"
+        },
+        {
+          "id": "user:8528",
+          "role": "user",
+          "text": "sw upgrade + 1210 pls, but i don't want standalone sw sync run, just the mj index rebuild"
+        },
+        {
+          "id": "agent:8530",
+          "role": "assistant",
+          "text": "I'll take the sessionwiki upgrade and #1210 together. My reading of \"just the mj index rebuild\": when the index on disk was written by an older sessionwiki schema, mj rebuilds it itself in its background sync. Nobody should have to run the standalone `sessionwiki` command to fix it. That also fits the `AGENTS.md` rule that upgrades finish without user intervention. An index written by a *newer* schema still makes mj stand aside, because mj must never downgrade a newer store."
+        },
+        {
+          "id": "agent:8677",
+          "role": "assistant",
+          "text": "The 0.33.1 upgrade and #1210 are done. The full controller suite (1,914 tests), clippy, fmt and the license check pass. I'm checking the working tree and then committing and pushing."
+        },
+        {
+          "id": "agent:8703",
+          "role": "assistant",
+          "text": "The one new upstream commit only touches `services/jev-proxy` (TypeScript), with no Rust overlap, so the merge needs no recheck. Pushing:"
+        },
+        {
+          "id": "agent:8721",
+          "role": "assistant",
+          "text": "mj now uses upstream sessionwiki 0.33.1 instead of the fork's `brokk-sessionwiki` 0.30.1, and resume search filters by role. The change is pushed to `origin/master` (merge `139726d84`), and #1210 is closed.\n\n**No index rebuild was needed.** The schema version is 8 in both versions, so existing indexes open as they are. I didn't run the standalone `sessionwiki` command, and tests never touched your real index.\n\n**#1210:**\n- Resume search asks sessionwiki for user and assistant messages only, through your upstreamed `search_with_roles`. The filter now runs before the 4,000-message limit, so pages stay full.\n- The row shows the snippet of the conversational message that matched, which fixes the bug where a tool snippet was shown.\n- Up to 200 whole-transcript rebuilds per search are gone. On a 20 GB index, upstream's maintainer measured 0.3 s with the filter, against 1.3 s without it.\n- Agent history search still includes tool messages, and the sub-agent filter is unchanged.\n\n**Fork-only code moved into mj:** the matcher behind previews and the history tools (`grep`) existed only in your fork, never upstream. Its 182 lines now live in mj as `sessionwiki/transcript_grep.rs`, with a comment saying so. Nothing in mj depends on the fork anymore.\n\n**You'll notice one behaviour change:** since upstream 0.31, an unquoted multi-word search needs every word in the same message. Quote a phrase to match it as written.\n\n**Opening the index:** 0.33's index cleanup passes run only when the index is opened for writing. mj's search opens it read-only, so searches never write to it.\n\n**Validation:**\n- Isolated real-index tests: tool-only matches are excluded from resume but kept in history search, a mixed session shows a conversational snippet, short, NFC-normalized and CJK queries work, every word must be in the same message, and 250 higher-ranked tool-only sessions still leave a full page.\n- The full controller suite (1,914 tests), workspace clippy, fmt and the license check also passed.\n- The one upstream commit merged before pushing only touched TypeScript in `services/jev-proxy`.\n\n**Still open:**\n- **Your installed `sessionwiki` command.** If it's still a 0.30-era fork build, it shares schema 8, so it won't rebuild the index. It won't have upstream's role filter or newer cleanup passes, though. Upgrading it (`brew` or `npm i -g @youdie006/sessionwiki`) would keep both tools on the same code.\n- **#1228**, the `mj usage` undercount (high / L), is the most valuable unassigned issue left. Should I research it next?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "sw upgrade + 1210 pls, but i don't want standalone sw sync run, just the mj index rebuild",
+    "assistant_text_tail": "ly, through your upstreamed `search_with_roles`. The filter now runs before the 4,000-message limit, so pages stay full.\n- The row shows the snippet of the conversational message that matched, which fixes the bug where a tool snippet was shown.\n- Up to 200 whole-transcript rebuilds per search are gone. On a 20 GB index, upstream's maintainer measured 0.3 s with the filter, against 1.3 s without it.\n- Agent history search still includes tool messages, and the sub-agent filter is unchanged.\n\n**Fork-only code moved into mj:** the matcher behind previews and the history tools (`grep`) existed only in your fork, never upstream. Its 182 lines now live in mj as `sessionwiki/transcript_grep.rs`, with a comment saying so. Nothing in mj depends on the fork anymore.\n\n**You'll notice one behaviour change:** since upstream 0.31, an unquoted multi-word search needs every word in the same message. Quote a phrase to match it as written.\n\n**Opening the index:** 0.33's index cleanup passes run only when the index is opened for writing. mj's search opens it read-only, so searches never write to it.\n\n**Validation:**\n- Isolated real-index tests: tool-only matches are excluded from resume but kept in history search, a mixed session shows a conversational snippet, short, NFC-normalized and CJK queries work, every word must be in the same message, and 250 higher-ranked tool-only sessions still leave a full page.\n- The full controller suite (1,914 tests), workspace clippy, fmt and the license check also passed.\n- The one upstream commit merged before pushing only touched TypeScript in `services/jev-proxy`.\n\n**Still open:**\n- **Your installed `sessionwiki` command.** If it's still a 0.30-era fork build, it shares schema 8, so it won't rebuild the index. It won't have upstream's role filter or newer cleanup passes, though. Upgrading it (`brew` or `npm i -g @youdie006/sessionwiki`) would keep both tools on the same code.\n- **#1228**, the `mj usage` undercount (high / L), is the most valuable unassigned issue left. Should I research it next?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      8721
+    ],
+    "user_position": 8528,
+    "input_rationale": "Upgrade and #1210 done and pushed. The reply asks which work comes next and advises the user to upgrade their installed sessionwiki command (optional user_action). Neither blocks the delivered result.",
+    "label": "required_final",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "next_work_menu",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "menu": "unsolicited",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent.",
+    "request_message_ids": [
+      "agent:8721"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-07T18:14:59.779Z",
+        "kind": "user",
+        "text": "update my local sessionwiki pls, then research 1228"
+      },
+      {
+        "at": "2026-10-07T18:15:03.384Z",
+        "kind": "agent",
+        "text": "First, finding the sessionwiki install you mean. This session runs in a Mjolnir container, so I'm checking whether your host's home directory is reachable from here and how `sessionwiki` is installed."
+      },
+      {
+        "at": "2026-10-07T18:17:10.395Z",
+        "kind": "system",
+        "text": "Interrupted"
+      },
+      {
+        "at": "2026-10-07T18:17:41.853Z",
+        "kind": "user",
+        "text": "oops, nvm, forgot you're containerized  but doesn't mj managed sw?"
+      },
+      {
+        "at": "2026-10-07T18:17:45.013Z",
+        "kind": "agent",
+        "text": "Let me check rather than guess."
+      },
+      {
+        "at": "2026-10-07T18:17:59.505Z",
+        "kind": "agent",
+        "text": "The docs still point at the fork's `brokk-sessionwiki@0.30.1`, and the fork note still says mj depends on the fork. I'm updating both to match what mj now links: upstream 0.33.1."
+      }
+    ]
+  }
+}

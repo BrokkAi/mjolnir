@@ -1,19 +1,19 @@
 use super::*;
+use crate::daemon::LifecycleKind;
 
 pub(super) const MAX_CONCURRENT_BUNDLE_CREATIONS: usize = 4;
 pub(super) const MAX_CONCURRENT_PREFLIGHTS: usize = 4;
 
 /// How one phone action ended when it did not succeed.
 ///
-/// `detail` is the whole error chain: it goes to the daemon log and to the
-/// session's error overlay, both of which stay on this machine. `refusal` is
-/// the part that may travel: a sentence written for the caller at the place
-/// the failure was produced. A failure with no refusal answers generically,
-/// which is why nothing leaks when a new failure site says nothing.
+/// `detail` is the whole error chain and belongs in the daemon log. `refusal`
+/// and `reason` are written for the caller at the failure boundary. They may
+/// be published on the session; failures without either use generic guidance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PhoneActionFailure {
     pub(super) detail: String,
     pub(super) refusal: Option<Refusal>,
+    pub(super) reason: Option<crate::controller::LifecycleFailureReason>,
 }
 
 impl PhoneActionFailure {
@@ -21,6 +21,9 @@ impl PhoneActionFailure {
         Self {
             detail: format!("{error:#}"),
             refusal: Refusal::of(error),
+            reason: error
+                .downcast_ref::<crate::controller::LifecycleFailureReason>()
+                .copied(),
         }
     }
 
@@ -30,6 +33,7 @@ impl PhoneActionFailure {
         Self {
             detail: detail.into(),
             refusal: None,
+            reason: None,
         }
     }
 
@@ -64,7 +68,7 @@ pub(super) struct PhoneActionStarted {
     pub(super) action_id: u64,
     pub(super) session: SessionRecord,
     /// Registration turned review off because the folder has no Git commits.
-    pub(super) review_turned_off: bool,
+    pub(super) review_notice: Option<&'static str>,
     pub(super) capacity_warning: Option<String>,
     pub(super) published: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
 }
@@ -98,7 +102,6 @@ impl PendingActionReplies {
             ControllerAction::New { .. }
                 | ControllerAction::SetPlanMode { .. }
                 | ControllerAction::StartReview { .. }
-                | ControllerAction::ResolveReview { .. }
                 | ControllerAction::Prompt {
                     command_id: Some(_),
                     ..
@@ -287,17 +290,21 @@ pub(super) fn apply_read_receipt(state: &mut State, session_id: &str, receipt: u
 pub(super) struct PhoneActionControl {
     pub(super) cancelled: Arc<AtomicBool>,
     pub(super) lifecycle: Option<LifecycleControl>,
+    /// The lifecycle kind the action starts, which decides how a server
+    /// shutdown stops it.
+    pub(super) kind: Option<LifecycleKind>,
 }
 
 impl PhoneActionControl {
     pub(super) fn for_action(action: &ControllerAction) -> Self {
-        let lifecycle = matches!(
-            action,
-            ControllerAction::New { .. }
-                | ControllerAction::Restart { .. }
-                | ControllerAction::Move { .. }
-        )
-        .then(LifecycleControl::default);
+        let kind = match action {
+            ControllerAction::New { .. } => Some(LifecycleKind::Create),
+            ControllerAction::Suspend { .. } => Some(LifecycleKind::Suspend),
+            ControllerAction::Restart { .. } => Some(LifecycleKind::Restart),
+            ControllerAction::Move { .. } => Some(LifecycleKind::Move),
+            _ => None,
+        };
+        let lifecycle = kind.map(|_| LifecycleControl::default());
         let cancelled = lifecycle.as_ref().map_or_else(
             || Arc::new(AtomicBool::new(false)),
             |control| control.cancelled.clone(),
@@ -305,17 +312,31 @@ impl PhoneActionControl {
         Self {
             cancelled,
             lifecycle,
+            kind,
         }
     }
 
-    pub(super) fn request_cancel(&self) -> bool {
+    /// The server is exiting: a create is stopped without rollback for the next
+    /// daemon to finish, everything else is cancelled.
+    pub(super) fn stop_for_server_shutdown(&self) {
+        match (&self.lifecycle, self.kind) {
+            (Some(control), Some(LifecycleKind::Create)) => {
+                control.cancel_for_shutdown();
+            }
+            _ => {
+                self.request_cancel("server shutdown");
+            }
+        }
+    }
+
+    pub(super) fn request_cancel(&self, cause: &'static str) -> bool {
         let accepted = self.lifecycle.as_ref().map_or_else(
             || {
                 self.cancelled
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
             },
-            |control| control.request_cancel(),
+            |control| control.request_cancel(cause),
         );
         if accepted {
             self.cancelled.store(true, Ordering::Release);

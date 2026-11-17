@@ -7,6 +7,11 @@ on:
   # release.yml runs the whole suite on the tagged commit before publishing.
   workflow_call: {}
 
+# Jobs build and run pull-request code (build scripts, tests); none writes to
+# the repository, so the token is read-only and checkouts keep no credentials.
+permissions:
+  contents: read
+
 # In a call from release.yml, github.workflow is the caller's name and the ref
 # is the tag, so this group is per release and does not cancel branch CI.
 concurrency:
@@ -19,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
     - uses: dtolnay/rust-toolchain@1.99.1
       with:
         components: rustfmt
@@ -29,6 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
     - uses: dtolnay/rust-toolchain@1.99.1
     - name: Cache pinned cargo-machete
       id: machete-tool
@@ -48,6 +57,8 @@ jobs:
       CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Test RunsOn launch-template helper
       run: bash scripts/test-update-runson-launch-template.sh
@@ -112,8 +123,7 @@ jobs:
         # licence text ships with it. `--list` does not build, so a crate whose
         # path dependencies are not on the registry yet still works here.
         for package in brokk-mj-core brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-voice-worker brokk-mj-worker \
-          brokk-mj-client brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mjolnir \
-          brokk-mj-desktop; do
+          brokk-mj-client brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mjolnir; do
           cargo package --locked --allow-dirty --list -p "$package" > "/tmp/$package-package-files.txt"
           grep -Fx LICENSE "/tmp/$package-package-files.txt"
         done
@@ -130,6 +140,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@1.99.1
@@ -174,6 +186,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
     - uses: dtolnay/rust-toolchain@1.99.1
       with:
         components: clippy
@@ -197,6 +211,8 @@ jobs:
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@1.99.1
@@ -232,47 +248,6 @@ jobs:
         if-no-files-found: warn
         retention-days: 14
 
-  desktop-linux:
-    # The primary Linux job builds the headless `mj` natively. This is the
-    # pull-request compile-and-test gate for the separate GNU/Linux desktop
-    # executable that releases ship beside it.
-    name: Desktop shell (x86_64-unknown-linux-gnu)
-    runs-on: ubuntu-latest
-    env:
-      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
-    steps:
-    - uses: actions/checkout@v6
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@1.99.1
-      with:
-        components: clippy
-        targets: x86_64-unknown-linux-gnu
-
-    - name: Install Linux desktop dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install --no-install-recommends --assume-yes libwebkit2gtk-4.1-dev
-
-    - uses: ./.github/actions/cache-rust
-      with:
-        lane: desktop-x86_64-unknown-linux-gnu
-        build-paths: |
-          target/debug
-          target/x86_64-unknown-linux-gnu/debug
-
-    - name: Clippy over the controller and desktop paths
-      run: cargo clippy --locked -p brokk-mjolnir -p brokk-mj-desktop --all-targets -- -D warnings
-
-    - name: Build the desktop crate
-      run: cargo check --locked -p brokk-mj-desktop
-
-    - name: Test the headless mj binary
-      run: cargo test --locked -p brokk-mjolnir --bin mj
-
-    - name: Test the desktop package
-      run: cargo test --locked -p brokk-mj-desktop
-
   voice-worker:
     name: Voice worker (ubuntu-latest)
     runs-on: ubuntu-latest
@@ -280,6 +255,8 @@ jobs:
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@1.99.1
@@ -317,6 +294,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: ${{ matrix.target }}
@@ -348,6 +327,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 24
