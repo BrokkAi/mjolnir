@@ -499,13 +499,11 @@ pub(crate) fn write_launcher_metadata(metadata: &DaemonMetadata) -> Result<()> {
 /// What a daemon reports about itself, or the legacy answer when an older
 /// daemon cannot report at all.
 async fn daemon_identity_or_legacy(metadata: &DaemonMetadata) -> DaemonIdentity {
-    let observed = tokio::time::timeout(Duration::from_secs(2), async {
+    let observed = async {
         let mut client = DaemonClient::connect(metadata.clone()).await.ok()?;
         client.identity().await.ok()
-    })
-    .await
-    .ok()
-    .flatten();
+    }
+    .await;
     observed.unwrap_or_else(|| DaemonIdentity {
         instance_id: String::new(),
         build_version: metadata.build_version.clone(),
@@ -734,9 +732,10 @@ async fn wait_for_store_release(timeout: Duration) -> Result<()> {
 }
 
 async fn ping_daemon(client: &mut DaemonClient) -> Result<()> {
-    let reply = tokio::time::timeout(Duration::from_secs(2), client.request(DaemonAction::Ping))
+    let reply = client
+        .request(DaemonAction::Ping)
         .await
-        .context("daemon did not answer its readiness probe")??;
+        .context("daemon did not answer its readiness probe")?;
     ensure!(
         matches!(reply, DaemonReply::Pong),
         "unexpected startup reply {reply:?}"
@@ -903,12 +902,12 @@ async fn recorded_daemon_is_gone(metadata: &DaemonMetadata) -> Result<bool> {
     {
         return Ok(false);
     }
-    let answered = tokio::time::timeout(Duration::from_secs(3), async {
+    let answered = async {
         let mut client = DaemonClient::connect(metadata.clone()).await?;
         ping_daemon(&mut client).await
-    })
+    }
     .await;
-    if matches!(answered, Ok(Ok(()))) {
+    if answered.is_ok() {
         return Ok(false);
     }
     tracing::info!(
@@ -977,9 +976,9 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     }
     // This protocol reports its own placement. A failed discovery cannot safely
     // decide whether to use or replace it, and may have interrupted the connection.
-    let identity = tokio::time::timeout(Duration::from_secs(2), client.identity())
+    let identity = client
+        .identity()
         .await
-        .context("time out reading the running daemon's identity")?
         .context("read the running daemon's identity")?;
     let build = daemon_build(&metadata, &identity.placement)?;
     // A container daemon's store is in its volume; the host store says
@@ -1535,18 +1534,18 @@ async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
             return Ok(());
         }
         attempts += 1;
-        let ready = tokio::time::timeout(Duration::from_secs(5), async {
+        let ready = async {
             let mut client = DaemonClient::connect(metadata.clone()).await?;
             match client.request(DaemonAction::PrepareUpgrade).await? {
                 DaemonReply::Done => Ok(true),
                 DaemonReply::UpgradePending => Ok(false),
                 reply => bail!("unexpected upgrade admission reply {reply:?}"),
             }
-        })
+        }
         .await;
-        let accepted_handoff = matches!(ready, Ok(Ok(true)));
+        let accepted_handoff = matches!(ready, Ok(true));
         match ready {
-            Ok(Ok(true)) => {
+            Ok(true) => {
                 let accepted = Instant::now();
                 tracing::info!(
                     pid = metadata.pid,
@@ -1581,15 +1580,11 @@ async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
                     return Ok(());
                 }
             }
-            Ok(Err(error)) => {
+            Err(error) => {
                 not_yet = format!("{error:#}");
                 tracing::debug!(%error, "automatic upgrade cannot establish safe handoff yet")
             }
-            Err(error) => {
-                not_yet = format!("the daemon did not answer within 5s ({error})");
-                tracing::debug!(%error, "automatic upgrade is waiting for the daemon to answer")
-            }
-            Ok(Ok(false)) => not_yet = "the daemon is finishing accepted work".to_owned(),
+            Ok(false) => not_yet = "the daemon is finishing accepted work".to_owned(),
         }
         // A daemon that died during the wait will never accept. Only a daemon
         // that did not take the handoff gets here, so a gone owner is
@@ -1637,15 +1632,12 @@ fn upgrade_wait_notice(blockers: Option<Vec<String>>) -> String {
 /// connection; that, any other failure, and an empty answer all yield `None`,
 /// and the caller falls back to the unnamed notice.
 async fn upgrade_blockers(metadata: &DaemonMetadata) -> Option<Vec<String>> {
-    let labels = tokio::time::timeout(Duration::from_secs(2), async {
-        let mut client = DaemonClient::connect(metadata.clone()).await.ok()?;
-        match client.request(DaemonAction::UpgradeBlockers).await.ok()? {
-            DaemonReply::UpgradeBlockers(labels) => Some(labels),
-            _ => None,
-        }
-    })
-    .await
-    .ok()??;
+    let mut client = DaemonClient::connect(metadata.clone()).await.ok()?;
+    let DaemonReply::UpgradeBlockers(labels) =
+        client.request(DaemonAction::UpgradeBlockers).await.ok()?
+    else {
+        return None;
+    };
     (!labels.is_empty()).then_some(labels)
 }
 
@@ -1703,29 +1695,34 @@ async fn wait_after_accepted_stop(
 
 /// Wait until no daemon answers at `metadata`'s endpoint.
 async fn wait_for_endpoint_down(metadata: &DaemonMetadata, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let answers = tokio::time::timeout(Duration::from_secs(1), async {
-            let Ok(mut client) = DaemonClient::connect(metadata.clone()).await else {
-                return false;
-            };
-            matches!(
-                client.request(DaemonAction::Ping).await,
-                Ok(DaemonReply::Pong)
-            )
-        })
-        .await
-        .unwrap_or(false);
-        if !answers {
-            return Ok(());
+    // This is the documented shutdown bound, not a per-request guess. Expiry
+    // reports failure instead of declaring that the endpoint is down.
+    tokio::time::timeout(timeout, async {
+        loop {
+            let answers = async {
+                let Ok(mut client) = DaemonClient::connect(metadata.clone()).await else {
+                    return false;
+                };
+                matches!(
+                    client.request(DaemonAction::Ping).await,
+                    Ok(DaemonReply::Pong)
+                )
+            }
+            .await;
+            if !answers {
+                return;
+            }
+            tokio::time::sleep(RETRY_DELAY).await;
         }
-        ensure!(
-            Instant::now() < deadline,
-            "the Mjolnir daemon still answers after {}s",
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "the Mjolnir daemon has not closed its endpoint after {}s",
             timeout.as_secs()
-        );
-        tokio::time::sleep(RETRY_DELAY).await;
-    }
+        )
+    })?;
+    Ok(())
 }
 
 /// Stop the daemon `metadata` names after it did not answer a protocol
@@ -1873,9 +1870,9 @@ pub fn maintain_attachment(client_id: String, cancellation: CancellationToken) -
                 _ = interval.tick() => {
                     let observed = tokio::select! {
                         _ = cancellation.cancelled() => return,
-                        result = tokio::time::timeout(Duration::from_secs(5), observe_attachment(&client_id)) => {
+                        result = observe_attachment(&client_id) => {
                             match result {
-                                Ok(Ok(presence)) => presence,
+                                Ok(presence) => presence,
                                 result => {
                                     let reason = format!("could not refresh daemon attachment: {result:?}");
                                     tracing::warn!(%reason);
@@ -2014,11 +2011,7 @@ mod tests {
         if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
             return;
         }
-        for (refuse, build_version) in [
-            (true, env!("CARGO_PKG_VERSION")),
-            (false, env!("CARGO_PKG_VERSION")),
-            (true, "0.0.1"),
-        ] {
+        for build_version in [env!("CARGO_PKG_VERSION"), "0.0.1"] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let metadata = DaemonMetadata {
                 protocol_version: PROTOCOL_VERSION,
@@ -2047,18 +2040,16 @@ mod tests {
                 .unwrap();
                 let identity: RequestEnvelope = read_frame(&mut stream).await.unwrap();
                 assert!(matches!(identity.action, DaemonAction::Identity));
-                if refuse {
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: identity.protocol_version,
-                            request_id: identity.request_id,
-                            result: Err("identity unavailable".into()),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                }
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: identity.protocol_version,
+                        request_id: identity.request_id,
+                        result: Err("identity unavailable".into()),
+                    },
+                )
+                .await
+                .unwrap();
                 use tokio::io::AsyncReadExt;
                 let mut byte = [0];
                 assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
@@ -2068,16 +2059,133 @@ mod tests {
                 Ok(_) => panic!("startup used a daemon without its identity"),
             };
             let message = format!("{error:#}");
-            if refuse {
-                assert!(message.contains("identity unavailable"), "{message}");
-            } else {
-                assert!(
-                    message.contains("time out reading the running daemon's identity"),
-                    "{message}"
-                );
-            }
+            assert!(message.contains("identity unavailable"), "{message}");
             server.await.unwrap();
         }
+    }
+
+    // Hard-won: #1566: guessed RPC deadlines blocked startup and same-protocol upgrades under load.
+    #[tokio::test]
+    async fn startup_waits_for_slow_ping_and_identity_before_replacing_an_older_release() {
+        const CHILD: &str = "MJ_TEST_SLOW_STARTUP_IDENTITY";
+        const TEST: &str = "daemon::tests::startup_waits_for_slow_ping_and_identity_before_replacing_an_older_release";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "isolated-slow-identity".into(),
+            started_at: "test".into(),
+            build_version: "0.0.1".into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let (received, mut waiting) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for is_identity in [false, true] {
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(if is_identity {
+                    matches!(request.action, DaemonAction::Identity)
+                } else {
+                    matches!(request.action, DaemonAction::Ping)
+                });
+                let (release, released) = tokio::sync::oneshot::channel();
+                received.send(release).unwrap();
+                released.await.unwrap();
+                let reply = if is_identity {
+                    DaemonReply::Identity(DaemonIdentity {
+                        instance_id: "isolated-slow-identity".into(),
+                        build_version: "0.0.1".into(),
+                        // Avoid a host store check: this peer represents a
+                        // container daemon with its own volume and store.
+                        placement: DaemonPlacement::Container {
+                            name: "isolated-slow-identity".into(),
+                            runtime: None,
+                        },
+                    })
+                } else {
+                    DaemonReply::Pong
+                };
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id: request.request_id,
+                        result: Ok(reply),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let decision = decide_existing_daemon();
+        tokio::pin!(decision);
+        for stage in 0..2 {
+            let release = tokio::select! {
+                result = &mut decision => panic!("startup finished before the reply at stage {stage}: {}", result.is_ok()),
+                release = waiting.recv() => release.unwrap(),
+            };
+            if stage == 0 {
+                tokio::time::pause();
+            }
+            tokio::time::advance(Duration::from_secs(3)).await;
+            // Poll once after the old deadline, before releasing the reply.
+            assert!(
+                std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(decision.as_mut().poll(cx).is_pending())
+                })
+                .await,
+                "startup abandoned its pending request at stage {stage}"
+            );
+            release.send(()).unwrap();
+        }
+        assert!(matches!(
+            decision.await.unwrap(),
+            ExistingDaemon::Replace { .. }
+        ));
+        server.await.unwrap();
+    }
+
+    // Hard-won: #1566: a timed-out endpoint Ping was mistaken for a stopped daemon.
+    #[tokio::test]
+    async fn shutdown_deadline_reports_an_unanswered_ping_instead_of_a_stopped_endpoint() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "shutdown-endpoint-deadline".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let (received, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            assert!(matches!(request.action, DaemonAction::Ping));
+            received.send(()).unwrap();
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        });
+        let stopped = wait_for_endpoint_down(&metadata, STOP_TIMEOUT);
+        tokio::pin!(stopped);
+        tokio::select! {
+            result = &mut stopped => panic!("the endpoint remains open: {result:?}"),
+            result = waiting => result.unwrap(),
+        }
+        tokio::time::pause();
+        tokio::time::advance(STOP_TIMEOUT).await;
+        let error = stopped.await.unwrap_err();
+        assert!(error.to_string().contains("has not closed its endpoint"));
+        server.await.unwrap();
     }
 
     // Hard-won: 413864386: the startup splash displayed frozen blocker ages for thirty seconds.
