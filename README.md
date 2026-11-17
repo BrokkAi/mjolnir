@@ -1,27 +1,19 @@
 # Mjolnir
 
-**One control plane for all your coding agents.**
+**Run many coding agents at once, and keep them working when you walk away.**
 
-Mjolnir (`mj`) runs Claude Code, Codex, Kimi Code, Grok Build, Muse Code,
-OpenCode, and DSH sessions side by side, on your laptop, in containers, over
-SSH, or on EC2, and
-keeps them running after you close the terminal. You can move a session to
-another account, another harness, or a compatible target without starting over.
-Bare SSH sessions stay on their original host.
+Mjolnir (`mj`) is a terminal dashboard and background service for Claude Code,
+Codex, Kimi Code, Grok Build, Muse Code, OpenCode, and DSH. Each session runs
+on your laptop, in a container, on any machine you can SSH to, or on EC2, and
+keeps going after you close the terminal. You can move a session to another
+account, another agent, or another machine without starting over.
 
-By default Mjolnir sends classifier evidence to GLiDE (Fastino) through its hosted proxy. `[jev] enabled = false` in `config.toml` stops all classifier requests ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
-
-GitHub relevance sends every classification to the public proxy by default.
-Local inference is opt-in: set `local_inference = true` under `[github.watch]`
-in `config.toml`. When enabled, it downloads a pinned local model and native inference runtime
-when the first GitHub item needs classification, verifies their checksums, and caches them in the
-Mjolnir data directory. GLiDE handles classification while preparation runs or
-local scoring is unavailable. Native license texts are kept beside the cached
-runtime; no Python installation is required. GPU scoring uses DirectML on Windows,
-CoreML on Apple-silicon macOS, or CUDA on Linux x64. Linux CUDA requires the NVIDIA
-driver and CUDA 12/cuDNN 9 libraries installed on the host; otherwise scoring uses
-CPU. Windows requires the Microsoft Visual C++ Redistributable (x64); missing
-runtime DLLs produce a notice while GLiDE handles scoring. A GPU is retained only when its measured warm latency beats CPU.
+By default, Mjolnir sends recent conversation text to **Jev**, a hosted
+classifier (Fastino's GLiDE, reached through a Brokk-run proxy). It uses Jev to
+tell when an agent is waiting for you or has finished. Turn it off in
+**Settings → Privacy** or with `[jev] enabled = false` in `config.toml`; the
+[security page](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)
+lists everything that leaves your machine.
 
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
@@ -41,39 +33,33 @@ runtime DLLs produce a notice while GLiDE handles scoring. A GPU is retained onl
   </tr>
 </table>
 
-## Why Mjolnir
+## Why use Mjolnir
 
-If you use one agent, in one terminal, on one machine, you don't need Mjolnir.
-It's for the point where that stops scaling: several subscriptions, several
-repositories, several machines, and work that should keep going when you walk
-away.
+Running one agent in one terminal needs no help. Mjolnir is for when you have
+several repositories, several subscriptions, or work that should continue
+without you.
 
-- **Sessions that outlive your terminal.** Each session runs beside a worker
-  that owns its prompt queue and event journal. Detach, close the terminal, or
-  restart the daemon; the agent keeps working and you reattach where you
-  left off.
-- **Run anywhere.** Use a local checkout or isolated clone, a Docker, Podman, or Apple container,
-  any Linux host over SSH, or an EC2 instance provisioned from a launch
-  template. Remote hosts need no resident daemon; Mjolnir uploads a worker on
-  demand.
-- **Move work freely.** Switch a session from your personal Codex account to
-  your work account, from Codex to Claude Code, or from your workstation to
-  EC2. Checkpoints are verified before anything is torn down.
-- **See every account's quota.** Keep multiple named profiles per harness and
-  watch remaining subscription quota and target capacity in one view.
-- **Shared project memory.** Supported harnesses share synchronized project
-  memory across sessions and targets. Muse currently cannot receive the
-  injected memory tools; see the [harness limitations](https://mjolnir.brokk.ai/profiles/#harness-limitations).
-- **Adversarial review.** Review committed work before push. Independent
-  reviewers, on a different provider when one is available, check the work and
-  report actionable findings.
-- **Multi-repo projects.** Bundle several repositories so they provision,
-  checkpoint, move, and restore together.
-- **Agent and editor integration.** Drive sessions through `mj new`, `mj prompt`,
-  `mj message` and `mj wait`, the HTTP API, or `mj acp` for stdio ACP clients.
-- **Terminal and web.** A full terminal dashboard, plus a
-  privacy-first web viewer you can reach from your phone over Tailscale.
-  Both share the same live sessions.
+- **Sessions outlive your terminal.** Detach, close the window, or restart the
+  daemon; the agent keeps working and you reattach where you left off.
+- **Isolation by default.** Each session can work in its own checkout, so
+  agents do not trip over each other or over your working tree.
+- **Run anywhere.** Use a local directory, a Docker, Podman, or Apple
+  container, a Linux host over SSH, or an EC2 instance. Remote hosts need no
+  setup beyond SSH; Mjolnir uploads what it needs.
+- **Move work freely.** Switch a session from your personal account to your
+  work account, from Codex to Claude Code, or from your laptop to EC2. The
+  session is checkpointed and verified before anything is torn down.
+- **See your quota.** Keep several accounts per agent and watch remaining
+  subscription quota, and capacity on your hosts (`mj quota`, `mj hosts`), in
+  one view. A session that hits its limit can resume itself after the reset.
+- **Review before you push.** Independent reviewers, on a different provider
+  when you have one, check committed work and report findings.
+- **Shared project memory** across sessions and machines.
+- **Multi-repository projects** that start, move, and restore together.
+- **Scriptable.** Drive sessions with `mj new`, `mj prompt`, `mj wait`, an HTTP
+  API, or `mj acp` for editors.
+- **Terminal and web.** A full terminal dashboard, plus a web viewer you can
+  open from your phone over Tailscale.
 
 ## Install
 
@@ -95,35 +81,20 @@ builds, and desktop dependencies.
 
 ## Quick start
 
-Mjolnir can install a pinned coding harness when you sign in. On first launch,
-choose **Set up a managed agent** if no agent is found, or install and sign in
-to an agent you already have and choose **Detect profiles**. Managed setup
-creates the profile and opens sign-in without asking you to choose a home
-directory. Then, from a project directory:
+From a project directory:
 
 ```sh
 mj
 ```
 
-On first launch, Mjolnir automatically adds profiles for your installed agents,
-and a bundle for the current GitHub repository; every later plain `mj` launch
-adds profiles for agents installed since (`mj go`, `mj workspaces`, and the
-relaunch after an upgrade do not). To stop using an agent, disable its profile
-in Settings rather than removing it. A brief welcome shows what it found and any
-prerequisite errors. Press Continue, then `ctrl+b c` to create a session: pick
-an agent profile and where the session runs. Container images download in the
-background while you use the dashboard. Configure SSH and AWS targets in
-Settings (`ctrl+b s`).
+On first launch Mjolnir finds the agents you have installed and shows what it
+found. If you have none, choose **Set up a managed agent** and sign in. Press
+`ctrl+b c` to create a session, pick an agent and where it runs. Settings is
+`ctrl+b s`.
 
-- `mj setup` reruns agent and repository discovery from the shell, preserving
-  your existing configuration.
-- `mj go` is a shortcut for later. Each folder remembers its setup, and
-  running `mj go` again returns you to that folder's last conversation.
-- `mj simple` is the minimal tmux-friendly mode. It uses the default
-  enabled agent, always starts locally with an isolated checkout, disables
-  automatic review for that session, and uses direct Ctrl-key commands with no
-  prefix, so Ctrl+B stays available to tmux.
-- `mj doctor` checks prerequisites and tells you how to fix anything missing.
+- `mj doctor` checks prerequisites and says how to fix anything missing.
+- `mj go` returns you to a folder's last conversation.
+- `mj simple` is a minimal mode for tmux (no `ctrl+b` prefix).
 
 The [quickstart](https://mjolnir.brokk.ai/quickstart/) walks through a first
 session end to end.
@@ -135,7 +106,7 @@ session end to end.
 - [Profiles and harnesses](https://mjolnir.brokk.ai/profiles/): accounts,
   login, credentials, and skills.
 - [Targets](https://mjolnir.brokk.ai/targets/) and
-  [bundles](https://mjolnir.brokk.ai/workspaces-bundles/): local, container,
+  [projects](https://mjolnir.brokk.ai/workspaces-bundles/): local, container,
   SSH, and EC2 environments, multi-repository projects, and shared memory.
 - [Sessions](https://mjolnir.brokk.ai/sessions/) and
   [durability](https://mjolnir.brokk.ai/durability/): adoption, move, resume,
