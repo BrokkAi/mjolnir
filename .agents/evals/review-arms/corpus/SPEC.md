@@ -28,7 +28,8 @@ you need a checkout. Remove worktrees you create before you finish.
 A candidate qualifies only if all of these hold:
 
 1. **Cutoff.** The introducing commit's committer date is before
-   2026-11-01T00:00 (local time in the commit).
+   2026-11-01T00:00:00Z (UTC), comparing instants strictly before the cutoff.
+   Timezone-free cutoffs are not accepted by the corpus tools.
 2. **Attribution.** You identified the commit (or short contiguous series of
    commits from the same change) that introduced the defective code, and you
    checked it: the defective lines are added or changed in `base..intro`, or

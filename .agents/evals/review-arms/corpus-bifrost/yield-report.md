@@ -71,11 +71,11 @@ Changed-line counts use the existing registered fields; source diffs were not re
 | Registered population | N | Median changed lines | Range | Over 1,500 |
 |---|---:|---:|---:|---:|
 | Bifrost frozen known bugs | 30 | 827 | 109–2936 | 8 |
-| Bifrost registered ordinary diffs | 40 | 191.5 | 95–1400 | 0 |
+| Bifrost registered ordinary diffs | 40 | 387 | 91–1473 | 0 |
 | Original Mjolnir known bugs | 30 | 688.5 | 11–2236 | 5 |
 | Original Mjolnir ordinary diffs | 40 | 326 | 90–949 | 0 |
 
-The Bifrost known-bug median is 4.32× its registered ordinary-diff median; the original Mjolnir ratio is 2.11×. These are descriptive size differences, not evidence about reviewer performance or controlled size matching.
+The Bifrost known-bug median is 2.14× its registered ordinary-diff median; the original Mjolnir ratio is 2.11×. These are descriptive size differences, not evidence about reviewer performance or controlled size matching.
 
 Bug-kind labels retain each original corpus taxonomy. Bifrost has `wrong result` (4), `name resolution` (2), `error handling` (2), and 22 singleton categories, including completeness/proof state, inference, control flow, routing and protocol ordering. Mjolnir has `lifecycle` (3), `configuration`, `UI state`, `security`, `error handling` (2 each), and 19 singleton categories including cancellation, staleness, deadlock, persistence and paths. Ordinary records have no bug-kind labels; none were inferred from subjects. Exact distributions and all original size records are in the JSON.
 
@@ -1776,3 +1776,5 @@ First fully qualifying marker in stable member order; all SPEC checks recorded.
 ## Provenance and limits
 
 Inputs: source `groups-*/attempts.jsonl`, superseded issue/comment attempt records, `parent-acceptance.json`, `spread-check.json`, frozen `corpus/corpus.jsonl`, and the explicitly requested original registered ordinary/Mjolnir comparison metadata. Input SHA256s are recorded in `yield-report.json`. Census inputs/outputs, outcome labels and model findings/results were not accessed. No builds, tests, reviews, source traces, sessions, config changes, selection edits or commits were performed. Parent owns synthesis and final freeze.
+
+UTC correction, 2026-11-17T03:41:57.338958+00:00: parent updated only the ordinary comparison after same-seed redraw (8230 eligible); source yield decisions and bug/census data unchanged. Earlier bytes are preserved under utc-cutoff-correction/pre-correction/.

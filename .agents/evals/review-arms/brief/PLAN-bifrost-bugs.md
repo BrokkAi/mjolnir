@@ -93,6 +93,21 @@ are now:
 The readout says that the primary labeller differs from mjolnir's census, so
 the relation shares of the two codebases are not directly comparable.
 
+Amendment, 2026-11-17, after census freeze and before any brief or review:
+UTC cutoff correction. Review found ordinary control `0549477459` has
+committer time `2026-11-01T01:14:32Z`, beyond the intended
+`2026-11-01T00:00:00Z` boundary. The sampler's timezone-free cutoff used the
+host timezone; the SPEC's local-time wording was also ambiguous. All corpus
+tools now use the same strict UTC instant for introducing commits and issue
+creation. Reject timezone-free cutoff arguments. Audit all 30 selected bug
+introductions before changing anything else; if any fails the corrected
+cutoff, stop and report before relabelling. Redraw all 40 controls with the
+recorded seed `20261117` and unchanged eligibility, exclusions and sampling
+method, then regenerate dependent freezes. Preserve the original freeze as
+historical evidence. Audit the original mjolnir selected bug/control corpus
+for the six-hour window after UTC midnight; report it without changing that
+corpus. No briefs or reviews preceded this correction.
+
 ## Arms
 
 3 Terra/high reviewers per diff in each arm:

@@ -1,0 +1,13 @@
+{
+  "cutoff": "2026-11-01T00:00:00+00:00",
+  "pool_count": 887,
+  "order_count": 887,
+  "ineligible": [],
+  "seed_order_matches": true,
+  "hashes": {
+    "pool": "69ed25d6d7477fdaecf788c995796d3fd9f7b128cd5f07c04843eff03a6dd730",
+    "order": "b9fcee93f4c4f05feeee97bb7a39635185f15e5fd5b3d97fc7f28c26431b2c0b"
+  },
+  "unchanged_during_audit": true,
+  "note": "Offline audit only; neither input was rewritten. Fallback order is unused in final sample."
+}

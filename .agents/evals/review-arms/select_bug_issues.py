@@ -20,11 +20,13 @@ import pathlib
 import random
 import subprocess
 
+from cutoff_dates import utc_datetime
+
 SEED = 20261117
 p = argparse.ArgumentParser()
 p.add_argument("repo")
 p.add_argument("out")
-p.add_argument("--before", default="2026-11-01T00:00:00Z")
+p.add_argument("--before", type=utc_datetime, default="2026-11-01T00:00:00Z")
 a = p.parse_args()
 out = pathlib.Path(a.out)
 out.mkdir(parents=True, exist_ok=True)
@@ -38,7 +40,7 @@ pool = sorted(
       "found_by": sorted(l["name"] for l in i["labels"] if l["name"].startswith("found-by:")) or None,
       "labels": sorted(l["name"] for l in i["labels"])}
      for page in pages for i in page
-     if "pull_request" not in i and i["created_at"] < a.before and i["state_reason"] == "completed"),
+     if "pull_request" not in i and utc_datetime(i["created_at"]) < a.before and i["state_reason"] == "completed"),
     key=lambda i: i["number"])
 order = list(pool)
 random.Random(SEED).shuffle(order)

@@ -1327,7 +1327,7 @@
       "secondary_reason_flags": [
         "not_product_behavior"
       ],
-      "decisive_reason_verbatim": "All six marker members examined. The first test accompanies the Nov 15 construction-matcher reuse optimization and receipt validation; its parent uncached walk actually recompiles/replaces the matcher, so that parent is not proof of the claimed stale reused matcher after an unreported edit. Rule-directory, transient-failure and publication-race members pin that new optimization’s follow-up races; seed symlink receipt also depends on November receipt changes. Actual relevant code boundaries are after the cutoff. The issue itself is primarily duplicate rule-read performance, not a reason to admit a different older defect.",
+      "decisive_reason_verbatim": "All six marker members examined. The first test accompanies the Nov 15 construction-matcher reuse optimization and receipt validation; its parent uncached walk actually recompiles/replaces the matcher, so that parent is not proof of the claimed stale reused matcher after an unreported edit. Rule-directory, transient-failure and publication-race members pin that new optimization\u2019s follow-up races; seed symlink receipt also depends on November receipt changes. Actual relevant code boundaries are after the cutoff. The issue itself is primarily duplicate rule-read performance, not a reason to admit a different older defect.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-025-036/attempts.jsonl",
@@ -1336,7 +1336,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "cutoff-and-source-boundary",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "All six marker members examined. The first test accompanies the Nov 15 construction-matcher reuse optimization and receipt validation; its parent uncached walk actually recompiles/replaces the matcher, so that parent is not proof of the claimed stale reused matcher after an unreported edit. Rule-directory, transient-failure and publication-race members pin that new optimization’s follow-up races; seed symlink receipt also depends on November receipt changes. Actual relevant code boundaries are after the cutoff. The issue itself is primarily duplicate rule-read performance, not a reason to admit a different older defect.",
+      "source_attempt_reason_verbatim": "All six marker members examined. The first test accompanies the Nov 15 construction-matcher reuse optimization and receipt validation; its parent uncached walk actually recompiles/replaces the matcher, so that parent is not proof of the claimed stale reused matcher after an unreported edit. Rule-directory, transient-failure and publication-race members pin that new optimization\u2019s follow-up races; seed symlink receipt also depends on November receipt changes. Actual relevant code boundaries are after the cutoff. The issue itself is primarily duplicate rule-read performance, not a reason to admit a different older defect.",
       "source_attempt_traced_intros_verbatim": [
         "6be4bd32056cb8cd0c11b73f76ef9aba0d6c0553",
         "4c02334855bac0bdd789b94170d833144c0bb302",
@@ -1389,7 +1389,7 @@
       "qualified": true,
       "primary_spec_failure": null,
       "secondary_reason_flags": [],
-      "decisive_reason_verbatim": "Only the first marker’s inconclusive/clean-label half is selected; the later empty-role hard-failure behavior is excluded. The original numeric projection comes from oversized 1e0ec9cf75b, but before this introduction ordinary default inconclusive runs exited unreliable; a830471d19 newly exposes the false label by default. Explicit policy unknown-verdict overrides already allowed advisory exit-zero paths, so this is not claimed as the first possible false-clean label for every configuration. The intro explicitly requests advisory exit zero and uses the symbolic clean exit constant, but does not flag the MCP string-conflation defect. Fix has a three-request real MCP regression with clean/inconclusive/unreliable responses. Current marker coordinates are pinned HEAD coordinates; actual test was added in the Nov 15 fix, which is allowed.",
+      "decisive_reason_verbatim": "Only the first marker\u2019s inconclusive/clean-label half is selected; the later empty-role hard-failure behavior is excluded. The original numeric projection comes from oversized 1e0ec9cf75b, but before this introduction ordinary default inconclusive runs exited unreliable; a830471d19 newly exposes the false label by default. Explicit policy unknown-verdict overrides already allowed advisory exit-zero paths, so this is not claimed as the first possible false-clean label for every configuration. The intro explicitly requests advisory exit zero and uses the symbolic clean exit constant, but does not flag the MCP string-conflation defect. Fix has a three-request real MCP regression with clean/inconclusive/unreliable responses. Current marker coordinates are pinned HEAD coordinates; actual test was added in the Nov 15 fix, which is allowed.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-025-036/attempts.jsonl",
@@ -1398,7 +1398,7 @@
       "source_attempt_status_verbatim": "accepted",
       "source_attempt_disposition_verbatim": "confirmed",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "Only the first marker’s inconclusive/clean-label half is selected; the later empty-role hard-failure behavior is excluded. The original numeric projection comes from oversized 1e0ec9cf75b, but before this introduction ordinary default inconclusive runs exited unreliable; a830471d19 newly exposes the false label by default. Explicit policy unknown-verdict overrides already allowed advisory exit-zero paths, so this is not claimed as the first possible false-clean label for every configuration. The intro explicitly requests advisory exit zero and uses the symbolic clean exit constant, but does not flag the MCP string-conflation defect. Fix has a three-request real MCP regression with clean/inconclusive/unreliable responses. Current marker coordinates are pinned HEAD coordinates; actual test was added in the Nov 15 fix, which is allowed.",
+      "source_attempt_reason_verbatim": "Only the first marker\u2019s inconclusive/clean-label half is selected; the later empty-role hard-failure behavior is excluded. The original numeric projection comes from oversized 1e0ec9cf75b, but before this introduction ordinary default inconclusive runs exited unreliable; a830471d19 newly exposes the false label by default. Explicit policy unknown-verdict overrides already allowed advisory exit-zero paths, so this is not claimed as the first possible false-clean label for every configuration. The intro explicitly requests advisory exit zero and uses the symbolic clean exit constant, but does not flag the MCP string-conflation defect. Fix has a three-request real MCP regression with clean/inconclusive/unreliable responses. Current marker coordinates are pinned HEAD coordinates; actual test was added in the Nov 15 fix, which is allowed.",
       "source_attempt_traced_intros_verbatim": [
         "1e0ec9cf75b40a8d50c5ef855e9e926b2be6d7e1",
         "a830471d19390c947b93e047483ab4e41f49ebe5"
@@ -1408,7 +1408,7 @@
         "accepted": true,
         "audit": "audit-groups-013-036.json",
         "field_overrides": {
-          "notes": "Only the first marker’s inconclusive/clean-label half is selected; the later empty-role hard-failure behavior is excluded. The original numeric projection comes from oversized 1e0ec9cf75b, but before this introduction ordinary default inconclusive runs exited unreliable; a830471d19 newly exposes the false label by default. Explicit policy unknown-verdict overrides already allowed advisory exit-zero paths, so this is not claimed as the first possible false-clean label for every configuration. The intro explicitly requests advisory exit zero and uses the symbolic clean exit constant, but does not flag the MCP string-conflation defect. Fix has a three-request real MCP regression with clean/inconclusive/unreliable responses. Current marker coordinates are pinned HEAD coordinates; actual test was added in the Nov 15 fix, which is allowed. Retain the existing explicit restriction to the newly exposed default/advisory path; this intro is not the earliest conceivable false-clean string under every nondefault override. Numeric exit 0 itself is explicitly intended, and findings about that policy are not matches."
+          "notes": "Only the first marker\u2019s inconclusive/clean-label half is selected; the later empty-role hard-failure behavior is excluded. The original numeric projection comes from oversized 1e0ec9cf75b, but before this introduction ordinary default inconclusive runs exited unreliable; a830471d19 newly exposes the false label by default. Explicit policy unknown-verdict overrides already allowed advisory exit-zero paths, so this is not claimed as the first possible false-clean label for every configuration. The intro explicitly requests advisory exit zero and uses the symbolic clean exit constant, but does not flag the MCP string-conflation defect. Fix has a three-request real MCP regression with clean/inconclusive/unreliable responses. Current marker coordinates are pinned HEAD coordinates; actual test was added in the Nov 15 fix, which is allowed. Retain the existing explicit restriction to the newly exposed default/advisory path; this intro is not the earliest conceivable false-clean string under every nondefault override. Numeric exit 0 itself is explicitly intended, and findings about that policy are not matches."
         }
       },
       "markers_examined_verbatim": [
@@ -1582,7 +1582,7 @@
         "introduction_over_4000_lines",
         "unconfirmed_attribution_or_exposing_boundary"
       ],
-      "decisive_reason_verbatim": "Marker attributed to actual namespace-relative AST/path fix in 093013efa3, not retrospective tag 5f283ece90d. That fix simultaneously upgrades PHP grammar and introduces relative_name handling. Parent path parser inferred namespace relativity from a first textual segment and sliced it; blame traces to e102717c907 (52850 changed lines). The new relative_name shape is not available under that original grammar. Neither the enormous original rewrite nor the simultaneous new-grammar fix is a confirmed eligible introduction of this marker’s exact defect.",
+      "decisive_reason_verbatim": "Marker attributed to actual namespace-relative AST/path fix in 093013efa3, not retrospective tag 5f283ece90d. That fix simultaneously upgrades PHP grammar and introduces relative_name handling. Parent path parser inferred namespace relativity from a first textual segment and sliced it; blame traces to e102717c907 (52850 changed lines). The new relative_name shape is not available under that original grammar. Neither the enormous original rewrite nor the simultaneous new-grammar fix is a confirmed eligible introduction of this marker\u2019s exact defect.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-025-036/attempts.jsonl",
@@ -1591,7 +1591,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "later-grammar-prerequisite-and-size",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "Marker attributed to actual namespace-relative AST/path fix in 093013efa3, not retrospective tag 5f283ece90d. That fix simultaneously upgrades PHP grammar and introduces relative_name handling. Parent path parser inferred namespace relativity from a first textual segment and sliced it; blame traces to e102717c907 (52850 changed lines). The new relative_name shape is not available under that original grammar. Neither the enormous original rewrite nor the simultaneous new-grammar fix is a confirmed eligible introduction of this marker’s exact defect.",
+      "source_attempt_reason_verbatim": "Marker attributed to actual namespace-relative AST/path fix in 093013efa3, not retrospective tag 5f283ece90d. That fix simultaneously upgrades PHP grammar and introduces relative_name handling. Parent path parser inferred namespace relativity from a first textual segment and sliced it; blame traces to e102717c907 (52850 changed lines). The new relative_name shape is not available under that original grammar. Neither the enormous original rewrite nor the simultaneous new-grammar fix is a confirmed eligible introduction of this marker\u2019s exact defect.",
       "source_attempt_traced_intros_verbatim": [
         "e102717c907f2eede3aaa7fbfc5b75fac70eb5b5",
         "093013efa3940b9d6e772b91a2cf0740021db440"
@@ -1688,7 +1688,7 @@
         "introduction_over_4000_lines",
         "not_product_behavior"
       ],
-      "decisive_reason_verbatim": "Named SHA 7a00192bb238 is discovery plus an ignored failing test, not the fix: it explicitly says generic() was already affected. Actual fix bff239a860 always publishes a type-parameter Identity slot and unignores the test. Missing slot falls through the engine’s nominal fallback: 45ebf3665cf changes alias handling around an already-existing nominal fallback; 4be28bcdec1 adds bound slots but leaves existing unbounded parameters unchanged. The initial generic-binder producer 61947ed027f is 8700 lines after exclusions and was a pre-cutover checkpoint. No smaller confirmed newly defective runtime boundary established.",
+      "decisive_reason_verbatim": "Named SHA 7a00192bb238 is discovery plus an ignored failing test, not the fix: it explicitly says generic() was already affected. Actual fix bff239a860 always publishes a type-parameter Identity slot and unignores the test. Missing slot falls through the engine\u2019s nominal fallback: 45ebf3665cf changes alias handling around an already-existing nominal fallback; 4be28bcdec1 adds bound slots but leaves existing unbounded parameters unchanged. The initial generic-binder producer 61947ed027f is 8700 lines after exclusions and was a pre-cutover checkpoint. No smaller confirmed newly defective runtime boundary established.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-025-036/attempts.jsonl",
@@ -1697,7 +1697,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "oversized-original-and-old-helper",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "Named SHA 7a00192bb238 is discovery plus an ignored failing test, not the fix: it explicitly says generic() was already affected. Actual fix bff239a860 always publishes a type-parameter Identity slot and unignores the test. Missing slot falls through the engine’s nominal fallback: 45ebf3665cf changes alias handling around an already-existing nominal fallback; 4be28bcdec1 adds bound slots but leaves existing unbounded parameters unchanged. The initial generic-binder producer 61947ed027f is 8700 lines after exclusions and was a pre-cutover checkpoint. No smaller confirmed newly defective runtime boundary established.",
+      "source_attempt_reason_verbatim": "Named SHA 7a00192bb238 is discovery plus an ignored failing test, not the fix: it explicitly says generic() was already affected. Actual fix bff239a860 always publishes a type-parameter Identity slot and unignores the test. Missing slot falls through the engine\u2019s nominal fallback: 45ebf3665cf changes alias handling around an already-existing nominal fallback; 4be28bcdec1 adds bound slots but leaves existing unbounded parameters unchanged. The initial generic-binder producer 61947ed027f is 8700 lines after exclusions and was a pre-cutover checkpoint. No smaller confirmed newly defective runtime boundary established.",
       "source_attempt_traced_intros_verbatim": [
         "61947ed027faead23f157993c92da3ec57b6f1c7",
         "45ebf3665cfabf59b3c3a4c2f7db2156765be644",
@@ -1885,7 +1885,7 @@
       "secondary_reason_flags": [
         "not_product_behavior"
       ],
-      "decisive_reason_verbatim": "Named commit changes this regression’s expected result from no_definition to resolved while production edits concern receiver-depth accounting and ambiguity collapse. The prior test/commit 0749516696 explicitly says const before declaration must keep returning no_definition as a TDZ control. No newly introduced hidden product bug boundary was established for this marker; the old behavior was expressly documented/tested, violating the unflagged-defect requirement if treated as the target. Do not substitute the unrelated receiver-depth fix for a lexical-binder introduction.",
+      "decisive_reason_verbatim": "Named commit changes this regression\u2019s expected result from no_definition to resolved while production edits concern receiver-depth accounting and ambiguity collapse. The prior test/commit 0749516696 explicitly says const before declaration must keep returning no_definition as a TDZ control. No newly introduced hidden product bug boundary was established for this marker; the old behavior was expressly documented/tested, violating the unflagged-defect requirement if treated as the target. Do not substitute the unrelated receiver-depth fix for a lexical-binder introduction.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-025-036/attempts.jsonl",
@@ -1894,7 +1894,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "test-contract-and-preflagging",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "Named commit changes this regression’s expected result from no_definition to resolved while production edits concern receiver-depth accounting and ambiguity collapse. The prior test/commit 0749516696 explicitly says const before declaration must keep returning no_definition as a TDZ control. No newly introduced hidden product bug boundary was established for this marker; the old behavior was expressly documented/tested, violating the unflagged-defect requirement if treated as the target. Do not substitute the unrelated receiver-depth fix for a lexical-binder introduction.",
+      "source_attempt_reason_verbatim": "Named commit changes this regression\u2019s expected result from no_definition to resolved while production edits concern receiver-depth accounting and ambiguity collapse. The prior test/commit 0749516696 explicitly says const before declaration must keep returning no_definition as a TDZ control. No newly introduced hidden product bug boundary was established for this marker; the old behavior was expressly documented/tested, violating the unflagged-defect requirement if treated as the target. Do not substitute the unrelated receiver-depth fix for a lexical-binder introduction.",
       "source_attempt_traced_intros_verbatim": [
         "07495166968d6e492b318e99d7f0c7f55bb06d89",
         "5f687c6c4a7660809ff2d9cf723436db291ff863"
@@ -1989,7 +1989,7 @@
       "qualified": false,
       "primary_spec_failure": "cutoff",
       "secondary_reason_flags": [],
-      "decisive_reason_verbatim": "Exact marker defect is the guard-before-glob regression, not the older inert-cleanup limitation.074aecd (2026-11-14local) replaced expression_ownership’s existing Declared classification with the guard-aware bounded classifier, losing the ten findings.0925dd (2026-11-15) restores that branch and retags/extends the golden. Actual introducing change is after cutoff.",
+      "decisive_reason_verbatim": "Exact marker defect is the guard-before-glob regression, not the older inert-cleanup limitation.074aecd (2026-11-14local) replaced expression_ownership\u2019s existing Declared classification with the guard-aware bounded classifier, losing the ten findings.0925dd (2026-11-15) restores that branch and retags/extends the golden. Actual introducing change is after cutoff.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-037-048/attempts.jsonl",
@@ -1998,7 +1998,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "post-cutoff",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "Exact marker defect is the guard-before-glob regression, not the older inert-cleanup limitation.074aecd (2026-11-14local) replaced expression_ownership’s existing Declared classification with the guard-aware bounded classifier, losing the ten findings.0925dd (2026-11-15) restores that branch and retags/extends the golden. Actual introducing change is after cutoff.",
+      "source_attempt_reason_verbatim": "Exact marker defect is the guard-before-glob regression, not the older inert-cleanup limitation.074aecd (2026-11-14local) replaced expression_ownership\u2019s existing Declared classification with the guard-aware bounded classifier, losing the ten findings.0925dd (2026-11-15) restores that branch and retags/extends the golden. Actual introducing change is after cutoff.",
       "source_attempt_traced_intros_verbatim": [
         "074aecd8459d9e8823398c1bae112e434ec62a34"
       ],
@@ -2080,7 +2080,7 @@
       "qualified": false,
       "primary_spec_failure": "unconfirmed_attribution_or_exposing_boundary",
       "secondary_reason_flags": [],
-      "decisive_reason_verbatim": "Examined first three stable members: unqualified tuple-pattern inverse hits, shadow/ambiguity control, nested struct initializer field ownership. Marker names561247, which really is a multi-defect fix/regression commit. Missing tuple handling predates aa49f’s tree-sitter rewrite (the replaced regex also recognized scoped uses only); fc2a adds enum-aware associated roles but does not establish introduction of the existing unqualified miss. Nested field test has no clearly matching new defective path isolated from earlier scanner/type-resolution behavior. Rejected after bounded tracing; did not force an old scanner rewrite as introduction. Remaining later members not traced after this group’s uncertainty/budget stop.",
+      "decisive_reason_verbatim": "Examined first three stable members: unqualified tuple-pattern inverse hits, shadow/ambiguity control, nested struct initializer field ownership. Marker names561247, which really is a multi-defect fix/regression commit. Missing tuple handling predates aa49f\u2019s tree-sitter rewrite (the replaced regex also recognized scoped uses only); fc2a adds enum-aware associated roles but does not establish introduction of the existing unqualified miss. Nested field test has no clearly matching new defective path isolated from earlier scanner/type-resolution behavior. Rejected after bounded tracing; did not force an old scanner rewrite as introduction. Remaining later members not traced after this group\u2019s uncertainty/budget stop.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-037-048/attempts.jsonl",
@@ -2089,7 +2089,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "attribution-uncertain",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "Examined first three stable members: unqualified tuple-pattern inverse hits, shadow/ambiguity control, nested struct initializer field ownership. Marker names561247, which really is a multi-defect fix/regression commit. Missing tuple handling predates aa49f’s tree-sitter rewrite (the replaced regex also recognized scoped uses only); fc2a adds enum-aware associated roles but does not establish introduction of the existing unqualified miss. Nested field test has no clearly matching new defective path isolated from earlier scanner/type-resolution behavior. Rejected after bounded tracing; did not force an old scanner rewrite as introduction. Remaining later members not traced after this group’s uncertainty/budget stop.",
+      "source_attempt_reason_verbatim": "Examined first three stable members: unqualified tuple-pattern inverse hits, shadow/ambiguity control, nested struct initializer field ownership. Marker names561247, which really is a multi-defect fix/regression commit. Missing tuple handling predates aa49f\u2019s tree-sitter rewrite (the replaced regex also recognized scoped uses only); fc2a adds enum-aware associated roles but does not establish introduction of the existing unqualified miss. Nested field test has no clearly matching new defective path isolated from earlier scanner/type-resolution behavior. Rejected after bounded tracing; did not force an old scanner rewrite as introduction. Remaining later members not traced after this group\u2019s uncertainty/budget stop.",
       "source_attempt_traced_intros_verbatim": [
         "aa49f37bb86c6971038f57a22583eb1036001b97",
         "fc2a4cffdfe13d56ed2c772ce88c2f55a0b7c9ba",
@@ -2129,7 +2129,7 @@
       "qualified": false,
       "primary_spec_failure": "unconfirmed_attribution_or_exposing_boundary",
       "secondary_reason_flags": [],
-      "decisive_reason_verbatim": "Marker’s real lifecycle regression is added in3d92e963 (not marker/tag introduction20ecc). Lifecycle plan documents losing overlay publication while carrying preparation evidence and later republishing only proven unchanged inputs.48a5e74 adds November evidence carry; older lifecycle/runtime support is in dc0ba96. Cannot establish when absent publication first became a visible complete-not_found instead of a later async refresh/activation problem. No bounded introducing/exposing series established, so do not blame old runtime default construction.",
+      "decisive_reason_verbatim": "Marker\u2019s real lifecycle regression is added in3d92e963 (not marker/tag introduction20ecc). Lifecycle plan documents losing overlay publication while carrying preparation evidence and later republishing only proven unchanged inputs.48a5e74 adds November evidence carry; older lifecycle/runtime support is in dc0ba96. Cannot establish when absent publication first became a visible complete-not_found instead of a later async refresh/activation problem. No bounded introducing/exposing series established, so do not blame old runtime default construction.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-037-048/attempts.jsonl",
@@ -2138,7 +2138,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "attribution-uncertain",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "Marker’s real lifecycle regression is added in3d92e963 (not marker/tag introduction20ecc). Lifecycle plan documents losing overlay publication while carrying preparation evidence and later republishing only proven unchanged inputs.48a5e74 adds November evidence carry; older lifecycle/runtime support is in dc0ba96. Cannot establish when absent publication first became a visible complete-not_found instead of a later async refresh/activation problem. No bounded introducing/exposing series established, so do not blame old runtime default construction.",
+      "source_attempt_reason_verbatim": "Marker\u2019s real lifecycle regression is added in3d92e963 (not marker/tag introduction20ecc). Lifecycle plan documents losing overlay publication while carrying preparation evidence and later republishing only proven unchanged inputs.48a5e74 adds November evidence carry; older lifecycle/runtime support is in dc0ba96. Cannot establish when absent publication first became a visible complete-not_found instead of a later async refresh/activation problem. No bounded introducing/exposing series established, so do not blame old runtime default construction.",
       "source_attempt_traced_intros_verbatim": [
         "dc0ba96f220bf0066892f98a6757a4c96d38335f",
         "48a5e74b5ab944907a3e16fbd2946e4fe8c845b7"
@@ -2208,7 +2208,7 @@
         "not_product_behavior",
         "unconfirmed_attribution_or_exposing_boundary"
       ],
-      "decisive_reason_verbatim": "First marker’s frozen relay test is added by01094c after7ef48c introduced precise copy-return support. Earlier b228cf explicitly says C++ class/template/deduced by-value returns retain conservative gaps; d8763 also documents typed incompleteness outside proved operations. Thus the unknown class-return capability is preflagged at those exposure boundaries. Second marker is an independent-storage assurance test added by01094c without changing production semantics (its external.rs changes are test helpers/cases); no actual aliasing defect/fix introduction was established. Both members excluded.",
+      "decisive_reason_verbatim": "First marker\u2019s frozen relay test is added by01094c after7ef48c introduced precise copy-return support. Earlier b228cf explicitly says C++ class/template/deduced by-value returns retain conservative gaps; d8763 also documents typed incompleteness outside proved operations. Thus the unknown class-return capability is preflagged at those exposure boundaries. Second marker is an independent-storage assurance test added by01094c without changing production semantics (its external.rs changes are test helpers/cases); no actual aliasing defect/fix introduction was established. Both members excluded.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-037-048/attempts.jsonl",
@@ -2217,7 +2217,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "preflagged-or-assurance-only",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "First marker’s frozen relay test is added by01094c after7ef48c introduced precise copy-return support. Earlier b228cf explicitly says C++ class/template/deduced by-value returns retain conservative gaps; d8763 also documents typed incompleteness outside proved operations. Thus the unknown class-return capability is preflagged at those exposure boundaries. Second marker is an independent-storage assurance test added by01094c without changing production semantics (its external.rs changes are test helpers/cases); no actual aliasing defect/fix introduction was established. Both members excluded.",
+      "source_attempt_reason_verbatim": "First marker\u2019s frozen relay test is added by01094c after7ef48c introduced precise copy-return support. Earlier b228cf explicitly says C++ class/template/deduced by-value returns retain conservative gaps; d8763 also documents typed incompleteness outside proved operations. Thus the unknown class-return capability is preflagged at those exposure boundaries. Second marker is an independent-storage assurance test added by01094c without changing production semantics (its external.rs changes are test helpers/cases); no actual aliasing defect/fix introduction was established. Both members excluded.",
       "source_attempt_traced_intros_verbatim": [
         "b228cf9869b952f47bb84bfdf31962d4edbcb40a",
         "d8763ec201f9eb3acc20eb77335e49d05e8db8f8",
@@ -2243,7 +2243,7 @@
       "secondary_reason_flags": [
         "cutoff"
       ],
-      "decisive_reason_verbatim": "Fix4b86bfa excludes configured semantic-pack catalog WAL/directory writes from watcher deltas. The visible pending-warm failure depends on invalidating activation after any such delta;7511100’s scoped stale-ecosystem refresh (Nov5) and c651684’s refresh coalescing (Nov4) are later prerequisites. Older AnalyzerOwnedPaths cache-only classification alone does not establish this runtime failure. No pre-cutoff introducing/exposing change proven; reject rather than labeling an old watcher helper the introduction.",
+      "decisive_reason_verbatim": "Fix4b86bfa excludes configured semantic-pack catalog WAL/directory writes from watcher deltas. The visible pending-warm failure depends on invalidating activation after any such delta;7511100\u2019s scoped stale-ecosystem refresh (Nov5) and c651684\u2019s refresh coalescing (Nov4) are later prerequisites. Older AnalyzerOwnedPaths cache-only classification alone does not establish this runtime failure. No pre-cutoff introducing/exposing change proven; reject rather than labeling an old watcher helper the introduction.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-037-048/attempts.jsonl",
@@ -2252,7 +2252,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "exposing-boundary-uncertain",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "Fix4b86bfa excludes configured semantic-pack catalog WAL/directory writes from watcher deltas. The visible pending-warm failure depends on invalidating activation after any such delta;7511100’s scoped stale-ecosystem refresh (Nov5) and c651684’s refresh coalescing (Nov4) are later prerequisites. Older AnalyzerOwnedPaths cache-only classification alone does not establish this runtime failure. No pre-cutoff introducing/exposing change proven; reject rather than labeling an old watcher helper the introduction.",
+      "source_attempt_reason_verbatim": "Fix4b86bfa excludes configured semantic-pack catalog WAL/directory writes from watcher deltas. The visible pending-warm failure depends on invalidating activation after any such delta;7511100\u2019s scoped stale-ecosystem refresh (Nov5) and c651684\u2019s refresh coalescing (Nov4) are later prerequisites. Older AnalyzerOwnedPaths cache-only classification alone does not establish this runtime failure. No pre-cutoff introducing/exposing change proven; reject rather than labeling an old watcher helper the introduction.",
       "source_attempt_traced_intros_verbatim": [
         "c651684701d9ea74aa37572c0b4708dc75a28460",
         "7511100cc7852ea642c89d6d73a56b1e69d3527e"
@@ -5643,7 +5643,7 @@
       "qualified": false,
       "primary_spec_failure": "cutoff",
       "secondary_reason_flags": [],
-      "decisive_reason_verbatim": "The first two markers pin bounded membership certification added by80d3/8bd7 and refactored in e0b090. All are Nov6–7. Third marker is prefix replay of depth answers introduced853aed on Nov7. Exact fixes69e050 are post-cutoff too; older generic caller-inventory helpers are not these exposing changes.",
+      "decisive_reason_verbatim": "The first two markers pin bounded membership certification added by80d3/8bd7 and refactored in e0b090. All are Nov6\u20137. Third marker is prefix replay of depth answers introduced853aed on Nov7. Exact fixes69e050 are post-cutoff too; older generic caller-inventory helpers are not these exposing changes.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-121-132/attempts.jsonl",
@@ -5652,7 +5652,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "post-cutoff",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "The first two markers pin bounded membership certification added by80d3/8bd7 and refactored in e0b090. All are Nov6–7. Third marker is prefix replay of depth answers introduced853aed on Nov7. Exact fixes69e050 are post-cutoff too; older generic caller-inventory helpers are not these exposing changes.",
+      "source_attempt_reason_verbatim": "The first two markers pin bounded membership certification added by80d3/8bd7 and refactored in e0b090. All are Nov6\u20137. Third marker is prefix replay of depth answers introduced853aed on Nov7. Exact fixes69e050 are post-cutoff too; older generic caller-inventory helpers are not these exposing changes.",
       "source_attempt_traced_intros_verbatim": [
         "80d3ed76dc51e00251962e4ae14e0522d890ff7e",
         "8bd7ac4470bf243be6d4a0fbac3af5bd9a23d2ff",
@@ -5740,7 +5740,7 @@
         "audit": "audit-groups-122-125.json",
         "field_overrides": {
           "trigger": "Use the intro-supported Java provider with a descendant/member-family walk truncated by the shared4096-visit budget. Keep the concrete target in a small separately materialized file and widening disabled. The unproven family is reported as Some(empty); new concrete discharge treats it as proof of no override. Do not rely on the later C# unindexed-ancestor test as intro-era C# exposure.",
-          "notes": "Attribution deliberately uses the new discharge consumer f5cf77, not the older helper305fc4/5d2a883. Actual fixa645655 adds C# unproven-family regression; first canonical marker’s truncated-descendant regression is added by4b33278 after directional completeness was refined. Both pin this unknown-versus-empty proof defect. Actual a6456555 introduces the C# three-state proof regression; canonical Java/Kotlin truncated-descendant directionality pin lands later. The intro witness here is Java truncation and was statically traced, not executed."
+          "notes": "Attribution deliberately uses the new discharge consumer f5cf77, not the older helper305fc4/5d2a883. Actual fixa645655 adds C# unproven-family regression; first canonical marker\u2019s truncated-descendant regression is added by4b33278 after directional completeness was refined. Both pin this unknown-versus-empty proof defect. Actual a6456555 introduces the C# three-state proof regression; canonical Java/Kotlin truncated-descendant directionality pin lands later. The intro witness here is Java truncation and was statically traced, not executed."
         }
       },
       "markers_examined_verbatim": [
@@ -5860,7 +5860,7 @@
       "qualified": false,
       "primary_spec_failure": "preflagged_or_declared_limitation",
       "secondary_reason_flags": [],
-      "decisive_reason_verbatim": "The rejected forwards-only owner behavior originates in2f34151. Its commit message explicitly states that forwards-only evidence remains ambiguous, the limitation this group’s fix removes. All four markers concern that same unique-direct-forward owner family; arity checks are controls. Cannot use an older parent helper or ignore the explicit limitation to qualify the case.",
+      "decisive_reason_verbatim": "The rejected forwards-only owner behavior originates in2f34151. Its commit message explicitly states that forwards-only evidence remains ambiguous, the limitation this group\u2019s fix removes. All four markers concern that same unique-direct-forward owner family; arity checks are controls. Cannot use an older parent helper or ignore the explicit limitation to qualify the case.",
       "decisive_reason_source": "source attempt",
       "attempt_record": {
         "path": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/groups-121-132/attempts.jsonl",
@@ -5869,7 +5869,7 @@
       "source_attempt_status_verbatim": "rejected",
       "source_attempt_disposition_verbatim": "preflagged",
       "source_attempt_reason_code_verbatim": null,
-      "source_attempt_reason_verbatim": "The rejected forwards-only owner behavior originates in2f34151. Its commit message explicitly states that forwards-only evidence remains ambiguous, the limitation this group’s fix removes. All four markers concern that same unique-direct-forward owner family; arity checks are controls. Cannot use an older parent helper or ignore the explicit limitation to qualify the case.",
+      "source_attempt_reason_verbatim": "The rejected forwards-only owner behavior originates in2f34151. Its commit message explicitly states that forwards-only evidence remains ambiguous, the limitation this group\u2019s fix removes. All four markers concern that same unique-direct-forward owner family; arity checks are controls. Cannot use an older parent helper or ignore the explicit limitation to qualify the case.",
       "source_attempt_traced_intros_verbatim": [
         "2f34151bec93ab645c8c2f6cb33a9f9452203ad4"
       ],
@@ -6047,7 +6047,7 @@
       "explicit_unattempted": 7,
       "unattempted_with_preliminary_intro_entries": 5,
       "included_in_final_prefix_yield": false,
-      "caution": "These extra source-wave entries are preparation overhead. Raw proposals are not declared finally qualified. Deferred and unattempted entries are not failures; preliminary SHAs in an unattempted record do not establish completed tracing. No assertion about unrecorded positions169–4168.",
+      "caution": "These extra source-wave entries are preparation overhead. Raw proposals are not declared finally qualified. Deferred and unattempted entries are not failures; preliminary SHAs in an unattempted record do not establish completed tracing. No assertion about unrecorded positions169\u20134168.",
       "records_detail": [
         {
           "selection_position": 128,
@@ -6363,7 +6363,7 @@
           "group_key": "issue:4627",
           "status_verbatim": "accepted",
           "disposition_verbatim": "confirmed",
-          "reason_verbatim": "The first group marker concerns the independently discovered Python startup repair, although the #4627 issue body primarily concerns stub closure; the group’s stable first qualifying marker is used as instructed. Attribution is specifically the newly added overload-metadata rescan in 23a2512cf13. Subsequent 54e463f18fd adds source-declaration-link cleanup, and f4495e5c7c6 changes replacement ownership; do not claim they first introduced this scan or that every extraction cost began in 23a2512cf13. Fix eebc18c0044 adds membership checks and retains the existing 10,000-function MCP fixture/deadline/assertions; its message records unmodified-master budget failure and a sampled extraction stack in unconditional retain. 4540671012d only corrects the Hard-won annotation format. No new timing run was performed.",
+          "reason_verbatim": "The first group marker concerns the independently discovered Python startup repair, although the #4627 issue body primarily concerns stub closure; the group\u2019s stable first qualifying marker is used as instructed. Attribution is specifically the newly added overload-metadata rescan in 23a2512cf13. Subsequent 54e463f18fd adds source-declaration-link cleanup, and f4495e5c7c6 changes replacement ownership; do not claim they first introduced this scan or that every extraction cost began in 23a2512cf13. Fix eebc18c0044 adds membership checks and retains the existing 10,000-function MCP fixture/deadline/assertions; its message records unmodified-master budget failure and a sampled extraction stack in unconditional retain. 4540671012d only corrects the Hard-won annotation format. No new timing run was performed.",
           "traced_intros_verbatim": [
             "23a2512cf134393d961bf978fed0886b0f5da533",
             "54e463f18fd450544b21a955bf21d85e4d870190",
@@ -6788,10 +6788,10 @@
     },
     "bifrost_registered_ordinary_40": {
       "n": 40,
-      "median_changed_lines": 191.5,
-      "mean_changed_lines": 361.775,
-      "minimum_changed_lines": 95,
-      "maximum_changed_lines": 1400,
+      "median_changed_lines": 387.0,
+      "mean_changed_lines": 475.725,
+      "minimum_changed_lines": 91,
+      "maximum_changed_lines": 1473,
       "at_most_1500": 40,
       "over_1500": 0,
       "sizes": [
@@ -6800,160 +6800,160 @@
           "changed_lines": 208
         },
         {
-          "id": "diff-ca1c726ed2",
-          "changed_lines": 1022
+          "id": "diff-5febdb1c44",
+          "changed_lines": 202
         },
         {
-          "id": "diff-03646ad1d7",
-          "changed_lines": 563
+          "id": "diff-95655a5e97",
+          "changed_lines": 750
         },
         {
-          "id": "diff-194d81177c",
-          "changed_lines": 419
+          "id": "diff-6449f901ba",
+          "changed_lines": 455
         },
         {
-          "id": "diff-7fd434e94d",
-          "changed_lines": 151
+          "id": "diff-5e17ecf53c",
+          "changed_lines": 346
         },
         {
-          "id": "diff-51cdb6dd00",
+          "id": "diff-2eaec0a7ad",
+          "changed_lines": 167
+        },
+        {
+          "id": "diff-63713569c1",
+          "changed_lines": 637
+        },
+        {
+          "id": "diff-bb39a5fd49",
+          "changed_lines": 175
+        },
+        {
+          "id": "diff-9f61b39391",
+          "changed_lines": 637
+        },
+        {
+          "id": "diff-c9cd4a27f9",
+          "changed_lines": 345
+        },
+        {
+          "id": "diff-b58235b247",
+          "changed_lines": 858
+        },
+        {
+          "id": "diff-a75a035026",
+          "changed_lines": 417
+        },
+        {
+          "id": "diff-b607037341",
+          "changed_lines": 334
+        },
+        {
+          "id": "diff-fdcd0552e9",
+          "changed_lines": 457
+        },
+        {
+          "id": "diff-0041fe831a",
+          "changed_lines": 493
+        },
+        {
+          "id": "diff-4d3aaeb3d1",
+          "changed_lines": 250
+        },
+        {
+          "id": "diff-1cfbe59c5b",
+          "changed_lines": 1473
+        },
+        {
+          "id": "diff-695a400f18",
+          "changed_lines": 308
+        },
+        {
+          "id": "diff-22207e44f0",
+          "changed_lines": 788
+        },
+        {
+          "id": "diff-57069dc4f7",
+          "changed_lines": 377
+        },
+        {
+          "id": "diff-df5fb945bf",
+          "changed_lines": 384
+        },
+        {
+          "id": "diff-0dc1b2afef",
           "changed_lines": 174
         },
         {
-          "id": "diff-8bae2bbe3a",
-          "changed_lines": 172
+          "id": "diff-43823779fb",
+          "changed_lines": 97
         },
         {
-          "id": "diff-81a1c9a14d",
-          "changed_lines": 876
+          "id": "diff-378bd893ed",
+          "changed_lines": 1015
         },
         {
-          "id": "diff-27d88994e9",
-          "changed_lines": 191
-        },
-        {
-          "id": "diff-c5e268e6dd",
-          "changed_lines": 150
-        },
-        {
-          "id": "diff-2cd4162415",
-          "changed_lines": 152
-        },
-        {
-          "id": "diff-2a7412b244",
-          "changed_lines": 184
-        },
-        {
-          "id": "diff-dd379cae10",
-          "changed_lines": 467
-        },
-        {
-          "id": "diff-2e1e53294e",
-          "changed_lines": 806
-        },
-        {
-          "id": "diff-add98826b8",
-          "changed_lines": 805
-        },
-        {
-          "id": "diff-b4987fa569",
-          "changed_lines": 845
-        },
-        {
-          "id": "diff-41050dcbd4",
-          "changed_lines": 231
-        },
-        {
-          "id": "diff-8917fa7406",
-          "changed_lines": 191
-        },
-        {
-          "id": "diff-14140b9058",
-          "changed_lines": 166
-        },
-        {
-          "id": "diff-77311cbd16",
-          "changed_lines": 487
-        },
-        {
-          "id": "diff-f9a13ce129",
-          "changed_lines": 181
-        },
-        {
-          "id": "diff-ab2e2f61ff",
-          "changed_lines": 186
-        },
-        {
-          "id": "diff-97a2478b0a",
-          "changed_lines": 277
-        },
-        {
-          "id": "diff-827f6c8c5f",
-          "changed_lines": 192
-        },
-        {
-          "id": "diff-602663f052",
+          "id": "diff-5053bc5bea",
           "changed_lines": 182
         },
         {
-          "id": "diff-9f85fb65ad",
-          "changed_lines": 109
+          "id": "diff-c2e0ac6264",
+          "changed_lines": 1115
         },
         {
-          "id": "diff-2bb32bb939",
-          "changed_lines": 1400
+          "id": "diff-9dad3f2c71",
+          "changed_lines": 450
         },
         {
-          "id": "diff-dbc72149f3",
-          "changed_lines": 188
+          "id": "diff-62d65b4fab",
+          "changed_lines": 860
         },
         {
-          "id": "diff-3b043cbf34",
-          "changed_lines": 161
+          "id": "diff-d3b5598051",
+          "changed_lines": 158
         },
         {
-          "id": "diff-9dd032152e",
-          "changed_lines": 95
+          "id": "diff-4a12c7dafa",
+          "changed_lines": 490
         },
         {
-          "id": "diff-160effc01b",
-          "changed_lines": 199
+          "id": "diff-a3b59a9183",
+          "changed_lines": 91
         },
         {
-          "id": "diff-f3f1d0c3da",
-          "changed_lines": 98
+          "id": "diff-43553e0d35",
+          "changed_lines": 206
         },
         {
-          "id": "diff-5cbc90d2bf",
-          "changed_lines": 148
+          "id": "diff-bb4addf48b",
+          "changed_lines": 890
         },
         {
-          "id": "diff-548c895d28",
-          "changed_lines": 474
+          "id": "diff-8a51f05e0a",
+          "changed_lines": 118
         },
         {
-          "id": "diff-0adcd85d49",
-          "changed_lines": 712
+          "id": "diff-8df49fdb43",
+          "changed_lines": 264
         },
         {
-          "id": "diff-d9d54ffd1e",
-          "changed_lines": 298
+          "id": "diff-b4dc5c62d0",
+          "changed_lines": 557
         },
         {
-          "id": "diff-45dae8f1bd",
-          "changed_lines": 128
+          "id": "diff-5c3a37983d",
+          "changed_lines": 390
         },
         {
-          "id": "diff-ba96fda19b",
-          "changed_lines": 348
+          "id": "diff-1c0f689be1",
+          "changed_lines": 898
         },
         {
-          "id": "diff-b6523f3f9b",
-          "changed_lines": 679
+          "id": "diff-27a65d6991",
+          "changed_lines": 920
         },
         {
-          "id": "diff-0549477459",
-          "changed_lines": 156
+          "id": "diff-7e35e90ce9",
+          "changed_lines": 93
         }
       ]
     },
@@ -7353,8 +7353,13 @@
     "/mnt/optane/review-arms-bifrost-20261116/corpus-build/issues-049-060/attempts.jsonl": "2eb660c6a0693600a65259daf3511f773d1a14d9cc9ca55ead09db6f03919de0",
     "/mnt/optane/review-arms-bifrost-20261116/corpus-build/issues-061-072/attempts.jsonl": "05373b3813ffc0999b6b1d42742807b48758e6171909cf29db3a60933230a228",
     "/mnt/optane/review-arms-bifrost-20261116/corpus-build/hard-won/attempts.jsonl": "79fa1d18079b97d6ab5c0e519afad08630ab800c5d779f64afa6a2f241a4623d",
-    "/mnt/optane/review-arms-bifrost-20261116/corpus/diffs.jsonl": "5417b82b4426b2e8e640f6b9c91f99c1e7e2b407b180ce63ecc44aae7f6d2328",
+    "/mnt/optane/review-arms-bifrost-20261116/corpus/diffs.jsonl": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
     "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/corpus/corpus.jsonl": "3daafcf88146d105ec96bd4aca4dfe56900e61cd172c3978969009bcc4980e93",
     "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/corpus/diffs.jsonl": "f1a3c68549215a59091de26048689ac0f8a4a9b0af65ff342cafa4ef400b7cec"
+  },
+  "utc_cutoff_revision": {
+    "revised_at": "2026-11-17T03:41:57.338958+00:00",
+    "reason": "Only ordinary comparison/input hash updated after UTC same-seed redraw; source yield decisions/counts and census remain unchanged.",
+    "correction": "utc-cutoff-correction/correction.json"
   }
 }

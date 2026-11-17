@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "frozen_at": "2026-11-17T03:21:04.968360+00:00",
-  "milestone": "M1 corpus and quota-amended census only",
+  "frozen_at": "2026-11-17T03:41:57.338958+00:00",
+  "milestone": "M1 corpus and quota-amended census, controls corrected to strict UTC before arms",
   "repository": "BrokkAi/bifrost-dev",
   "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
   "known_bug_diffs": 30,
@@ -31,12 +31,12 @@
       "bytes": 139280
     },
     "corpus/diffs.jsonl": {
-      "sha256": "5417b82b4426b2e8e640f6b9c91f99c1e7e2b407b180ce63ecc44aae7f6d2328",
-      "bytes": 11641
+      "sha256": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
+      "bytes": 11595
     },
     "corpus/selection-freeze.json": {
-      "sha256": "95dbe2ff38023e80d65c359db7cce2b6f1ad07bac3d5174e4c37c1a40f3bf661",
-      "bytes": 1709
+      "sha256": "b85cbfb436906936d05889c467e7629471cac4f3e7a9a502214d487b65c7951b",
+      "bytes": 2124
     },
     "census-results/missing-facts.jsonl": {
       "sha256": "cec120df43bc890efbfbd5fee79fc2236ff654e1249b3dcb1f9309c054536089",
@@ -75,8 +75,8 @@
       "bytes": 2140
     },
     "corpus-build/ordinary-draw.json": {
-      "sha256": "4b5b25ab42b953d62ae3e2e1450a2b96de2b4dc9fe98240da72fe4ac57a82e5f",
-      "bytes": 1037
+      "sha256": "f84a47e325e9009625bb9ec294f4b8dcb6df43f693b49a9d1ec148d305052a9d",
+      "bytes": 1351
     },
     "corpus-build/hardwon-draw.json": {
       "sha256": "4b0320829553d72574eb76e82a763e379f26ae6ee99f78ddc3e03884e0e264f5",
@@ -95,12 +95,12 @@
       "bytes": 4159667
     },
     "corpus-build/yield-report.json": {
-      "sha256": "728675bd27f194f03b2312ecdf4aaa1a44af46255cfd1dc065b363fab2dbebb6",
-      "bytes": 458166
+      "sha256": "7f6b975820366d9d4bba371418295e501671d1b2b553583296868e8a1d79d08f",
+      "bytes": 458554
     },
     "corpus-build/yield-report.md": {
-      "sha256": "a5ea6b9faa5391d1b7e5720a27e47c6d1f73bd765785e6c691235fddc9c166cf",
-      "bytes": 107658
+      "sha256": "a792f35407b7ef9df354f42814fe74717cff88781a13fb6aba84f9900ade15c2",
+      "bytes": 107918
     },
     "corpus-build/parent-acceptance.json": {
       "sha256": "e907acad54757b3dee1240e1c77f31fc1f6fdadc8d128907b634a2663ccaed9e",
@@ -131,15 +131,114 @@
       "bytes": 77407
     },
     "REPORT.md": {
-      "sha256": "a2f21fed2fe53e0aa7dac092802afecaa56ee0ea2ec0b73d5553e8011ec439b0",
-      "bytes": 5690
+      "sha256": "880da62edebfc0ee57e4de99581e466850ef84eb6f4b7bd675e0ab3c1a041ff0",
+      "bytes": 6677
+    },
+    "registration/PLAN-bifrost-bugs-after-cutoff-correction.md": {
+      "sha256": "aec8e11eb48fc405b0eff1692e952cee6368f3c87265ffad1760e800b4b7e1c5",
+      "bytes": 7384
+    },
+    "registration/CUTOFF-CORRECTION.md": {
+      "sha256": "417606ffb7cadf7bef081579b3c4e141bf0e876ba60f83a87fd959800cda6103",
+      "bytes": 1109
+    },
+    "registration/selection-registration-after-utc.json": {
+      "sha256": "085a82dbaf634426ffe3143ba3977909b1270c911daee6da2e547e017832c128",
+      "bytes": 10283
+    },
+    "utc-cutoff-correction/correction.json": {
+      "sha256": "73e171da50f4acca7884b46c1210fd3c49cd3d1531ba76207194ecee913d56d7",
+      "bytes": 1387
+    },
+    "utc-cutoff-correction/bifrost-known-utc-audit.json": {
+      "sha256": "420a4082bcba0db6f621af54e95512d0c197aa5493524396145b8791c6fb0ce3",
+      "bytes": 9596
+    },
+    "utc-cutoff-correction/mjolnir-original-utc-audit.json": {
+      "sha256": "a95af0fe85f745ab1dd09f10ade5cc66902a0f6cc6cd2952f70f2bd5873a6a2c",
+      "bytes": 21741
+    },
+    "utc-cutoff-correction/fallback-issue-pool-utc-audit.json": {
+      "sha256": "90c8f4eff1b4b617e3f0790e5130835078efde3ec006fe9f0213295909d4954d",
+      "bytes": 454
+    },
+    "utc-cutoff-correction/redraw-comparison.json": {
+      "sha256": "70515a9292c1f25809ac3e1ae05f65673778065e3482b546eb0d1cd3bc9209c5",
+      "bytes": 53858
+    },
+    "utc-cutoff-correction/redraw-command.json": {
+      "sha256": "b325af8559a4fe608793bbd4d9f5b225a1389215d634431c394580d0d0b290e0",
+      "bytes": 692
+    },
+    "utc-cutoff-correction/verification.json": {
+      "sha256": "17cecd3df4a9d10bea32439009e8583fdc500b06c632066acf55fd2dda30b5b0",
+      "bytes": 7327
+    },
+    "utc-cutoff-correction/pre-correction/FREEZE.json": {
+      "sha256": "43fca4db9602c22ca5666c40bc1787586c441b1ff88066b7668007c1a4d087eb",
+      "bytes": 5618
+    },
+    "utc-cutoff-correction/pre-correction/manifest.json": {
+      "sha256": "fda89b56b90167841b8bb95f8533f3b4c55cf43de31a09d01d43d6abb54c251f",
+      "bytes": 2464
+    },
+    "utc-cutoff-correction/permanent-tests.log": {
+      "sha256": "f15096de36123ec25f6f8950f9e0facf4702243631974b1953752e2bfd87f651",
+      "bytes": 548
+    },
+    "utc-cutoff-correction/final-code-syntax-hashes.json": {
+      "sha256": "5341b19a7a2c50841ce92f3f32275d20b8c569f82b5f789b294d7479039a9f46",
+      "bytes": 706
+    },
+    "utc-cutoff-correction/report.md": {
+      "sha256": "05dbb9834d5131a32b607279baacee9bdb05a95d1a07ab67c90e8a8b9fe373e7",
+      "bytes": 4888
     }
   },
   "shared_harness_code": {
-    "select_diffs.py": "c3e927a6bbaf5f43bac53ee37687d5b1efdb32880e359c786e076bc5b92787cd",
+    "select_diffs.py": "4fbad3fa25381fdd42c7beb3ff3310dc038f0ae6751bac1a4f17531dd1d07858",
     "label_facts.py": "d042b4b811c12ff8e7b81fb56619ec9400a7cd496f1439aceab92292d1ba90e7",
     "verify_driver.py": "02cbc987249ef925be732b46f0caf255475f6cc947566a7961d657fd21da5afc",
-    "corpus/SPEC.md": "516665e762842984f26ba868865972327e89753a745b96197fffce3724cffb45",
-    "label/SPEC.md": "1da9eb2c40b2a42905a12c870d1facf109d816c391c39f247013b3079e0f2502"
+    "corpus/SPEC.md": "410d22c1af2b77a6a9f5bd623b99d3d1e11b2e94fdb90e7ab3594c3c47c123ca",
+    "label/SPEC.md": "1da9eb2c40b2a42905a12c870d1facf109d816c391c39f247013b3079e0f2502",
+    "select_bug_issues.py": "2ff78fd69d21403af5d2cffae8710789dd8ce56ff7e277fe44145db97b30da0a",
+    "cutoff_dates.py": "d1c0eb73d8d9237fd1162e6a889f6357092b2d36612189dcc471ad90d01fc7ad",
+    "test_corpus_cutoff.py": "031d2e827117616226fc6bacde9a71751f5c0b0e080cb698aa8c0b2724e13596"
+  },
+  "original_frozen_at": "2026-11-17T03:21:04.968360+00:00",
+  "cutoff": "2026-11-01T00:00:00Z",
+  "utc_cutoff_correction": {
+    "recorded_at": "2026-11-17T03:41:57.338958+00:00",
+    "reason": "Review found control0549477459 at2026-11-01T01:14:32Z after registered UTC midnight; timezone-free Git argument used host UTC-6. SPEC local-time wording corrected too.",
+    "cutoff": "2026-11-01T00:00:00Z",
+    "strict_before": true,
+    "ordinary_seed": 20261117,
+    "ordinary_eligible_before": 8269,
+    "ordinary_eligible_after": 8230,
+    "ordinary_count": 40,
+    "old_ordinary_sha256": "5417b82b4426b2e8e640f6b9c91f99c1e7e2b407b180ce63ecc44aae7f6d2328",
+    "ordinary_sha256": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
+    "overlap": 1,
+    "removed": 39,
+    "added": 39,
+    "ordinary_changed_lines": {
+      "median": 387.0,
+      "min": 91,
+      "max": 1473
+    },
+    "known_bugs_checked": 30,
+    "known_bugs_changed": 0,
+    "corpus_census_relations_bytes_unchanged": true,
+    "fallback_issues_checked": 887,
+    "fallback_pool_order_unchanged": true,
+    "mjolnir_selected_checked": 70,
+    "mjolnir_affected_window_matches": 0,
+    "mjolnir_frozen_corpus_changed": false,
+    "selection_on_labels": false,
+    "study_brief_reviewer_judge_runs": 0,
+    "previous_freeze_sha256": "43fca4db9602c22ca5666c40bc1787586c441b1ff88066b7668007c1a4d087eb",
+    "historical_archive": "utc-cutoff-correction/pre-correction/",
+    "details": "utc-cutoff-correction/redraw-comparison.json",
+    "registration": "registration/CUTOFF-CORRECTION.md"
   }
 }
