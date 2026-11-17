@@ -135,6 +135,9 @@ impl CompletionRetry {
 enum Completed {
     Executed(StoredDelegationResult, bool),
     Delivered,
+    /// The owner closed during a deferral; the entry stays with the daemon
+    /// that is exiting.
+    Stopped,
     Unaccepted,
     QuotaSources(Vec<crate::quota::QuotaRefreshRequest>),
 }
@@ -266,11 +269,13 @@ async fn run(
                             if let Err(error) = &delivered {
                                 tracing::warn!(parent_session_id = %parent, request_id = %result.result.request_id, %error, "delegation delivery failed; retaining result for retry");
                             }
-                            Ok(Completed::Executed(result, delivered.is_ok()))
+                            Ok(Completed::Executed(result, matches!(delivered, Ok(Delivery::Delivered))))
                         }
                         Job::Deliver(result) => {
-                            deliver_background(&runtime, &parent, result).await?;
-                            Ok(Completed::Delivered)
+                            match deliver_background(&runtime, &parent, result).await? {
+                                Delivery::Delivered => Ok(Completed::Delivered),
+                                Delivery::Stopped => Ok(Completed::Stopped),
+                            }
                         }
                     }
                 });
@@ -373,6 +378,9 @@ async fn run(
                         Ok(Completed::Delivered) => {
                             tracing::debug!(parent_session_id = %id.0, request_id = %id.1, "delegation result delivered");
                             dispatch.delivered(&id, true);
+                        }
+                        Ok(Completed::Stopped) => {
+                            tracing::debug!(parent_session_id = %id.0, request_id = %id.1, "delegation delivery stopped by shutdown");
                         }
                         Ok(Completed::Unaccepted) => dispatch.unaccepted(&id),
                         Ok(Completed::QuotaSources(_)) => {
@@ -673,20 +681,10 @@ async fn deliver_background(
     runtime: &RuntimeState,
     parent: &str,
     stored_result: StoredDelegationResult,
-) -> Result<()> {
-    let admission = runtime
-        .recovery_observer
-        .gate
-        .try_start(
-            parent,
-            crate::recovery_gate::BackgroundWork::DelegationDelivery,
-        )
-        .map_err(|refusal| {
-            anyhow::anyhow!(
-                "delegation delivery deferred by {}",
-                refusal.holders.join(" and ")
-            )
-        })?;
+) -> Result<Delivery> {
+    let Some(admission) = admit_delivery(&runtime.recovery_observer.gate, parent).await else {
+        return Ok(Delivery::Stopped);
+    };
     let handle = runtime.workspace_session_handle(parent).await?;
     deliver(&handle, &admission, stored_result, async {
         if let Err(error) = runtime.reconcile_parent_reports(parent).await {
@@ -697,7 +695,53 @@ async fn deliver_background(
             );
         }
     })
-    .await
+    .await?;
+    Ok(Delivery::Delivered)
+}
+
+/// How a delivery attempt ended when it did not fail.
+enum Delivery {
+    Delivered,
+    /// The gate or the daemon closed while the delivery waited. The next
+    /// daemon rebuilds the delivery from the durable result.
+    Stopped,
+}
+
+/// A refusal is a deferral, not a failure: the delivery waits on the gate's
+/// own publications for the holder to release the session (or for a drain to
+/// lapse) and tries again. It holds no admission while it waits and blocks no
+/// other session's delivery, which runs in its own task. `None` means the
+/// owner closed. Failures are not handled here, so they keep their WARN and
+/// backoff.
+async fn admit_delivery(
+    gate: &Arc<crate::recovery_gate::RecoveryGate>,
+    parent: &str,
+) -> Option<crate::recovery_gate::RecoveryAttempt> {
+    use crate::recovery_gate::{BackgroundWork, RefusalCause};
+    let kind = BackgroundWork::DelegationDelivery;
+    let mut changed = gate.subscribe();
+    let mut deferred_by = None;
+    loop {
+        let refusal = match gate.try_start(parent, kind) {
+            Ok(admission) => return Some(admission),
+            Err(refusal) => refusal,
+        };
+        if deferred_by.as_ref() != Some(&refusal.holders) {
+            tracing::debug!(parent_session_id = parent, holders = %refusal.holders.join(" and "), "delegation delivery deferred");
+            deferred_by = Some(refusal.holders.clone());
+        }
+        let proceed = match refusal.cause {
+            RefusalCause::Closed => false,
+            RefusalCause::DaemonDraining => crate::upgrade::gate().wait_after_draining().await,
+            RefusalCause::SessionHeld => {
+                gate.wait_for_background_release(parent, kind, &mut changed)
+                    .await
+            }
+        };
+        if !proceed {
+            return None;
+        }
+    }
 }
 
 /// Dispatch keeps per-request ownership while foreground Move yields to the
@@ -2146,5 +2190,29 @@ mod tests {
             held.state.park_subagent("child".into()).await.unwrap(),
             ParkOutcome::Busy
         );
+    }
+
+    // Hard-won: #1574: a delivery refused by a holder re-polled every second and
+    // warned each time instead of waiting for the holder's release.
+    #[tokio::test(start_paused = true)]
+    async fn a_delivery_refused_by_a_held_session_waits_for_its_release() {
+        use crate::recovery_gate::{BackgroundWork, RecoveryGate};
+        let gate = Arc::new(RecoveryGate::default());
+        let copy = gate
+            .try_start("parent", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        let other = gate
+            .try_start("other", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        let mut waiting = Box::pin(admit_delivery(&gate, "parent"));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        // Paused time: a retry timer would fire, a publication-driven wait does not.
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(futures::poll!(&mut waiting).is_pending());
+        // Another session's release is not this session's.
+        drop(other);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(copy);
+        assert!(futures::poll!(&mut waiting).is_ready());
     }
 }
