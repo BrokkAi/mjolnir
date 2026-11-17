@@ -443,6 +443,7 @@ fn pane_scope(focus: Focus) -> Scope {
         Focus::Workspaces => Scope::Global,
         Focus::Targets => Scope::Targets,
         Focus::Quota => Scope::Quota,
+        Focus::Notifications => Scope::Notifications,
         Focus::Sessions | Focus::Prompt => Scope::Sessions,
     }
 }

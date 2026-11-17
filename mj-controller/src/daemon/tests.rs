@@ -15362,3 +15362,155 @@ async fn queued_lifecycle_requests_release_client_admission_for_handoff_and_stop
         );
     }
 }
+
+#[tokio::test]
+async fn notification_item_read_crosses_the_daemon_client_boundary() {
+    const NAME: &str = "notification_item_read_crosses_the_daemon_client_boundary";
+    const CHILD: &str = "MJ_TEST_NOTIFICATION_ITEM_READ";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&runtime_test_session(
+        "notification-history",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    ))
+    .unwrap();
+    let mut history = mj_core::state::MaterializedSession::empty("notification-history");
+    history.applied_event_ordinal = 600;
+    history.applied_event_digest = format!("{:064x}", 600);
+    for position in 1..=600 {
+        history.transcript.push(Arc::new(mj_core::state::TranscriptItem {
+            stable_id: format!("reply-{position}"), position,
+            latest_content_event_ordinal: Some(position), created_at_ms: position as i64, last_changed_at_ms: position as i64,
+            body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":format!("Question {position}")}})], streaming: false },
+        }));
+    }
+    crate::database::save_materialized_session(&history).unwrap();
+    let (tail, _) = crate::database::load_materialized_projection_tail("notification-history", 512)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !tail
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "reply-1")
+    );
+    let state = test_runtime_state();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(
+                stream,
+                server_metadata.clone(),
+                Arc::clone(&state),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+    });
+    // Send the legacy action shape without new optional fields, in the
+    // daemon's advertised dialect (as DaemonClient::request does). Reading a
+    // single raw frame proves the reply never entered chunk transport.
+    let mut legacy = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut legacy,
+        &serde_json::json!({
+            "protocol_version": metadata.protocol_version,
+            "request_id": 41,
+            "token": metadata.token.clone(),
+            "action": {"action": "stored_projection_tail", "arguments": {
+                "session_id": "notification-history", "items": 512
+            }}
+        }),
+    )
+    .await
+    .unwrap();
+    let response: ResponseEnvelope = read_frame(&mut legacy).await.unwrap();
+    assert_eq!(response.request_id, 41);
+    let Ok(DaemonReply::StoredProjectionTail(Some(legacy_tail))) = response.result else {
+        panic!("legacy count requests must return an unchunked StoredProjectionTail frame");
+    };
+    assert_eq!(legacy_tail.transcript.first().unwrap().position, 89);
+    assert_eq!(legacy_tail.transcript.last().unwrap().position, 600);
+    drop(legacy);
+    let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+    let StoredTranscriptItem::Found(item) = client
+        .stored_transcript_item("notification-history".into(), "reply-1".into())
+        .await
+        .unwrap()
+    else {
+        panic!("old question must be found outside the tail");
+    };
+    assert_eq!(*item, *history.transcript[0]);
+    assert!(matches!(
+        client
+            .stored_transcript_item("notification-history".into(), "missing".into())
+            .await
+            .unwrap(),
+        StoredTranscriptItem::Missing
+    ));
+    let count_tail = client
+        .stored_projection_tail("notification-history".into(), 512)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(count_tail.transcript.first().unwrap().position, 89);
+    assert_eq!(count_tail.transcript.last().unwrap().position, 600);
+    // A single stored item can exceed the transport frame boundary.
+    let large_text = "x".repeat(MAX_FRAME_BYTES + 128 * 1024);
+    for position in 601..=610 {
+        history.transcript.push(Arc::new(mj_core::state::TranscriptItem {
+            stable_id: format!("reply-{position}"), position,
+            latest_content_event_ordinal: Some(position), created_at_ms: position as i64, last_changed_at_ms: position as i64,
+            body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text", "text": if position == 610 { large_text.clone() } else { format!("Question {position}") }}})], streaming: false },
+        }));
+    }
+    history.applied_event_ordinal = 610;
+    history.applied_event_digest = format!("{:064x}", 610);
+    crate::database::save_materialized_session(&history).unwrap();
+    assert!(
+        serde_json::to_vec(&DaemonReply::StoredTranscriptItem(Some(Box::new(
+            history.transcript.last().unwrap().as_ref().clone()
+        ))))
+        .unwrap()
+        .len()
+            > MAX_FRAME_BYTES
+    );
+    let StoredTranscriptItem::Found(large) = client
+        .stored_transcript_item("notification-history".into(), "reply-610".into())
+        .await
+        .unwrap()
+    else {
+        panic!("large item must be returned");
+    };
+    assert!(large.body == history.transcript.last().unwrap().body);
+    drop(client);
+    let mut old_metadata = metadata;
+    old_metadata.protocol_version = mj_client::daemon::STORED_TRANSCRIPT_READ_PROTOCOL - 1;
+    let mut older = DaemonClient::connect(old_metadata).await.unwrap();
+    assert!(matches!(
+        older
+            .stored_transcript_item("notification-history".into(), "reply-1".into())
+            .await
+            .unwrap(),
+        StoredTranscriptItem::Unsupported
+    ));
+    // No unknown action was sent and no error/reconnect loop was entered.
+    // The frozen management operation still works on the same connection.
+    older.status().await.unwrap();
+    drop(older);
+    server.await.unwrap();
+}

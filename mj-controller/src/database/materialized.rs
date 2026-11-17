@@ -436,6 +436,33 @@ pub fn load_prompt_acceptance(session_id: &str, command_id: &str) -> Result<Opti
 /// Whether the stored projection holds a transcript item with this stable id.
 /// A prompt's item appears when the prompt starts, so this tells a started
 /// prompt from one that was only queued.
+/// Exact primary-key lookup; the runtime tail need not contain this message.
+pub fn load_materialized_transcript_item(
+    session_id: &str,
+    stable_id: &str,
+) -> Result<Option<TranscriptItem>> {
+    let connection = open_reader(&database_path())?;
+    let row = connection.query_row(
+        "SELECT position, latest_content_event_ordinal, created_at_ms, last_changed_at_ms, body_json
+         FROM materialized_transcript_items WHERE session_id=?1 AND stable_id=?2",
+        params![session_id, stable_id],
+        |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<u64>>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?)),
+    ).optional()?;
+    row.map(
+        |(position, latest_content_event_ordinal, created_at_ms, last_changed_at_ms, body)| {
+            Ok(TranscriptItem {
+                stable_id: stable_id.to_owned(),
+                position,
+                latest_content_event_ordinal,
+                created_at_ms,
+                last_changed_at_ms,
+                body: decode_transcript_body(&body, session_id)?,
+            })
+        },
+    )
+    .transpose()
+}
+
 pub fn materialized_transcript_item_exists(session_id: &str, stable_id: &str) -> Result<bool> {
     let connection = open_reader(&database_path())?;
     Ok(connection.query_row(

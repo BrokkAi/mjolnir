@@ -15,9 +15,6 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -29,7 +26,10 @@
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -51,9 +51,6 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -63,9 +60,12 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │ Added runtimes: builder, builder-docker. 2 were left out; Detection results says why. Review │                     │
-│                     │ them, then Save.                                                                             │                     │
-│                     │   Back     Save and Close                                                                    │                     │
+│                     │ them, then Save.                                                                             │  ───────────────────╯
+│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -87,9 +87,6 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -101,7 +98,10 @@ Enter open · / searc                                                           
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
 │                     ╰ ↑/↓ scroll · PgUp/PgDn · Home/End · Esc back ────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -123,9 +123,6 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -135,9 +132,12 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │ Added runtimes: builder, builder-docker. 2 were left out; Detection results says why. Review │                     │
-│                     │ them, then Save.                                                                             │                     │
-│                     │   Back     Save and Close                                                                    │                     │
+│                     │ them, then Save.                                                                             │  ───────────────────╯
+│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -159,9 +159,6 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -173,7 +170,10 @@ Enter open · / searc                                                           
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette

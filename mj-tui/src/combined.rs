@@ -102,6 +102,7 @@ struct CombinedHeights {
     prompt: u16,
     targets: u16,
     quota: u16,
+    notifications: u16,
     footer: u16,
 }
 
@@ -111,6 +112,7 @@ impl CombinedHeights {
             SupportPane::Sessions => self.sessions,
             SupportPane::Targets => self.targets,
             SupportPane::Quota => self.quota,
+            SupportPane::Notifications => self.notifications,
         }
     }
 }
@@ -121,20 +123,21 @@ enum CombinedAllocation {
     TooSmall { required_frame_height: u16 },
 }
 
-/// Divides the frame between the six bands.
+/// Divides the frame between the seven bands.
 ///
 /// Every band starts at its minimum, and the surplus is then spent in a fixed
 /// order: the composer first, because it is where the user is typing; then
 /// workspace growth in the stacked Sessions band; then the one maximized pane;
-/// then Standard Sessions, Targets, and Quota in screen order. The transcript
+/// then Standard Sessions, Targets, Quota and Notifications in screen order. The transcript
 /// takes whatever is left. Focus never participates.
 fn allocate_combined_heights(
     frame_height: u16,
     sessions: PaneBand,
     targets: PaneBand,
     quota: PaneBand,
+    notifications: PaneBand,
     desired_prompt: u16,
-    sizes: [(SupportPane, PaneSize); 3],
+    sizes: [(SupportPane, PaneSize); 4],
 ) -> CombinedAllocation {
     let required = sessions
         .minimum
@@ -142,6 +145,7 @@ fn allocate_combined_heights(
         .saturating_add(PROMPT_MINIMUM)
         .saturating_add(targets.minimum)
         .saturating_add(quota.minimum)
+        .saturating_add(notifications.minimum)
         .saturating_add(FOOTER_HEIGHT);
     if frame_height < required {
         return CombinedAllocation::TooSmall {
@@ -154,6 +158,7 @@ fn allocate_combined_heights(
         prompt: PROMPT_MINIMUM,
         targets: targets.minimum,
         quota: quota.minimum,
+        notifications: notifications.minimum,
         footer: FOOTER_HEIGHT,
     };
     let mut surplus = frame_height.saturating_sub(required);
@@ -187,6 +192,11 @@ fn allocate_combined_heights(
                 grow(&mut heights.targets, targets.full.min(targets.cap), surplus)
             }
             SupportPane::Quota => grow(&mut heights.quota, quota.full.min(quota.cap), surplus),
+            SupportPane::Notifications => grow(
+                &mut heights.notifications,
+                notifications.full.min(notifications.cap),
+                surplus,
+            ),
         };
         if let Some((pane, _)) = sizes.iter().find(|(_, size)| *size == PaneSize::Maximized) {
             grow_pane(*pane, &mut surplus);
@@ -207,16 +217,16 @@ fn allocate_combined_heights(
 /// the frame.
 fn maximized_pane_is_effective(
     frame_height: u16,
-    dimensions: [(SupportPane, PaneDimensions); 3],
+    dimensions: [(SupportPane, PaneDimensions); 4],
     desired_prompt: u16,
-    sizes: [(SupportPane, PaneSize); 3],
-) -> [(SupportPane, bool); 3] {
+    sizes: [(SupportPane, PaneSize); 4],
+) -> [(SupportPane, bool); 4] {
     let bands = dimensions;
     std::array::from_fn(|index| {
         let (pane, _) = bands[index];
         let standard_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Standard);
         let maximum_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Maximized);
-        let bands_for = |sizes: [(SupportPane, PaneSize); 3]| {
+        let bands_for = |sizes: [(SupportPane, PaneSize); 4]| {
             std::array::from_fn(|index| {
                 if index == 0 {
                     return PaneBand {
@@ -235,14 +245,15 @@ fn maximized_pane_is_effective(
                 )
             })
         };
-        let standard_bands: [PaneBand; 3] = bands_for(standard_sizes);
-        let maximum_bands: [PaneBand; 3] = bands_for(maximum_sizes);
+        let standard_bands: [PaneBand; 4] = bands_for(standard_sizes);
+        let maximum_bands: [PaneBand; 4] = bands_for(maximum_sizes);
         let effective = match (
             allocate_combined_heights(
                 frame_height,
                 standard_bands[0],
                 standard_bands[1],
                 standard_bands[2],
+                standard_bands[3],
                 desired_prompt,
                 standard_sizes,
             ),
@@ -251,6 +262,7 @@ fn maximized_pane_is_effective(
                 maximum_bands[0],
                 maximum_bands[1],
                 maximum_bands[2],
+                maximum_bands[3],
                 desired_prompt,
                 maximum_sizes,
             ),
@@ -267,10 +279,10 @@ fn maximized_pane_is_effective(
 }
 
 fn sizes_with_pane_size(
-    sizes: [(SupportPane, PaneSize); 3],
+    sizes: [(SupportPane, PaneSize); 4],
     pane: SupportPane,
     size: PaneSize,
-) -> [(SupportPane, PaneSize); 3] {
+) -> [(SupportPane, PaneSize); 4] {
     let mut adjusted = sizes;
     if size == PaneSize::Maximized {
         for (candidate, candidate_size) in &mut adjusted {
@@ -434,6 +446,7 @@ fn render_combined_themed(
         }
     }
     dashboard.pane_areas = None;
+    dashboard.notifications_area = None;
     dashboard.clear_workspace_tab_areas();
     dashboard.workspace_pane_area = None;
     dashboard.session_row_areas.clear();
@@ -621,10 +634,33 @@ fn render_combined_themed(
             dashboard.pane_size(SupportPane::Targets),
         ),
         (SupportPane::Quota, dashboard.pane_size(SupportPane::Quota)),
+        (
+            SupportPane::Notifications,
+            dashboard.pane_size(SupportPane::Notifications),
+        ),
     ];
     // The Sessions pane is as wide as the sidebar; its rows are laid out
     // once, for both the sizes asked here and the draw below.
     let sessions_layout = SessionsLayout::new(dashboard, sidebar_area.width.saturating_sub(2));
+    let notification_width = if support_panes_fit(content_area.width, dashboard) {
+        content_area.width
+    } else {
+        area.width
+    };
+    let notification_entries = dashboard.notification_entries();
+    let notification_text = notification_entries
+        .first()
+        .map_or_else(String::new, |entry| {
+            dashboard.notification_card_text(&entry.session_id, entry.level)
+        });
+    let notification_full = notification_entries.first().map_or(PANE_MINIMUM, |entry| {
+        let lines = Paragraph::new(notification_text.as_str())
+            .wrap(Wrap { trim: false })
+            .line_count(notification_width.saturating_sub(2).max(1));
+        u16::try_from(lines)
+            .unwrap_or(u16::MAX)
+            .saturating_add(4 + u16::from(entry.target.is_none()))
+    });
     let dimensions = [
         (
             SupportPane::Sessions,
@@ -655,8 +691,16 @@ fn render_combined_themed(
                 standard_cap: area.height / 4,
             },
         ),
+        (
+            SupportPane::Notifications,
+            PaneDimensions {
+                minimized: SUMMARY_ROW,
+                full: notification_full,
+                standard_cap: area.height / 4,
+            },
+        ),
     ];
-    let bands: [PaneBand; 3] = std::array::from_fn(|index| {
+    let bands: [PaneBand; 4] = std::array::from_fn(|index| {
         let (_, dimensions) = dimensions[index];
         sized_band(
             sizes[index].1,
@@ -693,8 +737,15 @@ fn render_combined_themed(
         && sessions_sidebar_width(area.width, PaneSize::Maximized)
             > sessions_sidebar_width(area.width, PaneSize::Standard);
     dashboard.set_pane_maximize_enabled(maximize_enabled);
-    let allocation =
-        allocate_combined_heights(area.height, sessions, targets, quota, desired_prompt, sizes);
+    let allocation = allocate_combined_heights(
+        area.height,
+        sessions,
+        targets,
+        quota,
+        bands[3],
+        desired_prompt,
+        sizes,
+    );
     let heights = match allocation {
         CombinedAllocation::Fits(heights) => heights,
         CombinedAllocation::TooSmall {
@@ -707,9 +758,9 @@ fn render_combined_themed(
                 TerminalSizeRequirement::Height(required_frame_height),
             );
             dashboard.end_surface_frame();
-            if dashboard.away_dialog().is_some() {
-                render_modal(frame, area, dashboard);
-            }
+            // A support-pane minimum must not prevent the user from using
+            // an already open dialog that fits this terminal.
+            render_modal(frame, area, dashboard);
             return Vec::new();
         }
     };
@@ -805,18 +856,31 @@ fn render_combined_themed(
         } else {
             area.width
         },
-        heights.targets.saturating_add(heights.quota),
+        heights
+            .targets
+            .saturating_add(heights.quota)
+            .saturating_add(heights.notifications),
     );
     let support_bands = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(heights.targets),
             Constraint::Length(heights.quota),
+            Constraint::Length(heights.notifications),
         ])
         .split(support_area);
     let (targets_area, quota_area) = (support_bands[0], support_bands[1]);
     render_workspace_tabs(frame, workspace_area, dashboard);
     let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+    let notifications_area = support_bands[2];
+    dashboard.notifications_area = Some(notifications_area);
+    crate::notifications_pane::render(
+        frame,
+        notifications_area,
+        dashboard,
+        &notification_entries,
+        notification_text,
+    );
     dashboard.pane_areas = Some([sessions_area, targets_area, quota_area]);
     for (pane, pane_area) in [
         (SupportPane::Sessions, sessions_area),
@@ -2203,17 +2267,19 @@ mod tests {
             fixed(4),
             fixed(1),
             fixed(1),
+            fixed(1),
             3,
             [
                 (SupportPane::Sessions, PaneSize::Minimized),
                 (SupportPane::Targets, PaneSize::Minimized),
                 (SupportPane::Quota, PaneSize::Minimized),
+                (SupportPane::Notifications, PaneSize::Minimized),
             ],
         );
         assert_eq!(
             result,
             CombinedAllocation::TooSmall {
-                required_frame_height: 13,
+                required_frame_height: 14,
             }
         );
     }
@@ -2457,10 +2523,17 @@ mod tests {
             (SupportPane::Sessions, PaneSize::Standard),
             (SupportPane::Targets, PaneSize::Maximized),
             (SupportPane::Quota, PaneSize::Standard),
+            (SupportPane::Notifications, PaneSize::Standard),
         ];
-        let CombinedAllocation::Fits(heights) =
-            allocate_combined_heights(40, band(12, 10), band(15, 15), band(8, 8), 6, sizes)
-        else {
+        let CombinedAllocation::Fits(heights) = allocate_combined_heights(
+            40,
+            band(12, 10),
+            band(15, 15),
+            band(8, 8),
+            band(3, 3),
+            6,
+            sizes,
+        ) else {
             panic!("40 rows should fit");
         };
         writeln!(
@@ -2496,7 +2569,7 @@ mod tests {
             }
         }
 
-        for (width, height) in [(70, 22), (80, 13), (160, 13)] {
+        for (width, height) in [(70, 25), (80, 16), (160, 16)] {
             let mut dashboard = dashboard_with_session(running_session());
             dashboard.set_workspace_names(
                 (0..48)

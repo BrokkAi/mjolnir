@@ -22,6 +22,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+/// A single-message read has a terminal unsupported result on older daemons.
+#[derive(Debug)]
+pub enum StoredTranscriptItem {
+    Found(Box<TranscriptItem>),
+    Missing,
+    Unsupported,
+}
+
 /// Durable terminal results for caller-owned startup prompt identities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -1026,11 +1034,15 @@ pub enum DaemonAction {
     },
     /// Mount history and remembered container sizes.
     StoredSessionMetadata,
-    /// The stored tail of a session's projection, at most `items` transcript
-    /// entries, or `None` when the session has no stored projection.
+    /// The last `items` entries of a stored projection.
     StoredProjectionTail {
         session_id: String,
         items: usize,
+    },
+    /// One stored transcript item, addressed by its stable identity.
+    StoredTranscriptItem {
+        session_id: String,
+        stable_id: String,
     },
     /// The stored projection summary of one session.
     StoredSessionSummary {
@@ -1378,11 +1390,13 @@ pub enum DaemonReply {
     DashboardStartup(Box<DashboardStartup>),
     WorkspaceLayouts(WorkspaceLayouts),
     StoredSessionMetadata(StoredSessionMetadata),
+    /// Legacy count-mode reply: older clients require this to stay unchunked.
     StoredProjectionTail(
         #[serde(serialize_with = "crate::runtime_feed::serialize_client_projection")]
         Option<Box<MaterializedSession>>,
     ),
     StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
+    StoredTranscriptItem(Option<Box<TranscriptItem>>),
     SavedSetup(Box<Config>),
     ArchiveSpacePreview(ArchiveSpacePreview),
     ResumeRepositoryPreflight(Box<ResumeRepositorySourcePreflight>),
@@ -1431,6 +1445,7 @@ impl DaemonReply {
                 | Self::DashboardStartup(_)
                 | Self::RuntimeChanges(_)
                 | Self::SessionTail(_)
+                | Self::StoredTranscriptItem(_)
                 | Self::ResumeCandidates(_)
         )
     }
@@ -2956,7 +2971,29 @@ impl DaemonClient {
             .await?
         {
             DaemonReply::StoredProjectionTail(tail) => Ok(tail.map(|tail| *tail)),
-            reply => bail!("unexpected stored projection tail reply {reply:?}"),
+            reply => bail!("unexpected stored projection reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_transcript_item(
+        &mut self,
+        session_id: String,
+        stable_id: String,
+    ) -> Result<StoredTranscriptItem> {
+        // Never send an unknown action to an older daemon or retry its refusal.
+        if self.metadata.protocol_version < STORED_TRANSCRIPT_READ_PROTOCOL {
+            return Ok(StoredTranscriptItem::Unsupported);
+        }
+        match self
+            .request(DaemonAction::StoredTranscriptItem {
+                session_id,
+                stable_id,
+            })
+            .await?
+        {
+            DaemonReply::StoredTranscriptItem(Some(item)) => Ok(StoredTranscriptItem::Found(item)),
+            DaemonReply::StoredTranscriptItem(None) => Ok(StoredTranscriptItem::Missing),
+            reply => bail!("unexpected stored transcript item reply {reply:?}"),
         }
     }
 
@@ -3650,7 +3687,12 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // configuration key added later needs no protocol version of its own; only
 // the configuration file refuses a key no field reads. `SubagentChoice` is
 // the exception and still refuses unknown keys everywhere.
-pub const PROTOCOL_VERSION: u32 = 104;
+// Version 105: indexed single-item stored transcript reads for notification
+// text use chunked replies; legacy count-mode stored projection tails remain
+// unchunked.
+pub const PROTOCOL_VERSION: u32 = 105;
+/// The first protocol with indexed stored transcript item reads.
+pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

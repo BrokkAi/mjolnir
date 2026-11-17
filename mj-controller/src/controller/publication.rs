@@ -12,7 +12,7 @@ use mj_core::state::{
 
 use crate::targets::{CancellableProcessExecutor, CommandExecutor};
 
-use super::worktree::managed_git_command;
+use super::worktree::{managed_git_command, managed_network_git_command};
 
 /// A failed remote check is evidence of uncertainty, never permission to age
 /// away the only checkpoint. The checkpoint itself has already been verified.
@@ -339,7 +339,7 @@ fn refresh_stopped_clone_publication_inner(
         current_url == meta.origin,
         "source origin changed since checkpoint"
     );
-    let remote = bounded.execute(&managed_git_command(
+    let remote = bounded.execute(&managed_network_git_command(
         SshTrafficClass::Control,
         &checkout.target,
         source,
@@ -449,7 +449,7 @@ fn assess_clone_checkpoint_inner(
     let check_id = mj_core::state::new_session_id()?;
     for (index, destination_url) in destinations.iter().enumerate() {
         let prefix = format!("refs/mj/publication/{check_id}/{index}");
-        let fetch = managed_git_command(
+        let fetch = managed_network_git_command(
             SshTrafficClass::Control,
             &clone.target,
             &clone.worktree_root,

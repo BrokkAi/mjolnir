@@ -7,12 +7,9 @@ action: SelectWorkspace { workspace_id: "alpha" }
 ╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
 │ Create   Open   Filter: _____________││                                                                    │
-│No sessions yet                       ││                                                                    │
-│Create new work or open a session.    ││                          ✦  M J O L N I R                          │
-│                                      ││                                                                    │
+│No sessions yet                       ││                          ✦  M J O L N I R                          │
+│Create new work or open a session.    ││                                                                    │
 │                                      ││                 Create a session to start building.                │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
@@ -32,6 +29,9 @@ action: SelectWorkspace { workspace_id: "alpha" }
 │                                      ││  claude-1  Claude Code  refreshing…                                │
 │                                      ││  codex-1   Codex        refreshing…                                │
 │                                      ││  codex-2   Codex        refreshing…                                │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                   │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: SelectWorkspace { workspace_id: "beta" }
@@ -42,12 +42,9 @@ action: SelectWorkspace { workspace_id: "beta" }
 ╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
 │ Create   Open   Filter: _____________││                                                                    │
-│No sessions yet                       ││                                                                    │
-│Create new work or open a session.    ││                          ✦  M J O L N I R                          │
-│                                      ││                                                                    │
+│No sessions yet                       ││                          ✦  M J O L N I R                          │
+│Create new work or open a session.    ││                                                                    │
 │                                      ││                 Create a session to start building.                │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
@@ -67,6 +64,9 @@ action: SelectWorkspace { workspace_id: "beta" }
 │                                      ││  claude-1  Claude Code  refreshing…                                │
 │                                      ││  codex-1   Codex        refreshing…                                │
 │                                      ││  codex-2   Codex        refreshing…                                │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                   │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: LoadWorkspaceManagement { generation: 1 }
@@ -86,9 +86,6 @@ action: LoadWorkspaceManagement { generation: 1 }
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ─────────────╮
 │              │                                                                             │               │
@@ -99,8 +96,11 @@ action: LoadWorkspaceManagement { generation: 1 }
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ────── ▁   ▄ ╮
 │              │                                                                             │               │
-│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
-│                                                                                                            │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
+│                                                                                               ────── ▁   ▄ ╮
 │                                                                                                            │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
@@ -121,9 +121,6 @@ action: None
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ─────────────╮
 │              │                                                                             │               │
@@ -134,8 +131,11 @@ action: None
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ────── ▁   ▄ ╮
 │              │                                                                             │               │
-│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
-│                                                                                                            │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
+│                                                                                               ────── ▁   ▄ ╮
 │                                                                                                            │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
@@ -156,9 +156,6 @@ action: None
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ─────────────╮
 │              │                                                                             │               │
@@ -169,8 +166,11 @@ action: None
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ────── ▁   ▄ ╮
 │              │                                                                             │               │
-│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
-│                                                                                                            │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
+│                                                                                               ────── ▁   ▄ ╮
 │                                                                                                            │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
@@ -191,9 +191,6 @@ action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ─────────────╮
 │              │                                                                             │               │
@@ -204,8 +201,11 @@ action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ────── ▁   ▄ ╮
 │              │                                                                             │               │
-│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
-│                                                                                                            │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
+│                                                                                               ────── ▁   ▄ ╮
 │                                                                                                            │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
@@ -216,17 +216,14 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 02 界   Project 03 界      ▐   ││                                                                    │
 │ Project 04 界   Project 05 界      ▐   ││                                                                    │
 │ Project 06 界   Project 07 界      ▐   ││                                                                    │
-│ Project 08 界   Project 09 界      │   ││                                                                    │
-│ Project 10 界   Project 11 界      │   ││                          ✦  M J O L N I R                          │
-│ Project 12 界   Project 13 界      │   ││                                                                    │
-╰──────────────────────────────────────╯│                 Create a session to start building.                │
+│ Project 08 界   Project 09 界      │   ││                          ✦  M J O L N I R                          │
+│ Project 10 界   Project 11 界      │   ││                                                                    │
+│ Project 12 界   Project 13 界      │   ││                 Create a session to start building.                │
+╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
 │ Create   Open   Filter: _____________││                                                                    │
 │No sessions yet                       ││                                                                    │
 │Create new work or open a session.    ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
 │                                      ││                                                                    │
 │                                      │╰────────────────────────────────────────────────────────────────────╯
 │                                      │╭ No live session ───────────────────────────────────────────────────╮
@@ -241,6 +238,9 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │                                      ││  claude-1  Claude Code  refreshing…                                │
 │                                      ││  codex-1   Codex        refreshing…                                │
 │                                      ││  codex-2   Codex        refreshing…                                │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                   │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
@@ -250,17 +250,14 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 03 界   Project 04 界   Project 05 界      ▐   ││                                                     │
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
-│ Project 18 界   Project 19 界   Project 20 界      │   ││                                                     │
-╰─────────────────────────────────────────────────────╯│         Create a session to start building.         │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
+│ Project 18 界   Project 19 界   Project 20 界      │   ││         Create a session to start building.         │
+╰─────────────────────────────────────────────────────╯│                                                     │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
 │ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     │╰─────────────────────────────────────────────────────╯
 │                                                     │╭ No live session ────────────────────────────────────╮
@@ -275,6 +272,9 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │  claude-1  Claude Code  refreshing…                                                                        │
 │  codex-1   Codex        refreshing…                                                                        │
 │  codex-2   Codex        refreshing…                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
@@ -284,17 +284,14 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
 │ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
-│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                  ✦  M J O L N I R                   │
-│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
-╰─────────────────────────────────────────────────────╯│         Create a session to start building.         │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││         Create a session to start building.         │
+╰─────────────────────────────────────────────────────╯│                                                     │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
 │ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     │╰─────────────────────────────────────────────────────╯
 │                                                     │╭ No live session ────────────────────────────────────╮
@@ -309,6 +306,9 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │  claude-1  Claude Code  refreshing…                                                                        │
 │  codex-1   Codex        refreshing…                                                                        │
 │  codex-2   Codex        refreshing…                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
@@ -318,17 +318,14 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
 │ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
-│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                  ✦  M J O L N I R                   │
-│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
-╰─────────────────────────────────────────────────────╯│         Create a session to start building.         │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││         Create a session to start building.         │
+╰─────────────────────────────────────────────────────╯│                                                     │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
 │ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     │╰─────────────────────────────────────────────────────╯
 │                                                     │╭ No live session ────────────────────────────────────╮
@@ -343,6 +340,9 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │  claude-1  Claude Code  refreshing…                                                                        │
 │  codex-1   Codex        refreshing…                                                                        │
 │  codex-2   Codex        refreshing…                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
@@ -352,17 +352,14 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
 │ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
-│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                  ✦  M J O L N I R                   │
-│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
-╰─────────────────────────────────────────────────────╯│         Create a session to start building.         │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││         Create a session to start building.         │
+╰─────────────────────────────────────────────────────╯│                                                     │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
 │ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     │╰─────────────────────────────────────────────────────╯
 │                                                     │╭ No live session ────────────────────────────────────╮
@@ -378,6 +375,9 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │  codex-1   Codex        refreshing…                                                                        │
 │  codex-2   Codex        refreshing…                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
 === tiny workspace selector (110x32) ===
@@ -386,12 +386,9 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 ╰──────────────────╯│                                                                                        │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                        │
 │ Create   Open    ││                                                                                        │
-│No sessions yet   ││                                                                                        │
-│Create new work or││                                    ✦  M J O L N I R                                    │
-│open a session.   ││                                                                                        │
-│                  ││                           Create a session to start building.                          │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
+│No sessions yet   ││                                    ✦  M J O L N I R                                    │
+│Create new work or││                                                                                        │
+│open a session.   ││                           Create a session to start building.                          │
 │                  ││                                                                                        │
 │                  ││                                                                                        │
 │                  ││                                                                                        │
@@ -411,6 +408,9 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │                  ││  claude-1  Claude Code  refreshing…                                                    │
 │                  ││  codex-1   Codex        refreshing…                                                    │
 │                  ││  codex-2   Codex        refreshing…                                                    │
+│                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ Notifications (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                  ││Nothing needs you                                                                       │
 ╰──────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
@@ -420,31 +420,31 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 ╰╭Workspaces───────────────╮                                                                                 │
 ╭│Project 00 界             │                                                                                 │
 ││Project 01 界             │                                                                                 │
-││Project 02 界             │                                                                                 │
-││Project 03 界             │                             ✦  M J O L N I R                                    │
-││Project 04 界             │                                                                                 │
-││Project 05 界             │                    Create a session to start building.                          │
+││Project 02 界             │                             ✦  M J O L N I R                                    │
+││Project 03 界             │                                                                                 │
+││Project 04 界             │                    Create a session to start building.                          │
+││Project 05 界             │                                                                                 │
 ││Project 06 界             │                                                                                 │
 ││Project 07 界             │                                                                                 │
 ││Project 08 界             │                                                                                 │
 ││Project 09 界             │                                                                                 │
 ││Project 10 界             │                                                                                 │
-││Project 11 界             │                                                                                 │
-││Project 12 界             │                                                                                 │
-││Project 13 界             │                                                                                 │
-││Project 14 界             │─────────────────────────────────────────────────────────────────────────────────╯
-││Project 15 界             │e session ───────────────────────────────────────────────────────────────────────╮
-││Project 16 界             │ session in this workspace.                                                      │
-││Project 17 界             │trl+b c to create a session or ctrl+b g to find one.                             │
+││Project 11 界             │─────────────────────────────────────────────────────────────────────────────────╯
+││Project 12 界             │e session ───────────────────────────────────────────────────────────────────────╮
+││Project 13 界             │ session in this workspace.                                                      │
+││Project 14 界             │trl+b c to create a session or ctrl+b g to find one.                             │
+││Project 15 界             │─────────────────────────────────────────────────────────────────────────────────╯
+││Project 16 界             │s ▾ ────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+││Project 17 界             │/ fleet  Targets  CPU  RAM                                                       │
 ││Project 18 界             │─────────────────────────────────────────────────────────────────────────────────╯
-││Project 19 界             │s ▾ ────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-││Project 20 界             │/ fleet  Targets  CPU  RAM                                                       │
-││Project 21 界             │─────────────────────────────────────────────────────────────────────────────────╯
-││Project 22 界             │es ▾ (not refreshed)────────────────────────────────────────────────────── ▁   ▄ ╮
-││Project 23 界  (current)  │     Harness      Weekly      Resets  5H Resets                                  │
-│╰─────────────────────────╯e-1  Claude Code  refreshing…                                                    │
-│                  ││  codex-1   Codex        refreshing…                                                    │
-│                  ││  codex-2   Codex        refreshing…                                                    │
+││Project 19 界             │es ▾ (not refreshed)────────────────────────────────────────────────────── ▁   ▄ ╮
+││Project 20 界             │     Harness      Weekly      Resets  5H Resets                                  │
+││Project 21 界             │e-1  Claude Code  refreshing…                                                    │
+││Project 22 界             │-1   Codex        refreshing…                                                    │
+││Project 23 界  (current)  │-2   Codex        refreshing…                                                    │
+│╰─────────────────────────╯─────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ Notifications (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                  ││Nothing needs you                                                                       │
 ╰──────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 dropdown action: SelectWorkspace { workspace_id: "workspace-0" }
@@ -455,12 +455,9 @@ dropdown action: SelectWorkspace { workspace_id: "workspace-0" }
 ╰──────────────────╯│                                                                                        │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                        │
 │ Create   Open    ││                                                                                        │
-│No sessions yet   ││                                                                                        │
-│Create new work or││                                    ✦  M J O L N I R                                    │
-│open a session.   ││                                                                                        │
-│                  ││                           Create a session to start building.                          │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
+│No sessions yet   ││                                    ✦  M J O L N I R                                    │
+│Create new work or││                                                                                        │
+│open a session.   ││                           Create a session to start building.                          │
 │                  ││                                                                                        │
 │                  ││                                                                                        │
 │                  ││                                                                                        │
@@ -480,6 +477,9 @@ dropdown action: SelectWorkspace { workspace_id: "workspace-0" }
 │                  ││  claude-1  Claude Code  refreshing…                                                    │
 │                  ││  codex-1   Codex        refreshing…                                                    │
 │                  ││  codex-2   Codex        refreshing…                                                    │
+│                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ Notifications (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                  ││Nothing needs you                                                                       │
 ╰──────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Escape dismisses the dropdown without switching workspace

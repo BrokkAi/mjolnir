@@ -492,6 +492,7 @@ pub struct ChatState {
     /// a large session opens on its tail and converts the rest off the event
     /// loop. Zero whenever the projection is complete.
     unconverted_prefix: usize,
+    /// Explicitly loaded history stays available when the live tail slides.
     /// The last unconverted transcript item: the projection item a pending
     /// prefix has to end at to be spliced in front of the tail. `None`
     /// whenever the projection is complete.

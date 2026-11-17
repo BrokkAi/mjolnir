@@ -715,6 +715,16 @@ pub(super) async fn handle_action(
                 tail.map(|(session, _)| Box::new(session)),
             ))
         }
+        DaemonAction::StoredTranscriptItem {
+            session_id,
+            stable_id,
+        } => {
+            let item = blocking(move || {
+                crate::database::load_materialized_transcript_item(&session_id, &stable_id)
+            })
+            .await?;
+            Ok(DaemonReply::StoredTranscriptItem(item.map(Box::new)))
+        }
         DaemonAction::StoredSessionSummary { session_id } => {
             let summary =
                 blocking(move || crate::database::load_materialized_session_summary(&session_id))
