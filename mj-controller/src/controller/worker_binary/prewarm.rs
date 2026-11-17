@@ -27,7 +27,7 @@ pub(crate) fn shared_content_ssh(locator: &targets::TargetLocator) -> Option<&Ss
     }
 }
 
-/// Stages `profile_id` the way a reviewer launch stages it and offers the
+/// Stages `profile_id`'s shareable files the way a reviewer launch stages them and offers the
 /// host the shareable objects, so the launch that follows sends only its
 /// private bundle. It rides the negotiation a launch uses, on the bulk lane,
 /// with no operation deadline: the executor's cancellation is what stops it.
@@ -52,13 +52,28 @@ pub(crate) fn prewarm_profile_content(
         .with_context(|| format!("profile {profile_id:?} is unavailable"))?;
     let staging = tempfile::tempdir().context("create profile prewarm staging")?;
     let stage = staging.path().join("profile");
-    stage_profile_with_catalog(
+    harness::stage_profile(profile, &stage)?;
+    // The provider's model catalog (`models.json`) is a shared file, but
+    // fetching it is a network wait a cancelled daemon cannot interrupt. Prewarm
+    // offers the catalog only when this daemon already holds a copy from an
+    // earlier launch; without one it is left for the launch that needs it.
+    if let Err(error) = catalog::stage_codex_catalog(
         profile_id,
         profile,
         &stage,
-        &catalog::fetch_catalog_over_https,
+        &|_, _| anyhow::bail!("prewarm does not fetch model catalogs"),
         &catalog::SharedCatalogCache,
-    )?;
+    ) {
+        tracing::debug!(
+            profile_id,
+            error = format!("{error:#}"),
+            "prewarm skips the model catalog"
+        );
+        // A failed catalog step may have left a partial change in the stage;
+        // stage the plain profile again rather than offer it.
+        std::fs::remove_dir_all(&stage).ok();
+        harness::stage_profile(profile, &stage)?;
+    }
     stage_managed_skills(profile.kind, &stage, locator.skills_scope())?;
     let roots = shared_profile_paths(profile.kind);
     let manifest = ProfileContentManifest::from_staged(&stage, &roots)?;
