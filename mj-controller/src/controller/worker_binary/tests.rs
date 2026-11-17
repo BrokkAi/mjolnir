@@ -133,6 +133,255 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
     assert!(error.contains("missing worker build stamp"), "{error}");
 }
 
+// Hard-won: 816ca1d77: the controller ran an old root binary that lacks the worker control subcommands
+#[cfg(unix)]
+#[test]
+fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_worker() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    const CHILD: &str = "MJ_OLD_ROOT_WORKER_CHILD";
+    const SESSION: &str = "17171717171717171717171717171717";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        // The current worker: answers the control subcommands, then carries
+        // this build's stamp after its `exit`.
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; liveness) echo dead ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_worker",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-816ca1d77-old-root")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    // A build from before `worker stop|liveness|holder`: clap's own rejection.
+    let old = "#!/bin/sh\necho \"error: unrecognized subcommand '$2'\" >&2\nexit 2\n";
+    let hel = root.join("hel");
+    std::fs::write(&hel, old).unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let inode = std::fs::metadata(&hel).unwrap().ino();
+    let unchanged = || {
+        assert_eq!(std::fs::read_to_string(&hel).unwrap(), old);
+        assert_eq!(std::fs::metadata(&hel).unwrap().ino(), inode);
+    };
+
+    let liveness = probe_worker_liveness(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
+    assert_eq!(liveness.status, 0);
+    assert_eq!(String::from_utf8_lossy(&liveness.stdout).trim(), "dead");
+    // The control worker is a hard link to this build's store entry, in the
+    // root itself, so the entry's link count went up and the root owns it.
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert_eq!(control.parent(), Some(root.as_path()));
+    let digest = mj_core::worker_launch::worker_executable_digest(Path::new(
+        &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
+    ))
+    .unwrap();
+    let entry = directory
+        .path()
+        .join("workers/worker-binaries")
+        .join(digest)
+        .join("hel");
+    let entry_meta = std::fs::metadata(&entry).unwrap();
+    assert_eq!(std::fs::metadata(&control).unwrap().ino(), entry_meta.ino());
+    assert_eq!(entry_meta.nlink(), 2, "the store entry and the root's link");
+    unchanged();
+
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(SESSION, "test stop")
+        .unwrap()
+        .unwrap();
+    stop_worker(&owner, &ProcessExecutor, &locator, &root_text).unwrap();
+    unchanged();
+
+    // The close plan stops the worker (embedding the same control binary) and
+    // then removes the root, and the control worker with it.
+    targets::close_plan(&locator, SESSION)
+        .unwrap()
+        .execute(&ProcessExecutor)
+        .unwrap();
+    assert!(!root.exists());
+}
+
+// A plan that embeds the control worker installs it when it runs, so a
+// cleanup with no earlier probe or stop (a failed provisioning) still works.
+#[cfg(unix)]
+#[test]
+fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_FRESH_BARE_CLOSE_CHILD";
+    const SESSION: &str = "18181818181818181818181818181818";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-816ca1d77-fresh-close")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("worker's space").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    let hel = root.join("hel");
+    std::fs::write(&hel, "#!/bin/sh\nexit 2\n").unwrap();
+    let hel_inode = std::fs::metadata(&hel).unwrap().ino();
+    let root_text = root.to_string_lossy().into_owned();
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert!(!control.exists(), "nothing is staged yet");
+    // Simulate another build's control file as a link to this worker store
+    // entry. Installing this build must release the old link.
+    let other = std::path::PathBuf::from(targets::control_worker_path_for_build(
+        &root_text,
+        "another-build",
+    ));
+    assert_ne!(other, control, "builds get separate files");
+    assert_eq!(other.parent(), control.parent());
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let plan = targets::close_plan(&locator, SESSION).unwrap();
+    assert!(plan.stages_control_worker());
+    // A caller's deadline bounds the check that precedes its command: with the
+    // deadline already past, nothing is staged and nothing is removed.
+    let expired = targets::CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
+    let error = plan.execute(&expired).unwrap_err();
+    assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    assert!(!control.exists(), "the check ignored the caller's deadline");
+    assert!(root.exists(), "the timed-out close removed nothing");
+    // Install this build's control worker once so its store entry exists, then
+    // add a stand-in for an older build's control file linked to that entry.
+    ensure_control_worker(&ProcessExecutor, &locator, SESSION).unwrap();
+    let digest = mj_core::worker_launch::worker_executable_digest(Path::new(
+        &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
+    ))
+    .unwrap();
+    let entry = store::store_root(&locator, SESSION)
+        .unwrap()
+        .join(digest)
+        .join("hel");
+    std::fs::hard_link(&entry, &other).unwrap();
+    assert_eq!(std::fs::metadata(&entry).unwrap().nlink(), 3);
+    std::fs::remove_file(&control).unwrap();
+    ensure_control_worker(&ProcessExecutor, &locator, SESSION).unwrap();
+    assert!(control.exists());
+    assert!(!other.exists(), "the superseded control file is removed");
+    assert_eq!(std::fs::metadata(&entry).unwrap().nlink(), 2);
+    assert_eq!(std::fs::metadata(&hel).unwrap().ino(), hel_inode);
+    plan.execute(&ProcessExecutor).unwrap();
+    assert!(!root.exists());
+}
+
+// A diagnosis reports and installs nothing: a root with no control worker for
+// this build gets a finding that says so, and no file appears.
+#[cfg(unix)]
+#[test]
+fn a_diagnosis_reports_a_missing_control_worker_and_installs_nothing() {
+    const SESSION: &str = "20202020202020202020202020202020";
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let before = std::fs::read_dir(directory.path().join("workers"))
+        .unwrap()
+        .count();
+    let error = diagnose_worker_read_only(&ProcessExecutor, &locator, &root_text).unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&format!(
+            "control worker for this build not installed in {root_text}"
+        )),
+        "{error:#}"
+    );
+    assert!(!std::path::Path::new(&targets::control_worker_path(&root_text)).exists());
+    assert_eq!(
+        std::fs::read_dir(directory.path().join("workers"))
+            .unwrap()
+            .count(),
+        before,
+        "the diagnosis created something beside the root"
+    );
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+}
+
+// The readiness probe is a decision, so like every command that embeds the
+// control worker it installs it first: a startup wait on a root with none
+// must not fail with exit 78.
+#[cfg(unix)]
+#[test]
+fn probing_a_worker_installs_the_control_worker_itself() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_PROBE_STAGES_CHILD";
+    const SESSION: &str = "19191919191919191919191919191919";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "probing_a_worker_installs_the_control_worker_itself",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-816ca1d77-probe-stages")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert!(!control.exists(), "nothing is staged yet");
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let probe = probe_worker(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
+    assert!(control.exists());
+    assert!(probe.pids.is_empty(), "{probe:?}");
+}
+
 #[test]
 fn stale_pins_are_re_resolved() {
     const CHILD: &str = "MJ_STALE_WORKER_PIN_CHILD";
@@ -150,6 +399,7 @@ fn stale_pins_are_re_resolved() {
             .env("MJ_INSTANCE", "issue-1138-pins")
             .env(CHILD, "1")
             .env("MJ_WORKER_DIR", workers)
+            .env_remove("MJ_WORKER_BINARY")
             .run();
         return;
     }
@@ -201,6 +451,7 @@ fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
         .env("MJ_INSTANCE", "handoff-warm-pins")
         .env(CHILD, "1")
         .env("MJ_WORKER_DIR", &workers)
+        .env_remove("MJ_WORKER_BINARY")
         .run();
         return;
     }
@@ -440,6 +691,29 @@ fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
         fail: std::cell::Cell<bool>,
     }
     impl CommandExecutor for FullDiskUpload {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if self.fail.get() && command.purpose == "stage replacement Mjolnir worker" {
                 std::fs::write(&command.args[1], vec![0; 32 * 1024]).unwrap();
@@ -1087,8 +1361,12 @@ fn a_present_controller_still_looks_beside_itself() {
 #[test]
 #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
 fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("Application Support").join("hel worker");
+    let root = temp
+        .path()
+        .join("Application Support")
+        .join("0123456789abcdef0123456789abcdef");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join(mj_core::relay::WORKER_STARTUP_FILE),
@@ -1112,7 +1390,7 @@ fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
         worker_root: root.into(),
     };
 
-    let probe = probe_worker(&ProcessExecutor, &locator, root).unwrap();
+    let probe = probe_worker(&ProcessExecutor, &locator, SESSION, root).unwrap();
 
     assert_eq!(probe.step(), Some("harness-resolve"));
     assert_eq!(
@@ -1128,8 +1406,32 @@ fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
 /// nothing to report.
 #[test]
 fn a_probe_that_prints_something_else_is_an_error() {
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
     struct GarbageExecutor;
     impl CommandExecutor for GarbageExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 0,
@@ -1138,11 +1440,12 @@ fn a_probe_that_prints_something_else_is_an_error() {
             })
         }
     }
+    let root = format!("/nonexistent/{SESSION}");
     let locator = targets::TargetLocator::LocalBare {
-        worker_root: "/nonexistent".into(),
+        worker_root: root.clone(),
     };
 
-    let error = probe_worker(&GarbageExecutor, &locator, "/nonexistent").unwrap_err();
+    let error = probe_worker(&GarbageExecutor, &locator, SESSION, &root).unwrap_err();
 
     assert!(
         format!("{error:#}").contains("read the worker probe"),
@@ -1181,6 +1484,29 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -1294,6 +1620,29 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -1329,16 +1678,18 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     .unwrap();
 
     let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].purpose, "stop Mjolnir worker daemon");
+    // The staged control worker is checked first, then the stop runs it.
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].purpose, "check the control worker");
+    assert_eq!(commands[1].purpose, "stop Mjolnir worker daemon");
     assert!(
-        commands[0]
+        commands[1]
             .args
             .last()
             .is_some_and(|remote| unwrapped_remote_line(remote).starts_with("'sh' '-c' ")),
         "raw SSH worker management must not source login profiles: {commands:?}"
     );
-    let script = commands[0]
+    let script = commands[1]
         .args
         .iter()
         .find(|argument| argument.contains("worker stop --root"))
@@ -1357,6 +1708,29 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(self.outputs.borrow_mut().remove(0))
@@ -1397,6 +1771,11 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
                 stdout: Vec::new(),
                 stderr: Vec::new(),
             },
+            CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
         ]),
     };
     let locator = targets::TargetLocator::LocalPodman {
@@ -1430,6 +1809,7 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
             "inspect Mjolnir session container",
             "start stopped Mjolnir session container",
             "inspect Mjolnir session container",
+            "check the control worker",
             "stop Mjolnir worker daemon",
         ]
     );
@@ -1485,6 +1865,29 @@ struct SshHostExecutor {
     host_files: RefCell<HashSet<String>>,
 }
 impl CommandExecutor for SshHostExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         let mut status = 0;
@@ -1831,13 +2234,20 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
             target: targets::target_recovery_plan(&locator, &session)?,
             workspace: None,
             exit_record: None,
-            liveness_probe: worker_liveness_command(&locator, &root),
+            liveness_probe: targets::WorkerControlPlan::new(
+                "probe liveness",
+                vec![worker_liveness_command(&locator, &root)],
+                &locator,
+                &session,
+            )
+            .unwrap(),
             binary_refresh: worker_binary_refresh_plan(&locator, &session)?,
             launch_refresh: Some(worker_launch_refresh_plan(&locator, &session, &launch)?),
             restart: CommandPlan {
                 description: "restart isolated Docker worker".into(),
                 commands: vec![start_worker_command(&locator, &root)],
-            },
+            }
+            .into(),
         };
         crate::session_manager::recover_worker_controlled(plan, false, None, &ProcessExecutor)?;
         let installed = execute_checked(
@@ -2051,7 +2461,10 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
         })?;
         // The daemon identifies its worker by `hel worker run --root`; the
         // link keeps that name on the process started through it.
-        let liveness = execute_checked(&ProcessExecutor, worker_liveness_command(&locator, &root))?;
+        let liveness = execute_checked(
+            &ProcessExecutor,
+            worker_liveness_command(&locator, &root).unstaged_command(),
+        )?;
         ensure!(
             String::from_utf8_lossy(&liveness.stdout).trim() == "alive",
             "the worker started through the link must be recognized as alive, got {:?}",
@@ -2073,6 +2486,29 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         commands: RefCell<Vec<CommandSpec>>,
     }
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -3702,6 +4138,29 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(format!(
                 "{} {}",
@@ -3766,6 +4225,29 @@ fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
     }
 
     impl CommandExecutor for VersionExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(format!(
                 "{} {}",
@@ -4563,6 +5045,29 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
 fn container_attachment_guidance_matches_engine_permissions_and_harness_instruction_files() {
     struct MountExecutor;
     impl CommandExecutor for MountExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(command.purpose, "inspect session container storage");
             assert!(command.args.iter().any(|arg| arg == "{{json .Mounts}}"));
@@ -4679,6 +5184,29 @@ struct DigestExecutor {
 }
 
 impl CommandExecutor for DigestExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         Ok(CommandOutput {
@@ -4810,6 +5338,29 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
     }
 
     impl CommandExecutor for CacheLinkExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
             let mut args = command.args[3..].to_vec();
@@ -4939,6 +5490,29 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     }
 
     impl CommandExecutor for ConfigRecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let config_path = command
                 .args
@@ -4959,6 +5533,29 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     }
 
     impl CommandExecutor for FailingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.borrow_mut().push(command.purpose.clone());
             Err(anyhow::anyhow!("managed harness installation failed"))
@@ -5142,7 +5739,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["dead\n"]),
+        liveness_probe: CommandSpec::new("printf", ["dead\n"]).into(),
         binary_refresh: worker_binary_refresh_plan(&locator, session_id).unwrap(),
         launch_refresh: Some(WorkerLaunchRefreshPlan {
             expected_sha256: lower_hex(Sha256::digest(b"new launch schema")),
@@ -5168,7 +5765,8 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
                 "touch",
                 [restarted.to_string_lossy().into_owned()],
             )],
-        },
+        }
+        .into(),
     };
     let mut record = crate::controller::test_support::checkpoint_test_session(session_id);
     record.target = Some(Box::new(plan.source_target.clone()));
@@ -6045,6 +6643,29 @@ mod container_runtime {
             fail_prepare: bool,
         }
         impl CommandExecutor for PreparationExecutor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 self.commands.borrow_mut().push(command.clone());
                 if self.fail_prepare

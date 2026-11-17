@@ -238,10 +238,7 @@ impl Controller {
             // An older failed wake may have left a parked record and boot
             // intent. Only proved death permits retiring that intent.
             if crate::database::load_worker_restart(session_id)?.is_some() {
-                let output = executor.execute(&super::worker_binary::worker_liveness_command(
-                    &backend,
-                    &worker_root,
-                ))?;
+                let output = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &worker_root)?;
                 ensure!(
                     output.status == 0 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
                     "parked sub-agent still has a live worker boot"
@@ -330,9 +327,7 @@ impl Controller {
             if let Err(error) = observed {
                 // A failed connection alone does not prove death. The same
                 // lifecycle owner probes and settles before recovery can act.
-                let liveness = executor.execute(&super::worker_binary::worker_liveness_command(
-                    &backend, &worker_root,
-                )).context("check whether the failed unpark worker exited")?;
+                let liveness = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &worker_root).context("check whether the failed unpark worker exited")?;
                 if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
                     let detail = format!("{error:#}");
                     let failure = if mj_core::credentials::text_reports_auth_failure(&detail) {
@@ -404,6 +399,29 @@ mod tests {
     }
 
     impl CommandExecutor for RacingStop {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             if let Some((handle, runtime)) = self.racer.lock().unwrap().take() {
@@ -498,6 +516,29 @@ mod tests {
     }
 
     impl CommandExecutor for WakeTarget {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             if command.purpose == "start detached Mjolnir worker" {
@@ -806,13 +847,15 @@ mod tests {
             workspace: None,
             exit_record: None,
             liveness_probe: CommandSpec::new("printf", ["alive\n"])
-                .purpose("probe Mjolnir worker daemon liveness"),
+                .purpose("probe Mjolnir worker daemon liveness")
+                .into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: targets::CommandPlan {
                 description: "a live wake must not be restarted".into(),
                 commands: vec![CommandSpec::new("false", std::iter::empty::<&str>())],
-            },
+            }
+            .into(),
         });
         executor.cancelled.store(false, Ordering::SeqCst);
         assert_eq!(

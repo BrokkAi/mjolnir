@@ -819,7 +819,7 @@ impl Controller {
                         if let Some(command) =
                             targets::clear_relay_state_plan(&backend, session_id)?
                         {
-                            execute_checked(syncing, command)?;
+                            command.execute(syncing)?;
                         }
                         // Both lanes below write into the worker root, so it
                         // exists first.
@@ -849,7 +849,7 @@ impl Controller {
                                 previous_profile_root,
                             )?
                         };
-                        execute_checked(syncing, reset)?;
+                        reset.execute(syncing)?;
                     }
                 }
             }
@@ -2709,6 +2709,14 @@ struct CrossHarnessProvisionExecutor<'a, E: CommandExecutor + ?Sized> {
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecutor<'_, E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.inner.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation.is_cancelled() || self.inner.cancellation_requested_without_deadline()
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if self.cancellation.is_cancelled() {
             bail!("operation cancelled while provisioning destination");
@@ -2741,6 +2749,25 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecu
             bail!("operation cancelled while provisioning destination");
         }
         self.inner.execute_with_stdin(command, input)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner.execute_without_deadline(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner
+            .execute_with_stdin_without_deadline(command, input)
     }
 }
 

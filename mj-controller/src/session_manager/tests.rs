@@ -45,7 +45,8 @@ async fn recovery_allows_preparation_longer_than_the_previous_thirty_second_dead
         workspace: None,
         exit_record: None,
         liveness_probe: CommandSpec::new("sh", ["-c", "sleep 31; printf dead"])
-            .purpose("probe slowly staged recovery"),
+            .purpose("probe slowly staged recovery")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -58,7 +59,8 @@ async fn recovery_allows_preparation_longer_than_the_previous_thirty_second_dead
                     .to_string_lossy()
                     .into_owned()],
             )],
-        },
+        }
+        .into(),
     };
     assert_eq!(
         recover_worker(plan, false).await.unwrap(),
@@ -359,7 +361,8 @@ async fn recovery_restarts_a_live_worker_only_after_a_failed_handshake() {
         }),
         exit_record: None,
         liveness_probe: CommandSpec::new("printf", [format!("{liveness}\n")])
-            .purpose("probe test worker liveness"),
+            .purpose("probe test worker liveness")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -368,7 +371,8 @@ async fn recovery_restarts_a_live_worker_only_after_a_failed_handshake() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test worker"),
             ],
-        },
+        }
+        .into(),
     };
 
     assert_eq!(
@@ -421,7 +425,8 @@ async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
         }),
         exit_record: None,
         liveness_probe: CommandSpec::new("printf", ["dead\n"])
-            .purpose("probe test worker liveness"),
+            .purpose("probe test worker liveness")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -430,7 +435,8 @@ async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test worker"),
             ],
-        },
+        }
+        .into(),
     };
 
     assert_eq!(
@@ -477,7 +483,7 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
                 directory: missing.clone(),
             }),
             exit_record: None,
-            liveness_probe: CommandSpec::new("printf", ["dead\n"]),
+            liveness_probe: CommandSpec::new("printf", ["dead\n"]).into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: CommandPlan {
@@ -486,7 +492,8 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
                     "touch",
                     [restarted.to_string_lossy().into_owned()],
                 )],
-            },
+            }
+            .into(),
         }),
         project_memory: None,
     };
@@ -573,7 +580,8 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
                 .purpose("read test worker exit record"),
         ),
         liveness_probe: CommandSpec::new("printf", ["dead\n"])
-            .purpose("probe test worker liveness"),
+            .purpose("probe test worker liveness")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -582,7 +590,8 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test worker"),
             ],
-        },
+        }
+        .into(),
     };
 
     let outcome = recover_worker(plan.clone(), false).await.unwrap();
@@ -673,7 +682,8 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
             workspace: None,
             exit_record: None,
             liveness_probe: CommandSpec::new("printf", ["dead\n"])
-                .purpose("probe test worker liveness"),
+                .purpose("probe test worker liveness")
+                .into(),
             binary_refresh: Some(WorkerBinaryRefresh::Prepared(WorkerBinaryRefreshPlan {
                 source: source.clone(),
                 installed_digest: CommandSpec::new(
@@ -693,7 +703,8 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
             restart: CommandPlan {
                 description: "restart test worker".into(),
                 commands: vec![restart],
-            },
+            }
+            .into(),
         }
     };
 
@@ -749,7 +760,8 @@ async fn recovery_refreshes_a_stale_launch_config_before_restart() {
             workspace: None,
             exit_record: None,
             liveness_probe: CommandSpec::new("printf", ["dead\n"])
-                .purpose("probe test worker liveness"),
+                .purpose("probe test worker liveness")
+                .into(),
             binary_refresh: None,
             launch_refresh: Some(WorkerLaunchRefreshPlan {
                 expected_sha256: "a".repeat(64),
@@ -769,7 +781,8 @@ async fn recovery_refreshes_a_stale_launch_config_before_restart() {
             restart: CommandPlan {
                 description: "restart test worker".into(),
                 commands: vec![restart],
-            },
+            }
+            .into(),
         },
         false,
     )
@@ -852,7 +865,7 @@ async fn recovery_starts_a_stopped_target_before_probing_its_worker() {
             }),
             workspace: None,
             exit_record: None,
-            liveness_probe: liveness,
+            liveness_probe: liveness.into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: CommandPlan {
@@ -861,7 +874,8 @@ async fn recovery_starts_a_stopped_target_before_probing_its_worker() {
                     CommandSpec::new("touch", [worker_restarted.to_string_lossy().into_owned()])
                         .purpose("restart test worker"),
                 ],
-            },
+            }
+            .into(),
         },
         false,
     )
@@ -891,13 +905,14 @@ async fn recovery_reports_a_missing_target_without_running_worker_commands() {
             }),
             workspace: None,
             exit_record: None,
-            liveness_probe: CommandSpec::new("false", std::iter::empty::<&str>()),
+            liveness_probe: CommandSpec::new("false", std::iter::empty::<&str>()).into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: CommandPlan {
                 description: "must not restart".into(),
                 commands: vec![CommandSpec::new("false", std::iter::empty::<&str>())],
-            },
+            }
+            .into(),
         },
         true,
     )
@@ -2198,17 +2213,41 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
             description: "restart".into(),
             commands: vec![CommandSpec::new("restart", std::iter::empty::<&str>())],
-        },
+        }
+        .into(),
     };
     #[derive(Default)]
     struct RecordingExecutor(Mutex<Vec<String>>);
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
             self.0.lock().unwrap().push(command.program.clone());
             Ok(crate::targets::CommandOutput {
@@ -2351,7 +2390,9 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["alive\n"]).purpose("probe test relay worker"),
+        liveness_probe: CommandSpec::new("printf", ["alive\n"])
+            .purpose("probe test relay worker")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -2360,7 +2401,8 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test relay worker"),
             ],
-        },
+        }
+        .into(),
     };
     let target = RelaySessionTarget {
         session_id: LEASED_RELAY_SESSION.to_owned(),
@@ -2464,7 +2506,9 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
             CommandSpec::new("printf", ["%s", exit_record.as_str()])
                 .purpose("read test worker exit record"),
         ),
-        liveness_probe: CommandSpec::new("printf", ["dead\n"]).purpose("probe test relay worker"),
+        liveness_probe: CommandSpec::new("printf", ["dead\n"])
+            .purpose("probe test relay worker")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -2473,7 +2517,8 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test relay worker"),
             ],
-        },
+        }
+        .into(),
     };
     let target = RelaySessionTarget {
         session_id: LEASED_RELAY_SESSION.to_owned(),
@@ -2837,13 +2882,14 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["alive\n"]),
+        liveness_probe: CommandSpec::new("printf", ["alive\n"]).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: crate::targets::CommandPlan {
             description: "failed preparation is not a dead transport".into(),
             commands: Vec::new(),
-        },
+        }
+        .into(),
     });
     let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
         LEASED_RELAY_SESSION,
@@ -4269,19 +4315,43 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
             description: "restart".into(),
             commands: vec![CommandSpec::new("restart", std::iter::empty::<&str>())],
-        },
+        }
+        .into(),
     };
     struct ProbeExecutor {
         live: bool,
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for ProbeExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
             self.commands.lock().unwrap().push(command.program.clone());
             Ok(crate::targets::CommandOutput {
@@ -4784,13 +4854,14 @@ async fn suppressed_recovery_preserves_hello_backoff() {
             target: None,
             workspace: None,
             exit_record: None,
-            liveness_probe: probe,
+            liveness_probe: probe.into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: CommandPlan {
                 description: "unused restart".into(),
                 commands: vec![],
-            },
+            }
+            .into(),
         }),
         project_memory: None,
     };
