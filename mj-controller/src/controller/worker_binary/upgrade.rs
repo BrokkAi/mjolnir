@@ -274,7 +274,7 @@ pub(in crate::controller) fn install_staged_worker_binary(
                 "sh".into(),
                 "-c".into(),
                 format!(
-                    "{PROMOTE_WORKER_BINARY}\npromote_worker_binary \"$1\" \"$2\"\n\
+                    "{PROMOTE_WORKER_BINARY}\npromote_worker_binary \"$1\" \"$2\" || exit $?\n\
                      # The promoted build serves every control subcommand; a staged\n\
                      # control worker would only pin a store entry.\n\
                      rm -f -- \"$3\"/hel-control*"
