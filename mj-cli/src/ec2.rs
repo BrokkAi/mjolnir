@@ -1946,7 +1946,7 @@ else:
         let uname = remote_bin.join("uname");
         fs::write(
             &uname,
-            "#!/bin/sh\ncase \"$1\" in\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\n  -r) printf '6.18.56-126.188.amzn2023\\n' ;;\n  *) exec /usr/bin/uname \"$@\" ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  -sm) printf 'Linux x86_64\\n' ;;\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\n  -r) printf '6.18.56-126.188.amzn2023\\n' ;;\n  *) exec /usr/bin/uname \"$@\" ;;\nesac\n",
         )
         .unwrap();
         fs::set_permissions(&uname, fs::Permissions::from_mode(0o700)).unwrap();
