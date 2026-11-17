@@ -1,6 +1,7 @@
 //! Background recovery-copy policy and coordination.
 
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -10,8 +11,10 @@ use tokio::task::JoinSet;
 
 use crate::controller::{CheckpointArtifact, Controller, checkpoint_was_deferred};
 use crate::database::record_recovery_failure_if_current;
+#[cfg(test)]
+use crate::recovery_gate::RecoveryGate;
 use crate::recovery_gate::{
-    BackgroundWork, ObservationReceiver, RecoveryGate, RecoveryObserver, observation_channel,
+    BackgroundWork, ObservationReceiver, RecoveryObserver, observation_channel,
 };
 use crate::session_manager::SessionManagerControl;
 use crate::targets::CancellableProcessExecutor;
@@ -74,7 +77,7 @@ impl RecoveryCoordinator {
         let (observations_tx, mut observations_rx) =
             observation_channel::<crate::recovery_gate::PendingRecoveryObservation>();
         let (results_tx, results_rx) = observation_channel();
-        let gate = Arc::new(RecoveryGate::default());
+        let gate = session_manager.session_gate.clone();
         let coordinator_gate = gate.clone();
         let supervisor = tokio::spawn(async move {
             let mut policies = BTreeMap::<String, PolicyState>::new();

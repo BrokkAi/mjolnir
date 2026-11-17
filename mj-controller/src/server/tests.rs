@@ -1874,7 +1874,7 @@ fn a_tampered_cookie_is_refused() {
 #[tokio::test]
 async fn an_oversized_draft_is_refused_with_a_stable_code() {
     let (app, _, _, _, mut stored) = app();
-    let draft = "x".repeat(64 * 1024 + 1);
+    let draft = "x".repeat(MAX_DRAFT_BYTES + 1);
     let response = app
         .oneshot(
             Request::put("/api/sessions/session-1/draft")

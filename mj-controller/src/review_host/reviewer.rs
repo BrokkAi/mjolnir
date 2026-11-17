@@ -21,16 +21,16 @@ pub(super) async fn reviewer_action(
         .await
         .map_err(|error| format!("{error:#}"))?;
     let deadline = tokio::time::Instant::now() + LIFECYCLE_WAIT;
-    let mut pause = LEASE_RETRY_PAUSE;
+    let mut changes = control.session_gate.subscribe();
     loop {
+        changes.borrow_and_update();
         match handle
             .reviewer(action.clone())
             .await
             .map_err(|error| format!("{error:#}"))
         {
             Err(reason)
-                if preempted_by_lifecycle(&reason)
-                    && tokio::time::Instant::now() + pause < deadline =>
+                if preempted_by_lifecycle(&reason) && tokio::time::Instant::now() < deadline =>
             {
                 tracing::info!(
                     %session_id,
@@ -38,8 +38,18 @@ pub(super) async fn reviewer_action(
                     %reason,
                     "a running review waits for another operation on the session"
                 );
-                tokio::time::sleep(pause).await;
-                pause = (pause * 2).min(LIFECYCLE_RETRY_PAUSE_MAX);
+                if !matches!(
+                    tokio::time::timeout_at(
+                        deadline,
+                        control
+                            .session_gate
+                            .wait_for_lease_return(session_id, &mut changes)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    return Err(reason);
+                }
             }
             outcome => return outcome,
         }
@@ -49,9 +59,6 @@ pub(super) async fn reviewer_action(
 /// How long a running review's reviewer action waits out a foreground
 /// operation holding the session before the review reports the refusal.
 pub(super) const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// The longest pause between attempts while a running review waits.
-const LIFECYCLE_RETRY_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The step of review preparation in progress.
 ///
@@ -196,7 +203,7 @@ pub(super) async fn prepare(
     let captured = {
         let _stage = stages.enter(session_id, "capturing the change set through the worker");
         let handle = &handle;
-        after_background_work(session_id, deadline, move || {
+        after_background_work(&control.session_gate, session_id, deadline, move || {
             let repositories = scoped_repositories.clone();
             async move {
                 handle
@@ -238,7 +245,7 @@ pub(super) async fn prepare(
     }
     let reviewer = {
         let _stage = stages.enter(session_id, "choosing reviewers");
-        after_background_work(session_id, deadline, || {
+        after_background_work(&control.session_gate, session_id, deadline, || {
             environment.resolve(handle.clone(), config.clone())
         })
         .await
@@ -310,21 +317,17 @@ pub(super) async fn hold_background_work(
         .map_err(|_| StartRefusal(format!("waiting for background work on session {session_id} exceeded the review preparation deadline")))
 }
 
-/// Pause between attempts when the session's lease was taken by something the
-/// recovery gate does not coordinate, so a retry does not spin.
-const LEASE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
-
 pub(super) use crate::review_selection::preempted_by_lifecycle;
 
 /// Runs one step of review preparation, trying again while a lifecycle
 /// operation holds the session.
 ///
 /// The review's background hold keeps recovery copies and worker upgrades
-/// from starting, but a foreground lifecycle operation (a suspend, a move, a
-/// copy still running when the hold's wait ran out) can still refuse or
+/// from starting, but a foreground lifecycle operation (a suspend, a move) can still refuse or
 /// cancel the capture or the reviewer choice. The step tries again until
 /// `deadline` instead of giving up. Cancelling the review drops this future.
 async fn after_background_work<T, Step, Attempt>(
+    gate: &Arc<crate::recovery_gate::RecoveryGate>,
     session_id: &str,
     deadline: tokio::time::Instant,
     mut step: Step,
@@ -334,10 +337,9 @@ where
     Attempt: std::future::Future<Output = Result<T, String>>,
 {
     let mut attempt = 0_u32;
+    let mut changes = gate.subscribe();
     loop {
-        if attempt > 0 {
-            tokio::time::sleep(LEASE_RETRY_PAUSE).await;
-        }
+        changes.borrow_and_update();
         attempt += 1;
         match step().await {
             Err(reason)
@@ -349,6 +351,16 @@ where
                     %reason,
                     "code review waits for another operation on the session"
                 );
+                if !matches!(
+                    tokio::time::timeout_at(
+                        deadline,
+                        gate.wait_for_lease_return(session_id, &mut changes)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    return Err(reason);
+                }
             }
             outcome => return outcome,
         }

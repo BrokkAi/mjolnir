@@ -199,7 +199,7 @@ impl DashboardState {
                     ("Usage by session…", CommandId::SessionUsageReport),
                 ],
             ),
-            SupportPane::Sessions => return,
+            SupportPane::Sessions | SupportPane::Notifications => return,
         };
         let entries = std::iter::once(("Refresh", CommandId::Refresh))
             .chain(settings.iter().copied())

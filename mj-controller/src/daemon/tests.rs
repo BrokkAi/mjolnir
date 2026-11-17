@@ -1179,6 +1179,28 @@ pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeStat
     ))
 }
 
+fn test_runtime_state_loading_the_store_with_live_recovery() -> (
+    Arc<RuntimeState>,
+    crate::recovery::RecoveryCoordinator,
+    crate::worker_upgrade::WorkerUpgradeCoordinator,
+) {
+    let remote = spawn_remote_session_manager().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        remote.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        remote.control,
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ));
+    (state, recovery, upgrades)
+}
+
 /// The wait notice names what the daemon is waiting for, so `UpgradeBlockers`
 /// must report a live gate label and stop reporting it once released. A
 /// lifecycle hold also names its session, kind and current stage, read from the
@@ -5000,7 +5022,7 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
         target: *child.target.clone().unwrap(),
         desired_build: "fixture".into(),
     };
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire("child-1", "test child wake")
+    let owner = crate::controller::test_support::worker_test_permit("child-1", "test child wake")
         .unwrap()
         .unwrap();
     owner
@@ -5516,6 +5538,176 @@ async fn queued_startup_prompts_are_delivered_in_order_once_the_harness_is_ready
         .send(Ok(2))
         .expect("the drain awaits the submit reply");
     assert!(notice_texts(&state).is_empty(), "delivery posted a notice");
+}
+
+/// Peer messages accepted while a session is starting stay behind its first
+/// prompt, then land in the mailbox in send order. They are not a second
+/// prompt (#1553).
+#[tokio::test]
+async fn session_messages_while_starting_follow_the_first_prompt() {
+    let Some(_writer) =
+        startup_prompt_test_store("session_messages_while_starting_follow_the_first_prompt")
+    else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    state
+        .queue_api_followup(
+            "session-1",
+            "api-startup-order".into(),
+            crate::server::api::StartFollowup {
+                prompt: Some("open the brief".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("queue the startup prompt");
+    for (request_id, text, at) in [
+        ("first-note", "first note", 1),
+        ("second-note", "second note", 2),
+    ] {
+        state
+            .queue_startup_session_message(
+                "session-1",
+                crate::daemon::startup_followup::QueuedSessionMessage {
+                    request_id: request_id.into(),
+                    sender_id: "sender-1".into(),
+                    sender_title: "sender".into(),
+                    text: text.into(),
+                    created_at_ms: at,
+                    waited_on_group: Some("api-startup-order".into()),
+                },
+            )
+            .await
+            .expect("queue the session message");
+    }
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .expect("publish the ready view");
+
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "open the brief");
+    reply
+        .send(Ok(1))
+        .expect("the drain awaits the submit reply");
+
+    let pending = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = crate::database::pending_mailbox_events(10).unwrap();
+            if pending.len() >= 2 {
+                return pending;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the session messages were not queued behind the prompt");
+    let texts = pending
+        .iter()
+        .map(|row| {
+            assert_eq!(row.target_session_id, "session-1");
+            assert!(!row.unpark);
+            let event: mj_core::mailbox::MailboxEvent =
+                serde_json::from_str(&row.event_json).unwrap();
+            assert_eq!(event.source, "session_message");
+            assert!(event.wake);
+            let mj_core::mailbox::MailboxEventBody::SessionMessage { text, .. } = event.body else {
+                panic!("expected a session message");
+            };
+            text
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["first note", "second note"]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "a held session message was submitted as its own prompt"
+    );
+}
+
+/// A message held for a session that will never finish starting is returned
+/// to the sender, and the startup row stays so a retry is not delivered later.
+#[tokio::test]
+async fn a_session_message_while_starting_is_returned_when_startup_fails() {
+    let Some(_writer) = startup_prompt_test_store(
+        "a_session_message_while_starting_is_returned_when_startup_fails",
+    ) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let sender = runtime_test_session(
+        "sender-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&sender).unwrap();
+    let command_id =
+        mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id("bring-logs");
+    state
+        .queue_startup_session_message(
+            "session-1",
+            crate::daemon::startup_followup::QueuedSessionMessage {
+                request_id: "bring-logs".into(),
+                sender_id: "sender-1".into(),
+                sender_title: "sender".into(),
+                text: "bring the logs".into(),
+                created_at_ms: 5,
+                waited_on_group: None,
+            },
+        )
+        .await
+        .expect("queue the session message");
+
+    let mut session = state
+        .session_record("session-1")
+        .expect("the starting session is published");
+    session.state = SessionState::Error;
+    session.last_error = Some("provisioning failed".into());
+    crate::database::save_session(&session).unwrap();
+
+    // The notice is committed before the failed phase. Both are the receipt.
+    let (notice, stored_error) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = crate::database::pending_mailbox_events(10).unwrap();
+            let notice = pending.iter().find_map(|row| {
+                (row.target_session_id == "sender-1").then(|| row.event_json.clone())
+            });
+            let failed = crate::database::load_startup_delivery(&command_id)
+                .unwrap()
+                .filter(|row| row.phase == "failed")
+                .and_then(|row| row.error);
+            if let (Some(notice), Some(error)) = (notice, failed) {
+                return (notice, error);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the sender was not told the message was dropped");
+    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&notice).unwrap();
+    let mj_core::mailbox::MailboxEventBody::PlainText { text } = event.body else {
+        panic!("the undelivered notice is plain text, not a reply from the target");
+    };
+    assert!(text.contains("was not delivered"), "{text}");
+    assert!(text.contains("bring the logs"), "{text}");
+    assert!(text.contains("provisioning failed"), "{text}");
+    assert!(
+        stored_error.contains("was not delivered"),
+        "a retry has to read that the message was not delivered: {stored_error}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "the undelivered message was submitted"
+    );
 }
 
 /// A restored session's hand-off is queued ahead of any prompt, so the prompt
@@ -9694,14 +9886,15 @@ async fn discard_intent_recovers_without_checkpointing_and_reconciles_children()
         .checkpoint
         .clone()
         .unwrap();
-    controller
-        .prepare_discard(
+    crate::controller::test_support::worker_test_scope(LATCH_RELAY_SESSION, || {
+        controller.prepare_discard(
             LATCH_RELAY_SESSION,
             &checkpoint,
             &ProcessExecutor,
             || Ok(()),
         )
-        .unwrap();
+    })
+    .unwrap();
     let durable = Controller::load().unwrap();
     assert_eq!(
         durable.state.sessions[LATCH_RELAY_SESSION].state,
@@ -9847,11 +10040,8 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     )
     .unwrap();
 
-    let mut state = test_runtime_state_loading_the_store();
-    // This fixture needs live recovery admission. Its usual inert observers
-    // belong to coordinators already dropped by the runtime helper.
-    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
-    Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
+    let (state, mut recovery, _upgrades) =
+        test_runtime_state_loading_the_store_with_live_recovery();
     // A recovery copy in flight holds the child's stop at its start, where
     // the operation is already visible.
     let recovery_attempt = state
@@ -9938,9 +10128,8 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
             .unwrap();
     }
 
-    let mut state = test_runtime_state_loading_the_store();
-    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
-    Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
+    let (state, mut recovery, _upgrades) =
+        test_runtime_state_loading_the_store_with_live_recovery();
     let attempt_a = state
         .recovery_observer
         .gate
@@ -15342,4 +15531,156 @@ async fn queued_lifecycle_requests_release_client_admission_for_handoff_and_stop
             "unexpected lifecycle failure: {error:#}"
         );
     }
+}
+
+#[tokio::test]
+async fn notification_item_read_crosses_the_daemon_client_boundary() {
+    const NAME: &str = "notification_item_read_crosses_the_daemon_client_boundary";
+    const CHILD: &str = "MJ_TEST_NOTIFICATION_ITEM_READ";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&runtime_test_session(
+        "notification-history",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    ))
+    .unwrap();
+    let mut history = mj_core::state::MaterializedSession::empty("notification-history");
+    history.applied_event_ordinal = 600;
+    history.applied_event_digest = format!("{:064x}", 600);
+    for position in 1..=600 {
+        history.transcript.push(Arc::new(mj_core::state::TranscriptItem {
+            stable_id: format!("reply-{position}"), position,
+            latest_content_event_ordinal: Some(position), created_at_ms: position as i64, last_changed_at_ms: position as i64,
+            body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":format!("Question {position}")}})], streaming: false },
+        }));
+    }
+    crate::database::save_materialized_session(&history).unwrap();
+    let (tail, _) = crate::database::load_materialized_projection_tail("notification-history", 512)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !tail
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "reply-1")
+    );
+    let state = test_runtime_state();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(
+                stream,
+                server_metadata.clone(),
+                Arc::clone(&state),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+    });
+    // Send the legacy action shape without new optional fields, in the
+    // daemon's advertised dialect (as DaemonClient::request does). Reading a
+    // single raw frame proves the reply never entered chunk transport.
+    let mut legacy = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut legacy,
+        &serde_json::json!({
+            "protocol_version": metadata.protocol_version,
+            "request_id": 41,
+            "token": metadata.token.clone(),
+            "action": {"action": "stored_projection_tail", "arguments": {
+                "session_id": "notification-history", "items": 512
+            }}
+        }),
+    )
+    .await
+    .unwrap();
+    let response: ResponseEnvelope = read_frame(&mut legacy).await.unwrap();
+    assert_eq!(response.request_id, 41);
+    let Ok(DaemonReply::StoredProjectionTail(Some(legacy_tail))) = response.result else {
+        panic!("legacy count requests must return an unchunked StoredProjectionTail frame");
+    };
+    assert_eq!(legacy_tail.transcript.first().unwrap().position, 89);
+    assert_eq!(legacy_tail.transcript.last().unwrap().position, 600);
+    drop(legacy);
+    let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+    let StoredTranscriptItem::Found(item) = client
+        .stored_transcript_item("notification-history".into(), "reply-1".into())
+        .await
+        .unwrap()
+    else {
+        panic!("old question must be found outside the tail");
+    };
+    assert_eq!(*item, *history.transcript[0]);
+    assert!(matches!(
+        client
+            .stored_transcript_item("notification-history".into(), "missing".into())
+            .await
+            .unwrap(),
+        StoredTranscriptItem::Missing
+    ));
+    let count_tail = client
+        .stored_projection_tail("notification-history".into(), 512)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(count_tail.transcript.first().unwrap().position, 89);
+    assert_eq!(count_tail.transcript.last().unwrap().position, 600);
+    // A single stored item can exceed the transport frame boundary.
+    let large_text = "x".repeat(MAX_FRAME_BYTES + 128 * 1024);
+    for position in 601..=610 {
+        history.transcript.push(Arc::new(mj_core::state::TranscriptItem {
+            stable_id: format!("reply-{position}"), position,
+            latest_content_event_ordinal: Some(position), created_at_ms: position as i64, last_changed_at_ms: position as i64,
+            body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text", "text": if position == 610 { large_text.clone() } else { format!("Question {position}") }}})], streaming: false },
+        }));
+    }
+    history.applied_event_ordinal = 610;
+    history.applied_event_digest = format!("{:064x}", 610);
+    crate::database::save_materialized_session(&history).unwrap();
+    assert!(
+        serde_json::to_vec(&DaemonReply::StoredTranscriptItem(Some(Box::new(
+            history.transcript.last().unwrap().as_ref().clone()
+        ))))
+        .unwrap()
+        .len()
+            > MAX_FRAME_BYTES
+    );
+    let StoredTranscriptItem::Found(large) = client
+        .stored_transcript_item("notification-history".into(), "reply-610".into())
+        .await
+        .unwrap()
+    else {
+        panic!("large item must be returned");
+    };
+    assert!(large.body == history.transcript.last().unwrap().body);
+    drop(client);
+    let mut old_metadata = metadata;
+    old_metadata.protocol_version = mj_client::daemon::STORED_TRANSCRIPT_READ_PROTOCOL - 1;
+    let mut older = DaemonClient::connect(old_metadata).await.unwrap();
+    assert!(matches!(
+        older
+            .stored_transcript_item("notification-history".into(), "reply-1".into())
+            .await
+            .unwrap(),
+        StoredTranscriptItem::Unsupported
+    ));
+    // No unknown action was sent and no error/reconnect loop was entered.
+    // The frozen management operation still works on the same connection.
+    older.status().await.unwrap();
+    drop(older);
+    server.await.unwrap();
 }

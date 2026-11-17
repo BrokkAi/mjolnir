@@ -80,6 +80,54 @@ impl RuntimeState {
     }
 }
 
+/// One peer message held until startup can take it. The command id is the
+/// turn id a later delivery uses, so a retry of the same request is the same
+/// step. `created_at_ms` is the first request's clock; a retry must not
+/// rewrite it.
+#[derive(Clone, Debug)]
+pub(crate) struct QueuedSessionMessage {
+    pub request_id: String,
+    pub sender_id: String,
+    pub sender_title: String,
+    pub text: String,
+    pub created_at_ms: u64,
+    pub waited_on_group: Option<String>,
+}
+
+pub(crate) fn session_message_startup_step(
+    message: &QueuedSessionMessage,
+) -> (String, StartupStep) {
+    (
+        mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id(&message.request_id),
+        StartupStep::SessionMessage {
+            sender_id: message.sender_id.clone(),
+            sender_title: message.sender_title.clone(),
+            text: message.text.clone(),
+            created_at_ms: message.created_at_ms,
+            waited_on_group: message.waited_on_group.clone(),
+        },
+    )
+}
+
+impl RuntimeState {
+    /// Accept one peer message into the session's startup queue. The row stays
+    /// ungrouped so it cannot become the status `mj wait` reads.
+    pub(crate) async fn queue_startup_session_message(
+        self: &Arc<Self>,
+        session_id: &str,
+        message: QueuedSessionMessage,
+    ) -> Result<()> {
+        let (command_id, step) = session_message_startup_step(&message);
+        self.queue_startup_steps_with_ids(
+            session_id,
+            vec![(command_id, step)],
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+    }
+}
+
 pub(crate) fn api_followup_steps(
     group_id: &str,
     followup: crate::server::api::StartFollowup,

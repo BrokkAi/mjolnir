@@ -743,3 +743,105 @@ pub(crate) fn session_admission(session_id: &str) -> crate::recovery_gate::Sessi
 pub(crate) fn relay_admission(session_id: &str) -> crate::recovery_gate::RelayLeaseAdmission {
     futures::executor::block_on(session_admission(session_id).lease(session_id)).unwrap()
 }
+
+/// Shared owner for fixtures exercising process mutation without a daemon.
+pub(crate) fn worker_test_gate() -> std::sync::Arc<crate::recovery_gate::RecoveryGate> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    static GATES: OnceLock<
+        Mutex<
+            std::collections::BTreeMap<std::path::PathBuf, Arc<crate::recovery_gate::RecoveryGate>>,
+        >,
+    > = OnceLock::new();
+    GATES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .entry(mj_core::config::data_dir())
+        .or_default()
+        .clone()
+}
+pub(crate) fn worker_test_permit(
+    id: &str,
+    _reason: &'static str,
+) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {
+    if let Some(owner) = crate::worker_lifecycle::current(id) {
+        return Ok(Some(owner));
+    }
+    let Ok(admission) =
+        worker_test_gate().try_start(id, crate::recovery_gate::BackgroundWork::WorkerReplacement)
+    else {
+        return Ok(None);
+    };
+    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission).map(Some)
+}
+pub(crate) fn worker_test_observation(
+    id: &str,
+) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {
+    let Ok(admission) =
+        worker_test_gate().try_start(id, crate::recovery_gate::BackgroundWork::WorkerObservation)
+    else {
+        return Ok(None);
+    };
+    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission).map(Some)
+}
+
+/// Enter a fixture's operation exactly as the daemon registry does.
+pub(crate) fn worker_test_scope<T>(id: &str, work: impl FnOnce() -> T) -> T {
+    if let Some(owner) = crate::worker_lifecycle::current(id) {
+        return owner.scope_blocking(work);
+    }
+    let gate = worker_test_gate();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let enter = gate.enter_foreground(
+        id,
+        "test lifecycle",
+        crate::recovery_gate::LifecycleOrigin::Person,
+        &cancelled,
+        &crate::targets::ProcessExecutor,
+    );
+    let admission = if tokio::runtime::Handle::try_current().is_ok() {
+        futures::executor::block_on(enter)
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(enter)
+    }
+    .unwrap();
+    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission)
+        .unwrap()
+        .scope_blocking(work)
+}
+pub(crate) async fn worker_test_scope_async<T>(
+    id: &str,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    if let Some(owner) = crate::worker_lifecycle::current(id) {
+        return owner.scope(work).await;
+    }
+    let admission = worker_test_gate()
+        .enter_foreground(
+            id,
+            "test lifecycle",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &std::sync::atomic::AtomicBool::new(false),
+            &crate::targets::ProcessExecutor,
+        )
+        .await
+        .unwrap();
+    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission)
+        .unwrap()
+        .scope(work)
+        .await
+}
+pub(crate) fn worker_test_run_blocking<T>(
+    id: &str,
+    reason: &'static str,
+    executor: &impl crate::targets::CommandExecutor,
+    work: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    worker_test_scope(id, || {
+        crate::worker_lifecycle::run_blocking(id, reason, executor, work)
+    })
+}

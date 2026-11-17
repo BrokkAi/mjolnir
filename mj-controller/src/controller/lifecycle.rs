@@ -228,6 +228,7 @@ impl Controller {
     ) -> Result<bool> {
         let retained = source_relay.owner();
         crate::worker_lifecycle::run_with_owner(
+            admission,
             session_id,
             "suspend session for move",
             executor,
@@ -291,7 +292,7 @@ impl Controller {
         held_relay: Option<super::checkpoint::ControllerRelayLease>,
         exclusivity: LatchExclusivity,
     ) -> Result<bool> {
-        crate::worker_lifecycle::run(session_id, "suspend session controlled with manager", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
         let previous = self
             .state
@@ -633,7 +634,7 @@ impl Controller {
         ignore_nested_repositories: bool,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
-        crate::worker_lifecycle::run(session_id, "recover interrupted close managed", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
         let (state, verified) = {
             let session = self
                 .state

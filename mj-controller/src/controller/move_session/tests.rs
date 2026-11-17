@@ -1275,7 +1275,7 @@ fn move_preparation_can_refresh_a_dead_source_without_starting_its_harness() {
                 project_memory: None,
             }])
             .unwrap();
-        let checkpoint_owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        let checkpoint_owner = crate::controller::test_support::worker_test_permit(
             MOVE_QUEUE_SESSION_ID,
             "background recovery checkpoint",
         )
@@ -5378,11 +5378,14 @@ fn restart_reuses_an_error_target_and_preserves_its_queued_command() {
         .build()
         .unwrap();
     let restored = runtime
-        .block_on(controller.restore_session_in_place_for_restart(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             LATCH_RELAY_SESSION,
-            IN_PLACE_SOURCE_PROFILE,
-            "local-bare",
-            &executor,
+            controller.restore_session_in_place_for_restart(
+                LATCH_RELAY_SESSION,
+                IN_PLACE_SOURCE_PROFILE,
+                "local-bare",
+                &executor,
+            ),
         ))
         .unwrap()
         .unwrap();
@@ -5479,11 +5482,14 @@ fn restart_classifies_a_missing_target_as_a_preflight_fallback() {
         .build()
         .unwrap();
     let error = runtime
-        .block_on(controller.restore_session_in_place_for_restart(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             LATCH_RELAY_SESSION,
-            IN_PLACE_SOURCE_PROFILE,
-            "local-bare",
-            &executor,
+            controller.restore_session_in_place_for_restart(
+                LATCH_RELAY_SESSION,
+                IN_PLACE_SOURCE_PROFILE,
+                "local-bare",
+                &executor,
+            ),
         ))
         .unwrap()
         .unwrap_err();
@@ -6644,11 +6650,14 @@ fn restart_with_oversized_workspace_retains_native_state_and_full_checkpoint() {
     )
     .unwrap();
     runtime
-        .block_on(fixture.controller.restore_session_in_place_for_restart(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             LATCH_RELAY_SESSION,
-            IN_PLACE_SOURCE_PROFILE,
-            "local-bare",
-            &executor,
+            fixture.controller.restore_session_in_place_for_restart(
+                LATCH_RELAY_SESSION,
+                IN_PLACE_SOURCE_PROFILE,
+                "local-bare",
+                &executor,
+            ),
         ))
         .unwrap()
         .unwrap();

@@ -12,6 +12,29 @@ impl std::fmt::Display for StartupQueueChanged {
 }
 impl std::error::Error for StartupQueueChanged {}
 
+enum SessionMessageHold {
+    /// The harness should deliver the message.
+    Proceed,
+    /// The step is finished: delivered, or the sender was told it was not.
+    Settled,
+}
+
+/// A session in one of these states can still take a queued message. Anything
+/// else will not start, so a held peer message has to be returned.
+fn session_message_terminal_reason(state: Option<SessionState>) -> Option<String> {
+    match state {
+        Some(
+            SessionState::Provisioning
+            | SessionState::Running
+            | SessionState::Disconnected
+            | SessionState::Checkpointing
+            | SessionState::Parked,
+        ) => None,
+        Some(state) => Some(format!("the session is {state:?}")),
+        None => Some("the session disappeared".to_owned()),
+    }
+}
+
 impl RuntimeState {
     pub(crate) fn worker_background_gate(&self) -> Arc<crate::recovery_gate::RecoveryGate> {
         self.recovery_observer.gate.clone()
@@ -626,19 +649,18 @@ impl RuntimeState {
         session_id: &str,
         error: &str,
     ) {
-        let provisioning = {
-            let controller_owner = self.owner();
-            let controller = controller_owner.controller();
-            durable_session_state(controller, session_id) == Some(SessionState::Provisioning)
-        };
-        if !provisioning {
-            return;
-        }
         let cause = format!("session provisioning ended without finishing: {error}");
         let applied = blocking({
             let session_id = session_id.to_owned();
             move || {
                 let mut controller = Controller::load()?;
+                // The store owns whether provisioning is unfinished. A stale
+                // publication must not skip settlement before the operation ran.
+                if durable_session_state(&controller, &session_id)
+                    != Some(SessionState::Provisioning)
+                {
+                    return Ok(false);
+                }
                 controller.fail_interrupted_lifecycle(&session_id, &cause)
             }
         })
@@ -1211,6 +1233,18 @@ impl RuntimeState {
                 } => move_operation_id.as_deref(),
                 _ => None,
             };
+            match self
+                .settle_if_session_message_cannot_deliver(session_id, &step, &decoded)
+                .await
+            {
+                Ok(SessionMessageHold::Settled) => continue,
+                Ok(SessionMessageHold::Proceed) => {}
+                Err(error) => {
+                    self.fail_startup_queue(session_id, &format!("{error:#}"))
+                        .await;
+                    return;
+                }
+            }
             // A step that is accepted, cancelling or rejecting only needs its
             // final phase written, so it settles even after its session is gone.
             let delivers = !matches!(step.phase.as_str(), "accepted" | "cancelling" | "rejecting");
@@ -1260,6 +1294,25 @@ impl RuntimeState {
                         return;
                     }
                     Err(error) => {
+                        if matches!(decoded, StartupStep::SessionMessage { .. }) {
+                            match self
+                                .settle_if_session_message_cannot_deliver(
+                                    session_id, &step, &decoded,
+                                )
+                                .await
+                            {
+                                Ok(SessionMessageHold::Settled) => continue,
+                                Ok(SessionMessageHold::Proceed) => {}
+                                Err(persistence) => {
+                                    self.fail_startup_queue(
+                                        session_id,
+                                        &format!("{persistence:#}"),
+                                    )
+                                    .await;
+                                    return;
+                                }
+                            }
+                        }
                         let id = session_id.to_owned();
                         let reason = format!("{error:#}");
                         if let Err(persistence) = blocking(move || crate::database::fail_unavailable_startup_groups(&id, &reason)).await {
@@ -1650,7 +1703,233 @@ impl RuntimeState {
                 blocking(move || crate::database::record_subagent_prompt(&id, ordinal)).await?;
                 Ok(Some(ordinal))
             }
+            StartupStep::SessionMessage { .. } => {
+                self.deliver_queued_session_message(session_id, handle, step, command_id)
+                    .await
+            }
         }
+    }
+
+    /// A peer message held for startup. `Settled` means the row is no longer
+    /// unfinished: it was delivered already, or the sender was told it will
+    /// not be. `Proceed` means the drain should deliver it once the harness
+    /// is ready.
+    async fn settle_if_session_message_cannot_deliver(
+        &self,
+        session_id: &str,
+        step: &crate::database::StartupDelivery,
+        decoded: &StartupStep,
+    ) -> Result<SessionMessageHold> {
+        if !matches!(decoded, StartupStep::SessionMessage { .. })
+            || matches!(step.phase.as_str(), "cancelling" | "rejecting" | "accepted")
+        {
+            return Ok(SessionMessageHold::Proceed);
+        }
+        if self
+            .session_message_receipt_exists(session_id, &step.command_id)
+            .await?
+        {
+            self.finish_session_message_step(&step.command_id).await?;
+            return Ok(SessionMessageHold::Settled);
+        }
+        if let Some(reason) = self
+            .session_message_block_reason(session_id, decoded)
+            .await?
+        {
+            self.report_undelivered_session_message(session_id, decoded, &step.command_id, &reason)
+                .await?;
+            return Ok(SessionMessageHold::Settled);
+        }
+        Ok(SessionMessageHold::Proceed)
+    }
+
+    async fn session_message_receipt_exists(
+        &self,
+        session_id: &str,
+        command_id: &str,
+    ) -> Result<bool> {
+        let Some(request_id) =
+            mj_core::continuation::GeneratedPrompt::SessionMessageTurn.suffix(command_id)
+        else {
+            return Ok(false);
+        };
+        let event_key = format!("session-message-{request_id}");
+        let session_id = session_id.to_owned();
+        let command_id = command_id.to_owned();
+        blocking(move || {
+            Ok(crate::database::mailbox_event_exists(&event_key)?
+                || crate::database::load_prompt_acceptance(&session_id, &command_id)?.is_some())
+        })
+        .await
+    }
+
+    /// Why this held message must not be delivered. A session that can still
+    /// start returns `None`. A startup group fails the message only when this
+    /// message queued behind that group.
+    async fn session_message_block_reason(
+        &self,
+        session_id: &str,
+        step: &StartupStep,
+    ) -> Result<Option<String>> {
+        if let Some(reason) = session_message_terminal_reason(self.session_state(session_id)) {
+            let detail = self
+                .session_record(session_id)
+                .and_then(|record| record.last_error);
+            return Ok(Some(match detail {
+                Some(error) => format!("{reason}: {error}"),
+                None => reason,
+            }));
+        }
+        let StartupStep::SessionMessage {
+            waited_on_group: Some(group_id),
+            ..
+        } = step
+        else {
+            return Ok(None);
+        };
+        let session_id = session_id.to_owned();
+        let group_id = group_id.clone();
+        blocking(move || {
+            let failed = crate::database::load_startup_group(&session_id, &group_id)?
+                .into_iter()
+                .find(|step| matches!(step.phase.as_str(), "failed" | "rejecting"));
+            Ok(failed.map(|step| {
+                step.error
+                    .unwrap_or_else(|| "session startup was rejected".to_owned())
+            }))
+        })
+        .await
+    }
+
+    async fn finish_session_message_step(&self, command_id: &str) -> Result<()> {
+        let command_id = command_id.to_owned();
+        blocking(move || {
+            let phase = crate::database::load_startup_delivery(&command_id)?.map(|step| step.phase);
+            match phase.as_deref() {
+                Some("pending" | "delivering") => {
+                    ensure!(
+                        crate::database::claim_startup_delivery(&command_id)?,
+                        "session message delivery was withdrawn"
+                    );
+                    crate::database::set_startup_delivery_accepted(&command_id, None)?;
+                    crate::database::set_startup_delivery_phase(&command_id, "done", None)?;
+                }
+                Some("accepted") => {
+                    crate::database::set_startup_delivery_phase(&command_id, "done", None)?;
+                }
+                Some("done" | "dismissed") => {}
+                other => bail!("session message step is {other:?}"),
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn report_undelivered_session_message(
+        &self,
+        target_id: &str,
+        step: &StartupStep,
+        command_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let StartupStep::SessionMessage {
+            sender_id, text, ..
+        } = step
+        else {
+            bail!("startup step is not a session message");
+        };
+        let target_title = self
+            .session_record(target_id)
+            .map(|record| record.message_name())
+            .unwrap_or_else(|| target_id.to_owned());
+        let notice = format!(
+            "Your message to session \"{target_title}\" ({target_id}) was not delivered: {reason}\n\n{text}"
+        );
+        let event_key = format!("undelivered-{command_id}");
+        let event = mj_core::mailbox::MailboxEvent {
+            key: event_key.clone(),
+            source: "startup".into(),
+            wake: true,
+            created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+            body: mj_core::mailbox::MailboxEventBody::PlainText { text: notice },
+        };
+        let event_json = serde_json::to_string(&event)?;
+        let sender = sender_id.clone();
+        let key = event_key;
+        let enqueued = blocking(move || {
+            crate::database::enqueue_mailbox_event(&key, &sender, &event_json, true, false)
+        })
+        .await?;
+        if enqueued == crate::database::Enqueued::TargetGone {
+            tracing::warn!(
+                sender = %sender_id,
+                target_id,
+                "could not tell the sender its message was not delivered"
+            );
+        }
+        let stored = format!("the message was not delivered: {reason}");
+        let command_id = command_id.to_owned();
+        blocking(move || crate::database::fail_retained_startup_step(&command_id, &stored)).await
+    }
+
+    /// Deliver one held peer message. A protocol-36 worker takes the same
+    /// mailbox event a live session would; an older or unpublished worker
+    /// takes the rendered text as the next turn.
+    async fn deliver_queued_session_message(
+        &self,
+        session_id: &str,
+        handle: &crate::session_manager::ManagedSessionHandle,
+        step: &StartupStep,
+        command_id: &str,
+    ) -> Result<Option<u64>> {
+        let StartupStep::SessionMessage {
+            sender_id,
+            sender_title,
+            text,
+            created_at_ms,
+            ..
+        } = step
+        else {
+            bail!("startup step is not a session message");
+        };
+        let request_id = mj_core::continuation::GeneratedPrompt::SessionMessageTurn
+            .suffix(command_id)
+            .context("session message command id has no request id")?;
+        let event_key = format!("session-message-{request_id}");
+        let event = mj_core::mailbox::MailboxEvent {
+            key: event_key.clone(),
+            source: "session_message".into(),
+            wake: true,
+            created_at_ms: *created_at_ms,
+            body: mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session {
+                    id: sender_id.clone(),
+                    title: sender_title.clone(),
+                },
+                text: text.clone(),
+            },
+        };
+        let protocol = crate::mailbox_outbox::published_worker_relay_protocol(&handle.view());
+        if protocol
+            .is_some_and(|protocol| protocol >= mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL)
+        {
+            let event_json = serde_json::to_string(&event)?;
+            let target = session_id.to_owned();
+            let key = event_key;
+            let enqueued = blocking(move || {
+                crate::database::enqueue_mailbox_event(&key, &target, &event_json, true, false)
+            })
+            .await?;
+            ensure!(
+                enqueued != crate::database::Enqueued::TargetGone,
+                "session {session_id} no longer exists, so the message was not delivered"
+            );
+            return Ok(None);
+        }
+        let rendered = mj_core::mailbox::render_mailbox_event(&event);
+        self.submit_startup_prompt(session_id, handle, &rendered, None, None, command_id)
+            .await
+            .map(Some)
     }
 
     /// Submit one queued prompt and give it the history and draft handling a
@@ -1776,6 +2055,25 @@ impl RuntimeState {
                 .await
             {
                 tracing::error!(session_id, %error, "startup draft recovery remains saved");
+            }
+            return;
+        }
+        if let Some(message) = &decoded
+            && matches!(message, StartupStep::SessionMessage { .. })
+        {
+            if self
+                .session_message_receipt_exists(session_id, &step.command_id)
+                .await
+                .unwrap_or(false)
+            {
+                if let Err(error) = self.finish_session_message_step(&step.command_id).await {
+                    tracing::error!(session_id, %error, "could not settle a delivered session message");
+                }
+            } else if let Err(error) = self
+                .report_undelivered_session_message(session_id, message, &step.command_id, &reason)
+                .await
+            {
+                tracing::error!(session_id, %error, "could not report an abandoned session message");
             }
             return;
         }

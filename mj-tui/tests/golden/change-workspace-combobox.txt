@@ -21,22 +21,22 @@
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
 │                │  Change Workspace ›                                                                │                │
-│                │                                                                                    │                │
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╮
-│                │  Restart                                                                           │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
 │                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
 │                │  Destroy…                                                                          │  ──────────────╯
 │                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
-│                                                                                                        ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 menu popup action: None
@@ -63,22 +63,22 @@ menu popup action: None
 │                   │  Rename…                                                                         ctrl+b shift+t  │                   │
 │                   │  Pin…                                                                                            │                   │
 │                   │› Change Workspace ▾                                                                              │                   │
-│                   │  ╭ workspace · ↑/↓ select · Enter choose ╮                                                       │                   │
-│                   │  │Default (current)                      │─────────────────────────────────────────────────────  │                   │
+│                   │  ╭ workspace · ↑/↓ select · Enter choose ╮                                                       │  ─────────────────╯
+│                   │  │Default (current)                      │─────────────────────────────────────────────────────  │  ─────────────────╮
 │                   │  │Other                                  │                                                       │                   │
-│                   │  │Third                                  │                                                       │  ─────────────────╯
-│                   │  ╰───────────────────────────────────────╯                                       ctrl+b shift+x  │  ─────────────────╮
-│                   │  Restart                                                                                         │                   │
+│                   │  │Third                                  │                                                       │                   │
+│                   │  ╰───────────────────────────────────────╯                                       ctrl+b shift+x  │  ─────────────────╯
+│                   │  Restart                                                                                         │  ────────── ▁   ▄ ╮
 │                   │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-agents.            │                   │
 │                   │  Destroy…                                                                                        │  ─────────────────╯
 │                   │Move the selected session, and its sub-agents, to another workspace, after you confirm.           │  ────────── ▁   ▄ ╮
 │                   │                                                                                                  │                   │
-│                   ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────────────────────────────────╯  ─────────────────╯
-│                                                                                                                         ────────── ▁   ▄ ╮
+│                   ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────────────────────────────────╯                   │
 │                                                                                                                                          │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                                                                                                                          │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 menu popup action: None
@@ -94,8 +94,8 @@ menu popup action: None
 │  │ No m  │                                      Copy session ID  │           │
 │  │       │  codex-1                                              │           │
 │          │  Sub-agents Native                                    │           │
-│          │  CPU        no CPU data yet                           │           │
-│          │                                                       │  conversat│
+│          │  CPU        no CPU data yet                           │  conversat│
+│          │                                                       │           │
 │          │  Content  ──────────────────────────────────────────  │           │
 │          │  Changed files — The session's target is …  ctrl+b d  │           │
 │          │  Dismiss notification — No dismissible notificati…    │           │
@@ -105,22 +105,22 @@ menu popup action: None
 │          │  Rename…                              ctrl+b shift+t  │           │
 │          │  Pin…                                                 │           │
 │          │› Change Workspace ▾                                   │           │
-│          │  ╭ workspace · ↑/↓ select · Enter choose ╮            │           │
-│          │  │Default (current)                      │──────────  │           │
+│          │  ╭ workspace · ↑/↓ select · Enter choose ╮            │  ─────────╯
+│          │  │Default (current)                      │──────────  │  ─────────╮
 │          │  │Other                                  │            │           │
-│          │  │Third                                  │            │  ─────────╯
-│          │  ╰───────────────────────────────────────╯+b shift+x  │  ─────────╮
-│          │  Restart                                              │           │
-│          │  Interrupt all (parent + sub-agents)… — No turn i…    │  Enter on │
+│          │  │Third                                  │            │  Enter on │
+╰────────  │  ╰───────────────────────────────────────╯+b shift+x  │  ─────────╯
+╭ Targets  │  Restart                                              │  ── ▁   ▄ ╮
+│  Host /  │  Interrupt all (parent + sub-agents)… — No turn i…    │           │
 ╰────────  │  Destroy…                                             │  ─────────╯
-╭ Targets  │Move the selected session, and its sub-agents, to anoth│  ── ▁   ▄ ╮
-│  Host /  │                                                       │           │
-╰────────  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ╯  ─────────╯
-╭ Profile                                                             ── ▁   ▄ ╮
-│                                                                              │
-│  claude-1  Claude Code  refreshing…                                          │
-│  codex-1   Codex        refreshing…                                          │
-│  codex-2   Codex        refreshing…                                          │
+╭ Profile  │Move the selected session, and its sub-agents, to anoth│  ── ▁   ▄ ╮
+│          │                                                       │           │
+│  claude  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ╯           │
+│  codex-                                                                      │
+│  codex-                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 selected palette command: Some(ChangeWorkspace)
@@ -135,10 +135,10 @@ palette popup action: None
 │› · ACP pretty name               ◇ ⋯ ││                                                          │
 │  Idle  podman  codex-1               ││                                                          │
 │  │ No messages yet                   ││                                                          │
-│  │                                   ││                                                          │
-│                                      ││                     ✦  M J O L N I R                     │
+│  │                                   ││                     ✦  M J O L N I R                     │
 │                                      ││                                                          │
 │                                      ││        Select a session to open its conversation.        │
+│                                      ││                                                          │
 │                                      ││                                                          │
 │                                                                                                  │
 │                                                                                                  │
@@ -148,12 +148,9 @@ palette popup action: None
 │             │› Change workspace ▾                                                  │             │
 │             │Move the selected session, and its sub-agents, to another workspace, a│             │
 │             │  │Default (current)                      │                           │             │
-│             ╰ ↑│Other                                  │ Esc closes ───────────────╯             │
-│                │Third                                  │                                         │
+│             ╰ ↑│Other                                  │ Esc closes ───────────────╯  ───────────╯
+│                │Third                                  │                              ───────────╮
 │                ╰───────────────────────────────────────╯                                         │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ No conversation open ────────────────────────────────────╮
-│                                      ││No conversation open.                                     │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
@@ -164,6 +161,9 @@ palette popup action: None
 │                                      ││  claude-1  Claude Code  refreshing…                      │
 │                                      ││  codex-1   Codex        refreshing…                      │
 │                                      ││  codex-2   Codex        refreshing…                      │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 select Other action: ChangeWorkspace { session_id: "session-1", workspace_id: "other", workspace_name: "Other" }
@@ -177,12 +177,9 @@ select Other action: ChangeWorkspace { session_id: "session-1", workspace_id: "o
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
+│  │                                   ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -206,6 +203,9 @@ select Other action: ChangeWorkspace { session_id: "session-1", workspace_id: "o
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === nine workspaces in a six-row list (120x40) ===
@@ -231,22 +231,22 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
 │                │› Change Workspace ▾                                                                │                │
-│                │  ╭ workspace · ↑/↓ select · Enter choose ╮                                         │                │
-│                │  │Workspace default (current)           ▐│───────────────────────────────────────  │                │
+│                │  ╭ workspace · ↑/↓ select · Enter choose ╮                                         │  ──────────────╯
+│                │  │Workspace default (current)           ▐│───────────────────────────────────────  │  ──────────────╮
 │                │  │Workspace w2                          ▐│                                         │                │
-│                │  │Workspace w3                          ▐│                                         │  ──────────────╯
-│                │  │Workspace w4                          ▐│                         ctrl+b shift+x  │  ──────────────╮
-│                │  │Workspace w5                          ││                                         │                │
+│                │  │Workspace w3                          ▐│                                         │                │
+│                │  │Workspace w4                          ▐│                         ctrl+b shift+x  │  ──────────────╯
+│                │  │Workspace w5                          ││                                         │  ─────── ▁   ▄ ╮
 │                │  │Workspace w6                          ││ turn is running here or in its sub-…    │                │
 │                │  ╰───────────────────────────────────────╯                                         │  ──────────────╯
 │                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
-│                                                                                                        ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 first Escape action: None
@@ -273,22 +273,22 @@ first Escape action: None
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
 │                │› Change Workspace ›                                                                │                │
-│                │                                                                                    │                │
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╮
-│                │  Restart                                                                           │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
 │                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
 │                │  Destroy…                                                                          │  ──────────────╯
 │                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
-│                                                                                                        ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 second Escape action: None
@@ -302,12 +302,9 @@ second Escape action: None
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
+│  │                                   ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -331,5 +328,8 @@ second Escape action: None
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette

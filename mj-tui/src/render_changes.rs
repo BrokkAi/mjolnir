@@ -146,6 +146,11 @@ impl DashboardState {
                 SupportPane::Sessions => 0,
                 SupportPane::Targets => 1,
                 SupportPane::Quota => 2,
+                SupportPane::Notifications => {
+                    return self
+                        .notifications_area
+                        .is_some_and(|area| area.width > 0 && area.height > 0);
+                }
             };
             let area = areas[index];
             area.width > 0 && area.height > 0
