@@ -436,6 +436,53 @@ impl RuntimeStateOwner {
 }
 
 impl RuntimeState {
+    pub(crate) fn credential_sync_skips(
+        &self,
+        profile_id: &str,
+        fanout: bool,
+        caused_by: Option<&str>,
+        present: impl Fn(&str) -> bool,
+    ) -> Vec<(String, &'static str)> {
+        let owner = self.owner();
+        let mut ids = BTreeSet::new();
+        if fanout {
+            ids.extend(owner.indexes.pollable.keys().filter_map(|id| {
+                owner
+                    .controller
+                    .state
+                    .sessions
+                    .get(id)
+                    .filter(|record| record.last_profile == profile_id)
+                    .map(|_| id.as_str())
+            }));
+        }
+        ids.extend(caused_by);
+        ids.into_iter()
+            .filter(|id| !present(id))
+            .map(|id| {
+                let reason = match owner.controller.state.sessions.get(id) {
+                    None => "session record is absent",
+                    Some(record) if record.last_profile != profile_id => "session changed profiles",
+                    Some(record) if record.state == SessionState::Disconnected => {
+                        "session is disconnected"
+                    }
+                    Some(record) if !crate::pollers::session_target_is_pollable(record) => {
+                        "session has no pollable worker"
+                    }
+                    Some(_) if owner.close_requested.contains(id) => "session is closing",
+                    Some(_) if owner.worker_is_owned(id) => "lifecycle operation owns the worker",
+                    Some(_) if !owner.controller.config.profiles.contains_key(profile_id) => {
+                        "profile is missing"
+                    }
+                    Some(_) => {
+                        "no published credential target for this worker's staged home and route"
+                    }
+                };
+                (id.to_owned(), reason)
+            })
+            .collect()
+    }
+
     pub(crate) fn credential_target_is_current(
         &self,
         target: &mj_core::credentials::CredentialSyncTarget,

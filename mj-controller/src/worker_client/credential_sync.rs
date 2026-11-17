@@ -355,6 +355,7 @@ impl CredentialSyncCoordinator {
             // the trigger's answer, which can wait for a renewal.
             let mut busy = BTreeSet::<String>::new();
             let mut queue = VecDeque::<SyncTrigger>::new();
+            let mut renewal_logs = BTreeSet::new();
             // Role-scoped AWS credentials are renewed by a task per session,
             // never by the profile's pass: a pass that waits on one stalled
             // session must not hold back another session's renewal.
@@ -417,6 +418,10 @@ impl CredentialSyncCoordinator {
                     }
                     trigger = triggers_rx.recv() => {
                         let Some(trigger) = trigger else { break };
+                        // Explicit requests without a cause come from quota/login renewal.
+                        if trigger.cause.is_none() {
+                            renewal_logs.insert(trigger.profile_id.clone());
+                        }
                         enqueue(&mut queue, trigger);
                     }
                     completed = completed_rx.recv() => {
@@ -458,7 +463,12 @@ impl CredentialSyncCoordinator {
                         .filter(|target| target.profile_id == trigger.profile_id)
                         .cloned()
                         .collect();
+                    let log = SyncLog::new(
+                        trigger.cause.as_ref(),
+                        renewal_logs.remove(&trigger.profile_id),
+                    );
                     if targets.is_empty() {
+                        log_missing_targets(runtime.as_ref(), &trigger.profile_id, &targets, log);
                         if trigger.cause.is_some() {
                             let profile_id = trigger.profile_id.clone();
                             if results_tx
@@ -502,9 +512,10 @@ impl CredentialSyncCoordinator {
                     let relays = relays.clone();
                     let runtime = runtime.clone();
                     let steps = steps.clone();
+                    let log = log.into_owned();
                     tokio::spawn(async move {
                         let joined = tokio::spawn(async move {
-                            reconcile_profile_guarded(
+                            reconcile_profile_observed(
                                 &SessionAccess {
                                     relays: &relays,
                                     gate: gate.as_ref(),
@@ -514,6 +525,7 @@ impl CredentialSyncCoordinator {
                                 &targets,
                                 triggered_by.as_deref(),
                                 slopcop_login,
+                                log.as_ref(),
                             )
                             .await
                         })
@@ -655,11 +667,105 @@ pub(super) async fn reconcile_profile(
 /// `triggered_by`, the session whose failure asked for this sync: that it was
 /// reached and had nothing to change is what shows the profile's own login
 /// is the one the provider refused.
+#[cfg(test)]
 pub(super) async fn reconcile_profile_guarded(
     access: &SessionAccess<'_>,
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
     slopcop_login: SlopcopLoginSource,
+) -> Vec<CredentialSyncOutcome> {
+    reconcile_profile_observed(
+        access,
+        targets,
+        triggered_by,
+        slopcop_login,
+        SyncLog::default(),
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Default)]
+struct SyncLog<'a> {
+    cause: Option<&'a mj_core::credentials::CredentialSyncCause>,
+    fanout: bool,
+}
+
+impl<'a> SyncLog<'a> {
+    fn new(cause: Option<&'a mj_core::credentials::CredentialSyncCause>, fanout: bool) -> Self {
+        Self {
+            cause: cause.filter(|cause| {
+                cause.reason == mj_core::credentials::CredentialSyncReason::AuthenticationFailure
+            }),
+            fanout,
+        }
+    }
+
+    fn into_owned(self) -> OwnedSyncLog {
+        OwnedSyncLog {
+            cause: self.cause.cloned(),
+            fanout: self.fanout,
+        }
+    }
+
+    fn record(self, profile_id: &str, session_id: &str, reason: &str) {
+        tracing::info!(
+            %profile_id,
+            %session_id,
+            cause_ordinal = self.cause.map(|cause| cause.ordinal),
+            reason,
+            "credential sync session disposition"
+        );
+    }
+}
+
+struct OwnedSyncLog {
+    cause: Option<mj_core::credentials::CredentialSyncCause>,
+    fanout: bool,
+}
+
+impl OwnedSyncLog {
+    fn as_ref(&self) -> SyncLog<'_> {
+        SyncLog {
+            cause: self.cause.as_ref(),
+            fanout: self.fanout,
+        }
+    }
+}
+
+fn log_missing_targets(
+    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    profile_id: &str,
+    targets: &[CredentialSyncTarget],
+    log: SyncLog<'_>,
+) {
+    let present = |id: &str| targets.iter().any(|target| target.session_id == id);
+    if let Some(runtime) = runtime {
+        let skipped = runtime.credential_sync_skips(
+            profile_id,
+            log.fanout,
+            log.cause.map(|cause| cause.session_id.as_str()),
+            present,
+        );
+        for (session_id, reason) in skipped {
+            log.record(profile_id, &session_id, &reason);
+        }
+    } else if let Some(cause) = log.cause
+        && !present(&cause.session_id)
+    {
+        log.record(
+            profile_id,
+            &cause.session_id,
+            "not an eligible target: no published credential sync target",
+        );
+    }
+}
+
+async fn reconcile_profile_observed(
+    access: &SessionAccess<'_>,
+    targets: &[CredentialSyncTarget],
+    triggered_by: Option<&str>,
+    slopcop_login: SlopcopLoginSource,
+    mut log: SyncLog<'_>,
 ) -> Vec<CredentialSyncOutcome> {
     let SessionAccess {
         relays,
@@ -715,8 +821,9 @@ pub(super) async fn reconcile_profile_guarded(
     };
     // Targets share a profile but can differ in host CLI access. Collect off
     // scheduler threads once per wire format, then derive both scoped trees.
+    let skills_target = first.clone();
     let skills = Arc::new(
-        tokio::task::spawn_blocking(move || CanonicalSkills::collect(&first))
+        tokio::task::spawn_blocking(move || CanonicalSkills::collect(&skills_target))
             .await
             .unwrap_or_else(|error| {
                 CanonicalSkills::failed(&format!("skills collection task stopped: {error}"))
@@ -753,6 +860,7 @@ pub(super) async fn reconcile_profile_guarded(
         .collect::<Vec<_>>();
     let login_pass = async {
         let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
+        let mut skipped = Vec::new();
         for pass in 0..2 {
             let mut pulled = false;
             for (index, target) in targets.iter().enumerate() {
@@ -766,6 +874,11 @@ pub(super) async fn reconcile_profile_guarded(
                 ))
                 .await;
                 pulled |= result.pulled;
+                if log.cause.is_some() || (log.fanout && result.login_skipped) {
+                    log.record(&target.profile_id, &target.session_id, &result.reason);
+                } else if result.login_skipped {
+                    skipped.push((target.session_id.clone(), result.reason));
+                }
                 match result.outcome {
                     Some(outcome) => {
                         outcomes.insert(target.session_id.clone(), outcome);
@@ -776,6 +889,18 @@ pub(super) async fn reconcile_profile_guarded(
                     None => {}
                 }
             }
+            log.fanout |= pulled
+                || outcomes.values().any(|outcome| {
+                    outcome
+                        .outcome
+                        .as_ref()
+                        .is_ok_and(|actions| actions.contains(&CredentialSyncAction::Pushed))
+                });
+            if log.fanout && log.cause.is_none() {
+                for (session_id, reason) in skipped.drain(..) {
+                    log.record(&first.profile_id, &session_id, &reason);
+                }
+            }
             if !pulled || pass == 1 {
                 break;
             }
@@ -783,6 +908,7 @@ pub(super) async fn reconcile_profile_guarded(
         outcomes
     };
     let outcomes = login_pass.await;
+    log_missing_targets(runtime, &first.profile_id, targets, log);
     outcomes.into_values().collect()
 }
 
@@ -1032,6 +1158,8 @@ struct PassContext<'a> {
 
 /// What reconciling one session in one pass found.
 struct TargetResult {
+    reason: String,
+    login_skipped: bool,
     outcome: Option<CredentialSyncOutcome>,
     /// A fresher copy of the profile's login was pulled from the session.
     pulled: bool,
@@ -1092,7 +1220,7 @@ async fn target_is_current(
 /// still current. `None` means the work was deferred. `work` receives the hold
 /// (the admission, the session's turn and its install lock) to pass on to
 /// whatever outlives this future.
-pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
+async fn admitted_with_reason<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     target: &CredentialSyncTarget,
@@ -1107,7 +1235,7 @@ pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>
                 crate::recovery_gate::BackgroundWork::CredentialSync,
                 |admission| async move {
                     if !target_is_current(runtime, target).await? {
-                        return Ok(None);
+                        return Err(RelayJobDeferred("credential target snapshot is stale").into());
                     }
                     work(JobHold::new(
                         Some(admission),
@@ -1119,8 +1247,30 @@ pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>
                 },
             )
             .await
-            .unwrap_or_else(|| Ok(None)),
+            .unwrap_or_else(|| {
+                Err(RelayJobDeferred("credential sync admission unavailable").into())
+            }),
         None => work(JobHold::new(None, Some(turn), installing, runtime.cloned())).await,
+    }
+}
+
+// Callers outside the login pass only need to distinguish a deferral from failure.
+#[cfg(test)]
+pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
+    gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
+    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    target: &CredentialSyncTarget,
+    turn: SessionTurn,
+    installing: Option<SessionTurn>,
+    work: impl FnOnce(JobHold) -> F,
+) -> Result<Option<T>> {
+    defer_as_none(admitted_with_reason(gate, runtime, target, turn, installing, work).await)
+}
+
+fn defer_as_none<T>(result: Result<Option<T>>) -> Result<Option<T>> {
+    match result {
+        Err(error) if RelayJobDeferred::marks(&error) => Ok(None),
+        result => result,
     }
 }
 
@@ -1146,7 +1296,7 @@ async fn reconcile_target(
     // After the same session's AWS install, if it is running, never racing it
     // for the session's admission slot.
     let turn = steps.enter(&target.session_id).await;
-    let result = admitted(*gate, *runtime, target, turn, None, |hold| async move {
+    let result = admitted_with_reason(*gate, *runtime, target, turn, None, |hold| async move {
         // A failed GitHub token lookup is that step's failure, not the
         // session's: the AWS credentials, skills and logins do not depend on it.
         let github = if target.sync_github_token {
@@ -1180,18 +1330,26 @@ async fn reconcile_target(
     match result {
         // Deferral is not a successful credential check: in particular
         // it must not mark an authentication-triggered login refused.
-        Ok(None) => TargetResult {
+        Ok(None) => unreachable!("a deferred login sync carries a reason"),
+        Err(error) if RelayJobDeferred::marks(&error) => TargetResult {
+            reason: format!("{error:#}"),
+            login_skipped: true,
             outcome: None,
             pulled: false,
             clean: false,
         },
         Ok(Some(SessionSync {
-            actions, failures, ..
+            actions,
+            failures,
+            unchanged_login,
+            ..
         })) if actions.is_empty()
             && failures.is_empty()
             && (*triggered_by != Some(target.session_id.as_str()) || reported) =>
         {
             TargetResult {
+                reason: login_disposition(target, unchanged_login.as_ref(), &actions, &failures),
+                login_skipped: true,
                 outcome: None,
                 pulled: false,
                 clean: true,
@@ -1214,6 +1372,13 @@ async fn reconcile_target(
                 );
             }
             TargetResult {
+                reason: login_disposition(target, unchanged_login.as_ref(), &actions, &failures),
+                login_skipped: !actions.iter().any(|action| {
+                    matches!(
+                        action,
+                        CredentialSyncAction::Pushed | CredentialSyncAction::Pulled
+                    )
+                }),
                 pulled: actions.contains(&CredentialSyncAction::Pulled),
                 clean: failures.is_empty(),
                 outcome: Some(CredentialSyncOutcome {
@@ -1234,6 +1399,8 @@ async fn reconcile_target(
                 "credential synchronization failed for relay session"
             );
             TargetResult {
+                reason: format!("{error:#}"),
+                login_skipped: true,
                 pulled: false,
                 clean: false,
                 outcome: Some(CredentialSyncOutcome {
@@ -1245,6 +1412,30 @@ async fn reconcile_target(
                 }),
             }
         }
+    }
+}
+
+fn login_disposition(
+    target: &CredentialSyncTarget,
+    unchanged_login: Option<&CredentialSnapshot>,
+    actions: &[CredentialSyncAction],
+    failures: &[StepFailure],
+) -> String {
+    if let Some(failure) = failures
+        .iter()
+        .find(|failure| failure.step == SyncStep::HarnessLogin)
+    {
+        format!("login sync failed: {}", failure.detail)
+    } else if actions.contains(&CredentialSyncAction::Pulled) {
+        "pulled the session's fresher login".into()
+    } else if actions.contains(&CredentialSyncAction::Pushed) {
+        "pushed the current profile login".into()
+    } else if target.skips_login_file_sync {
+        "not an eligible login target: shares the profile login or uses another authentication scheme".into()
+    } else if unchanged_login.is_some() {
+        "session already holds the current login".into()
+    } else {
+        "no eligible credential transfer for the reported copies".into()
     }
 }
 
@@ -1456,15 +1647,17 @@ async fn aws_job(
     work: SyncWork,
 ) -> Result<Option<SessionSync>> {
     let turn = access.steps.enter(&target.session_id).await;
-    admitted(
-        access.gate,
-        access.runtime,
-        target,
-        turn,
-        installing,
-        |hold| async move { run_on_session(access.relays, target, work, hold).await },
+    defer_as_none(
+        admitted_with_reason(
+            access.gate,
+            access.runtime,
+            target,
+            turn,
+            installing,
+            |hold| async move { run_on_session(access.relays, target, work, hold).await },
+        )
+        .await,
     )
-    .await
 }
 
 /// What a session's renewal task needs, shared by all of them.
@@ -2247,11 +2440,10 @@ pub(super) async fn run_on_session(
     match relays {
         SessionRelays::Actors(manager) => {
             let Some(handle) = manager.find_session(target.session_id.clone()).await? else {
-                tracing::debug!(
-                    session_id = %target.session_id,
-                    "credential sync waits for the session's relay actor"
-                );
-                return Ok(None);
+                return Err(RelayJobDeferred(
+                    "credential sync waits for the session's relay actor",
+                )
+                .into());
             };
             let (job, response, _queued) = CredentialSyncJob::queue(target.clone(), work, hold);
             handle.run_on_connection(Box::new(job)).await;
@@ -2260,14 +2452,6 @@ pub(super) async fn run_on_session(
                 .context("the session actor dropped the credential sync")?
             {
                 Ok(sync) => Ok(Some(sync)),
-                Err(error) if RelayJobDeferred::marks(&error) => {
-                    tracing::debug!(
-                        session_id = %target.session_id,
-                        reason = %error,
-                        "credential sync deferred until the relay is available"
-                    );
-                    Ok(None)
-                }
                 Err(error) => Err(error),
             }
         }
