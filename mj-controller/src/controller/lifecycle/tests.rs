@@ -314,7 +314,7 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     );
     let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 3);
-    assert_eq!(commands[0].purpose, "check the staged control worker");
+    assert_eq!(commands[0].purpose, "check the control worker");
     assert_eq!(commands[1].purpose, "kill retired Mjolnir worker daemon");
     assert!(commands[2].args.iter().any(|arg| arg.contains("rm -rf")));
     let stopped = &controller.state.sessions[session_id];
@@ -1041,7 +1041,7 @@ impl CommandExecutor for RootProbeExecutor {
                 stdout: format!("{}\n", self.worker).into_bytes(),
                 stderr: Vec::new(),
             }),
-            "check the staged control worker" => Ok(CommandOutput {
+            "check the control worker" => Ok(CommandOutput {
                 status: 0,
                 stdout: b"present\n".to_vec(),
                 stderr: Vec::new(),
@@ -1120,12 +1120,12 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
     assert_eq!(
         *answered.purposes.lock().unwrap(),
         [
-            "check the staged control worker",
+            "check the control worker",
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
-            "check the staged control worker",
+            "check the control worker",
             "probe Mjolnir worker daemon liveness",
-            "check the staged control worker",
+            "check the control worker",
             "stop Mjolnir worker daemon"
         ]
     );
@@ -1161,13 +1161,18 @@ async fn close_child_with_partial_root(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    // Control commands run the staged current worker; this one answers them.
-    let control =
-        std::path::PathBuf::from(targets::control_worker_path(&worker_root.to_string_lossy()));
-    let control = control.parent().unwrap().to_owned();
-    std::fs::create_dir_all(&control).unwrap();
+    // Control commands run this build's control worker in the root; this
+    // stand-in answers them.
     #[cfg(unix)]
-    mj_core::test_hooks::install_fake_command(&control, "hel", "");
+    {
+        let control =
+            std::path::PathBuf::from(targets::control_worker_path(&worker_root.to_string_lossy()));
+        mj_core::test_hooks::install_fake_command(
+            control.parent().unwrap(),
+            control.file_name().unwrap().to_str().unwrap(),
+            "",
+        );
+    }
     std::fs::write(worker_root.join("worker-exit.json"), b"{}").unwrap();
     if has_state {
         std::fs::write(worker_root.join(mj_core::relay::RELAY_STATE_FILE), b"{}").unwrap();
@@ -1237,12 +1242,12 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
     assert_eq!(
         purposes,
         [
-            "check the staged control worker",
+            "check the control worker",
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
-            "check the staged control worker",
+            "check the control worker",
             "probe Mjolnir worker daemon liveness",
-            "check the staged control worker",
+            "check the control worker",
             "stop Mjolnir worker daemon"
         ]
     );
@@ -1269,7 +1274,7 @@ async fn closing_a_child_whose_root_has_relay_state_keeps_worker_recovery() {
     assert_eq!(
         purposes[..3],
         [
-            "check the staged control worker",
+            "check the control worker",
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root"
         ]
@@ -1307,7 +1312,7 @@ async fn closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery() 
     assert_eq!(
         purposes,
         [
-            "check the staged control worker",
+            "check the control worker",
             "probe Mjolnir worker daemon liveness"
         ]
     );

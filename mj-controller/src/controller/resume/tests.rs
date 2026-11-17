@@ -2857,7 +2857,7 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
                 }
                 "probe retained environment directory" => (0, "present\n".into()),
                 "probe Mjolnir worker root" => (0, "recoverable\n".into()),
-                "check the staged control worker" => {
+                "check the control worker" => {
                     assert!(
                         *running,
                         "control worker check ran inside a stopped container"
@@ -3016,7 +3016,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
                 "probe retained target before Restart"
                     | "probe Mjolnir worker root"
                     | "probe Mjolnir worker daemon liveness"
-                    | "check the staged control worker"
+                    | "check the control worker"
                     | "probe retained environment directory"
             ));
             let mut local = if command.program == "ssh" {

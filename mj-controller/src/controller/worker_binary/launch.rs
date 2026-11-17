@@ -572,7 +572,7 @@ impl Controller {
             }
         };
         let binary_failure = worker_binary_probe_failure(executor, &backend, &worker_root);
-        let probe = match probe_worker(executor, &backend, session_id, &worker_root) {
+        let probe = match diagnose_worker_read_only(executor, &backend, &worker_root) {
             Ok(probe) => probe.to_string(),
             Err(error) => format!("the worker could not be probed: {error:#}"),
         };

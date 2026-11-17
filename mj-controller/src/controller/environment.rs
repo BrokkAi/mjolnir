@@ -830,9 +830,9 @@ mod tests {
         assert_eq!(
             executor.operations.lock().unwrap().as_slice(),
             [
-                "check the staged control worker",
+                "check the control worker",
                 "kill retired Mjolnir worker daemon",
-                "check the staged control worker",
+                "check the control worker",
                 "kill retired Mjolnir worker daemon"
             ]
         );

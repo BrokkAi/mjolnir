@@ -1117,8 +1117,7 @@ impl Controller {
                 Err(error) => {
                     // The diagnosis reads the worker's state, so it runs before the
                     // worker is stopped.
-                    let error =
-                        worker_probe_diagnosis(executor, backend, session_id, worker_root, error);
+                    let error = worker_probe_diagnosis(executor, backend, worker_root, error);
                     Err(error)
                 }
             }

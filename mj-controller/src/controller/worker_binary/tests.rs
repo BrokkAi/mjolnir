@@ -131,7 +131,7 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
 // Hard-won: 816ca1d77: the controller ran an old root binary that lacks the worker control subcommands
 #[cfg(unix)]
 #[test]
-fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current_one() {
+fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_worker() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     const CHILD: &str = "MJ_OLD_ROOT_WORKER_CHILD";
     const SESSION: &str = "17171717171717171717171717171717";
@@ -150,7 +150,7 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
         IsolatedTest::new(test_name(
             module_path!(),
-            "probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current_one",
+            "probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_worker",
         ))
         .isolated_store(directory.path())
         .env("MJ_INSTANCE", "issue-816ca1d77-old-root")
@@ -180,15 +180,22 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current
     let liveness = probe_worker_liveness(&ProcessExecutor, &locator, SESSION, &root_text).unwrap();
     assert_eq!(liveness.status, 0);
     assert_eq!(String::from_utf8_lossy(&liveness.stdout).trim(), "dead");
-    let control = targets::control_worker_path(&root_text);
-    assert!(std::path::Path::new(&control).exists());
-    assert!(
-        std::fs::symlink_metadata(&control)
-            .unwrap()
-            .file_type()
-            .is_symlink(),
-        "the staged worker links into the store"
-    );
+    // The control worker is a hard link to this build's store entry, in the
+    // root itself, so the entry's link count went up and the root owns it.
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert_eq!(control.parent(), Some(root.as_path()));
+    let digest = mj_core::worker_launch::worker_executable_digest(Path::new(
+        &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
+    ))
+    .unwrap();
+    let entry = directory
+        .path()
+        .join("workers/worker-binaries")
+        .join(digest)
+        .join("hel");
+    let entry_meta = std::fs::metadata(&entry).unwrap();
+    assert_eq!(std::fs::metadata(&control).unwrap().ino(), entry_meta.ino());
+    assert_eq!(entry_meta.nlink(), 2, "the store entry and the root's link");
     unchanged();
 
     let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(SESSION, "test stop")
@@ -197,8 +204,8 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current
     stop_worker(&owner, &ProcessExecutor, &locator, &root_text).unwrap();
     unchanged();
 
-    // The close plan stops the worker (embedding the same staged binary) and
-    // then removes the root.
+    // The close plan stops the worker (embedding the same control binary) and
+    // then removes the root, and the control worker with it.
     targets::close_plan(&locator, SESSION)
         .unwrap()
         .execute(&ProcessExecutor)
@@ -206,7 +213,7 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_staged_current
     assert!(!root.exists());
 }
 
-// A plan that embeds the staged control worker stages it when it runs, so a
+// A plan that embeds the control worker installs it when it runs, so a
 // cleanup with no earlier probe or stop (a failed provisioning) still works.
 #[cfg(unix)]
 #[test]
@@ -243,13 +250,14 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     let root_text = root.to_string_lossy().into_owned();
     let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
     assert!(!control.exists(), "nothing is staged yet");
-    // Another build's slot beside this one: staging must never touch it.
+    // Another build's control worker in the same root: installing this build's
+    // must never touch it.
     let other = std::path::PathBuf::from(targets::control_worker_path_for_build(
         &root_text,
         "another-build",
     ));
-    assert_ne!(other, control, "builds get separate slots");
-    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    assert_ne!(other, control, "builds get separate files");
+    assert_eq!(other.parent(), control.parent());
     std::fs::write(&other, "another build's worker").unwrap();
     let locator = targets::TargetLocator::LocalBare {
         worker_root: root_text,
@@ -263,20 +271,58 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     assert!(format!("{error:#}").contains("timed out"), "{error:#}");
     assert!(!control.exists(), "the check ignored the caller's deadline");
     assert!(root.exists(), "the timed-out close removed nothing");
-    plan.execute(&ProcessExecutor).unwrap();
-    assert!(!root.exists());
+    ensure_control_worker(&ProcessExecutor, &locator, SESSION).unwrap();
+    assert!(control.exists());
     assert_eq!(
         std::fs::read_to_string(&other).unwrap(),
-        "another build's worker"
+        "another build's worker",
+        "installing this build's control worker touched another build's"
     );
+    plan.execute(&ProcessExecutor).unwrap();
+    assert!(!root.exists());
 }
 
-// The diagnostic probe reads the lock holder through the staged control
-// worker, so it stages it like every command that embeds it: a startup
-// readiness wait on a store with nothing staged must not fail with exit 78.
+// A diagnosis reports and installs nothing: a root with no control worker for
+// this build gets a finding that says so, and no file appears.
 #[cfg(unix)]
 #[test]
-fn probing_a_worker_stages_the_control_worker_itself() {
+fn a_diagnosis_reports_a_missing_control_worker_and_installs_nothing() {
+    const SESSION: &str = "20202020202020202020202020202020";
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let before = std::fs::read_dir(directory.path().join("workers"))
+        .unwrap()
+        .count();
+    let error = diagnose_worker_read_only(&ProcessExecutor, &locator, &root_text).unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&format!(
+            "control worker for this build not installed in {root_text}"
+        )),
+        "{error:#}"
+    );
+    assert!(!std::path::Path::new(&targets::control_worker_path(&root_text)).exists());
+    assert_eq!(
+        std::fs::read_dir(directory.path().join("workers"))
+            .unwrap()
+            .count(),
+        before,
+        "the diagnosis created something beside the root"
+    );
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+}
+
+// The readiness probe is a decision, so like every command that embeds the
+// control worker it installs it first: a startup wait on a root with none
+// must not fail with exit 78.
+#[cfg(unix)]
+#[test]
+fn probing_a_worker_installs_the_control_worker_itself() {
     use std::os::unix::fs::PermissionsExt;
     const CHILD: &str = "MJ_PROBE_STAGES_CHILD";
     const SESSION: &str = "19191919191919191919191919191919";
@@ -293,7 +339,7 @@ fn probing_a_worker_stages_the_control_worker_itself() {
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
         IsolatedTest::new(test_name(
             module_path!(),
-            "probing_a_worker_stages_the_control_worker_itself",
+            "probing_a_worker_installs_the_control_worker_itself",
         ))
         .isolated_store(directory.path())
         .env("MJ_INSTANCE", "issue-816ca1d77-probe-stages")
@@ -1599,7 +1645,7 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     let commands = executor.commands.borrow();
     // The staged control worker is checked first, then the stop runs it.
     assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0].purpose, "check the staged control worker");
+    assert_eq!(commands[0].purpose, "check the control worker");
     assert_eq!(commands[1].purpose, "stop Mjolnir worker daemon");
     assert!(
         commands[1]
@@ -1724,7 +1770,7 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
             "inspect Mjolnir session container",
             "start stopped Mjolnir session container",
             "inspect Mjolnir session container",
-            "check the staged control worker",
+            "check the control worker",
             "stop Mjolnir worker daemon",
         ]
     );

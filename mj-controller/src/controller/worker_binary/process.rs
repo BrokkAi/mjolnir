@@ -45,78 +45,61 @@ fn run_owned_worker_stop(
     Ok(())
 }
 
-/// Stage the current worker build where control commands run it
-/// ([`targets::control_worker_path`]), when it is not there yet.
+/// Install this build's control worker in the session's root
+/// ([`targets::control_worker_path`]) when it is not there yet.
 ///
 /// Control commands (`hel worker liveness|holder|stop`) never use a root's own
 /// `hel`: a parked sub-agent or a worker not yet upgraded keeps a build that
 /// predates them. The current build judges and stops an older worker correctly,
-/// because the lock and startup record it reads are older than the commands.
-/// Staging touches only the target's worker store, never a root, so it needs no
-/// worker admission and probes leave roots unchanged. When the current build
-/// cannot be staged for the target this fails and names it; there is no second
-/// way to stop a worker.
+/// because the lock and startup record it reads are older than the commands. The
+/// control worker is a hard link to this build's entry in the worker store,
+/// installed by the protocol that installs `<root>/hel`, only under another
+/// name. The worker never executes it, so this is not a worker swap and needs no
+/// swap admission; the root is its one owner. A root with no `hel` never ran a
+/// worker and needs none. When this build's worker cannot be installed for the
+/// target this fails and names it; there is no second way to stop a worker.
 ///
-/// Only the transfer of the binary's bytes (the upload or install in
-/// [`install_control_worker`]) runs without the caller's deadline, keeping its
-/// cancellation, because a timeout on the stop or probe that follows does not
-/// name it. The check and the link step run on the caller's executor, deadline
-/// included, so a hung session or mount still fails the caller's operation.
-///
-/// The check and the refresh of the slot's modification time are one command
-/// under the store gate that publication and collection share (a control
-/// command that starts within the entry age of its check cannot lose its
-/// binary: the collector keeps every entry a recently used slot names).
+/// Deadlines: the state check (absent, present or missing) runs on the caller's
+/// executor, deadline included. The install, meaning publication of the build
+/// to the store plus the link (and any wait behind another publication of the
+/// same digest), runs without the caller's deadline and keeps its cancellation,
+/// because it is the work a stop's timeout does not name.
 pub(crate) fn ensure_control_worker(
     caller: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
 ) -> Result<()> {
     let root = targets::worker_root(locator, session_id)?;
-    let store = mj_core::target_path::text(&store_root(locator, session_id)?);
-    let state = {
-        let gate = store_gate(locator, &store);
-        let _held = lock_gate(
-            &targets::WithoutDeadline::new(caller),
-            &gate,
-            session_id,
-            "check the control worker",
-        )?;
-        execute_checked(
-            caller,
-            targets::locator_command(
-                locator,
-                vec![
-                    "sh".into(),
-                    "-c".into(),
-                    targets::control_worker_state_script(&root),
-                ],
-            )
-            .purpose("check the staged control worker"),
-        )?
-    };
+    let state = execute_checked(
+        caller,
+        targets::locator_command(
+            locator,
+            vec![
+                "sh".into(),
+                "-c".into(),
+                targets::control_worker_state_script(&root),
+            ],
+        )
+        .purpose("check the control worker"),
+    )?;
     // Anything but `missing` (`present`, or `absent` for a root that never ran a
-    // worker) needs no staging.
+    // worker) needs no install.
     if String::from_utf8_lossy(&state.stdout).trim() != "missing" {
         return Ok(());
     }
-    let control = targets::control_worker_path(&root);
-    let worker = WorkerInstall::for_target(locator, caller).with_context(|| {
+    let untimed = &targets::WithoutDeadline::new(caller);
+    let worker = WorkerInstall::for_target(locator, untimed).with_context(|| {
         format!(
-            "the current worker cannot be staged for {root}, so its worker cannot be stopped or probed"
+            "the current worker cannot be installed for {root}, so its worker cannot be stopped or probed"
         )
     })?;
-    let slot = Path::new(&control)
-        .parent()
-        .context("the control worker has a directory")?;
-    install_control_worker(
-        caller,
-        locator,
-        session_id,
-        &worker,
-        &mj_core::target_path::text(slot),
-    )
-    .with_context(|| format!("stage the current worker for {root}"))
+    let name = Path::new(&targets::control_worker_path(&root))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("the control worker has a file name")?
+        .to_owned();
+    install_worker_binary(untimed, locator, session_id, &worker, &name)
+        .with_context(|| format!("install the current worker for {root}"))
 }
 
 /// Probe worker liveness through the staged current worker.
@@ -559,7 +542,6 @@ pub(super) fn start_worker_command(
 pub(in crate::controller) fn worker_probe_diagnosis(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
-    session_id: &str,
     worker_root: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
@@ -567,7 +549,7 @@ pub(in crate::controller) fn worker_probe_diagnosis(
         Some(failure) => error.context(failure),
         None => error,
     };
-    match probe_worker(executor, locator, session_id, worker_root) {
+    match diagnose_worker_read_only(executor, locator, worker_root) {
         Ok(probe) => error.context(probe.to_string()),
         Err(probe_error) => {
             error.context(format!("the worker could not be probed: {probe_error:#}"))
@@ -714,24 +696,20 @@ impl std::fmt::Display for WorkerProbe {
 /// A target that cannot be asked, or a record that does not parse, is an
 /// error: the caller must not mistake it for a worker with nothing to report.
 ///
-/// The probe reads the lock holder through the staged control worker, so like
-/// every command that embeds it, it is a [`targets::WorkerControlPlan`] and
-/// stages that worker first. Staging changes no root.
+/// For decisions (the readiness wait). The probe reads the lock holder through
+/// the control worker, so like every command that embeds it, it is a
+/// [`targets::WorkerControlPlan`] and installs that worker first. A diagnosis
+/// that only reports uses [`diagnose_worker_read_only`].
 pub(in crate::controller) fn probe_worker(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
     worker_root: &str,
 ) -> Result<WorkerProbe> {
-    let command = targets::locator_command(
-        locator,
-        vec!["sh".into(), "-c".into(), worker_probe_script(worker_root)],
-    )
-    .purpose("probe worker state");
     let output = targets::WorkerControlPlan::declare(
         CommandPlan {
             description: "probe worker state".into(),
-            commands: vec![command],
+            commands: vec![worker_probe_command(locator, worker_root)],
         },
         locator,
         session_id,
@@ -740,6 +718,42 @@ pub(in crate::controller) fn probe_worker(
     .context("the worker probe failed")?
     .pop()
     .context("the worker probe produced no output")?;
+    parse_worker_probe(&output)
+}
+
+/// [`probe_worker`] for a diagnosis that only reports: it never installs and
+/// never waits on the worker store. When this build's control worker is not in
+/// the root, the diagnosis says so as its finding.
+pub(in crate::controller) fn diagnose_worker_read_only(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> Result<WorkerProbe> {
+    let command = worker_probe_command(locator, worker_root);
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status != targets::WORKER_CONTROL_UNSTAGED_STATUS,
+        "{}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    ensure!(
+        output.status == 0,
+        "the worker probe exited with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    parse_worker_probe(&output)
+}
+
+fn worker_probe_command(locator: &targets::TargetLocator, worker_root: &str) -> CommandSpec {
+    targets::locator_command(
+        locator,
+        vec!["sh".into(), "-c".into(), worker_probe_script(worker_root)],
+    )
+    .purpose("probe worker state")
+}
+
+fn parse_worker_probe(output: &mj_core::targets::CommandOutput) -> Result<WorkerProbe> {
     serde_json::from_slice(&output.stdout).with_context(|| {
         format!(
             "read the worker probe: {}",
@@ -748,7 +762,7 @@ pub(in crate::controller) fn probe_worker(
     })
 }
 
-/// The shell half of [`probe_worker`]. The records are JSON the worker wrote,
+/// The shell half of [`probe_worker`] and [`diagnose_worker_read_only`]. The records are JSON the worker wrote,
 /// so they are inserted as they are; everything else it prints is a number.
 /// The live pid is the holder of the worker lock, the same fact the liveness
 /// probe reports.

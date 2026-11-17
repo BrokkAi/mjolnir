@@ -9,9 +9,9 @@ pub(super) fn store_root(locator: &targets::TargetLocator, session_id: &str) -> 
         .context("worker root has no parent")
 }
 
-/// The worker store beside a worker root. The only place that interprets where
-/// a store is; the staged control worker (`control_worker_path`) builds on it.
-pub(crate) fn store_directory(worker_root: &Path) -> Option<PathBuf> {
+/// The worker store beside a worker root; the only place that interprets where
+/// a store is.
+fn store_directory(worker_root: &Path) -> Option<PathBuf> {
     Some(mj_core::target_path::join(
         worker_root.parent()?,
         Path::new("worker-binaries"),
@@ -202,55 +202,32 @@ fn script_argv(body: &str, args: &[&str]) -> Vec<String> {
     argv
 }
 
-/// How long an unused entry, a transfer leftover or a control slot must sit
-/// before the collector may remove it, in minutes (a day). One value for all
-/// three, passed to the collector script.
-const ENTRY_AGE_MINUTES: &str = "1440";
-
 // Rename an old entry out of the published namespace before deciding whether
 // it is unreferenced. A concurrent installer either pins it first, or sees a
 // missing path and retries. Never remove a directory that an uploader owns.
 const COLLECT: &str = r#"set -eu
-store=$1; keep=${2-}; age=$3
+store=$1; keep=${2-}
 [ -d "$store" ] || exit 0
 # Timed-out transfers may not be able to run their cleanup command. All live
 # transfers in this daemon share the owner held by collection.
 for upload in "$store"/.upload-* "$store"/.transport-*; do
     [ -d "$upload" ] || continue
-    [ -n "$(find "$upload" -prune -mmin +"$age" -print)" ] || continue
+    [ -n "$(find "$upload" -prune -mmin +1440 -print)" ] || continue
     rm -rf -- "$upload"
 done
 for retired in "$store"/.gc-*; do
     [ -f "$retired/hel" ] || continue
-    [ -n "$(find "$retired/hel" -type f -mmin +"$age" -links 1 -print)" ] || continue
+    [ -n "$(find "$retired/hel" -type f -mmin +1440 -links 1 -print)" ] || continue
     rm -f -- "$retired/hel"
     rmdir -- "$retired"
 done
-# A control slot is a symlink into this store that a control command uses, and
-# every use refreshes the slot's modification time under the store gate. A slot
-# whose link resolves and was used within the entry age is a reference: the
-# entry it names is never retired. A slot unused for that long, or whose link
-# points nowhere, is removed; its entry then goes by the usual rule.
-referenced=
-for slot in "$store"/control-*; do
-    [ -d "$slot" ] || continue
-    if [ -e "$slot/hel" ] && [ -z "$(find "$slot" -prune -mmin +"$age" -print)" ]; then
-        target=$(readlink "$slot/hel") || continue
-        entry=${target%/hel}; entry=${entry##*/}
-        referenced="$referenced $entry"
-        continue
-    fi
-    rm -f -- "$slot/hel"
-    rmdir -- "$slot" 2>/dev/null || true
-done
 for file in "$store"/*/hel; do
     [ -f "$file" ] || continue
-    [ -n "$(find "$file" -type f -mmin +"$age" -links 1 -print)" ] || continue
+    [ -n "$(find "$file" -type f -mmin +1440 -links 1 -print)" ] || continue
     dir=${file%/hel}; name=${dir##*/}
     case $name in *[!0123456789abcdef]*|'') continue;; esac
     [ ${#name} = 64 ] || continue
     [ "$name" != "$keep" ] || continue
-    case "$referenced " in *" $name "*) continue;; esac
     retired="$store/.gc-$name-$$"
     mv -- "$dir" "$retired" 2>/dev/null || continue
     if [ -n "$(find "$retired/hel" -type f -links 1 -print)" ]; then
@@ -276,7 +253,7 @@ fn collect(
         script(
             locator,
             COLLECT,
-            &[root, keep.unwrap_or(""), ENTRY_AGE_MINUTES],
+            &[root, keep.unwrap_or("")],
             "collect unused Mjolnir worker binaries",
         ),
     )?;
@@ -387,75 +364,6 @@ pub(super) fn install_worker_binary(
 const LINK_MISSING: i32 = 75;
 const LINK_NO_HARD_LINKS: i32 = 76;
 const LINK_DIGEST_MISMATCH: i32 = 77;
-
-/// Stage the worker as the control worker in `slot` (a directory in the store):
-/// `slot/hel` becomes a symlink to the store's digest entry, relative so it
-/// survives the store moving as a unit and works in containers and on macOS.
-/// A symlink adds no link count, and the collector treats a slot used within
-/// the entry age as a reference (see [`COLLECT`]), so the entry it names stays
-/// while the slot is in use and goes after a day of disuse. An image's own
-/// worker is linked by the usual upload plan instead.
-///
-/// Only the transfer of the binary's bytes runs without `caller`'s deadline,
-/// and keeps its cancellation: a timeout on the stop or probe that follows does
-/// not name an upload. The gate waits and the link step run on `caller`, deadline
-/// included.
-pub(super) fn install_control_worker(
-    caller: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    worker: &WorkerInstall,
-    slot: &str,
-) -> Result<()> {
-    let untimed = &targets::WithoutDeadline::new(caller);
-    let WorkerInstall::Host(source) = worker else {
-        let destination = format!("{slot}/hel");
-        // The slot directory and the link in it are created under the store
-        // gate, so a collection cannot remove the empty slot in between.
-        let store = mj_core::target_path::text(&store_root(locator, session_id)?);
-        let gate = store_gate(locator, &store);
-        let _held = lock_gate(untimed, &gate, session_id, "stage the control worker")?;
-        execute_checked(
-            caller,
-            targets::locator_command(locator, vec!["mkdir".into(), "-p".into(), slot.into()])
-                .purpose("create the control worker directory"),
-        )?;
-        return super::upgrade::worker_binary_upload_plan(
-            locator,
-            session_id,
-            worker,
-            &destination,
-            None,
-        )?
-        .execute(caller)
-        .map(|_| ());
-    };
-    verify_worker_build(source)?;
-    let digest = mj_core::worker_launch::worker_executable_digest(source)?;
-    let store = mj_core::target_path::text(&store_root(locator, session_id)?);
-    ensure_published(
-        untimed, locator, session_id, worker, source, &store, &digest,
-    )?;
-    // The link goes in under the store gate, the one publication and collection
-    // share, so a collection cannot retire the entry or sweep the slot between
-    // the directory's creation and the link.
-    let gate = store_gate(locator, &store);
-    let _held = lock_gate(untimed, &gate, session_id, "stage the control worker")?;
-    execute_checked(
-        caller,
-        script(
-            locator,
-            r#"set -eu
-slot=$1; target=$2
-mkdir -p -- "$slot"
-ln -sfn "$target" "$slot/hel.new-$$"
-mv -f -- "$slot/hel.new-$$" "$slot/hel""#,
-            &[slot, &format!("../{digest}/hel")],
-            "stage the control Mjolnir worker",
-        ),
-    )?;
-    Ok(())
-}
 
 pub(super) fn install_worker_binary_at(
     executor: &impl CommandExecutor,

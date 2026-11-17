@@ -58,7 +58,7 @@ pub struct WorkerRecoveryPlan {
     pub source_target: mj_core::state::TargetLocator,
     pub target: Option<TargetRecoveryPlan>,
     pub workspace: Option<WorkerWorkspace>,
-    /// Runs the staged control worker, so it stages it first.
+    /// Runs the control worker, so it installs it first.
     pub liveness_probe: crate::targets::WorkerControlPlan,
     /// Prints the dead worker's own exit record, read before a restart
     /// replaces it, so a worker that died of a full disk is not restarted

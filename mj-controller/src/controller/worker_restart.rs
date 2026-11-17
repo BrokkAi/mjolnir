@@ -650,7 +650,7 @@ impl Controller {
         )
         .await
         .map_err(|error| {
-            worker_probe_diagnosis(executor, backend, session_id, worker_root, error)
+            worker_probe_diagnosis(executor, backend, worker_root, error)
                 .context(messages.connect)
                 .context(WorkerRestartLeftNoWorker)
         })?;

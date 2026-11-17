@@ -1,15 +1,14 @@
 use super::*;
 
-/// Where this build's worker is staged for control commands on a target: a
-/// slot named for the build in the target's worker store (`store_directory`, the
-/// one place that interprets the store's location), so daemons of different
-/// builds sharing a store (an SSH user's home, an EC2 host) each stage and use
-/// only their own and never overwrite another's. The build is known statically,
-/// so plans can embed the path without any I/O.
-///
-/// Nothing collects stale slots: the store's collector retires only
-/// 64-hex-digit digest directories, so a slot for a retired build stays until
-/// someone removes it.
+/// Where this build's control worker lives: `hel-control-<hash of the build>`
+/// in the session's own worker root, a hard link to this build's entry in the
+/// worker store. The worker never executes it, so installing it is not a worker
+/// swap. The root is its one owner: the link keeps the store entry alive under
+/// the collector's ordinary link-count rule, whichever daemon collects, and
+/// goes with the root. The name carries the build, so daemons of different
+/// builds each install and use their own file in the same root and never
+/// overwrite another's. The build is known statically, so plans can embed the
+/// path without any I/O. Files of older builds stay until the root is removed.
 pub fn control_worker_path(worker_root: &str) -> String {
     control_worker_path_for_build(worker_root, mj_core::worker_build::WORKER_BUILD_ID)
 }
@@ -17,38 +16,37 @@ pub fn control_worker_path(worker_root: &str) -> String {
 /// [`control_worker_path`] for a named build.
 pub fn control_worker_path_for_build(worker_root: &str, build_id: &str) -> String {
     use sha2::Digest as _;
-    let slot = format!(
-        "control-{}",
+    let name = format!(
+        "hel-control-{}",
         &mj_core::hex::lower_hex(sha2::Sha256::digest(build_id.as_bytes()))[..16]
     );
-    let store = crate::controller::store_directory(std::path::Path::new(worker_root))
-        .expect("a worker root has a parent directory");
     mj_core::target_path::text(&mj_core::target_path::join(
-        &mj_core::target_path::join(&store, std::path::Path::new(&slot)),
-        std::path::Path::new("hel"),
+        std::path::Path::new(worker_root),
+        std::path::Path::new(&name),
     ))
 }
 
-/// Exit status of a control script whose staged worker is missing. Nothing ran.
-/// Callers stage it first (`controller::worker_binary::ensure_control_worker`),
-/// so this reports a staging that was skipped or removed.
+/// Exit status of a control script whose control worker is not in the root.
+/// Nothing ran. Decisions install it first
+/// (`controller::worker_binary::ensure_control_worker`); a read-only diagnosis
+/// reports it as a finding.
 pub const WORKER_CONTROL_UNSTAGED_STATUS: i32 = 78;
 
-/// Shell that runs `hel worker <subcommand> --root <root>` from the target's
-/// staged current worker ([`control_worker_path`]), never from the root's own
-/// `hel`. A root keeps the build that last started a worker there, which can
-/// predate these subcommands; the lock they inspect (`<root>/worker.lock`, which
-/// no shell can test portably) and the startup record are older than they are,
-/// so the current build judges and stops an older worker correctly. A root
-/// without a `hel` never had a worker started from it, so `when_no_binary`
-/// answers for it.
+/// Shell that runs `hel worker <subcommand> --root <root>` from this build's
+/// control worker ([`control_worker_path`]), never from the root's own `hel`. A
+/// root keeps the build that last started a worker there, which can predate
+/// these subcommands; the lock they inspect (`<root>/worker.lock`, which no
+/// shell can test portably) and the startup record are older than they are, so
+/// the current build judges and stops an older worker correctly. A root without
+/// a `hel` never had a worker started from it, so `when_no_binary` answers for
+/// it.
 fn installed_worker_script(worker_root: &str, subcommand: &str, when_no_binary: &str) -> String {
     format!(
         r#"hel_root={root}
 hel_control={control}
 if [ -e "$hel_root/hel" ]; then
     if [ ! -x "$hel_control" ]; then
-        echo "the current Mjolnir worker is not staged at $hel_control" >&2
+        echo "control worker for this build not installed in $hel_root" >&2
         exit {unstaged}
     fi
     "$hel_control" worker {subcommand} --root "$hel_root" || exit $?
@@ -62,8 +60,8 @@ fi
     )
 }
 
-/// A plan whose commands may run the staged control worker. Running it stages
-/// that worker first (`controller::worker_binary::ensure_control_worker`), so no
+/// A plan whose commands may run the control worker. Running it installs that
+/// worker first (`controller::worker_binary::ensure_control_worker`), so no
 /// caller has to remember to. [`Self::declare`] decides by looking for the
 /// control path in the commands, so a builder cannot embed it without the plan
 /// requiring staging.
@@ -152,17 +150,14 @@ impl From<CommandPlan> for WorkerControlPlan {
 }
 
 /// Print `absent` when the root never ran a worker (no `hel`), `present` when
-/// the staged control worker is this build (and refresh its slot's modification
-/// time), and `missing` otherwise.
+/// this build's control worker is installed in the root, and `missing`
+/// otherwise.
 pub fn control_worker_state_script(worker_root: &str) -> String {
     format!(
         r#"hel_root={root}
 hel_control={control}
 if [ ! -e "$hel_root/hel" ]; then printf 'absent\n'
-elif [ -x "$hel_control" ] && [ "$("$hel_control" worker build-id 2>/dev/null)" = {build} ]; then
-    # Every use refreshes the slot, which tells the store's collector it is live.
-    touch "${{hel_control%/*}}" 2>/dev/null || true
-    printf 'present\n'
+elif [ -x "$hel_control" ] && [ "$("$hel_control" worker build-id 2>/dev/null)" = {build} ]; then printf 'present\n'
 else printf 'missing\n'
 fi
 "#,
