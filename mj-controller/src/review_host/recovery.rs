@@ -21,10 +21,20 @@ impl HostState {
             .iter()
             .map(|slot| slot.role.as_str())
             .collect();
+        // The brief writer is registered beside the reviewers, never as one.
+        let writer = mj_core::review::driver::BRIEF_WRITER_ROLE;
+        if group.brief_writer.is_some()
+            != group.registrations.iter().any(|item| item.role == writer)
+        {
+            return Err(format!(
+                "{session_id}: stored review group has inconsistent brief writer registration"
+            ));
+        }
         let registrations: BTreeSet<_> = group
             .registrations
             .iter()
             .map(|item| item.role.as_str())
+            .filter(|role| *role != writer)
             .collect();
         let keys: BTreeSet<_> = group
             .registrations
