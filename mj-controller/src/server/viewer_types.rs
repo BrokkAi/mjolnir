@@ -586,7 +586,7 @@ pub struct ViewerSession {
     pub unread_frontier: Option<u64>,
     #[serde(default)]
     pub notification_dismissal: Option<mj_core::attention::NotificationDismissal>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub notification_card: Option<mj_client::runtime_feed::NotificationCard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub form_holder: Option<String>,

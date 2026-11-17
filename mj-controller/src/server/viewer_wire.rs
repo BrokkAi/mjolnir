@@ -59,6 +59,7 @@ pub(super) struct MetadataDigests(pub(super) [Option<[u8; 32]>; METADATA_FIELDS.
 const SUMMARY_FIELDS: &[&str] = &[
     "attention",
     "notification_dismissal",
+    "notification_card",
     "form_holder",
     "unread_frontier",
     "id",

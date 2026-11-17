@@ -418,6 +418,10 @@ pub(super) async fn run_daemon_runtime(
     let capacity_service =
         super::capacity::spawn_capacity_service(state.clone(), cancellation.clone());
     let observe_delivery = super::observe::spawn(state.clone(), cancellation.clone());
+    let notification_pruning = tokio::spawn(super::attention::prune_read_notifications(
+        state.clone(),
+        cancellation.clone(),
+    ));
 
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
@@ -1003,6 +1007,14 @@ pub(super) async fn run_daemon_runtime(
         observe_delivery
             .await
             .context("Brokk Observe delivery task panicked")
+            .and_then(std::convert::identity),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join notification pruning",
+        notification_pruning
+            .await
+            .context("notification pruning task panicked")
             .and_then(std::convert::identity),
     );
     if let Some(phone_task) = phone_task {

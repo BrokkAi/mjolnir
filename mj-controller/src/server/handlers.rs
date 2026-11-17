@@ -163,7 +163,8 @@ pub(super) async fn session_row(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NotificationMessageQuery {
-    holder: String,
+    holder: Option<String>,
+    message_id: Option<String>,
     #[serde(default)]
     requests: String,
     #[serde(default)]
@@ -205,6 +206,39 @@ pub(super) async fn notification_message(
 ) -> Result<Response<Body>, ApiError> {
     use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
     validate_public_id(&session_id)?;
+    if expected.message_id.is_some() && expected.through.is_some() {
+        return Err(ApiError::bad_request(
+            "select a notification by message id or completion",
+        ));
+    }
+    if expected.message_id.is_some() || (expected.through.is_some() && expected.holder.is_none()) {
+        use mj_core::attention::EntryMessage;
+        {
+            let snapshot = state.snapshot_rx.borrow();
+            let session = require_session_record(&snapshot, &session_id)?;
+            let current = session.notification_card.as_ref().is_some_and(|card| {
+                card.entries.iter().any(|entry| match &entry.message {
+                    EntryMessage::Found(id) => expected.message_id.as_ref() == Some(id),
+                    EntryMessage::Locating | EntryMessage::None => {
+                        expected.through == Some(entry.completed_ordinal)
+                    }
+                })
+            });
+            if !current {
+                return Err(ApiError::not_found("notification entry not found"));
+            }
+        }
+        return read_notification_message(session_id, move |id| {
+            match (expected.message_id, expected.through) {
+                (Some(target), _) => read_notification_item(id, &target),
+                (_, Some(through)) => {
+                    crate::database::load_materialized_agent_message_through(id, through)
+                }
+                _ => unreachable!("entry selector is present"),
+            }
+        })
+        .await;
+    }
     // Copy what the snapshot holds, then release it before any database read.
     let (
         holder,
@@ -247,10 +281,11 @@ pub(super) async fn notification_message(
             }
             _ => None,
         };
-        if holder != expected.holder
-            || requests != expected.requests
-            || holder_session.question_message.as_deref().unwrap_or("") != expected.question
-        {
+        if expected.holder.as_ref().is_some_and(|expected_holder| {
+            &holder != expected_holder
+                || requests != expected.requests
+                || holder_session.question_message.as_deref().unwrap_or("") != expected.question
+        }) {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 "the notification changed; its message will be read again",
@@ -277,8 +312,7 @@ pub(super) async fn notification_message(
             through,
         )
     };
-    let reader = holder.clone();
-    let text = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
+    read_notification_message(holder, move |reader| {
         let facts = NotificationMessageFacts {
             pending_request: pending_request.as_deref(),
             review_activity: review_activity.as_deref(),
@@ -288,29 +322,37 @@ pub(super) async fn notification_message(
         notification_message_text(
             kind,
             &facts,
-            |target| {
-                let item = crate::database::load_materialized_transcript_item(&reader, target)?;
-                Ok(item.and_then(|item| {
-                    mj_core::transcript::materialized_agent_message_text(
-                        std::iter::once(&item),
-                        target,
-                    )
-                }))
-            },
+            |target| read_notification_item(reader, target),
             || match (kind, through) {
                 (NotificationKind::Important, Some(through)) => {
-                    crate::database::load_materialized_agent_message_through(&reader, through)
+                    crate::database::load_materialized_agent_message_through(reader, through)
                 }
                 // An important card with no boundary has no message to name.
                 (NotificationKind::Important, None) => Ok(None),
                 // A legacy worker's question is the agent's latest reply.
                 (NotificationKind::NeedsInput, _) => {
-                    Ok(crate::database::load_materialized_session_summary(&reader)?
+                    Ok(crate::database::load_materialized_session_summary(reader)?
                         .and_then(|summary| summary.last_agent_message))
                 }
             },
         )
     })
+    .await
+}
+
+fn read_notification_item(session_id: &str, target: &str) -> anyhow::Result<Option<String>> {
+    let item = crate::database::load_materialized_transcript_item(session_id, target)?;
+    Ok(item.and_then(|item| {
+        mj_core::transcript::materialized_agent_message_text(std::iter::once(&item), target)
+    }))
+}
+
+async fn read_notification_message(
+    session_id: String,
+    read: impl FnOnce(&str) -> anyhow::Result<Option<String>> + Send + 'static,
+) -> Result<Response<Body>, ApiError> {
+    let reader = session_id.clone();
+    let text = tokio::task::spawn_blocking(move || read(&reader))
     .await
     .map_err(|error| {
         tracing::error!(%error, session_id, "notification message read did not finish");
@@ -327,7 +369,7 @@ pub(super) async fn notification_message(
         )
     })?;
     let mut response =
-        Json(serde_json::json!({ "session_id": holder, "text": text })).into_response();
+        Json(serde_json::json!({ "session_id": session_id, "text": text })).into_response();
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));

@@ -196,6 +196,8 @@ pub struct NativeAgentSummary {
     /// Native operational facts needed by the daemon attention projection.
     #[serde(default)]
     pub pending_input: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input_message: Option<String>,
 }
 
 impl NativeAgentSummary {
@@ -206,6 +208,11 @@ impl NativeAgentSummary {
             projection_ordinal: view.projection.applied_event_ordinal,
             projection_digest: view.projection.applied_event_digest.clone(),
             pending_input: !view.projection.pending_elicitations.is_empty(),
+            pending_input_message: view
+                .projection
+                .pending_elicitations
+                .last()
+                .map(|request| request.message.clone()),
         }
     }
 

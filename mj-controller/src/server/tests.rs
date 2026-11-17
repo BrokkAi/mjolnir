@@ -5672,3 +5672,113 @@ async fn notification_message_for_an_important_card_requires_its_read_through_bo
         assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
     }
 }
+
+#[tokio::test]
+async fn notification_message_reads_only_entries_on_the_current_card() {
+    use mj_client::runtime_feed::NotificationCard;
+    use mj_core::attention::{EntryMessage, NotificationKind, NotificationStackEntry};
+    use mj_core::state::{MaterializedSession, TranscriptBody, TranscriptItem};
+
+    const NAME: &str = "notification_message_reads_only_entries_on_the_current_card";
+    const CHILD: &str = "MJ_TEST_NOTIFICATION_CARD_MESSAGE";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (_, state) = sample_config_state();
+    crate::database::save_session(&state.sessions["session-1"]).unwrap();
+    let mut history = MaterializedSession::empty("session-1");
+    history.applied_event_ordinal = 9;
+    history.applied_event_digest = format!("{:064x}", 9);
+    for (ordinal, message) in [(1, "exact"), (4, "bounded"), (8, "unlisted")] {
+        history.transcript.push(Arc::new(TranscriptItem {
+            stable_id: format!("agent:{ordinal}"),
+            position: ordinal,
+            latest_content_event_ordinal: Some(ordinal),
+            created_at_ms: ordinal as i64,
+            last_changed_at_ms: ordinal as i64,
+            body: TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content":{"type":"text","text":message}})],
+                streaming: false,
+            },
+        }));
+    }
+    crate::database::save_materialized_session(&history).unwrap();
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.sessions[0].notification_card = Some(NotificationCard {
+            badge: NotificationKind::Important,
+            entries: vec![
+                NotificationStackEntry {
+                    completed_ordinal: 2,
+                    kind: NotificationKind::Important,
+                    message: EntryMessage::Found("agent:1".into()),
+                },
+                NotificationStackEntry {
+                    completed_ordinal: 5,
+                    kind: NotificationKind::Important,
+                    message: EntryMessage::None,
+                },
+            ],
+            dismissal: None,
+            holder: None,
+            form: None,
+        });
+    });
+    let cookie = login_cookie(&app).await;
+    for (query, text) in [
+        ("message_id=agent%3A1", Some("exact")),
+        ("through=5", Some("bounded")),
+        ("message_id=agent%3A8", None),
+        ("through=2", None),
+        ("through=8", None),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{query}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        if let Some(text) = text {
+            assert_eq!(response.status(), StatusCode::OK, "{query}");
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"session_id": "session-1", "text": text})
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{query}");
+        }
+    }
+
+    let response = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        body["sessions"][0]["notification_card"]["entries"][0]["message"]["found"],
+        "agent:1"
+    );
+}

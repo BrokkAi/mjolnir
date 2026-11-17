@@ -14761,6 +14761,10 @@ async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
 /// command lands. The attention must drop so the card glyph clears.
 #[tokio::test]
 async fn dismiss_notification_clears_the_served_question_attention() {
+    use mj_core::attention::{
+        EntryMessage, NotificationDismissal, NotificationKind, NotificationStack,
+        NotificationStackEntry,
+    };
     const CHILD: &str = "MJ_TEST_DISMISS_CLEARS_ATTENTION";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
@@ -14828,6 +14832,26 @@ async fn dismiss_notification_clears_the_served_question_attention() {
                 question: question.clone(),
                 question_message: None,
             });
+        snapshot.operational.notification_stack = NotificationStack {
+            revision: if dismissed { 10 } else { 9 },
+            entries: if dismissed {
+                vec![]
+            } else {
+                vec![
+                    NotificationStackEntry {
+                        completed_ordinal: 7,
+                        kind: NotificationKind::Important,
+                        message: EntryMessage::None,
+                    },
+                    NotificationStackEntry {
+                        completed_ordinal: 9,
+                        kind: NotificationKind::NeedsInput,
+                        message: EntryMessage::None,
+                    },
+                ]
+            },
+        }
+        .into();
         view
     };
     state
@@ -14845,10 +14869,7 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .get("session-1")
         .cloned()
         .expect("a needs-input session serves its dismissal target");
-    assert_eq!(
-        target,
-        mj_core::attention::NotificationDismissal::Question(question.clone())
-    );
+    assert_eq!(target, NotificationDismissal::Stack { revision: 9 });
 
     let answerer = tokio::spawn(async move {
         let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
@@ -14864,9 +14885,9 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         else {
             panic!("the dismissal is a submit");
         };
-        assert_eq!(command_id, "dismiss-question-9");
+        assert_eq!(command_id, "clear-notifications-9");
         assert!(
-            matches!(command, RelayCommand::DismissQuestion { .. }),
+            matches!(command, RelayCommand::ClearNotifications { revision: 9 }),
             "{command:?}"
         );
         let _ = reply.send(Ok(10));
@@ -14885,6 +14906,15 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .await
         .unwrap();
     let cleared = state.runtime_publication().unwrap();
+    assert_eq!(cleared.records["session-1"].viewed_through_event_ordinal, 7);
+    assert!(
+        !cleared
+            .metadata
+            .notification_cards
+            .as_ref()
+            .unwrap()
+            .contains_key("session-1")
+    );
     assert_eq!(
         cleared.metadata.session_attention["session-1"],
         mj_core::attention::SessionAttention::Idle
