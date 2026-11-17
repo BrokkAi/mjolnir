@@ -205,9 +205,9 @@ impl Controller {
             "The recovery copy does not contain this parent's native session. Current files and children were kept; supply a recovery copy for the current conversation and retry Resume."
         );
         let (backend, root) = self.worker_placement(session_id)?;
-        let output = executor.execute(&super::super::worker_binary::worker_liveness_command(
-            &backend, &root,
-        ))?;
+        let output = super::super::worker_binary::probe_worker_liveness(
+            executor, &backend, session_id, &root,
+        )?;
         ensure!(
             output.status == 0 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
             "Cannot recover parent files while its worker may be live; everything was kept. Retry Resume."
@@ -905,9 +905,9 @@ impl Controller {
             )?,
         )?;
         executor.end_resumable_work("resume recovered checkout")?;
-        let liveness = executor.execute(&super::super::worker_binary::worker_liveness_command(
-            &backend, &root,
-        ))?;
+        let liveness = super::super::worker_binary::probe_worker_liveness(
+            executor, &backend, session_id, &root,
+        )?;
         ensure!(
             liveness.status == 0,
             "cannot establish parent worker state after checkout recovery; everything was kept, retry Resume"
@@ -946,9 +946,9 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
         let (backend, root) = self.worker_placement(session_id)?;
-        let dead = executor.execute(&super::super::worker_binary::worker_liveness_command(
-            &backend, &root,
-        ))?;
+        let dead = super::super::worker_binary::probe_worker_liveness(
+            executor, &backend, session_id, &root,
+        )?;
         ensure!(
             dead.status == 0 && String::from_utf8_lossy(&dead.stdout).trim() == "dead",
             "Parent runtime cannot be reconstructed while its worker may be live; everything was kept. Retry Resume."

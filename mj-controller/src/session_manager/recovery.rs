@@ -200,17 +200,13 @@ pub(crate) fn recover_worker_controlled(
         {
             return Ok(WorkerRecoveryOutcome::TargetMissing);
         }
-        let output = executor
-            .execute(&plan.liveness_probe)
-            .context("probe relay worker liveness")?;
-        if output.status != 0 {
-            bail!(
-                "{} failed with status {}: {}",
-                plan.liveness_probe.purpose,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
+        // The probe plan stages the current worker, then runs it.
+        let output = plan
+            .liveness_probe
+            .execute(executor)
+            .context("probe relay worker liveness")?
+            .pop()
+            .context("the liveness probe produced no output")?;
         // A replacement may still be replaying its journal after the daemon
         // that launched it has exited. A lost handshake is not permission to kill
         // that live process; only a liveness probe proving death permits restart.
