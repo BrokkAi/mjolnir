@@ -1,0 +1,17 @@
+{
+  "accepted_at": "2026-11-17T10:17:04.620665+00:00",
+  "same_carrier": "0f23bb69a200485d9306560e463ae6a7",
+  "same_native_reviewers": [
+    "c8757173aac60ff861754ba851e318f9",
+    "2be51eba653cb3939b13ecda2083bc56",
+    "3eefdcce61d77b652364d43d0485728c"
+  ],
+  "all_three_roster_output_usage_hashes_checked": true,
+  "original_partial_stored_bytes_equal": true,
+  "original_error_preserved": true,
+  "clean_inventory": true,
+  "carrier_api_suspended_no_background_tasks": true,
+  "readback_failures": 1,
+  "reviewer_role_retries_or_replacements": 0,
+  "admission": "Resume unchanged80jobfile with61done skipped; only19previouslyunlaunchedjobs, concurrency3, existingcodex4=25gate."
+}

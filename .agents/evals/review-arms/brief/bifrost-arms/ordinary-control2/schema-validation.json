@@ -1,0 +1,231 @@
+{
+  "recorded_epoch": 1794914819.6839998,
+  "complete_raw_pass": true,
+  "expected_units": 15,
+  "returned_units": 15,
+  "missing_units_unknown": [],
+  "schema_errors": [],
+  "expected_findings": 192,
+  "observed_finding_occurrences": 192,
+  "distinct_finding_ids": 192,
+  "expected_nonempty_diffs": 29,
+  "observed_nonempty_intros": 29,
+  "group_count_full_pass": 69,
+  "observed_group_count": 69,
+  "raw_group_verdict_counts_full_pass": {
+    "confirmed": 54,
+    "rejected": 15
+  },
+  "observed_raw_group_verdict_counts": {
+    "confirmed": 54,
+    "rejected": 15
+  },
+  "confidence_counts": {
+    "high": 68,
+    "medium": 1
+  },
+  "severity_counts": {
+    "medium": 47,
+    "null": 15,
+    "high": 6,
+    "low": 1
+  },
+  "units": [
+    {
+      "tag": "0",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-0.json",
+      "sha256": "0561d0e5d97e40b9064c1f162aa4337e2ee772781ab701f9c50efada60fc3ed9",
+      "expected_intros": [
+        "bb39a5fd493f91f3e9f0ec0e6670fb60a557894c",
+        "a75a035026aedb57d18b9f4332e6d0a2d475b344"
+      ],
+      "expected_findings": 14,
+      "observed_findings": 14,
+      "groups": 3,
+      "schema_errors": []
+    },
+    {
+      "tag": "1",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-1.json",
+      "sha256": "570b72817794a366e06e2586f4eaffe085ed3aef3ee49b99d26fdb9527aaf964",
+      "expected_intros": [
+        "fdcd0552e9a57c8dfb91ab03b26d2d0ee08df36d",
+        "27a65d69912b50de7a83fba15ebc039e347f61b8"
+      ],
+      "expected_findings": 12,
+      "observed_findings": 12,
+      "groups": 4,
+      "schema_errors": []
+    },
+    {
+      "tag": "10",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-10.json",
+      "sha256": "18a3b1209e54ee12bd9875da57aa493b339e0c606ee2560328ce0faea110baf9",
+      "expected_intros": [
+        "0041fe831aa2758c07076386c37401666075717b",
+        "b607037341ce1af66354cf4d45b02a3c3644d5d3"
+      ],
+      "expected_findings": 11,
+      "observed_findings": 11,
+      "groups": 4,
+      "schema_errors": []
+    },
+    {
+      "tag": "11",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-11.json",
+      "sha256": "a861b377cd00f7da2935f8c5c0adda9dff4371fa4a978910d9596beb1599572f",
+      "expected_intros": [
+        "22207e44f0c4fd28f29b49f236f9c5ecedc08981",
+        "6f9a2656f3a72bb23b3549c3dff738d78b19110b"
+      ],
+      "expected_findings": 8,
+      "observed_findings": 8,
+      "groups": 4,
+      "schema_errors": []
+    },
+    {
+      "tag": "12",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-12.json",
+      "sha256": "fc15d1b7ac0039ae1ef51c35f6fa243874b48b9a8b4eae181298f310b458e5fe",
+      "expected_intros": [
+        "695a400f18549624bbcc23f51e65b987160b6f28",
+        "95655a5e97784ceaa702a0d069b7853aa6dd2d27"
+      ],
+      "expected_findings": 15,
+      "observed_findings": 15,
+      "groups": 6,
+      "schema_errors": []
+    },
+    {
+      "tag": "13",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-13.json",
+      "sha256": "7da5b22045c6797535ffaa568c763947de1d06676d712464e0f5e2684362e49e",
+      "expected_intros": [
+        "7e35e90ce9c60c9be56cce34f0916f4e4083a090",
+        "378bd893ed9b7f893d1aa153ebb058c04c549141"
+      ],
+      "expected_findings": 10,
+      "observed_findings": 10,
+      "groups": 4,
+      "schema_errors": []
+    },
+    {
+      "tag": "14",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-14.json",
+      "sha256": "440a6b5c5f91cf8901ede420229437dba172c16c213552f813efaea068b0b66c",
+      "expected_intros": [
+        "1c0f689be10f72194cf49e6363366e3188def335"
+      ],
+      "expected_findings": 4,
+      "observed_findings": 4,
+      "groups": 1,
+      "schema_errors": []
+    },
+    {
+      "tag": "2",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-2.json",
+      "sha256": "8e65d826e26974af22c9b667de4a02cffabf75f73a3825ebe8381946187d1126",
+      "expected_intros": [
+        "1cfbe59c5b4458d3536821893d4568507cbbbbf6",
+        "57069dc4f77fbc6d06ad07c2aa8831807751336e"
+      ],
+      "expected_findings": 9,
+      "observed_findings": 9,
+      "groups": 5,
+      "schema_errors": []
+    },
+    {
+      "tag": "3",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-3.json",
+      "sha256": "382365c4a41f35d902fe4fa921e4e6cf5a045275e2d52628ebeeffb6373e9d6a",
+      "expected_intros": [
+        "0dc1b2afeff033dc3ede39f124d874f170a02bf5",
+        "b58235b247fdea10a2d6cf9039aec4de5245792a"
+      ],
+      "expected_findings": 25,
+      "observed_findings": 25,
+      "groups": 11,
+      "schema_errors": []
+    },
+    {
+      "tag": "4",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-4.json",
+      "sha256": "4a169dabf1ea31944225af9aa5400c73c1c56dd9707d47fd7f3b161eebff50dd",
+      "expected_intros": [
+        "5e17ecf53c3ffc620452b0bee0ab022c6ecd0ac4",
+        "9dad3f2c71bdc0bfea12f55d0ceb5fb7bd2dad97"
+      ],
+      "expected_findings": 14,
+      "observed_findings": 14,
+      "groups": 3,
+      "schema_errors": []
+    },
+    {
+      "tag": "5",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-5.json",
+      "sha256": "ddfd1199867125b63d2062e68f1d0ed3feac322b2db81b57de771aad853024fe",
+      "expected_intros": [
+        "43553e0d358d58fd725d108b4e25e9236f98824b",
+        "5053bc5bea1ac33fb6e5ee71ffa46cc0f34429e6"
+      ],
+      "expected_findings": 7,
+      "observed_findings": 7,
+      "groups": 4,
+      "schema_errors": []
+    },
+    {
+      "tag": "6",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-6.json",
+      "sha256": "6da75ecae7dae3b44bf7dbbffc4d4b4c85d36db1cb0815431977fa02ae1c1d0c",
+      "expected_intros": [
+        "4a12c7dafabb99c81e3a6b6c4d97979fc6547f82",
+        "2eaec0a7ad9102c79d5bb2b3850f7325cdfaf341"
+      ],
+      "expected_findings": 13,
+      "observed_findings": 13,
+      "groups": 4,
+      "schema_errors": []
+    },
+    {
+      "tag": "7",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-7.json",
+      "sha256": "df10551964b125b2c6b66881816fb113a62ac4c7997d5802d63fabb592e3a48c",
+      "expected_intros": [
+        "c2e0ac626414a90c7907277d9e602abcc45eedd9",
+        "a3b59a918343940f3b010783d30146b2766c04f3"
+      ],
+      "expected_findings": 10,
+      "observed_findings": 10,
+      "groups": 2,
+      "schema_errors": []
+    },
+    {
+      "tag": "8",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-8.json",
+      "sha256": "af08406df5f7963c49122bc691fb260420e67a4ccb2898d20021cbcf6b3a291f",
+      "expected_intros": [
+        "b4dc5c62d066dbfcfa1d4cdf3b1d0e007b791ba1",
+        "5febdb1c440fbec63a6d3df1b7bb1e54bec37c1e"
+      ],
+      "expected_findings": 27,
+      "observed_findings": 27,
+      "groups": 9,
+      "schema_errors": []
+    },
+    {
+      "tag": "9",
+      "path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-control2/out/verify-out-9.json",
+      "sha256": "769a908018fbf232a6bcc5271e3e76c3dbaff63f85576c2b190a37856b9044e1",
+      "expected_intros": [
+        "d3b55980518b2602e43e61e32226c940b9b69593",
+        "62d65b4fabf50487cdb2ab5a403ed61b4fec3506"
+      ],
+      "expected_findings": 13,
+      "observed_findings": 13,
+      "groups": 5,
+      "schema_errors": []
+    }
+  ],
+  "no_operator_relabeling": true,
+  "no_score_or_control2_or_runpy_or_candidates_or_handmarks_invoked": true
+}

@@ -1,0 +1,67 @@
+{
+  "commits": [
+    {
+      "intro": "4a12c7dafabb99c81e3a6b6c4d97979fc6547f82",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-360f7057",
+            "f-d709f6bd",
+            "f-ccf567c4",
+            "f-87677896"
+          ],
+          "summary": "Discarding base-side deletion ownership excludes surviving procedures when deletions land at their start or beyond their shortened end.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/diff_analysis.rs:1507-1513 converts pure deletions to a zero-width head position at the next surviving line or EOF. crates/bifrost-policy/src/coordinator.rs:4431-4443 reads the base but retains only those head ranges. PolicyChangedFile::overlaps in crates/bifrost-policy/src/taint_policy.rs:1525-1528 accepts only strict interior positions. Python procedures are anchored to their function_definition nodes (crates/bifrost-analysis/src/analyzer/python/semantic.rs:410-427). Deleting a final body statement therefore leaves the deletion position after the last remaining statement and outside the shortened function. Removing a decorator immediately before def, or a standalone Rust pub line before fn, instead puts the deletion exactly at the surviving declaration start, also excluded. Sink candidates in those procedures are dropped at taint_policy.rs:3066-3080; the second filter at 3099-3111 cannot recover them, and 3154-3167 takes the empty NoSinkInRange path. Before this diff the changed file retained these sinks. These are one ownership defect requiring base-side attribution, rather than simply making the head-boundary comparison inclusive (which would also admit unrelated gap deletions).",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-eca110d2",
+            "f-78d76d68"
+          ],
+          "summary": "The whole-program span of a synthetic JavaScript/TypeScript initializer admits unrelated top-level sinks for edits inside functions or comments.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/js_ts/semantic/syntax.rs:145-162 creates an Initializer for a program containing executable statements and uses the program itself as its body; lines 332-336 require only one non-comment, non-declaration statement. semantic/inventory.rs:145-168 anchors that procedure to the program node. crates/bifrost-policy/src/taint_policy.rs:3021-3026 tests the full source anchor against every hunk. In a file containing a top-level sink and a separate function, an edit inside that function consequently marks both the function and the enclosing program initializer as overlapping. A top-level sink has no smaller enclosing function, so the smallest-enclosing-range filter at 3068-3080 admits it and the endpoint filter at 3099-3111 retains it. An interior module comment edit also overlaps the initializer. Although file-wide binding existed before, the newly implemented edited-procedure scope exposes this incorrect over-approximation and fails to provide the promised exclusion for top-level sinks. Nested-procedure ownership filtering of the sink itself does not filter ownership of the edit.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "2eaec0a7ad9102c79d5bb2b3850f7325cdfaf341",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-9d9bd027",
+            "f-5c1a5886"
+          ],
+          "summary": "Structural facts intentionally use the indexed source and matching indexed coordinates rather than raw working-file bytes.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/i_analyzer.rs:419-424 defines indexed_source as the source retained by the generation producing declarations and ranges. tree_sitter_analyzer.rs:3382-3388 selects that source; indexed_source delegates to it at 7916-7917, and ordinary ranges select indexed state at 8281-8289. StructuralSearchProvider::structural_source uses the same file_source (structural/provider.rs:349-350); fact extraction, snapshot decoding and cache materialization all receive that same source at 411-427. Rendering declaration coordinates also reads indexed_source (structural/search/mod.rs:977-985). Thus the fact offsets are paired with their actual source, not incorrectly applied to CRLF working-file bytes by this path. Keeping ordinary traversal on indexed state is the explicit purpose of intro (commit message: isolate exact source recovery to location queries), and the findings identify no consumer requiring raw working-file offsets. Source-aware location APIs are a separate path and have the confirmed mismatch in the next group.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-df2d1639",
+            "f-51a6e1b2",
+            "f-a7e4f063",
+            "f-479d1231",
+            "f-50aaa24d"
+          ],
+          "summary": "Location scans compare a point computed from indexed LF source against module ranges projected onto CRLF working source.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:3382-3388 and 7916-7917 return retained indexed LF text. Its structural_file_state at 3742-3755 instead accepts current CRLF text when only line endings differ and builds state for that text; location_ranges at 8292-8295 returns those CRLF ranges. crates/bifrost-analysis/src/searchtools/scan_usages.rs:1192-1204 obtains the LF indexed_source, and 1214-1236 converts line/column to an LF byte position. With an explicit matching module selector, 1365-1376 compares that point to CRLF module ranges; the predicate at 1589-1595 directly compares bytes. For example, a module starting on a later line has a CRLF start advanced by one byte per preceding newline, so a point at its opening keyword can fall before its projected start and fail selection. Declaration-name recovery also mixes the LF tree with location_ranges (declaration_range.rs:19-22,95-108), though its line-based fallback at 120-129 repairs many such cases; the module branch bypasses that recovery entirely. This became inconsistent when intro changed file_source from structural_file_state to indexed state. Later fix 9af58e8fce5c16aed54453f6c774176fb56a2a41 changes location selection to read current working source, directly addressing this mismatch; cf4ffe8f9489801022736ce8c691cd6951e79d94 separately confines source-aware declaration ranges to location consumers.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

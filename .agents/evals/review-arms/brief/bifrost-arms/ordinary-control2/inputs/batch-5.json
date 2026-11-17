@@ -1,0 +1,42 @@
+[
+ {
+  "intro": "43553e0d358d58fd725d108b4e25e9236f98824b",
+  "base": "36b7312a6f46478bfd93566453c126d57f13184e",
+  "findings": [
+   {
+    "id": "f-98087c39",
+    "text": "- [P1] Initialize the new field in the candidate solve path \u2014 crates/bifrost-policy/src/taint_policy.rs:382. The production candidate solver also constructs `PreparedTaintPlan` in `taint_policy/candidate.rs`, but that initializer does not supply `sink_files`. Because the candidate module is compiled unconditionally, this change makes `bifrost-policy` fail to compile with a missing-field error, blocking all builds that depend on it."
+   }
+  ]
+ },
+ {
+  "intro": "5053bc5bea1ac33fb6e5ee71ffa46cc0f34429e6",
+  "base": "1f0369a153e35024ff696e7c73f4f5e439eebbbb",
+  "findings": [
+   {
+    "id": "f-e6b647fa",
+    "text": "- [P2] Preserve coverage of the shared scan budget boundary \u2014 crates/bifrost-analysis/src/analyzer/semantic_model/callable_values.rs:277-279. When the fact scan consumes the last allowed record before coverage collection begins, the removed test was the only check that the query reports `RecordBudgetExhausted` and does not claim complete coverage. The retained test has enough budget for both phases, so it cannot catch a regression at this boundary; this is the kind of tricky edge case the repository explicitly retains tests for ([AGENTS.md:128](AGENTS.md#L128))."
+   },
+   {
+    "id": "f-0f846e04",
+    "text": "- [P2] Preserve coverage for a budget exhausted between query stages \u2014 crates/bifrost-analysis/src/analyzer/semantic_model/callable_values.rs:278 \u2014 When the final allowed record is a matching fact and a coverage record remains, the shared budget must prevent the coverage claim from being returned and report `RecordBudgetExhausted`. The deleted test was the only check of that cross-stage boundary; the retained test has ample budget, so resetting the counter before coverage would silently turn a bounded result into an apparently complete one. This is the kind of tricky boundary for which [AGENTS.md:128](AGENTS.md#L128) calls for a test."
+   },
+   {
+    "id": "f-27f55995",
+    "text": "- [P1] Restore formatting before the CI format check \u2014 crates/bifrost-analysis/src/analyzer/semantic_model/callable_values.rs:375 \u2014 Removing the final test leaves its indented closing brace as the module's closing brace, so `cargo fmt --check` fails in the required CI formatting job. The same issue occurs in `catalog/mod.rs`, and the deletions also leave extra blank lines in several files."
+   },
+   {
+    "id": "f-fa0c8191",
+    "text": "- [P1] Restore rustfmt-compliant module closures crates/bifrost-analysis/src/analyzer/semantic_model/callable_values.rs:375: Removing the last test leaves its indented closing brace as the module's closing brace; the same issue occurs in `catalog/mod.rs`. `cargo fmt --check` rejects these files, so the formatting job in CI fails on this change. The repository's [Rust validation guidance](.agents/docs/testing-and-rust-validation.md#L134-L140) requires formatting before the pre-push gate."
+   },
+   {
+    "id": "f-15cb7edf",
+    "text": "- [P2] Retain the initialization retry deadline test \u2014 crates/bifrost-analysis/src/analyzer/semantic_model/catalog/db.rs:734 \u2014 If SQLite continues returning a retryable BUSY or PROTOCOL error until the deadline, initialization must stop retrying and return that error. The removed test was the only one exercising expiration; the remaining retryable-error test eventually succeeds and the LOCKED test takes a different branch, so a regression could leave catalog opening stuck indefinitely under persistent contention. The deadline is a tricky timing boundary covered by [AGENTS.md:128](AGENTS.md#L128)."
+   },
+   {
+    "id": "f-7237e55b",
+    "text": "- [P2] Retain the initialization retry deadline check \u2014 crates/bifrost-analysis/src/analyzer/semantic_model/catalog/db.rs:733-735. When SQLite continues to return a transient error until the deadline, the removed test was the only check that initialization stops retrying and returns that error. The remaining tests cover eventual success and a non-transient error, so an unbounded retry under persistent contention would go undetected; the repository calls for tests of tricky conditions ([AGENTS.md:128](AGENTS.md#L128))."
+   }
+  ]
+ }
+]

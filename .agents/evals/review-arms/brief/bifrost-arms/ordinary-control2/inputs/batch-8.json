@@ -1,0 +1,122 @@
+[
+ {
+  "intro": "b4dc5c62d066dbfcfa1d4cdf3b1d0e007b791ba1",
+  "base": "dde0369f3dcacdb914c01ff9b4998701cb289039",
+  "findings": [
+   {
+    "id": "f-50188d8c",
+    "text": "- [P2] Avoid treating repeated calls as self-comparisons \u2014 crates/bifrost-js-ts/src/test_detection.rs:264-269. When both operands contain the same call expression, such as `expect(counter.next()).toBe(counter.next())`, structural equality classifies the assertion as a self-comparison even though the calls execute separately and can return different values. These nested-call assertions were not recognized by the previous matcher, so the change introduces false high-severity smell findings for meaningful comparisons."
+   },
+   {
+    "id": "f-d61349f8",
+    "text": "- [P2] Avoid treating repeated calls as self-comparisons \u2014 crates/bifrost-js-ts/src/test_detection.rs:264-269\n\n  When both operands contain the same call expression, such as `expect(next()).toBe(next())`, structural equality labels the assertion a self-comparison even though the calls are evaluated separately and can return different values. These nested-call assertions were not previously classified this way, so valid tests can now receive a high-severity tautology finding; expression identity alone does not establish that repeated evaluations have the same value."
+   },
+   {
+    "id": "f-b842ab34",
+    "text": "- [P2] Unwrap parenthesized operands before classification \u2014 crates/bifrost-js-ts/src/test_detection.rs:241-245\n  Assertions such as `assert.ok((true))` were previously classified as constant truth because operand normalization stripped parentheses; the AST now supplies a `parenthesized_expression`, so this falls through to a meaningful assertion and the smell disappears. The same regression affects equality checks such as `assert.equal((value), value)`, whose operands now compare as different node kinds."
+   },
+   {
+    "id": "f-f2969674",
+    "text": "- [P2] Preserve equality detection for parenthesized assert operands \u2014 crates/bifrost-js-ts/src/test_detection.rs:342-343. For `assert.strictEqual((value), value)` (and similarly parenthesized literals), the old normalization stripped enclosing parentheses and reported self-comparison or constant-equality. The AST comparison instead rejects the `parenthesized_expression` against the unwrapped operand and treats the assertion as meaningful, hiding an existing smell."
+   },
+   {
+    "id": "f-5fa6a3e0",
+    "text": "- [P2] Preserve assertions accessed through chai.assert \u2014 crates/bifrost-js-ts/src/test_detection.rs:203-206\n  For tests using the standard `chai.assert.equal(...)` or `chai.assert.isTrue(...)` API, the object is a member expression whose property is `assert`, so this loop rejects the call. The previous detector matched the `assert.equal` portion, but these tests now receive a false `no-assertions` finding when that is their only assertion."
+   },
+   {
+    "id": "f-862ab892",
+    "text": "- [P2] Avoid treating repeated calls as self-comparisons \u2014 crates/bifrost-js-ts/src/test_detection.rs:264-269\n  When both operands contain the same call, such as `expect(counter.next()).toBe(counter.next())`, structural equality labels the assertion a tautology even though each invocation can return a different value or have side effects. The previous expect pattern did not match nested calls, so this change introduces false self-comparison findings for these assertions."
+   },
+   {
+    "id": "f-ae1d16b2",
+    "text": "- [P2] Avoid treating repeated calls as self-comparisons \u2014 crates/bifrost-js-ts/src/test_detection.rs:265-269. When both operands contain the same call, such as `expect(counter.next()).toBe(counter.next())`, structural equality marks the assertion as tautological even though the calls run separately and can return different values. The new AST handling now admits these nested calls, so valid tests receive a high-scoring self-comparison finding; restrict this classification to expressions whose repeated evaluation can be assumed to yield the same value."
+   },
+   {
+    "id": "f-ccd225b5",
+    "text": "- [P2] Avoid treating repeated calls as self-comparisons \u2014 crates/bifrost-js-ts/src/test_detection.rs:264-269\n  When both operands contain the same call, such as `expect(counter.next()).toBe(counter.next())`, the calls execute separately and can produce different values or side effects. The new structural comparison labels this a self-comparison with a tautology score, even though it is a meaningful assertion; nested calls were not classified this way by the previous detector."
+   },
+   {
+    "id": "f-863c053f",
+    "text": "- [P2] Avoid treating repeated calls as self-comparisons \u2014 crates/bifrost-js-ts/src/test_detection.rs:264-269\n  When both operands contain the same call, such as `expect(next()).toBe(next())`, matching syntax does not imply matching values: each call is evaluated separately and can return a different result or have side effects. The new support for nested calls therefore reports these valid checks as self-comparisons with a tautology score, even though the previous detector did not recognize the outer assertion. Only classify expressions as self-comparisons when their evaluation can be assumed to yield the same value."
+   }
+  ]
+ },
+ {
+  "intro": "5febdb1c440fbec63a6d3df1b7bb1e54bec37c1e",
+  "base": "882dfa34d4499ed55ce7309d165bf768706972f2",
+  "findings": [
+   {
+    "id": "f-250d6990",
+    "text": "- [P2] Substitute template parameters in qualified pointee types \u2014 src/analyzer/usages/get_definition.rs:7370-7371\n  When `operator->` returns `const T*` or `volatile T*`, the pointee text is `const T` or `volatile T`, so the exact-match substitution leaves `T` unresolved. For example, `using Ptr = Wrapper<Node>;` with `const T* operator->() const` no longer resolves `ptr->member`, although the previous first-argument behavior did. Substitute the parameter within the qualified type before resolving it."
+   },
+   {
+    "id": "f-106a4c00",
+    "text": "- [P2] Substitute parameters inside qualified return types \u2014 src/analyzer/usages/get_definition.rs:7384-7391\n  When a wrapper declares `const T* operator->()` (or another return type containing `T` rather than exactly equal to it), the pointee text is `const T`, so the exact-string comparison never substitutes the alias argument. Resolving that text then searches for a type named `T` instead of the actual pointee, causing member lookup through aliases such as `using P = Wrapper<Node>` to fail even though the previous first-argument resolution found `Node`."
+   },
+   {
+    "id": "f-aab94fc1",
+    "text": "- [P2] Resolve pointer return aliases before checking pointer depth \u2014 src/analyzer/usages/get_definition.rs:7362-7363\n  When `operator->` returns a named pointer type, such as `using pointer = T*; pointer operator->()`, its declared return text contains no `*`, so this check rejects the operator and member lookup falls back to the wrapper. This breaks valid smart-pointer aliases that use a `pointer` typedef, including wrappers whose pointee was previously resolved from the template argument."
+   },
+   {
+    "id": "f-62ae70b1",
+    "text": "- [P2] Apply default template arguments during substitution \u2014 src/analyzer/usages/get_definition.rs:7387-7392. For `template<class T, class U = T> struct Wrapper` with `U* operator->()` and `using P = Wrapper<Node>`, the second parameter has no corresponding explicit argument, so `U` is left unresolved even though its default is `Node`. Valid member accesses through `P` therefore regress from the previous first-argument resolution."
+   },
+   {
+    "id": "f-2c542349",
+    "text": "- [P2] Apply default template arguments before substituting the return type \u2014 src/analyzer/usages/get_definition.rs:7391-7393. For a wrapper such as `template<class T, class U = T> class Ptr` whose `operator->` returns `U*`, an alias `Ptr<Node>` leaves `args[1]` absent, so the lookup tries to resolve `U` instead of `Node`. This regresses valid accesses that the previous first-argument logic resolved."
+   },
+   {
+    "id": "f-9dfe82d5",
+    "text": "- [P2] Substitute template parameters inside qualified return types \u2014 src/analyzer/usages/get_definition.rs:7390-7394\n  When a wrapper declares `const T* operator->()`, the pointee text is `const T`, so the exact-string comparison does not substitute `T` and the resolver cannot find the actual class. A valid access such as `using P = Wrapper<Node>; P p; p->member()` therefore stops resolving even though the previous first-argument handling resolved it."
+   },
+   {
+    "id": "f-8e10c1f3",
+    "text": "- [P2] Follow operator-> results that are class types \u2014 src/analyzer/usages/get_definition.rs:7361-7364\n  When `operator->` returns a proxy object whose own `operator->` returns a pointer, C++ applies the operator repeatedly until it reaches a pointer. Rejecting the first non-pointer return breaks valid wrappers such as `Wrapper<Node>::operator->() -> Proxy<Node>` and regresses aliases that previously resolved to their first template argument."
+   },
+   {
+    "id": "f-a84760e9",
+    "text": "- [P2] Follow alias chains before extracting wrapper arguments \u2014 src/analyzer/usages/get_definition.rs:7346-7347 \u2014 For `using Ptr = Wrapper<Node>; using Alias = Ptr;`, the receiver's alias is `Alias`, so this reads `Ptr` as the wrapper head and collects no arguments. Resolving the head follows the alias to `Wrapper`, but its `T` cannot be substituted and `Alias::operator->` member resolution fails; the template arguments need to be retained while following the alias chain."
+   },
+   {
+    "id": "f-9a77edbc",
+    "text": "- [P2] Substitute template parameters in qualified pointee types \u2014 src/analyzer/usages/get_definition.rs:7385-7392. When a wrapper declares `const T* operator->()`, the extracted pointee is `const T`, so the exact equality check never substitutes `T` with the alias argument. Resolving that text then fails, and valid accesses through an alias such as `using P = Wrapper<Node>` no longer resolve to members of `Node`; the previous first-argument behavior handled this case."
+   },
+   {
+    "id": "f-e2814021",
+    "text": "- [P2] Substitute template parameters inside qualified pointee types \u2014 src/analyzer/usages/get_definition.rs:7370-7371 \u2014 When an operator returns a qualified template parameter, such as `const T* operator->()`, the extracted pointee is `const T`, which does not equal the parameter name `T`. Substitution therefore never happens and resolution of `ptr->member` fails, even though the previous first-argument handling resolved this common smart-pointer shape."
+   },
+   {
+    "id": "f-fc81c966",
+    "text": "- [P2] Follow class-valued operator-> results \u2014 src/analyzer/usages/get_definition.rs:7360-7363. C++ permits `operator->` to return another class with its own `operator->`, and applies the operator repeatedly until it reaches a pointer. A wrapper returning such a proxy now fails this pointer-depth check, so accesses through aliases to that wrapper lose the member resolution that previously worked when the first template argument was the ultimate pointee."
+   },
+   {
+    "id": "f-bede1a70",
+    "text": "- [P2] Follow proxy objects returned by operator arrow \u2014 src/analyzer/usages/get_definition.rs:7362-7363\n  When `operator->` returns a proxy object that itself defines `operator->`, C++ applies the operator repeatedly until a pointer is reached. Rejecting every non-pointer return here makes valid `Wrapper<Node>` aliases with such a proxy lose member resolution, even when the proxy ultimately returns `Node*` and the previous handling resolved the member."
+   },
+   {
+    "id": "f-6477d9cb",
+    "text": "- [P2] Avoid looking up arrow members on a wrapper without an operator \u2014 src/analyzer/usages/get_definition.rs:6421-6426 \u2014 If an alias names a class with no `operator->` (or one returning a non-pointer), the new resolver returns `None` and this falls back to the wrapper class. Consequently `obj->size()` can resolve to the wrapper's `size` member even though the expression is invalid C++; failed arrow resolution must not be treated as ordinary member access on the wrapper."
+   },
+   {
+    "id": "f-f7b00111",
+    "text": "- [P2] Substitute template parameters inside qualified return types \u2014 src/analyzer/usages/get_definition.rs:7390-7394. When a wrapper declares `const T* operator->()`, the extracted pointee is `const T`, which does not exactly match the parameter `T`. Resolution then looks for a type named `T` instead of the alias argument, so member lookup regresses for a common smart-pointer return type that previously resolved through the first argument."
+   },
+   {
+    "id": "f-3018b628",
+    "text": "- [P2] Do not search wrapper members when arrow resolution fails \u2014 src/analyzer/usages/get_definition.rs:6425-6429\n  For an alias to a non-pointer wrapper with no `operator->` (or an operator returning a non-pointer), the new helper returns `None` and this falls through to the wrapper class. Consequently `x->size()` can resolve to the wrapper's `size` member even though the expression is invalid; this is newly observable for aliases such as `using X = Container<Node>`, which previously searched `Node`. Distinguish a failed overloaded-arrow lookup from an ordinary pointer receiver and avoid returning the wrapper as the arrow target."
+   },
+   {
+    "id": "f-733a89c2",
+    "text": "- [P2] Follow alias chains while preserving template arguments \u2014 src/analyzer/usages/get_definition.rs:7346-7355. For `using Ptr = shared_ptr<Node>; using OtherPtr = Ptr;`, resolving `OtherPtr` finds the `shared_ptr` wrapper through `Ptr` but collects no template arguments from the outer alias. Consequently `T*` cannot be substituted and `OtherPtr` arrow accesses no longer resolve, although the underlying alias supplies the argument."
+   },
+   {
+    "id": "f-ceb73de7",
+    "text": "- [P2] Avoid looking up arrow members on the wrapper after failure \u2014 src/analyzer/usages/get_definition.rs:6420-6425\n  If an aliased template wrapper has no `operator->`, this falls through to `cpp_type.unit`, so `p->member` can resolve to a member of the wrapper itself even though the expression has no valid arrow operation. Previously an alias with a resolvable first template argument used that argument as the owner, so this change newly produces false definitions for wrapper members."
+   },
+   {
+    "id": "f-77cef644",
+    "text": "- [P2] Use default template arguments when resolving the return type \u2014 src/analyzer/usages/get_definition.rs:7389-7393\n  When an omitted template argument has a default, the parameter has no corresponding entry in `args`, so it is left unresolved. For example, `template<class T, class U = T> class Wrapper { U* operator->(); }; using Ptr = Wrapper<Node>;` makes `ptr->member` fail to resolve even though `U` is `Node` and the previous implementation resolved it. Resolve omitted arguments from the wrapper's defaults, including defaults that refer to earlier parameters."
+   }
+  ]
+ }
+]
