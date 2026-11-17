@@ -23,8 +23,13 @@ chmod(0700, $store, $operations) == 2 or die "secure profile store: $!";
 open(my $metadata, '>>', "$operations/metadata") or die "open profile store lock: $!";
 flock($metadata, LOCK_EX) or die "lock profile store: $!";
 my $work = tempdir('receive-XXXXXXXXXX', DIR => $operations);
-open(my $lease, '>>', "$work/lease") or die "open profile receiver lease: $!";
+my $lease_path = "$work/lease";
+open(my $lease, '>>', $lease_path) or die "open profile receiver lease: $!";
 flock($lease, LOCK_EX) or die "lock profile receiver lease: $!";
+my ($operation) = $work =~ m{([^/]+)\z};
+my $owner = "$operation\n";
+my $written = syswrite($lease, $owner);
+die "write profile receiver identity: $!" unless defined($written) && $written == length($owner);
 # Tar may still be writing after a receiver is killed. Keep the operation
 # lease in that child until it exits so collection cannot delete its files.
 defined(fcntl($lease, F_SETFD, 0)) or die "share profile lease with tar: $!";
@@ -45,33 +50,63 @@ while (defined(my $line = <STDIN>)) {
 }
 die "incomplete profile offer" unless $complete;
 
+# Each claim name is a hard link to the receiver's locked operation lease.
+# link creates the name exclusively and needs no per-object descriptor. Older
+# receivers that lock the claim file itself still see the same locked inode.
+sub claim_is_live {
+    my ($path) = @_;
+    if (!open(my $probe, '+<', $path)) {
+        return 0 if $!{ENOENT};
+        die "open profile claim for inspection: $!";
+    } else {
+        return 0 if flock($probe, LOCK_EX | LOCK_NB);
+        return 1 if $!{EWOULDBLOCK};
+        die "inspect profile claim: $!";
+    }
+}
+
+sub pin_profile_object {
+    my ($key) = @_;
+    for my $name ($key, "$key.x") {
+        my $blob = "$store/$name";
+        my $pin = "$work/pins/$key";
+        if (-f $blob && -s $blob == $offered{$key} && link($blob, $pin)) {
+            utime(undef, undef, $pin) or die "touch profile content: $!";
+            return 1;
+        }
+    }
+    return 0;
+}
+
 flock($metadata, LOCK_EX) or die "lock profile store: $!";
 my (%claims, @reply);
 my $busy = 0;
 for my $key (@offer) {
-    my $pinned = 0;
-    for my $name ($key, "$key.x") {
-        my $blob = "$store/$name";
-        if (-f $blob && -s $blob == $offered{$key} && link($blob, "$work/pins/$key")) {
-            $pinned = 1;
-            last;
-        }
-    }
-    if ($pinned) {
-        utime(undef, undef, "$work/pins/$key") or die "touch profile content: $!";
+    if (pin_profile_object($key)) {
         push @reply, "present $key\n";
         next;
     }
-    open(my $claim, '>>', "$operations/claims/$key") or die "open profile claim: $!";
-    if (flock($claim, LOCK_EX | LOCK_NB)) {
-        $claims{$key} = $claim;
-        push @reply, "claimed $key\n";
-    } elsif ($!{EWOULDBLOCK}) {
-        $busy = 1;
-        push @reply, "busy $key\n";
-    } else {
-        die "claim profile content: $!";
+    my $claim = "$operations/claims/$key";
+    if (!link($lease_path, $claim)) {
+        die "create profile claim: $!" unless $!{EEXIST};
+        if (claim_is_live($claim)) {
+            $busy = 1;
+            push @reply, "busy $key\n";
+            next;
+        }
+        # A legacy owner can publish without the metadata lock. If it
+        # finished before our probe acquired the claim, use that publication.
+        if (pin_profile_object($key)) {
+            push @reply, "present $key\n";
+            next;
+        }
+        # All receivers acquire new claims under the metadata lock. A dead
+        # claim therefore cannot acquire a new owner between probe and unlink.
+        unlink($claim) or die "retire released profile claim: $!";
+        link($lease_path, $claim) or die "take over profile claim: $!";
     }
+    $claims{$key} = $claim;
+    push @reply, "claimed $key\n";
 }
 
 # Match the legacy store's collection schedule and retention. Live operation
@@ -88,7 +123,7 @@ if ((! -f "$store/.collected") || -M _ > 1 / 24) {
     open(my $stamp, '>', "$store/.collected") or die "mark profile store collection: $!";
 }
 # Reap crashed receivers and expired unowned claim names on the same schedule
-# as profile objects. Never unlink a lock file with a live holder.
+# as profile objects. Claim takeover itself depends on the lock, not age.
 if ((! -f "$operations/collected") || -M _ > 1 / 24) {
     opendir(my $dirs, $operations) or die "list profile operations: $!";
     for my $name (readdir($dirs)) {
@@ -106,9 +141,8 @@ if ((! -f "$operations/collected") || -M _ > 1 / 24) {
         next unless $name =~ /\A[0-9a-f]{64}(?:\.x)?\z/;
         my $path = "$operations/claims/$name";
         next unless -M $path > 1;
-        my $old;
-        if (open($old, '<', $path) && flock($old, LOCK_EX | LOCK_NB)) {
-            unlink($path) or die "collect profile claim: $!";
+        if (!claim_is_live($path)) {
+            unlink($path) or $!{ENOENT} or die "collect profile claim: $!";
         }
     }
     open(my $stamp, '>', "$operations/collected") or die "mark profile operation collection: $!";
@@ -133,8 +167,10 @@ for my $key (sort keys %claims) {
     # Pin the verified inode before publication. Collection or a compatible
     # older controller can change the store name, never this operation's pin.
     link($blob, "$work/pins/$key") or die "pin received profile object: $!";
+    flock($metadata, LOCK_EX) or die "lock profile store: $!";
     rename($blob, "$store/$key") or die "publish profile object: $!";
-    delete($claims{$key});
+    unlink($claims{$key}) or die "release published profile claim: $!";
+    flock($metadata, LOCK_UN) or die "unlock profile store: $!";
 }
 exit 0 if $busy || !defined($destination);
 open(my $manifest, '<:raw', "$work/incoming/manifest.json") or die "read profile manifest: $!";
