@@ -1,0 +1,12 @@
+{
+  "accepted_proposal": true,
+  "rows": 88,
+  "independent_review": [
+    "f2112bac72d98175",
+    "94108308d5a9ffed"
+  ],
+  "changed_output": "f2112bac72d98175",
+  "change": "partial to missed",
+  "reason": "The older-reader schema issue is a distinct defect; capture/ref-count mechanism absent.",
+  "retained_partial_reason": "Generic selector-alias omission is related to the same restore extraction but does not identify reasoning_effort loss; it is not a catch."
+}
