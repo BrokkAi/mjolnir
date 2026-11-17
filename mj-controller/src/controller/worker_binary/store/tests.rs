@@ -40,6 +40,10 @@ fn install(
 #[derive(Default)]
 struct Transfers(AtomicUsize);
 impl CommandExecutor for Transfers {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -154,11 +158,12 @@ fn concurrent_sessions_share_one_verified_upload_and_swaps_leave_other_links_unc
 }
 
 // The staged control worker is a relative symlink into the store, so it adds no
-// link count: an entry no root uses is still retired, and the dead link it
-// leaves is swept by the same collection.
+// link count. The collector keeps the entry a recently used slot names even
+// when no root links it, removes a slot unused for the entry age (freeing its
+// entry by the usual rule), and removes a slot whose link points nowhere.
 #[cfg(unix)]
 #[test]
-fn a_staged_control_worker_pins_nothing_and_its_dead_link_is_swept() {
+fn a_staged_control_worker_keeps_its_entry_while_used_and_is_swept_when_stale_or_dead() {
     let temp = tempfile::tempdir().unwrap();
     let id = "44444444444444444444444444444444";
     let locator = target(temp.path(), id);
@@ -169,14 +174,33 @@ fn a_staged_control_worker_pins_nothing_and_its_dead_link_is_swept() {
     let entry = root.join(&digest).join("hel");
     let links_before = std::fs::metadata(&entry).unwrap().nlink();
     let slot = root.join("control-0123456789abcdef");
-    install_control_worker(
-        &targets::ProcessExecutor,
-        &locator,
-        id,
-        &WorkerInstall::Host(bytes.clone()),
-        slot.to_str().unwrap(),
-    )
-    .unwrap();
+    let stage = || {
+        install_control_worker(
+            &targets::ProcessExecutor,
+            &locator,
+            id,
+            &WorkerInstall::Host(bytes.clone()),
+            slot.to_str().unwrap(),
+        )
+        .unwrap()
+    };
+    let collect_now = || {
+        collect(
+            &targets::ProcessExecutor,
+            &locator,
+            root.to_str().unwrap(),
+            None,
+        )
+        .unwrap()
+    };
+    let age = |path: &Path| {
+        execute_checked(
+            &targets::ProcessExecutor,
+            CommandSpec::new("touch", ["-t", "200001010000", path.to_str().unwrap()]),
+        )
+        .unwrap()
+    };
+    stage();
     assert_eq!(
         std::fs::read_link(slot.join("hel")).unwrap(),
         Path::new(&format!("../{digest}/hel")),
@@ -184,34 +208,59 @@ fn a_staged_control_worker_pins_nothing_and_its_dead_link_is_swept() {
     );
     assert_eq!(std::fs::metadata(&entry).unwrap().nlink(), links_before);
     // Staging again replaces the link in place.
-    install_control_worker(
-        &targets::ProcessExecutor,
+    stage();
+
+    // No root uses the entry any more and it is old, but its slot is fresh.
+    std::fs::remove_file(temp.path().join(id).join("hel")).unwrap();
+    age(&entry);
+    collect_now();
+    assert!(entry.exists(), "a used control slot's entry was retired");
+    assert!(slot.join("hel").exists());
+
+    // Unused for the entry age, the slot goes, and then its entry with it.
+    age(&slot);
+    collect_now();
+    assert!(!slot.exists(), "the stale control slot was not removed");
+    assert!(!entry.exists(), "the freed entry was not retired");
+
+    // A slot whose entry is gone is dead and is swept.
+    stage();
+    std::fs::remove_dir_all(root.join(&digest)).unwrap();
+    assert!(!slot.join("hel").exists());
+    collect_now();
+    assert!(!slot.exists(), "the dead control slot was not swept");
+}
+
+// Only the transfer of the binary's bytes is exempt from the caller's deadline;
+// the step that links the slot is not.
+#[cfg(unix)]
+#[test]
+fn staging_a_control_worker_uploads_without_the_callers_deadline_but_links_within_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let id = "55555555555555555555555555555555";
+    let locator = target(temp.path(), id);
+    let bytes = source(temp.path(), "worker");
+    let root = store_root(&locator, id).unwrap();
+    let digest = mj_core::worker_launch::worker_executable_digest(&bytes).unwrap();
+    let slot = root.join("control-0123456789abcdef");
+    let expired = targets::CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
+    let error = install_control_worker(
+        &expired,
         &locator,
         id,
-        &WorkerInstall::Host(bytes.clone()),
+        &WorkerInstall::Host(bytes),
         slot.to_str().unwrap(),
     )
-    .unwrap();
-
-    // No root uses the entry any more, and it is old.
-    std::fs::remove_file(temp.path().join(id).join("hel")).unwrap();
-    execute_checked(
-        &targets::ProcessExecutor,
-        CommandSpec::new("touch", ["-t", "200001010000", entry.to_str().unwrap()]),
-    )
-    .unwrap();
-    collect(
-        &targets::ProcessExecutor,
-        &locator,
-        root.to_str().unwrap(),
-        None,
-    )
-    .unwrap();
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("timed out"), "{error:#}");
     assert!(
-        !entry.exists(),
-        "the control link kept an unused entry alive"
+        root.join(&digest).join("hel").exists(),
+        "the upload was cut short by the caller's deadline"
     );
-    assert!(!slot.exists(), "the dead control slot was not swept");
+    assert!(
+        !slot.join("hel").exists(),
+        "the link step ignored the deadline"
+    );
 }
 
 #[cfg(unix)]
@@ -309,6 +358,10 @@ fn a_filesystem_without_hard_links_still_installs_verified_private_copies() {
         bin: PathBuf,
     }
     impl CommandExecutor for NoLinks {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -356,6 +409,10 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
         release: std::sync::Mutex<mpsc::Receiver<()>>,
     }
     impl CommandExecutor for HeldUpload {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -388,6 +445,10 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
     #[derive(Default)]
     struct DeadlineAtWait(OnceLock<targets::CancellableProcessExecutor>);
     impl CommandExecutor for DeadlineAtWait {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -474,6 +535,10 @@ fn published_builds_install_without_waiting_on_each_other_or_on_an_upload_or_col
         release: std::sync::Mutex<mpsc::Receiver<()>>,
     }
     impl CommandExecutor for Overlap {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -585,6 +650,10 @@ fn fallback_reuploads_a_source_retired_between_link_and_copy_but_preserves_other
         transfers: AtomicUsize,
     }
     impl CommandExecutor for RetiringCopy {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -665,6 +734,10 @@ exec /bin/cp "$@"
 fn killed_store_pins_are_swept_on_the_next_install_while_live_pins_survive() {
     struct KillLink;
     impl CommandExecutor for KillLink {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -819,6 +892,10 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
     assert!(crate::target_storage::is_storage_full(&error), "{error:#}");
     struct NoLinks;
     impl CommandExecutor for NoLinks {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -858,6 +935,10 @@ fn a_wait_behind_a_held_store_gate_is_reported_as_a_queue_stage() {
     #[derive(Default)]
     struct Stages(Mutex<Vec<(bool, targets::ProvisionStage)>>);
     impl CommandExecutor for Stages {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

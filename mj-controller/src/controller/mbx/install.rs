@@ -962,6 +962,10 @@ mod tests {
     }
 
     impl CommandExecutor for FakeExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1454,6 +1458,10 @@ mod tests {
             home: PathBuf,
         }
         impl CommandExecutor for FixtureExecutor {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,

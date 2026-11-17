@@ -372,6 +372,10 @@ mod tests {
     }
 
     impl CommandExecutor for FakeGh {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -395,6 +399,10 @@ mod tests {
 
     struct NoCommands;
     impl CommandExecutor for NoCommands {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -516,6 +524,10 @@ mod tests {
     fn directory_scan_observes_the_callers_cancellation() {
         struct CancelDuringScan(Cell<usize>);
         impl CommandExecutor for CancelDuringScan {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,

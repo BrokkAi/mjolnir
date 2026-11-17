@@ -89,6 +89,10 @@ impl CompletionExecutor {
 }
 
 impl CommandExecutor for CompletionExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -125,6 +129,10 @@ impl CommandExecutor for CompletionExecutor {
 struct UnusedExecutor;
 
 impl CommandExecutor for UnusedExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -361,6 +369,10 @@ fn remote_path_resolution_uses_login_home_without_evaluating_suffix() {
         home: &'static str,
     }
     impl CommandExecutor for HomeExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2480,6 +2492,10 @@ struct DurableTargetExecutor {
 }
 
 impl CommandExecutor for DurableTargetExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,

@@ -149,6 +149,10 @@ impl ShellHost {
 
 #[cfg(unix)]
 impl CommandExecutor for ShellHost {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -265,6 +269,10 @@ fn a_linux_machine_is_never_asked_for_apple_container() {
 fn a_machine_whose_ssh_fails_is_unreachable_with_the_ssh_error() {
     struct Refused;
     impl CommandExecutor for Refused {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

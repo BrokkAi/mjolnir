@@ -152,13 +152,17 @@ impl From<CommandPlan> for WorkerControlPlan {
 }
 
 /// Print `absent` when the root never ran a worker (no `hel`), `present` when
-/// the staged control worker is this build, and `missing` otherwise.
+/// the staged control worker is this build (and refresh its slot's modification
+/// time), and `missing` otherwise.
 pub fn control_worker_state_script(worker_root: &str) -> String {
     format!(
         r#"hel_root={root}
 hel_control={control}
 if [ ! -e "$hel_root/hel" ]; then printf 'absent\n'
-elif [ -x "$hel_control" ] && [ "$("$hel_control" worker build-id 2>/dev/null)" = {build} ]; then printf 'present\n'
+elif [ -x "$hel_control" ] && [ "$("$hel_control" worker build-id 2>/dev/null)" = {build} ]; then
+    # Every use refreshes the slot, which tells the store's collector it is live.
+    touch "${{hel_control%/*}}" 2>/dev/null || true
+    printf 'present\n'
 else printf 'missing\n'
 fi
 "#,

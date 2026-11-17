@@ -911,6 +911,10 @@ pub trait CommandExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput>;
+
+    /// [`Self::cancellation_requested`] as the no-deadline methods see it: a
+    /// deadline that has passed is not a cancellation.
+    fn cancellation_requested_without_deadline(&self) -> bool;
 }
 
 /// An executor whose commands run without the wrapped executor's deadline but
@@ -926,6 +930,10 @@ impl<'a, E: CommandExecutor + ?Sized> WithoutDeadline<'a, E> {
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.0.cancellation_requested_without_deadline()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &crate::targets::CommandSpec,
@@ -1165,6 +1173,10 @@ impl ProcessExecutor {
 // must not hold one of the runtime's async worker threads for the length of a
 // target command.
 impl CommandExecutor for ProcessExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &crate::targets::CommandSpec,
@@ -1436,6 +1448,14 @@ impl CancellableProcessExecutor {
             || self
                 .deadline
                 .is_some_and(|(deadline, _)| Instant::now() >= deadline)
+    }
+
+    /// Whether the supervisor, not the deadline, has asked to stop.
+    pub fn is_cancelled_without_deadline(&self) -> bool {
+        self.token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self.cancelled.load(Ordering::Acquire)
     }
 
     pub fn with_timeout(timeout: Duration) -> Self {
@@ -1883,6 +1903,10 @@ impl CancellableProcessExecutor {
 }
 
 impl CommandExecutor for CancellableProcessExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.is_cancelled_without_deadline()
+    }
+
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.clone()
             .with_deadline(Duration::from_secs(15))
@@ -2013,6 +2037,10 @@ impl BoundedProcessExecutor {
 }
 
 impl CommandExecutor for BoundedProcessExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &crate::targets::CommandSpec,
@@ -3794,6 +3822,10 @@ mod executor_tests {
     }
 
     impl CommandExecutor for MasterKilledOnce {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &crate::targets::CommandSpec,

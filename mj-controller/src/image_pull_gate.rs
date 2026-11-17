@@ -228,6 +228,10 @@ mod tests {
             ready: Arc<AtomicBool>,
         }
         impl CommandExecutor for Download {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,
@@ -265,6 +269,10 @@ mod tests {
             waits: AtomicUsize,
         }
         impl CommandExecutor for Launch {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,

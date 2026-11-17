@@ -93,6 +93,10 @@ pub(in crate::controller) fn destroy_prepared_environment(
 struct MoveCleanupExecutor<'a, E>(&'a E);
 
 impl<E: CommandExecutor> CommandExecutor for MoveCleanupExecutor<'_, E> {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.0.cancellation_requested_without_deadline()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,

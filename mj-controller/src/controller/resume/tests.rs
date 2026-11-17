@@ -99,6 +99,10 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
     }
     struct SourceExists;
     impl CommandExecutor for SourceExists {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -390,6 +394,10 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     // Hard-won: 055d8a772 review: a stale locator hid source confirmation.
     struct MissingTarget;
     impl CommandExecutor for MissingTarget {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -582,6 +590,10 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
     }
 
     impl CommandExecutor for ConcurrentSourceExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -706,6 +718,10 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -989,6 +1005,10 @@ struct BarrierExecutor {
 }
 
 impl CommandExecutor for BarrierExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -1288,6 +1308,10 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1476,6 +1500,10 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     }
 
     impl CommandExecutor for FailingPreflightExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1714,6 +1742,10 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     struct FailAfterWorktreeRestore;
 
     impl CommandExecutor for FailAfterWorktreeRestore {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1927,6 +1959,10 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     struct GitWithoutPodmanExecutor;
 
     impl CommandExecutor for GitWithoutPodmanExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2583,6 +2619,10 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for Engine {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2772,6 +2812,10 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for AppleEngine {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2947,6 +2991,10 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         home: PathBuf,
     }
     impl CommandExecutor for HostShell {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

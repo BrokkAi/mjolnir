@@ -39,6 +39,10 @@ impl ProbeExecutor {
 }
 
 impl CommandExecutor for ProbeExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -155,6 +159,10 @@ fn ssh_docker_registration_config() -> Config {
 struct DockerDesktopExecutor;
 
 impl CommandExecutor for DockerDesktopExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -722,6 +730,10 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
 
 struct CancelledLaunch;
 impl CommandExecutor for CancelledLaunch {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -1045,6 +1057,10 @@ struct DurableStateAtCleanup {
 }
 
 impl CommandExecutor for DurableStateAtCleanup {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -1200,6 +1216,10 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
 
     struct RefuseStop(Mutex<usize>);
     impl CommandExecutor for RefuseStop {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1626,6 +1646,10 @@ impl RecordingExecutor {
 }
 
 impl CommandExecutor for RecordingExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -1856,6 +1880,10 @@ fn only_a_worker_that_never_started_is_retried() {
 
 struct RawRegistrationExecutor;
 impl CommandExecutor for RawRegistrationExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -1896,6 +1924,10 @@ async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
     }
 
     impl CommandExecutor for StageRecorder {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1966,6 +1998,10 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
     }
 
     impl CommandExecutor for StageRecorder {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2076,6 +2112,10 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
 struct CgroupExecutor(serde_json::Value);
 
 impl CommandExecutor for CgroupExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -2219,6 +2259,10 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         checkout: PathBuf,
     }
     impl CommandExecutor for OverlapExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

@@ -698,6 +698,10 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
 struct NoticeExecutor(std::sync::Mutex<Vec<String>>);
 
 impl CommandExecutor for NoticeExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -1948,6 +1952,10 @@ fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_it
         calls: std::sync::atomic::AtomicUsize,
     }
     impl CommandExecutor for StopFails {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2064,6 +2072,10 @@ struct GitWithPodmanPreflightExecutor {
 }
 
 impl CommandExecutor for GitWithPodmanPreflightExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -2227,6 +2239,10 @@ struct RecordedMoveRestore {
 
 #[cfg(unix)]
 impl CommandExecutor for RecordedMoveRestore {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -2454,6 +2470,10 @@ struct LocalMoveRestore {
 
 #[cfg(unix)]
 impl CommandExecutor for LocalMoveRestore {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -2624,6 +2644,10 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
 struct RsyncWithoutPartialDir(GitWithPodmanPreflightExecutor);
 
 impl CommandExecutor for RsyncWithoutPartialDir {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -2832,6 +2856,10 @@ impl RecordingProcessExecutor {
 
 #[cfg(unix)]
 impl CommandExecutor for RecordingProcessExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -6279,6 +6307,10 @@ struct Ec2PreviewExecutor(GitWithPodmanPreflightExecutor);
 
 #[cfg(unix)]
 impl CommandExecutor for Ec2PreviewExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,

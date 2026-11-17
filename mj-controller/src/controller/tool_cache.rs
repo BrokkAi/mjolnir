@@ -165,6 +165,10 @@ mod tests {
     }
 
     impl CommandExecutor for FailSecondDirectory {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -216,6 +220,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for MacHost {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

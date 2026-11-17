@@ -663,6 +663,10 @@ mod tests {
     }
 
     impl CommandExecutor for FakeAws {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

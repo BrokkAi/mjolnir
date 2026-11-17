@@ -399,6 +399,10 @@ mod tests {
     }
 
     impl CommandExecutor for RacingStop {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -508,6 +512,10 @@ mod tests {
     }
 
     impl CommandExecutor for WakeTarget {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

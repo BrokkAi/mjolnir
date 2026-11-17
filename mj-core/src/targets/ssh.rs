@@ -2626,6 +2626,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &crate::targets::CommandSpec,
@@ -3430,6 +3434,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for JoinsNewMaster {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &crate::targets::CommandSpec,
@@ -3675,6 +3683,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for FakeMasters {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &crate::targets::CommandSpec,
@@ -4109,6 +4121,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for RacingMasters {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &crate::targets::CommandSpec,
@@ -4386,6 +4402,10 @@ mod tests {
     struct NoMaster;
 
     impl CommandExecutor for NoMaster {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &crate::targets::CommandSpec,

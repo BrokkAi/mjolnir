@@ -2219,6 +2219,10 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
     #[derive(Default)]
     struct RecordingExecutor(Mutex<Vec<String>>);
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -4185,6 +4189,10 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for ProbeExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

@@ -23,6 +23,10 @@ use super::*;
 fn provisioning_uses_accepted_fetch_and_push_settings_after_the_catalog_changes() {
     struct NoProbe;
     impl CommandExecutor for NoProbe {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -107,6 +111,10 @@ impl SshProbeExecutor {
     }
 }
 impl CommandExecutor for SshProbeExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -776,6 +784,10 @@ struct PreflightExecutor {
     notices: RefCell<Vec<String>>,
 }
 impl CommandExecutor for PreflightExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -879,6 +891,10 @@ fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
 fn launch_preflight_checks_only_reachability_for_ssh_container_targets() {
     struct Recording(RefCell<Vec<CommandSpec>>);
     impl CommandExecutor for Recording {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -949,6 +965,10 @@ fn launch_preflight_checks_only_reachability_for_ssh_container_targets() {
 struct NoDockerExecutor;
 
 impl CommandExecutor for NoDockerExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -1022,6 +1042,10 @@ impl RecordingAppleExecutor {
 }
 
 impl CommandExecutor for RecordingAppleExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,

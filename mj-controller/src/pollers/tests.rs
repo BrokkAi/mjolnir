@@ -2466,6 +2466,10 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
     }
 
     impl CommandExecutor for AppleExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2586,6 +2590,10 @@ fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
     }
 
     impl CommandExecutor for FailingPullExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2717,6 +2725,10 @@ fn a_missing_image_is_pulled_once_and_not_again_when_present() {
     }
 
     impl CommandExecutor for FirstPullExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

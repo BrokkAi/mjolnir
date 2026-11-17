@@ -256,13 +256,12 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     };
     let plan = targets::close_plan(&locator, SESSION).unwrap();
     assert!(plan.stages_control_worker());
-    // A caller's deadline covers the commands it names, not the staging that
-    // precedes them: with a deadline already past, staging still completes and
-    // only the plan's own commands time out.
+    // A caller's deadline bounds the check that precedes its command: with the
+    // deadline already past, nothing is staged and nothing is removed.
     let expired = targets::CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
     let error = plan.execute(&expired).unwrap_err();
     assert!(format!("{error:#}").contains("timed out"), "{error:#}");
-    assert!(control.exists(), "staging ignored the caller's deadline");
+    assert!(!control.exists(), "the check ignored the caller's deadline");
     assert!(root.exists(), "the timed-out close removed nothing");
     plan.execute(&ProcessExecutor).unwrap();
     assert!(!root.exists());
@@ -627,6 +626,10 @@ fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
         fail: std::cell::Cell<bool>,
     }
     impl CommandExecutor for FullDiskUpload {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1337,6 +1340,10 @@ fn a_probe_that_prints_something_else_is_an_error() {
     const SESSION: &str = "0123456789abcdef0123456789abcdef";
     struct GarbageExecutor;
     impl CommandExecutor for GarbageExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1404,6 +1411,10 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1532,6 +1543,10 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1612,6 +1627,10 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1761,6 +1780,10 @@ struct SshHostExecutor {
     host_files: RefCell<HashSet<String>>,
 }
 impl CommandExecutor for SshHostExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -2365,6 +2388,10 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         commands: RefCell<Vec<CommandSpec>>,
     }
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -4009,6 +4036,10 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -4088,6 +4119,10 @@ fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
     }
 
     impl CommandExecutor for VersionExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -4900,6 +4935,10 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
 fn container_attachment_guidance_matches_engine_permissions_and_harness_instruction_files() {
     struct MountExecutor;
     impl CommandExecutor for MountExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -5031,6 +5070,10 @@ struct DigestExecutor {
 }
 
 impl CommandExecutor for DigestExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -5177,6 +5220,10 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
     }
 
     impl CommandExecutor for CacheLinkExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -5321,6 +5368,10 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     }
 
     impl CommandExecutor for ConfigRecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -5356,6 +5407,10 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     }
 
     impl CommandExecutor for FailingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -6458,6 +6513,10 @@ mod container_runtime {
             fail_prepare: bool,
         }
         impl CommandExecutor for PreparationExecutor {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,

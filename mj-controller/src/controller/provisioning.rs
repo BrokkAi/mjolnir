@@ -1832,6 +1832,10 @@ impl<'a, E: CommandExecutor> StagedExecutor<'a, E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for StagedExecutor<'_, E> {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.inner.cancellation_requested_without_deadline()
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.inner.execute(&self.staged(command))
     }

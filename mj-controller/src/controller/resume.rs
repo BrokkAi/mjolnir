@@ -2710,6 +2710,10 @@ struct CrossHarnessProvisionExecutor<'a, E: CommandExecutor + ?Sized> {
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecutor<'_, E> {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation.is_cancelled() || self.inner.cancellation_requested_without_deadline()
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if self.cancellation.is_cancelled() {
             bail!("operation cancelled while provisioning destination");

@@ -3180,6 +3180,10 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
     use mj_core::targets::{CommandExecutor, CommandOutput};
     struct ShortLived;
     impl CommandExecutor for ShortLived {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

@@ -158,6 +158,10 @@ fn restart_recovery_discards_intents_superseded_by_suspend_or_destroy() {
 async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target() {
     struct StatusExecutor(i32);
     impl CommandExecutor for StatusExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -4646,6 +4650,10 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
     );
     struct NoEnvironmentMutation;
     impl crate::targets::CommandExecutor for NoEnvironmentMutation {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -10273,6 +10281,10 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
 
     struct AliveWorker;
     impl CommandExecutor for AliveWorker {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

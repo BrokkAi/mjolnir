@@ -53,38 +53,55 @@ fn run_owned_worker_stop(
 /// predates them. The current build judges and stops an older worker correctly,
 /// because the lock and startup record it reads are older than the commands.
 /// Staging touches only the target's worker store, never a root, so it needs no
-/// worker admission and probes leave roots unchanged. Callers run it before the
-/// control command, outside any timeout that names the command. When the
-/// current build cannot be staged for the target this fails and names it; there
-/// is no second way to stop a worker.
+/// worker admission and probes leave roots unchanged. When the current build
+/// cannot be staged for the target this fails and names it; there is no second
+/// way to stop a worker.
+///
+/// Only the transfer of the binary's bytes (the upload or install in
+/// [`install_control_worker`]) runs without the caller's deadline, keeping its
+/// cancellation, because a timeout on the stop or probe that follows does not
+/// name it. The check and the link step run on the caller's executor, deadline
+/// included, so a hung session or mount still fails the caller's operation.
+///
+/// The check and the refresh of the slot's modification time are one command
+/// under the store gate that publication and collection share (a control
+/// command that starts within the entry age of its check cannot lose its
+/// binary: the collector keeps every entry a recently used slot names).
 pub(crate) fn ensure_control_worker(
     caller: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
 ) -> Result<()> {
-    // Never the caller's own deadline: a timeout names the stop or probe that
-    // follows, not the upload. The caller's cancellation still applies.
-    let executor = &targets::WithoutDeadline::new(caller);
     let root = targets::worker_root(locator, session_id)?;
-    let state = execute_checked(
-        executor,
-        targets::locator_command(
-            locator,
-            vec![
-                "sh".into(),
-                "-c".into(),
-                targets::control_worker_state_script(&root),
-            ],
-        )
-        .purpose("check the staged control worker"),
-    )?;
+    let store = mj_core::target_path::text(&store_root(locator, session_id)?);
+    let state = {
+        let gate = store_gate(locator, &store);
+        let _held = lock_gate(
+            &targets::WithoutDeadline::new(caller),
+            &gate,
+            session_id,
+            "check the control worker",
+        )?;
+        execute_checked(
+            caller,
+            targets::locator_command(
+                locator,
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    targets::control_worker_state_script(&root),
+                ],
+            )
+            .purpose("check the staged control worker"),
+        )?
+    };
     // Anything but `missing` (`present`, or `absent` for a root that never ran a
     // worker) needs no staging.
     if String::from_utf8_lossy(&state.stdout).trim() != "missing" {
         return Ok(());
     }
     let control = targets::control_worker_path(&root);
-    let worker = WorkerInstall::for_target(locator, executor).with_context(|| {
+    let worker = WorkerInstall::for_target(locator, caller).with_context(|| {
         format!(
             "the current worker cannot be staged for {root}, so its worker cannot be stopped or probed"
         )
@@ -93,7 +110,7 @@ pub(crate) fn ensure_control_worker(
         .parent()
         .context("the control worker has a directory")?;
     install_control_worker(
-        executor,
+        caller,
         locator,
         session_id,
         &worker,

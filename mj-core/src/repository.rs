@@ -485,6 +485,10 @@ mod tests {
         // error: a repository that cannot be read is not a plain folder.
         struct RefusedGit;
         impl CommandExecutor for RefusedGit {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &crate::targets::CommandSpec,
@@ -575,6 +579,10 @@ mod tests {
         // A plain local session must not require the Git executable itself.
         struct MissingGit;
         impl CommandExecutor for MissingGit {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &crate::targets::CommandSpec,
@@ -612,6 +620,10 @@ mod tests {
         // sessions, so a plain folder is refused there.
         struct PlainRemoteFolder;
         impl CommandExecutor for PlainRemoteFolder {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &crate::targets::CommandSpec,
@@ -654,6 +666,10 @@ mod tests {
 
         struct RefusedGit;
         impl CommandExecutor for RefusedGit {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &crate::targets::CommandSpec,
@@ -703,6 +719,10 @@ mod tests {
             diagnostic: &'static str,
         }
         impl CommandExecutor for FailedGit {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &crate::targets::CommandSpec,
@@ -783,6 +803,10 @@ mod tests {
     }
 
     impl CommandExecutor for GitRootsExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &crate::targets::CommandSpec,

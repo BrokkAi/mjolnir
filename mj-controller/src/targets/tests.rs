@@ -118,6 +118,10 @@ impl PodmanPreflightExecutor {
 }
 
 impl CommandExecutor for PodmanPreflightExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -156,6 +160,10 @@ fn a_waiter_for_the_apple_container_gate_stops_when_cancelled() {
         first_check: Mutex<Option<mpsc::Sender<()>>>,
     }
     impl CommandExecutor for WaitingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -289,6 +297,10 @@ fn podman_inspection(status: &str, session_id: &str, managed: &str) -> CommandOu
 fn a_missing_podman_is_reported_as_a_command_that_could_not_run() {
     struct NoPodman;
     impl CommandExecutor for NoPodman {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -434,6 +446,10 @@ fn podman_preflight_reports_unparsable_info() {
 fn docker_preflight_says_in_one_sentence_why_docker_cannot_run_sessions() {
     struct NoDocker;
     impl CommandExecutor for NoDocker {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -4483,6 +4499,10 @@ struct StageRecordingExecutor {
 }
 
 impl CommandExecutor for StageRecordingExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -4579,6 +4599,10 @@ fn scoped_stage_reports_completion_after_controlled_error() {
 }
 
 impl CommandExecutor for FakeExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -4631,6 +4655,10 @@ struct SyncFakeExecutor {
 }
 
 impl CommandExecutor for SyncFakeExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -4667,6 +4695,10 @@ struct BarrierExecutor {
 }
 
 impl CommandExecutor for BarrierExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -4727,6 +4759,10 @@ struct OrderSensitiveFailureExecutor {
 }
 
 impl CommandExecutor for OrderSensitiveFailureExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,

@@ -1512,6 +1512,10 @@ Last 7d · 5966 requests · 78 sessions
     }
 
     impl CommandExecutor for RefreshExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1836,6 +1840,10 @@ Last 7d · 5966 requests · 78 sessions
     }
 
     impl CommandExecutor for BlockedRefreshExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2216,6 +2224,10 @@ Last 7d · 5966 requests · 78 sessions
     }
 
     impl CommandExecutor for FakeMac {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

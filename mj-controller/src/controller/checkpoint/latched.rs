@@ -974,6 +974,10 @@ mod cancel_log_tests {
     struct CancelledExecutor;
 
     impl CommandExecutor for CancelledExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

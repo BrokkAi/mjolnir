@@ -341,6 +341,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for IsolatedAws {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -556,6 +560,10 @@ mod tests {
     fn failed_aws_export_diagnostics_never_include_helper_output() {
         struct FailedExport;
         impl CommandExecutor for FailedExport {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,
@@ -593,6 +601,10 @@ mod tests {
             // failure. AWS helper output must bypass that observer too.
             struct FailedProcess;
             impl CommandExecutor for FailedProcess {
+                fn cancellation_requested_without_deadline(&self) -> bool {
+                    self.cancellation_requested()
+                }
+
                 fn execute_without_deadline(
                     &self,
                     command: &mj_core::targets::CommandSpec,

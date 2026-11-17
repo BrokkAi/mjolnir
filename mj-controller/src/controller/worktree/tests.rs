@@ -33,6 +33,10 @@ use super::*;
 fn managed_clone_copies_large_origin_ref_sets_in_one_command() {
     struct RecordingExecutor(RefCell<Vec<String>>);
     impl CommandExecutor for RecordingExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -624,6 +628,10 @@ fn concurrent_session_starts_fetch_one_repository_one_at_a_time() {
         fetches: AtomicUsize,
     }
     impl CommandExecutor for OverlapRecorder {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -675,6 +683,10 @@ fn a_github_ssh_origin_without_a_key_is_fetched_over_https() {
         fetches: std::sync::Mutex<Vec<Vec<String>>>,
     }
     impl CommandExecutor for Origin {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -883,6 +895,10 @@ fn a_plain_local_directory_cannot_convert_into_a_bundle_workspace() {
 fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
     struct OriginExecutor;
     impl CommandExecutor for OriginExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -941,6 +957,10 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
         common: String,
     }
     impl CommandExecutor for NoOriginExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1027,6 +1047,10 @@ fn raw_non_git_directory_keeps_its_local_path_source() {
         commands: RefCell<Vec<CommandSpec>>,
     }
     impl CommandExecutor for NonGitExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1093,6 +1117,10 @@ fn raw_non_git_directory_keeps_its_local_path_source() {
 fn project_root_lookup_reports_git_failures_instead_of_treating_them_as_non_git() {
     struct FailedGit;
     impl CommandExecutor for FailedGit {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1131,6 +1159,10 @@ struct CheckoutPositionExecutor {
     branch: Option<String>,
 }
 impl CommandExecutor for CheckoutPositionExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -1844,6 +1876,10 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
     }
 
     impl CommandExecutor for RemoteExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2637,6 +2673,10 @@ fn archiving_keeps_a_branch_only_another_session_branch_contains() {
 fn raw_checkout_inspection_uses_recorded_access_after_template_removal() {
     struct RecordedHost;
     impl CommandExecutor for RecordedHost {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

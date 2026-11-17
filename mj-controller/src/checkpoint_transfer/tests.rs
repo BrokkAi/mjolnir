@@ -160,6 +160,10 @@ struct CopyExecutor {
     calls: RefCell<usize>,
 }
 impl CommandExecutor for CopyExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -208,6 +212,10 @@ impl SshDockerTransferExecutor {
 }
 
 impl CommandExecutor for SshDockerTransferExecutor {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
     fn execute_without_deadline(
         &self,
         command: &mj_core::targets::CommandSpec,
@@ -485,6 +493,10 @@ fn overlapping_remote_transfers_keep_their_own_bytes_and_cleanup() {
         first: bool,
     }
     impl CommandExecutor for InterleavedExecutor<'_> {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,

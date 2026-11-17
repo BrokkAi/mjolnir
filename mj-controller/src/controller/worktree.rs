@@ -498,6 +498,10 @@ impl<E: CommandExecutor> RemoteGitExecutor<'_, E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.executor.execute(&self.remote(command))
     }

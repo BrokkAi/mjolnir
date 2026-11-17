@@ -202,32 +202,55 @@ fn script_argv(body: &str, args: &[&str]) -> Vec<String> {
     argv
 }
 
+/// How long an unused entry, a transfer leftover or a control slot must sit
+/// before the collector may remove it, in minutes (a day). One value for all
+/// three, passed to the collector script.
+const ENTRY_AGE_MINUTES: &str = "1440";
+
 // Rename an old entry out of the published namespace before deciding whether
 // it is unreferenced. A concurrent installer either pins it first, or sees a
 // missing path and retries. Never remove a directory that an uploader owns.
 const COLLECT: &str = r#"set -eu
-store=$1; keep=${2-}
+store=$1; keep=${2-}; age=$3
 [ -d "$store" ] || exit 0
 # Timed-out transfers may not be able to run their cleanup command. All live
 # transfers in this daemon share the owner held by collection.
 for upload in "$store"/.upload-* "$store"/.transport-*; do
     [ -d "$upload" ] || continue
-    [ -n "$(find "$upload" -prune -mmin +1440 -print)" ] || continue
+    [ -n "$(find "$upload" -prune -mmin +"$age" -print)" ] || continue
     rm -rf -- "$upload"
 done
 for retired in "$store"/.gc-*; do
     [ -f "$retired/hel" ] || continue
-    [ -n "$(find "$retired/hel" -type f -mmin +1440 -links 1 -print)" ] || continue
+    [ -n "$(find "$retired/hel" -type f -mmin +"$age" -links 1 -print)" ] || continue
     rm -f -- "$retired/hel"
     rmdir -- "$retired"
 done
+# A control slot is a symlink into this store that a control command uses, and
+# every use refreshes the slot's modification time under the store gate. A slot
+# whose link resolves and was used within the entry age is a reference: the
+# entry it names is never retired. A slot unused for that long, or whose link
+# points nowhere, is removed; its entry then goes by the usual rule.
+referenced=
+for slot in "$store"/control-*; do
+    [ -d "$slot" ] || continue
+    if [ -e "$slot/hel" ] && [ -z "$(find "$slot" -prune -mmin +"$age" -print)" ]; then
+        target=$(readlink "$slot/hel") || continue
+        entry=${target%/hel}; entry=${entry##*/}
+        referenced="$referenced $entry"
+        continue
+    fi
+    rm -f -- "$slot/hel"
+    rmdir -- "$slot" 2>/dev/null || true
+done
 for file in "$store"/*/hel; do
     [ -f "$file" ] || continue
-    [ -n "$(find "$file" -type f -mmin +1440 -links 1 -print)" ] || continue
+    [ -n "$(find "$file" -type f -mmin +"$age" -links 1 -print)" ] || continue
     dir=${file%/hel}; name=${dir##*/}
     case $name in *[!0123456789abcdef]*|'') continue;; esac
     [ ${#name} = 64 ] || continue
     [ "$name" != "$keep" ] || continue
+    case "$referenced " in *" $name "*) continue;; esac
     retired="$store/.gc-$name-$$"
     mv -- "$dir" "$retired" 2>/dev/null || continue
     if [ -n "$(find "$retired/hel" -type f -links 1 -print)" ]; then
@@ -240,15 +263,6 @@ for file in "$store"/*/hel; do
         rm -f -- "$retired/hel"
     fi
     rmdir -- "$retired"
-done
-# A staged control worker is a symlink into this store, so it pins nothing. One
-# whose entry was retired points nowhere; the next control command stages it
-# again, so the dead link is only removed.
-for slot in "$store"/control-*; do
-    [ -L "$slot/hel" ] || continue
-    [ ! -e "$slot/hel" ] || continue
-    rm -f -- "$slot/hel"
-    rmdir -- "$slot" 2>/dev/null || true
 done"#;
 
 fn collect(
@@ -262,7 +276,7 @@ fn collect(
         script(
             locator,
             COLLECT,
-            &[root, keep.unwrap_or("")],
+            &[root, keep.unwrap_or(""), ENTRY_AGE_MINUTES],
             "collect unused Mjolnir worker binaries",
         ),
     )?;
@@ -377,21 +391,27 @@ const LINK_DIGEST_MISMATCH: i32 = 77;
 /// Stage the worker as the control worker in `slot` (a directory in the store):
 /// `slot/hel` becomes a symlink to the store's digest entry, relative so it
 /// survives the store moving as a unit and works in containers and on macOS.
-/// A symlink adds no link count, so it never keeps the collector from retiring
-/// an entry no root uses; a link left pointing at a retired entry fails the
-/// control worker's build check and is staged again. An image's own worker is
-/// linked by the usual upload plan instead.
+/// A symlink adds no link count, and the collector treats a slot used within
+/// the entry age as a reference (see [`COLLECT`]), so the entry it names stays
+/// while the slot is in use and goes after a day of disuse. An image's own
+/// worker is linked by the usual upload plan instead.
+///
+/// Only the transfer of the binary's bytes runs without `caller`'s deadline,
+/// and keeps its cancellation: a timeout on the stop or probe that follows does
+/// not name an upload. The gate waits and the link step run on `caller`, deadline
+/// included.
 pub(super) fn install_control_worker(
-    executor: &impl CommandExecutor,
+    caller: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
     worker: &WorkerInstall,
     slot: &str,
 ) -> Result<()> {
+    let untimed = &targets::WithoutDeadline::new(caller);
     let WorkerInstall::Host(source) = worker else {
         let destination = format!("{slot}/hel");
         execute_checked(
-            executor,
+            caller,
             targets::locator_command(locator, vec!["mkdir".into(), "-p".into(), slot.into()])
                 .purpose("create the control worker directory"),
         )?;
@@ -402,17 +422,22 @@ pub(super) fn install_control_worker(
             &destination,
             None,
         )?
-        .execute(executor)
+        .execute(caller)
         .map(|_| ());
     };
     verify_worker_build(source)?;
     let digest = mj_core::worker_launch::worker_executable_digest(source)?;
     let store = mj_core::target_path::text(&store_root(locator, session_id)?);
     ensure_published(
-        executor, locator, session_id, worker, source, &store, &digest,
+        untimed, locator, session_id, worker, source, &store, &digest,
     )?;
+    // The link goes in under the store gate, the one publication and collection
+    // share, so a collection cannot retire the entry or sweep the slot between
+    // the directory's creation and the link.
+    let gate = store_gate(locator, &store);
+    let _held = lock_gate(untimed, &gate, session_id, "stage the control worker")?;
     execute_checked(
-        executor,
+        caller,
         script(
             locator,
             r#"set -eu

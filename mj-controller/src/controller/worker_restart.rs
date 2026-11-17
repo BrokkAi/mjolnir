@@ -764,6 +764,10 @@ mod tests {
             yielded: AtomicBool,
         }
         impl CommandExecutor for LaunchThenHandoff {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,
@@ -890,6 +894,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for StopSucceedsThenFails {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -929,6 +937,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for FailingStop {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -1030,6 +1042,10 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct FailingCommands(AtomicUsize);
         impl CommandExecutor for FailingCommands {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,

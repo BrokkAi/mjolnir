@@ -1402,6 +1402,10 @@ mod tests {
     }
 
     impl CommandExecutor for ProbeExecutor {
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
         fn execute_without_deadline(
             &self,
             command: &mj_core::targets::CommandSpec,
@@ -2422,6 +2426,10 @@ mod tests {
             home: String,
         }
         impl CommandExecutor for IsolatedHostExecutor {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,
@@ -2506,6 +2514,10 @@ mod tests {
         }
 
         impl CommandExecutor for ReprobeExecutor {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,
@@ -2636,6 +2648,10 @@ fi"#,
             new_source: PathBuf,
         }
         impl CommandExecutor for FallbackExecutor {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,
@@ -2872,6 +2888,10 @@ while [ ! -e "$3" ]; do sleep 0.01; done"#;
         }
 
         impl CommandExecutor for ProbeAnswer {
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
             fn execute_without_deadline(
                 &self,
                 command: &mj_core::targets::CommandSpec,

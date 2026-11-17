@@ -126,6 +126,10 @@ impl<E: CommandExecutor> DaemonStageReportingExecutor<E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.inner.cancellation_requested_without_deadline()
+    }
+
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let _stage = command
             .stage
