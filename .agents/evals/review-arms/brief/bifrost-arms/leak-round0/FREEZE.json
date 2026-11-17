@@ -1,0 +1,26 @@
+{
+  "frozen_at": "2026-11-17T04:35:30.043376+00:00",
+  "stage": "paired leak round0 before wording-only rewrites",
+  "briefs": 17,
+  "valid_verdicts": 34,
+  "judges": "two codex4/gpt-6.1-sol/high, both suspended",
+  "combined_labels": {
+    "missed": 13,
+    "partial": 3,
+    "caught": 1
+  },
+  "api_equivalent_estimated_usd": 0.35638,
+  "post_run_quota_report_brackets_completion": false,
+  "next_stage_quota_recovered_percent": 32,
+  "next_stage_quota_refreshed_at": 1794889972,
+  "rule": "Existing stageB PLAN.md62\u201368: one wording-only rewrite/recheck, preserve every relation/anchor; neutral relations still flagged are retained and reported.",
+  "files": {
+    "completion-manifest.json": "e15b144601b91a3639b608abafc0c52af43c3bb77879b72a98bd58bc67a072ad",
+    "workflow-out.json": "dbe4ba9c8482bf350e0fc32f4771a401eab97c9c3effb7908dfc9d92d201da78",
+    "key.json": "d50b0d551860dabf885921fcce3e3f58ae902a9e6551fef289c9acba33c3f791",
+    "settings.json": "568725953f4e447940a6da30a144c623ca9677545cc4adf8eba59b00fc3a495a",
+    "SPEC.md": "424d065e62c57a8d103262017fb2a4b9f401fdb3d02f4b27f6b1f334b2770a4c",
+    "quota-before.json": "12d3b1a9f079460f56d1edba3ad26acaf5a06b348de63a5986b257677007fcf8",
+    "quota-after.json": "71d10cb734bcd82fe0303253d5278408cb374ecd67c30234040579a628a15e04"
+  }
+}
