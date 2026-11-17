@@ -636,6 +636,7 @@ fn a_queued_periodic_sync_is_not_queued_twice() {
             profile_id: "work".into(),
             cause: Some(CredentialSyncCause {
                 session_id: "session".into(),
+                ordinal: 1,
                 reason: CredentialSyncReason::EmptyPromptResponse,
                 login_fingerprint: None,
             }),
@@ -770,6 +771,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
             profile_id: "codex4".into(),
             trigger: Some(CredentialSyncCause {
                 session_id: "child-1".into(),
+                ordinal: 1,
                 reason,
                 login_fingerprint: None,
             }),
@@ -919,6 +921,7 @@ fn a_claude_refusal_is_recorded_for_the_failed_token_only_while_it_is_current() 
             profile_id: "claude6".into(),
             trigger: Some(CredentialSyncCause {
                 session_id: "child".into(),
+                ordinal: 1,
                 reason: CredentialSyncReason::AuthenticationFailure,
                 login_fingerprint: failed.map(fingerprint),
             }),
@@ -969,6 +972,7 @@ fn a_refused_login_observation_cannot_reject_a_later_host_refresh() {
         profile_id: "codex4".into(),
         trigger: Some(CredentialSyncCause {
             session_id: "failed-session".into(),
+            ordinal: 1,
             reason: CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),

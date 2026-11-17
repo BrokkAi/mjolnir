@@ -1112,6 +1112,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
             "other",
             Some(mj_core::credentials::CredentialSyncCause {
                 session_id: other.session_id.clone(),
+                ordinal: 1,
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
                 login_fingerprint: None,
             }),
@@ -3198,6 +3199,7 @@ async fn credential_sync_reconciles_newer_destinations_before_reporting_auth_rec
             profile_id: "codex".into(),
             trigger: Some(mj_core::credentials::CredentialSyncCause {
                 session_id: "login-race".into(),
+                ordinal: 1,
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
                 login_fingerprint: None,
             }),
@@ -3571,6 +3573,7 @@ async fn a_stalled_triggered_renewal_does_not_hold_the_profiles_other_syncs() {
         &target.profile_id,
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "stalled".into(),
+            ordinal: 1,
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),
@@ -3897,6 +3900,7 @@ async fn a_trigger_whose_renewal_is_stopped_reports_the_outcome_as_unknown() {
         &target.profile_id,
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "replaced".into(),
+            ordinal: 1,
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),
@@ -4773,6 +4777,7 @@ async fn an_auth_trigger_reinstalls_deleted_scoped_credentials_at_once() {
         &target.profile_id,
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "auth-session".into(),
+            ordinal: 1,
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),
@@ -4960,6 +4965,7 @@ async fn the_coordinator_runs_a_trigger_for_a_held_session_once_it_is_free() {
         "work",
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "held-session".into(),
+            ordinal: 1,
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),

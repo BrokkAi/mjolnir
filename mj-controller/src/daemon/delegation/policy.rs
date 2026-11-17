@@ -4,6 +4,7 @@ use crate::pollers::*;
 use crate::quota::{ProfileQuota, QuotaReportMap, QuotaReportPublication};
 use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::worker_client::CredentialSyncCoordinator;
+use mj_core::credentials::CredentialSyncReason;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, watch};
 
@@ -430,9 +431,33 @@ impl Policy {
         let Some(session) = self.state.session_record(id) else {
             return;
         };
-        if let Some(signal) = &observation.credential_signal {
+        let completed = observation
+            .outcome
+            .as_ref()
+            .map(|turn| turn.completed_ordinal);
+        if let Some(completed) = completed {
+            self.rejected
+                .lock()
+                .expect("rejected logins poisoned")
+                .supersede(id, completed);
+        }
+        if let Some(signal) = observation
+            .credential_signal
+            .as_ref()
+            .filter(|signal| completed.is_none_or(|completed| completed <= signal.ordinal))
+        {
+            let is_authentication = signal.reason == CredentialSyncReason::AuthenticationFailure;
             self.signals
                 .observe(id, &session.last_profile, signal.clone());
+            // Own the pending decision before this observation can launch child completion.
+            if is_authentication {
+                schedule_due_credential_syncs(
+                    &mut self.signals,
+                    &self.credentials.handle(),
+                    &self.rejected,
+                    Instant::now(),
+                );
+            }
         }
         if session.harness_kind == mj_core::config::HarnessKind::Claude
             && let Some(diagnostic) = observation
@@ -591,13 +616,23 @@ impl Policy {
             self.reconcile_publications(&self.batch.profiles.clone());
         }
     }
-    pub fn tick(&mut self) {
+    pub async fn tick(&mut self) {
         self.sync_grant_only_profiles();
         schedule_due_credential_syncs(
             &mut self.signals,
             &self.credentials.handle(),
+            &self.rejected,
             Instant::now(),
         );
+        let sessions = self.state.session_records();
+        self.rejected
+            .lock()
+            .expect("rejected logins poisoned")
+            .retain_failures(|id| {
+                sessions.get(id).is_some_and(|record| {
+                    record.state != mj_core::state::SessionState::DestroyedWithDataLoss
+                })
+            });
         while let Some(result) = self.credentials.try_result() {
             log_credential_sync_actions(&result);
             if result.credential_sessions() > 0
@@ -607,19 +642,40 @@ impl Policy {
                 // Recheck now so a resolved refusal is not shown for an interval.
                 self.profiles_tx.send_replace(self.batch.clone());
             }
-            let notice = {
-                let owner = self.state.owner();
-                let controller = owner.controller();
-                let profile = controller.config.profiles.get(&result.profile_id);
-                if let Some(profile) = profile {
-                    self.rejected
-                        .lock()
-                        .expect("rejected logins poisoned")
-                        .observe(&result, profile);
-                }
-                self.notices
-                    .leveled_notice(&result, profile.map(|p| p.kind), &controller.state)
+            let profile = self
+                .state
+                .owner()
+                .controller()
+                .config
+                .profiles
+                .get(&result.profile_id)
+                .cloned();
+            let auth_cause = result.trigger.as_ref().filter(|cause| {
+                cause.reason == mj_core::credentials::CredentialSyncReason::AuthenticationFailure
+            });
+            let current = match (auth_cause, profile.as_ref()) {
+                (Some(_), Some(profile)) => match current_profile_login(profile).await {
+                    Ok(current) => current,
+                    Err(error) => {
+                        tracing::warn!(profile_id = %result.profile_id, %error, "failed to read the current login after credential reconciliation");
+                        None
+                    }
+                },
+                _ => None,
             };
+            let verdict = {
+                let mut rejected = self.rejected.lock().expect("rejected logins poisoned");
+                rejected.conclude(&result, profile.as_ref());
+                auth_cause.map(|cause| {
+                    rejected.failure_verdict(&result.profile_id, cause, current.as_ref())
+                })
+            };
+            let notice = self.notices.leveled_notice(
+                &result,
+                profile.as_ref().map(|p| p.kind),
+                &self.state.owner().controller().state,
+                verdict.as_ref(),
+            );
             if let Some(notice) = notice {
                 if notice.routine {
                     tracing::info!(notice = %notice.text, "credential synchronization notice");

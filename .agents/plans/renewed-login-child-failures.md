@@ -18,7 +18,7 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
 
 - [x] (2026-11-17) Diagnosis of the 2026-11-17 occurrence (two read-only children, reports under `.mj/agents/83a84352…/diagnosis.md` and `.mj/agents/91d33c3f…/credential-diagnosis.md` in the planning clone; summarized in `Surprises & Discoveries`).
 - [x] (2026-11-17) Design reviewed with the senior advisor session; decisions recorded in `Decision Log`.
-- [ ] Milestone 1: classification. One child-state verdict; `login_invalid` only from the refusal owner; typed wake failure.
+- [x] (2026-11-17) Milestone 1: classification. The refusal owner decides each accepted turn failure and typed wake failure. Child reporting and park eligibility share that verdict.
 - [ ] Milestone 2: delivery. INFO logging of every per-session delivery deferral and conclusion (first commit), then per-session delivery owed until the worker reports the current login.
 - [ ] Milestone 3: the hold. Worker publishes retry intent separately from its submit gate; the daemon holds a child only while the retry is owed and the login is coming or already present.
 - [ ] Integrated review, merge, push; close #1581.
@@ -36,6 +36,9 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
   Evidence: a claude6 pass was still on session 419e3471 (sorted before d5a964ac) at 15:24:29.9 (`credential_state` waiting), 15:24:37.9 (`skills_state`), 15:24:44.6 (`github_token_state`). The serial slot is in `worker_client/credential_sync.rs:449–483,754–777,2373–2428`.
 
 - Observation: the "16:50 resume and new-start refusals" in #1581 have no producer in the store or logs; most likely a conflation with the same parent's 2026-11-16 10:06Z note, made under a daemon that predates #1547.
+
+- Observation: the wake staging path can read the identity of the exact temporary login copy it installs, including the file copied from the Keychain for Claude. Local bare Codex links to the profile login instead of installing a fixed copy, so a failed wake through that link has no staged identity to attest. The failure is retryable.
+  Evidence: `controller/worker_binary/launch.rs` and `controller/worker_binary/install.rs` distinguish staged copies from live links.
 
 
 ## Decision Log
@@ -81,9 +84,17 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
   Date/Author: 2026-11-17, advisor.
 
 
+- Decision: keep wake detail in `last_error` and append typed evidence only when the failed boot staged an identifiable login. Current readers separate the evidence from the detail. Older readers still see the original failure at the start of the same text column. The write that releases the boot intent persists both together, with no schema migration.
+  Rationale: helps distinguish old text from identity evidence without changing how old daemons update or clear session errors.
+  Date/Author: 2026-11-17, Milestone 1 implementation.
+
+- Decision: retain auth signals by session and event ordinal, with the failed fingerprint checked when one is present. Accept a trigger under the same registry lock used to conclude it, and retire old records when the daemon observes a newer completed turn or removes the session.
+  Rationale: two turns can fail on the same token, and later warning events can follow a failed turn. Neither can use that turn's pending decision or conclusion.
+  Date/Author: 2026-11-17, Milestone 1 implementation.
+
 ## Outcomes & Retrospective
 
-(To be written at each milestone.)
+Milestone 1: the parent receives `login_invalid` only for a refusal of the current login. A missing or inconclusive reconciliation leaves the child promptable, and a pending reconciliation keeps it unfinished. The live worker retry publication still holds a child whose login was renewed. The isolated incident test passes with Milestone 1 and fails on `15183b431`, where the durable mailbox contains `login_invalid` and an instruction to sign in again. Targeted controller and core tests passed (164 passed, one existing AWS CLI fixture ignored), as did clippy and formatting checks for both crates.
 
 
 ## Context and Orientation
@@ -157,10 +168,10 @@ Implementers work in detached worktrees so builds do not collide, for example:
 
 Commit on the detached HEAD; do not push; the planning session cherry-picks and requests review. Run `cargo test` outside the restricted sandbox. Run targeted tests only, e.g.:
 
-    cargo test -p mj-core --lib credentials
-    cargo test -p mj-controller --lib -- server_runtime::api subagent_park credential_sync
-    cargo test -p mj-worker --lib -- relay::authentication_tests
-    cargo clippy -p mj-core -p mj-controller -p mj-worker --all-targets -- -D warnings
+    cargo test -p brokk-mj-core --lib credentials
+    cargo test -p brokk-mj-controller --lib -- server_runtime::api subagent_park credential_sync
+    cargo test -p brokk-mj-worker --lib -- relay::authentication_tests
+    cargo clippy -p brokk-mj-core -p brokk-mj-controller -p brokk-mj-worker --all-targets -- -D warnings
 
 Relay protocol or schema revision numbers are assigned at merge time; if a milestone needs one, take the next free number and expect the planning session to renumber.
 

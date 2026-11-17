@@ -22,13 +22,14 @@ pub use locking::{
 };
 
 use crate::hex::lower_hex;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
@@ -674,9 +675,27 @@ pub struct CredentialSyncSignal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSyncCause {
     pub session_id: String,
+    pub ordinal: u64,
     pub reason: CredentialSyncReason,
     /// The failed turn's access-token hash, as in [`CredentialSyncSignal`].
     pub login_fingerprint: Option<String>,
+}
+
+impl CredentialSyncCause {
+    pub fn for_failed_turn(
+        session_id: &str,
+        turn: &crate::state::MaterializedTurnOutcome,
+    ) -> Option<Self> {
+        crate::subagent::turn_failed_on_login(turn).then(|| Self {
+            session_id: session_id.to_owned(),
+            ordinal: turn.completed_ordinal,
+            reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: turn
+                .diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.login_fingerprint.clone()),
+        })
+    }
 }
 
 /// What an authentication failure means, decided once against the profile's
@@ -1063,105 +1082,263 @@ impl CredentialSyncResult {
 /// while the whole login file is unchanged.
 #[derive(Debug, Default)]
 pub struct RejectedLogins {
-    profiles: std::collections::BTreeMap<String, (PathBuf, RefusedLogin)>,
+    profiles: std::collections::BTreeMap<String, (HarnessKind, PathBuf, LoginFingerprint)>,
+    failures: BTreeMap<String, BTreeMap<u64, LoginFailure>>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum RefusedLogin {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginFingerprint {
     AccessToken(String),
     File(String),
 }
 
-impl RejectedLogins {
-    /// Take in one finished sync of `profile`.
-    pub fn observe(&mut self, result: &CredentialSyncResult, profile: &HarnessProfile) {
-        let Some(cause) = &result.trigger else {
-            return;
-        };
-        // An API-key profile has no login to redo, and the sync never
-        // compares its key.
-        if cause.reason != CredentialSyncReason::AuthenticationFailure
-            || result.failure.is_some()
-            || !profile.auth_scheme().uses_native_login_file()
-        {
-            return;
+impl LoginFingerprint {
+    pub fn read_file(kind: HarnessKind, marker: &Path) -> Result<Option<Self>> {
+        let (snapshot, bytes) = read_credential_file(kind, marker)?;
+        if !snapshot.present {
+            return Ok(None);
         }
-        let reached = result
-            .outcomes
-            .iter()
-            .find(|outcome| outcome.session_id == cause.session_id);
-        // A step that failed (the harness login among them) is not a clean
-        // check that the profile's own login is the one the provider refused.
-        let Some(CredentialSyncOutcome {
-            outcome: Ok(actions),
-            unchanged_login: Some(snapshot),
-            current_access_token,
-            step_failures,
-            ..
-        }) = reached
+        Ok(if kind == HarnessKind::Claude {
+            claude_access_token_fingerprint(&bytes).map(Self::AccessToken)
+        } else {
+            Some(Self::File(snapshot.fingerprint))
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginFailureVerdict {
+    Deciding,
+    Refused,
+    Renewed,
+    Unrefused { reason: String },
+}
+
+#[derive(Debug)]
+struct LoginFailure {
+    profile_id: String,
+    fingerprint: Option<String>,
+    conclusion: Option<LoginConclusion>,
+}
+
+#[derive(Debug)]
+enum LoginConclusion {
+    Refused(LoginFingerprint),
+    Delivered { renewed: bool },
+    Renewed,
+    Unrefused(String),
+}
+
+impl LoginFailure {
+    fn matches(&self, profile_id: &str, cause: &CredentialSyncCause) -> bool {
+        self.profile_id == profile_id && self.fingerprint == cause.login_fingerprint
+    }
+}
+
+impl RejectedLogins {
+    /// The poller accepted a reconciliation for this failure. A later turn
+    /// supersedes it even when the worker used the same token for both.
+    pub fn accept(&mut self, profile_id: &str, cause: &CredentialSyncCause) {
+        if cause.reason == CredentialSyncReason::AuthenticationFailure {
+            self.failures
+                .entry(cause.session_id.clone())
+                .or_default()
+                .entry(cause.ordinal)
+                .or_insert_with(|| LoginFailure {
+                    profile_id: profile_id.to_owned(),
+                    fingerprint: cause.login_fingerprint.clone(),
+                    conclusion: None,
+                });
+        }
+    }
+
+    /// A preceding failure cannot be used to report a later turn. Warnings
+    /// after a terminal failure have their own ordinals and leave it intact.
+    pub fn supersede(&mut self, session_id: &str, ordinal: u64) {
+        if let std::collections::btree_map::Entry::Occupied(mut session) =
+            self.failures.entry(session_id.to_owned())
+        {
+            session.get_mut().retain(|previous, _| *previous >= ordinal);
+            if session.get().is_empty() {
+                session.remove();
+            }
+        }
+    }
+
+    /// A sync finishing after removal cannot revive a retired decision.
+    pub fn retain_failures(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.failures.retain(|id, _| keep(id));
+    }
+
+    /// Take in one finished sync of a configured profile. A removed profile
+    /// still ends the triggering decision.
+    pub fn observe(&mut self, result: &CredentialSyncResult, profile: &HarnessProfile) {
+        self.conclude(result, Some(profile));
+    }
+
+    pub fn conclude(&mut self, result: &CredentialSyncResult, profile: Option<&HarnessProfile>) {
+        let Some(cause) = result
+            .trigger
+            .as_ref()
+            .filter(|cause| cause.reason == CredentialSyncReason::AuthenticationFailure)
         else {
             return;
         };
-        if step_failures
-            .iter()
-            .any(|failure| matches!(failure.step, SyncStep::HarnessLogin | SyncStep::Session))
-        {
-            return;
+        let conclusion = Self::sync_conclusion(result, cause, profile);
+        if let (Some(profile), LoginConclusion::Refused(identity)) = (profile, &conclusion) {
+            let entry = (
+                profile.kind,
+                profile.authentication_marker(),
+                identity.clone(),
+            );
+            if self.profiles.get(&result.profile_id) != Some(&entry) {
+                tracing::info!(
+                    profile_id = %result.profile_id,
+                    session_id = %cause.session_id,
+                    "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
+                );
+                self.profiles.insert(result.profile_id.clone(), entry);
+            }
         }
+        if let Some(failure) = self
+            .failures
+            .get_mut(&cause.session_id)
+            .and_then(|session| session.get_mut(&cause.ordinal))
+            && failure.matches(&result.profile_id, cause)
+        {
+            failure.conclusion = Some(conclusion);
+        }
+    }
+
+    fn sync_conclusion(
+        result: &CredentialSyncResult,
+        cause: &CredentialSyncCause,
+        profile: Option<&HarnessProfile>,
+    ) -> LoginConclusion {
+        let unrefused = |reason: &str| LoginConclusion::Unrefused(reason.to_owned());
+        if let Some(detail) = &result.failure {
+            return unrefused(detail);
+        }
+        let Some(profile) = profile else {
+            return unrefused("the profile is no longer configured");
+        };
+        if !profile.auth_scheme().uses_native_login_file() {
+            return unrefused("this profile does not use a native login");
+        }
+        let Some(reached) = result
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.session_id == cause.session_id)
+        else {
+            return unrefused("credential reconciliation did not reach this session");
+        };
+        let actions = match &reached.outcome {
+            Ok(actions) => actions,
+            Err(detail) => return unrefused(detail),
+        };
+        if let Some(failure) = reached
+            .step_failures
+            .iter()
+            .find(|failure| matches!(failure.step, SyncStep::HarnessLogin | SyncStep::Session))
+        {
+            return unrefused(&failure.detail);
+        }
+        let verdict = classify_authentication_failure(
+            cause.login_fingerprint.as_deref(),
+            reached.current_access_token.as_deref(),
+        );
         if actions.iter().any(|action| {
             matches!(
                 action,
                 CredentialSyncAction::Pushed | CredentialSyncAction::Pulled
             )
         }) {
-            // A fresher copy was pushed, or the session's own became the
-            // profile's; either way the next turn may succeed.
-            return;
+            return LoginConclusion::Delivered {
+                renewed: profile.kind == HarnessKind::Claude
+                    && verdict == AuthenticationVerdict::LoginRenewed,
+            };
         }
-        if !snapshot.present {
-            return;
+        if profile.kind == HarnessKind::Claude && verdict == AuthenticationVerdict::LoginRenewed {
+            return LoginConclusion::Renewed;
         }
-        let refused = if profile.kind == HarnessKind::Claude {
-            // Only the failed turn's own token can show that the provider
-            // refused the current login. An unknown token proves nothing.
-            match classify_authentication_failure(
-                cause.login_fingerprint.as_deref(),
-                current_access_token.as_deref(),
-            ) {
-                AuthenticationVerdict::CurrentLoginRefused => {
-                    RefusedLogin::AccessToken(cause.login_fingerprint.clone().unwrap_or_default())
-                }
-                AuthenticationVerdict::LoginRenewed | AuthenticationVerdict::Unknown => return,
-            }
-        } else {
-            RefusedLogin::File(snapshot.fingerprint.clone())
+        let Some(snapshot) = reached
+            .unchanged_login
+            .as_ref()
+            .filter(|snapshot| snapshot.present)
+        else {
+            return unrefused("credential reconciliation found no unchanged login");
         };
-        let entry = (profile.authentication_marker(), refused);
-        // The same login refused again (another session, or a repeated
-        // signal) is already known; it is recorded and reported once.
-        if self.profiles.get(&result.profile_id) == Some(&entry) {
-            return;
+        if profile.kind != HarnessKind::Claude {
+            return LoginConclusion::Refused(LoginFingerprint::File(snapshot.fingerprint.clone()));
         }
-        tracing::info!(
-            profile_id = %result.profile_id,
-            session_id = %cause.session_id,
-            "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
-        );
-        self.profiles.insert(result.profile_id.clone(), entry);
+        match &cause.login_fingerprint {
+            Some(token) if verdict == AuthenticationVerdict::CurrentLoginRefused => {
+                LoginConclusion::Refused(LoginFingerprint::AccessToken(token.clone()))
+            }
+            _ => unrefused("credential reconciliation could not identify the failed login"),
+        }
+    }
+
+    pub fn failure_verdict(
+        &self,
+        profile_id: &str,
+        cause: &CredentialSyncCause,
+        current: Option<&LoginFingerprint>,
+    ) -> LoginFailureVerdict {
+        use LoginFailureVerdict::*;
+        let Some(failure) = self
+            .failures
+            .get(&cause.session_id)
+            .and_then(|session| session.get(&cause.ordinal))
+            .filter(|failure| failure.matches(profile_id, cause))
+        else {
+            return Unrefused {
+                reason: "credential reconciliation has no result for this turn".into(),
+            };
+        };
+        let Some(conclusion) = &failure.conclusion else {
+            return Deciding;
+        };
+        if let (Some(failed), Some(LoginFingerprint::AccessToken(current))) =
+            (&failure.fingerprint, current)
+            && failed != current
+        {
+            return Renewed;
+        }
+        match conclusion {
+            LoginConclusion::Refused(refused) => self.wake_verdict(refused, current),
+            LoginConclusion::Delivered { renewed: true } | LoginConclusion::Renewed => Renewed,
+            LoginConclusion::Delivered { renewed: false } => Unrefused {
+                reason: "credential reconciliation refreshed this session's login".into(),
+            },
+            LoginConclusion::Unrefused(reason) => Unrefused {
+                reason: reason.clone(),
+            },
+        }
+    }
+
+    pub fn wake_verdict(
+        &self,
+        staged: &LoginFingerprint,
+        current: Option<&LoginFingerprint>,
+    ) -> LoginFailureVerdict {
+        match current {
+            Some(current) if current == staged => LoginFailureVerdict::Refused,
+            Some(_) => LoginFailureVerdict::Renewed,
+            None => LoginFailureVerdict::Unrefused {
+                reason: "the current profile login could not be identified".into(),
+            },
+        }
     }
 
     /// Why a new session on this profile would fail to sign in, while its
     /// login is still the one the provider refused.
     pub fn refusal(&self, profile_id: &str) -> Option<String> {
-        let (marker, refused) = self.profiles.get(profile_id)?;
-        let current = std::fs::read(marker).ok()?;
-        let still_refused = match refused {
-            RefusedLogin::AccessToken(token) => {
-                claude_access_token_fingerprint(&current).as_deref() == Some(token.as_str())
-            }
-            RefusedLogin::File(fingerprint) => credential_fingerprint(&current) == *fingerprint,
-        };
-        still_refused.then(|| crate::subagent::login_invalid_reason(profile_id))
+        let (kind, marker, refused) = self.profiles.get(profile_id)?;
+        let current = LoginFingerprint::read_file(*kind, marker).ok().flatten();
+        (self.wake_verdict(refused, current.as_ref()) == LoginFailureVerdict::Refused)
+            .then(|| crate::subagent::login_invalid_reason(profile_id))
     }
 }
 
@@ -1187,7 +1364,7 @@ impl CredentialSyncHandle {
     }
 
     /// Reconcile one profile now instead of waiting for the next cycle.
-    pub fn sync_profile_now(&self, profile_id: &str, cause: Option<CredentialSyncCause>) {
+    pub fn sync_profile_now(&self, profile_id: &str, cause: Option<CredentialSyncCause>) -> bool {
         if let Err(error) = self.triggers.send(SyncTrigger {
             profile_id: profile_id.to_owned(),
             cause,
@@ -1197,7 +1374,9 @@ impl CredentialSyncHandle {
                 %error,
                 "credential sync request dropped because its coordinator stopped"
             );
+            return false;
         }
+        true
     }
 }
 
