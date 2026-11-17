@@ -35,10 +35,11 @@ LETTERS = "abcdefgh"
 def jl(path):
     out = []
     if os.path.exists(path):
-        for l in open(path, encoding="utf-8"):
-            l = l.strip()
-            if l:
-                out.append(json.loads(l))
+        with open(path, encoding="utf-8") as f:
+            for l in f:
+                l = l.strip()
+                if l:
+                    out.append(json.loads(l))
     return out
 
 
@@ -291,12 +292,19 @@ def build_queue(lab, key, labels, texts, zero, pops_of, seed, strict=False):
 
 
 # -------------------------------------------------------------------- scoring
+def input_rule_fires(g, cut, ceil=0.5, imp=corpus.IMPORTANT):
+    # Quota recovery returns before the input branch can consume an ask-kind answer.
+    if corpus.prob(g, "failure", "quota") >= corpus.FLOOR:
+        return False
+    req = corpus.prob(g, "input", "required")
+    return req >= cut and not (req < ceil and corpus.prob(g, "attention", "important") >= imp)
+
+
 def rule_action(g, cut, ceil, imp):
     p = lambda a, n: corpus.prob(g, a, n)
     if p("failure", "quota") >= corpus.FLOOR:
         return "recover_quota"
-    req = p("input", "required")
-    if req >= cut and not (req < ceil and p("attention", "important") >= imp):
+    if input_rule_fires(g, cut, ceil, imp):
         return "await_input"
     if p("failure", "transient_provider") >= corpus.FLOOR:
         return "retry_provider"
@@ -386,6 +394,9 @@ def evaluate(eps, lab, point, answers=None):
     res = collections.defaultdict(collections.Counter)
     for e in eps:
         c = res[e["session"]]
+        if answers is not None and missing_rule_answers(e, lab, point, answers):
+            c["ep_missing_answers"] += 1
+            continue
         onset = None
         for t in e["turns"]:
             if action(t) == "await_input":
@@ -791,7 +802,16 @@ def read_answers(out, key, by_turn, directory="familyB", full_trace=False):
     by_id = {(r["session"], r["turn_id"]): k for k, r in by_turn.items()}
     for wording in (("A", "B") if full_trace else ("A", "B", "C")):
         joined = {}
-        for d in jl(os.path.join(out, directory, f"answers-{'all-' if full_trace else ''}{wording}.jsonl")):
+        path = os.path.join(out, directory, f"answers-{'all-' if full_trace else ''}{wording}.jsonl")
+        if os.path.exists(path):
+            metadata = os.path.splitext(path)[0] + ".metadata.json"
+            if not os.path.exists(metadata):
+                raise ValueError(f"{path}: missing metadata sidecar {metadata}; require branch ask_kind_alone")
+            with open(metadata) as f:
+                branch = json.load(f).get("branch")
+            if branch != "ask_kind_alone":
+                raise ValueError(f"{path}: unsupported answers branch {branch!r}; expected ask_kind_alone (fresh-current snapshot scoring is not implemented)")
+        for d in jl(path):
             i = d["item"]
             if full_trace:
                 k = by_id.get((d["session"], d["turn_id"]))
@@ -826,8 +846,7 @@ def ask_action(t, point, answers):
             p = answers[wording][(t["session"], t["completed_ordinal"])]
             needs = sum(p[k] for k in ASKS) >= cut
         else:
-            req = corpus.prob(g, "input", "required")
-            needs = req >= cut and not (req < 0.5 and corpus.prob(g, "attention", "important") >= corpus.IMPORTANT)
+            needs = input_rule_fires(g, cut)
             if needs:
                 p = answers[wording][(t["session"], t["completed_ordinal"])]
                 needs = p["optional_or_default"] + p["none"] < limit
@@ -864,6 +883,30 @@ def cross_fit(per, sessions):
     return {s: per[p].get(s, collections.Counter()) for s, p in choices.items()}, choices
 
 
+def missing_rule_answers(episode, lab, point, answers):
+    """One coverage rule for grids and fixed confirmation rules, including unlabeled firings."""
+    family, wording, cut, _ = point
+    available = answers.get(wording, {})
+    return {(episode["session"], t["completed_ordinal"]) for t in episode["turns"]
+            if (family == "B" or (episode["session"], t["completed_ordinal"]) in lab
+                or input_rule_fires(t["glide"], cut))
+            and (episode["session"], t["completed_ordinal"]) not in available}
+
+
+def answer_ready_episodes(eps, lab, points, answers, exclusions=()):
+    """Exclude whole traces before either fitting or fixed-rule scoring reads answers."""
+    ready = []
+    wire = missing = 0
+    for e in eps:
+        if any((e["session"], t["completed_ordinal"]) in exclusions for t in e["turns"]):
+            wire += 1
+        elif any(missing_rule_answers(e, lab, p, answers) for p in points):
+            missing += 1
+        else:
+            ready.append(e)
+    return ready, wire, missing
+
+
 def ask_score_block(eps, lab, answers, rng, all_answers=None, b_status=None, exclusions=None):
     all_answers = all_answers or {"A": {}, "B": {}}
     exclusions = exclusions or {"B": set(), "C": set()}
@@ -874,16 +917,8 @@ def ask_score_block(eps, lab, answers, rng, all_answers=None, b_status=None, exc
         if family == "B" and b_status and b_status[1]:
             lines.append(f"\n#### Family B\n\npending labels for {b_status[1]} onset turns (all scopes); B is not selectable.\n")
             continue
-        eligible = []
-        excluded_wire = 0
-        for e in eps:
-            if any((e["session"], t["completed_ordinal"]) in exclusions[family] for t in e["turns"]):
-                excluded_wire += 1
-                continue
-            needed = e["turns"] if family == "B" else [t for t in e["turns"] if (e["session"], t["completed_ordinal"]) in lab]
-            if all((e["session"], t["completed_ordinal"]) in available[w] for t in needed for w in ("A", "B")):
-                eligible.append(e)
-        lines.append(f"\n#### Family {family}\n\nKept {len(eligible)}/{len(eps)} full-trace episodes; excluded {excluded_wire} for missing frozen wire state (Amendment 7), {len(eps) - len(eligible) - excluded_wire} pending answers.\n")
+        eligible, excluded_wire, missing_episodes = answer_ready_episodes(eps, lab, ASK_GRID[family], available, exclusions[family])
+        lines.append(f"\n#### Family {family}\n\nKept {len(eligible)}/{len(eps)} full-trace episodes; excluded {excluded_wire} for missing frozen wire state (Amendment 7), {missing_episodes} pending answers.\n")
         if not eligible:
             lines.append("Pending answers; not selectable.\n")
             continue
@@ -904,9 +939,8 @@ def ask_score_block(eps, lab, answers, rng, all_answers=None, b_status=None, exc
         summaries[family] = summary and len(eligible) + excluded_wire == len(eps) and (family != "B" or b_status is None or b_status[0])
     lines.append("\n#### Family C, wording C (Amendment 8; input cut fixed)\n")
     c_available = {"C": answers.get("C", {})}
-    c_eps = [e for e in eps if not any((e["session"], t["completed_ordinal"]) in exclusions["C"] for t in e["turns"])]
-    ready = [e for e in c_eps if all((e["session"], t["completed_ordinal"]) in c_available["C"] for t in e["turns"] if (e["session"], t["completed_ordinal"]) in lab)]
-    lines.append(f"Kept {len(ready)}/{len(eps)} full-trace episodes; {len(eps)-len(c_eps)} declared exclusions; {len(c_eps)-len(ready)} pending answers.\n")
+    ready, c_wire, c_missing = answer_ready_episodes(eps, lab, C_WORDING_GRID, c_available, exclusions["C"])
+    lines.append(f"Kept {len(ready)}/{len(eps)} full-trace episodes; {c_wire} declared exclusions; {c_missing} pending answers.\n")
     if ready:
         text, _ = family_score_block(ready, lab, c_available, rng, "C", C_WORDING_GRID)
         lines.append(text)
@@ -992,20 +1026,23 @@ def answer_exclusions(out, key, by_turn):
     result = {"B": set(), "C": set()}
     labeled = {(v["session"], v["completed_ordinal"]) for v in key.values() if "S" not in v["populations"]}
     path = os.path.join(out, "familyB", "missing-state-turns.json")
-    if os.path.exists(path):
-        for turn in json.load(open(path)):
-            k = (turn["session"], turn["completed_ordinal"])
-            if k not in by_turn or by_turn[k]["turn_id"] != turn["turn_id"]:
-                raise ValueError(f"Missing-state turn identity mismatch: {k}")
+    paths = [path] if os.path.exists(path) else [os.path.join(out, "familyB", name) for name in ("missing-wire-requests.json", "missing-wire-requests-all.json")]
+    by_id = {(t["session"], t["turn_id"]): k for k, t in by_turn.items()}
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path) as f:
+            turns = json.load(f)
+        for turn in turns:
+            i = turn.get("item")
+            k = ((key[i]["session"], key[i]["completed_ordinal"]) if i in key
+                 else by_id.get((turn.get("session"), turn.get("turn_id"))))
+            if (k not in by_turn or ("session" in turn and k[0] != turn["session"])
+                    or ("turn_id" in turn and by_turn[k]["turn_id"] != turn["turn_id"])
+                    or ("completed_ordinal" in turn and k[1] != turn["completed_ordinal"])):
+                raise ValueError(f"Missing-state turn identity mismatch: {turn}")
             result["B"].add(k)
-            if k in labeled:
-                result["C"].add(k)
-    else:
-        path = os.path.join(out, "familyB", "missing-wire-requests.json")
-        for i in json.load(open(path)) if os.path.exists(path) else []:
-            if i in key:
-                k = (key[i]["session"], key[i]["completed_ordinal"])
-                result["B"].add(k)
+            if k in labeled or input_rule_fires(by_turn[k]["glide"], corpus.CUTS[2]):
                 result["C"].add(k)
     return result
 
@@ -1203,26 +1240,24 @@ def development_v2(out, lab):
 
 
 def r3_selection(out, eps, lab, answers, exclusions):
-    retained = [e for e in eps if not any((e["session"], t["completed_ordinal"]) in exclusions["C"] for t in e["turns"])]
-    missing = {(e["session"], t["completed_ordinal"]) for e in retained for t in e["turns"]
-               if (e["session"], t["completed_ordinal"]) in lab and (e["session"], t["completed_ordinal"]) not in answers.get("C", {})}
+    retained, wire, missing = answer_ready_episodes(eps, lab, C_WORDING_GRID, answers, exclusions["C"])
     path = os.path.join(out, "scoring", "r3-selection.json")
-    if missing:
+    if not retained:
         with open(path, "w") as f:
-            json.dump(dict(status="pending wording C answers", missing_turns=len(missing)), f, indent=1)
-        return f"\nR3 cD not fixed: {len(missing)} labeled-turn wording C answers pending.\n"
+            json.dump(dict(status="no answer-complete episodes", missing_answer_episodes=missing, declared_excluded_episodes=wire), f, indent=1)
+        return f"\nR3 cD not fixed: no answer-complete episodes; {wire} declared exclusions, {missing} episodes missing answers.\n"
     sessions = sorted({e["session"] for e in retained})
     per = {p: evaluate(retained, lab, p, answers) for p in C_WORDING_GRID}
     cf, chosen = cross_fit(per, sessions)
     fit = select({p: sum_counts(c) for p, c in per.items()}, None)
     counts = sum_counts(cf)
     record = dict(status="development v2 fit", rule="R3", wording="C", input_cut=fit[2], cD=fit[3],
-                  episodes=len(retained), sessions=len(sessions), cross_fit_counts=dict(counts),
+                  episodes=len(retained), sessions=len(sessions), missing_answer_episodes=missing, declared_excluded_episodes=wire, cross_fit_counts=dict(counts),
                   held_out_choices={session: p[3] for session, p in chosen.items()},
                   note="Cross-fit evaluates the frozen selector; the same selector fitted on all primary development v2 data fixes the single confirmation cD. Confirmation is never used for fitting.")
     with open(path, "w") as f:
         json.dump(record, f, indent=1)
-    return f"\nR3 development v2: full-data fit fixes wording C, input {fit[2]}, cD={fit[3]}; held-out cD choices {dict(collections.Counter(p[3] for p in chosen.values()))}. See scoring/r3-selection.json.\n"
+    return f"\nR3 coverage: kept {len(retained)}/{len(eps)} episodes; {wire} declared exclusions, {missing} episodes missing answers.\nR3 development v2: full-data fit fixes wording C, input {fit[2]}, cD={fit[3]}; held-out cD choices {dict(collections.Counter(p[3] for p in chosen.values()))}. See scoring/r3-selection.json.\n"
 
 VERIFY_INSTRUCTIONS = 'Read LABELING-INSTRUCTIONS-v2.md in full first, especially the rulings on offers to carry out what the person was asking about. Each item shows a transcript, its older label, and a re-judge label that moved it from proposal to optional_or_default or none. Decide the label under the current instructions yourself, from the transcript. Write one JSON line per item: {"item", "ask_type", "ask_reply", "ask_quote", "delivers_requested_answer", "completion_report", "unclear", "agrees_with": "old"|"rejudge"|"neither", "reason": "<one sentence>"}. Never send transcript text to any service.'
 
