@@ -214,9 +214,7 @@ async fn missing_in(
     };
     // `mise ls --missing --json`: an object keyed by tool name whose records
     // list the requested versions that are not installed.
-    // `mise bootstrap packages status --json`: package managers with packages
-    // whose `state` is "missing" when not installed. Other states (a version
-    // mismatch for a "*" request) are left to `apply`, which is a quick no-op.
+    // `mise bootstrap packages status --json`: see [`unsatisfied_packages`].
     let result = async {
         // `ls --missing` silently omits a request mise cannot resolve (an
         // unknown tool); a dry run fails for it, and the failure then makes the
@@ -241,16 +239,7 @@ async fn missing_in(
             &["bootstrap", "packages", "status", "--json"],
         )
         .await?;
-        for (manager, entry) in packages.as_object().into_iter().flatten() {
-            for package in entry["packages"].as_array().into_iter().flatten() {
-                if package["desired_state"] == "present" && package["state"] == "missing" {
-                    missing.packages.push(format!(
-                        "{manager}:{}",
-                        package["package"].as_str().unwrap_or("?")
-                    ));
-                }
-            }
-        }
+        missing.packages = unsatisfied_packages(&packages);
         anyhow::Ok(())
     }
     .await;
@@ -260,6 +249,34 @@ async fn missing_in(
         missing.status_failure = Some(format!("{error:#}"));
     }
     Ok(missing)
+}
+
+/// `[bootstrap.packages]` entries that `mise bootstrap packages apply` would
+/// change, from `mise bootstrap packages status --json`: package managers whose
+/// packages carry a `state` of "installed", "missing" or "version_mismatch".
+/// mise 2026.11.9 reports a `*` request as a version mismatch whatever version
+/// is installed, so that one mismatch counts as satisfied.
+fn unsatisfied_packages(status: &serde_json::Value) -> Vec<String> {
+    let mut unsatisfied = Vec::new();
+    for (manager, entry) in status.as_object().into_iter().flatten() {
+        for package in entry["packages"].as_array().into_iter().flatten() {
+            let requested = package["requested_version"].as_str().unwrap_or("latest");
+            let needed = package["desired_state"] == "present"
+                && match package["state"].as_str() {
+                    Some("installed") => false,
+                    Some("version_mismatch") => requested != "*",
+                    _ => true,
+                };
+            if needed {
+                let name = package["package"].as_str().unwrap_or("?");
+                unsatisfied.push(match requested {
+                    "latest" | "*" => format!("{manager}:{name}"),
+                    version => format!("{manager}:{name}={version}"),
+                });
+            }
+        }
+    }
+    unsatisfied
 }
 
 /// Install mise if the image has none, apply the session environment and ask
@@ -322,7 +339,8 @@ impl Install {
             .join("; ");
         let text = format!(
             "Mjolnir: this session's project tools are being installed in the background: {items}. \
-             Commands that need those tools may wait or fail until Mjolnir sends a second message saying the install finished."
+             Until Mjolnir sends a second message saying the install finished, commands that need those tools may wait, fail, \
+             or run a different version the image already has, so hold off on builds and tests that depend on them."
         );
         relay
             .lock()
@@ -443,6 +461,26 @@ impl Drop for BackgroundInstall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: review of a045f704a: a version mismatch was not counted, so a recipe pinning a package the image has at another version skipped `apply`.
+    #[test]
+    fn package_version_mismatches_need_apply_except_for_any_version() {
+        // Output of mise 2026.11.9 on buildpack-deps:noble.
+        let status = serde_json::json!({"apt": {"available": true, "packages": [
+            {"package": "curl", "requested_version": "latest", "desired_state": "present",
+             "state": "installed", "installed_version": "8.5.0-2ubuntu10.16"},
+            {"package": "git", "requested_version": "1:2.30.0-1", "desired_state": "present",
+             "state": "version_mismatch", "installed_version": "1:2.43.0-1ubuntu7.4"},
+            {"package": "cowsay", "requested_version": "latest", "desired_state": "present",
+             "state": "missing", "installed_version": ""},
+            {"package": "make", "requested_version": "*", "desired_state": "present",
+             "state": "version_mismatch", "installed_version": "4.3-4.1build2"}
+        ]}});
+        assert_eq!(
+            unsatisfied_packages(&status),
+            ["apt:git=1:2.30.0-1", "apt:cowsay"]
+        );
+    }
 
     // Hard-won: review of b0f32d6: restoring the mise shims put them ahead of the build-cache launchers, bypassing mbx for mise-installed cmake.
     #[test]
