@@ -1204,6 +1204,12 @@ fi"#;
 // `.mj-keys` (every shared key, one per line). This script extracts it into a
 // private work directory and points `.mj-store` there at the store. One dereferencing `cp -RL` then materializes the
 // whole profile, so the cost does not grow with one process per file.
+const STAGE_PROFILE_CONTENT: &str = r#"set -eu
+umask 077
+work=$1
+mkdir -p -- "$work"
+tar -xzf - --no-same-owner --no-same-permissions -C "$work""#;
+
 const INSTALL_PROFILE_CONTENT: &str = r#"set -eu
 umask 077
 destination=$1
@@ -1211,11 +1217,10 @@ store="$HOME/$2"
 rm -rf -- "$destination"
 mkdir -p -- "$store" "$(dirname -- "$destination")"
 chmod -- 700 "$store"
-work=$(mktemp -d "$destination.work-XXXXXXXXXX")
+work=$3
 upload=
 pins=
 trap 'rm -rf -- "$work" ${upload:+"$upload"} ${pins:+"$pins"}' EXIT
-tar -xzf - --no-same-owner --no-same-permissions -C "$work"
 tree="$work/profile"
 mkdir -p -- "$tree"
 content="$work/.mj-content"
@@ -1242,7 +1247,8 @@ fi
 # Pin every needed file with a hard link in a private directory of the store
 # (always the same filesystem), then check and copy from the pins: content
 # removed from the store afterwards cannot change what this run decided.
-pins=$(mktemp -d "$store/.pins-XXXXXXXXXX")
+pins="$store/.pins-$4"
+mkdir -- "$pins"
 ln -s -- "$pins" "$work/.mj-store"
 missing=
 if [ -f "$work/.mj-keys" ]; then
@@ -1256,7 +1262,14 @@ if [ -n "$missing" ]; then
     printf '%s' "$missing"
     exit 75
 fi
-cp -RL -- "$tree" "$destination" || { echo "could not copy stored profile content into $destination" >&2; exit 1; }"#;
+# Materialization uses these private pins after releasing the store owner.
+trap - EXIT"#;
+
+const MATERIALIZE_PROFILE_CONTENT: &str = r#"set -eu
+umask 077
+work=$1; destination=$2; pins="$HOME/$3"
+trap 'rm -rf -- "$work" "$pins"' EXIT
+cp -RL -- "$work/profile" "$destination" || { echo "could not copy stored profile content into $destination" >&2; exit 1; }"#;
 
 struct ProfileArchiveEntry {
     path: PathBuf,
@@ -1386,8 +1399,10 @@ fn build_profile_archive(
     Ok(file)
 }
 
-/// Serialize the missing-content decision and upload per host. The destination
-/// is staging only: callers copy it into a private profile, then remove it.
+/// One transfer per shared content set; unrelated profiles transfer together.
+/// Only querying/collecting and publishing/pinning share the store-wide gate.
+/// The destination is staging only: callers copy it into a private profile,
+/// then remove it.
 fn upload_profile_archive(
     executor: &impl CommandExecutor,
     ssh: &SshTarget,
@@ -1405,8 +1420,12 @@ fn upload_profile_archive(
         worker_id: None,
         workspace: String::new(),
     };
-    let gate = super::store::store_gate(&host, PROFILE_CONTENT_STORE);
-    let _guard = super::store::lock_gate(executor, &gate, destination, "send profile content")?;
+    let mut sorted_keys: Vec<_> = keys.iter().map(String::as_str).collect();
+    sorted_keys.sort_unstable();
+    let content_digest = mj_core::hex::lower_hex(Sha256::digest(sorted_keys.join("\n").as_bytes()));
+    let gate =
+        super::store::store_gate(&host, &format!("{PROFILE_CONTENT_STORE}/{content_digest}"));
+    let store_gate = super::store::store_gate(&host, PROFILE_CONTENT_STORE);
     let query = targets::ssh_command(
         SshTrafficClass::Control,
         ssh,
@@ -1420,20 +1439,43 @@ fn upload_profile_archive(
     )
     .purpose("query host profile content")
     .stage(ProvisionStage::Syncing);
-    let mut input = std::io::Cursor::new(
-        keys.iter()
-            .map(|key| format!("{key}\n"))
-            .collect::<String>(),
-    );
-    let output = executor.execute_with_stdin(&query, &mut input)?;
-    ensure!(
-        output.status == 0,
-        "{} failed with status {}: {}",
-        query.purpose,
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let mut missing = profile_content_keys(&output.stdout, &keys)?;
+    let query_missing = || -> Result<HashSet<String>> {
+        let mut input = std::io::Cursor::new(
+            sorted_keys
+                .iter()
+                .map(|key| format!("{key}\n"))
+                .collect::<String>(),
+        );
+        let _store = super::store::lock_gate(
+            executor,
+            &store_gate,
+            destination,
+            "query and collect profile content",
+        )?;
+        let output = executor.execute_with_stdin(&query, &mut input)?;
+        let output = targets::checked_command_output(&query, output)?;
+        profile_content_keys(&output.stdout, &keys)
+    };
+    let mut missing = query_missing()?;
+    // Cached profiles send only private bytes and need no content owner. If
+    // content is missing, one uploader decides again after taking its owner:
+    // the preceding uploader may already have supplied everything it needs.
+    let mut content_owner = if missing.is_empty() {
+        None
+    } else {
+        Some(super::store::lock_gate(
+            executor,
+            &gate,
+            destination,
+            "send profile content",
+        )?)
+    };
+    if content_owner.is_some() {
+        missing = query_missing()?;
+        if missing.is_empty() {
+            drop(content_owner.take());
+        }
+    }
     for attempt in 0..2 {
         let mut file = build_profile_archive(source, &entries, &missing)?;
         tracing::info!(
@@ -1442,23 +1484,92 @@ fn upload_profile_archive(
             destination,
             "send profile content"
         );
-        let command = targets::ssh_command(
-            SshTrafficClass::Bulk,
-            ssh,
-            [
-                "sh",
-                "-c",
-                INSTALL_PROFILE_CONTENT,
-                "mj-profile-archive",
+        let token = crate::session_manager::new_command_id("profile-stage")?;
+        let work = format!("{destination}.{token}");
+        let pins = format!("{PROFILE_CONTENT_STORE}/.pins-{token}");
+        let mut can_cleanup = false;
+        let transfer = (|| -> Result<CommandOutput> {
+            let command = targets::ssh_command(
+                SshTrafficClass::Bulk,
+                ssh,
+                ["sh", "-c", STAGE_PROFILE_CONTENT, "mj-profile-stage", &work],
+            )
+            .purpose("send profile content")
+            .stage(ProvisionStage::Syncing);
+            let output = executor
+                .execute_with_stdin(&command, &mut file)
+                .context("stream staged harness profile archive")?;
+            can_cleanup = true;
+            targets::checked_command_output(&command, output)?;
+            // Collection cannot unlink between publication and pinning. The
+            // network transfer has already finished before taking this owner.
+            let _store = super::store::lock_gate(
+                executor,
+                &store_gate,
                 destination,
-                PROFILE_CONTENT_STORE,
-            ],
-        )
-        .purpose("send profile content")
-        .stage(ProvisionStage::Syncing);
-        let output = executor
-            .execute_with_stdin(&command, &mut file)
-            .context("stream staged harness profile archive")?;
+                "publish and pin profile content",
+            )?;
+            can_cleanup = false;
+            let output = executor.execute(
+                &targets::ssh_command(
+                    SshTrafficClass::Bulk,
+                    ssh,
+                    [
+                        "sh",
+                        "-c",
+                        INSTALL_PROFILE_CONTENT,
+                        "mj-profile-archive",
+                        destination,
+                        PROFILE_CONTENT_STORE,
+                        &work,
+                        &token,
+                    ],
+                )
+                .purpose("publish profile content")
+                .stage(ProvisionStage::Syncing),
+            )?;
+            can_cleanup = true;
+            drop(_store);
+            if output.status != 0 {
+                return Ok(output);
+            }
+            can_cleanup = false;
+            let output = executor.execute(
+                &targets::ssh_command(
+                    SshTrafficClass::Bulk,
+                    ssh,
+                    [
+                        "sh",
+                        "-c",
+                        MATERIALIZE_PROFILE_CONTENT,
+                        "mj-profile-materialize",
+                        &work,
+                        destination,
+                        &pins,
+                    ],
+                )
+                .purpose("materialize profile content")
+                .stage(ProvisionStage::Syncing),
+            )?;
+            can_cleanup = true;
+            Ok(output)
+        })();
+        if can_cleanup {
+            match executor.execute_cleanup(
+                &targets::ssh_command(
+                    SshTrafficClass::Control,
+                    ssh,
+                    ["rm", "-rf", "--", &work, &pins],
+                )
+                .purpose("discard private profile upload"),
+            ) {
+                Ok(output) if output.status == 0 => {}
+                other => tracing::warn!(result = ?other, "profile upload cleanup failed"),
+            }
+        } else {
+            tracing::warn!(%work, "profile transfer exit unknown; retaining its private staging");
+        }
+        let output = transfer?;
         if output.status == 0 {
             return Ok(());
         }
@@ -1471,8 +1582,7 @@ fn upload_profile_archive(
             continue;
         }
         bail!(
-            "{} failed with status {}: {}{}",
-            command.purpose,
+            "publish profile content failed with status {}: {}{}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim(),
             String::from_utf8_lossy(&output.stdout).trim()
@@ -1743,8 +1853,8 @@ mod profile_archive_tests {
             self.execute_with_stdin(command, input)
         }
 
-        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            bail!("profile transfer commands must stream their input")
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, &mut std::io::empty())
         }
         fn execute_with_stdin(
             &self,
@@ -1785,6 +1895,183 @@ mod profile_archive_tests {
             destination.to_str().unwrap(),
             &shared_profile_paths(HarnessKind::Claude),
         )
+    }
+
+    // Hard-won: 73052bca7: an unrelated profile transfer held the host-wide gate until restart timed out.
+    #[test]
+    fn distinct_profile_content_transfers_overlap_and_identical_content_is_sent_once() {
+        use std::sync::mpsc;
+        struct HeldTar {
+            tar: SystemTar,
+            reached: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+        impl CommandExecutor for HeldTar {
+            fn pause_deadline(&self) -> targets::DeadlinePause {
+                targets::DeadlinePause::none()
+            }
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                false
+            }
+            fn execute_without_deadline(&self, c: &CommandSpec) -> Result<CommandOutput> {
+                self.execute(c)
+            }
+            fn execute_with_stdin_without_deadline(
+                &self,
+                c: &CommandSpec,
+                i: &mut (dyn Read + Send),
+            ) -> Result<CommandOutput> {
+                self.execute_with_stdin(c, i)
+            }
+            fn execute(&self, c: &CommandSpec) -> Result<CommandOutput> {
+                self.tar.execute(c)
+            }
+            fn execute_with_stdin(
+                &self,
+                c: &CommandSpec,
+                i: &mut (dyn Read + Send),
+            ) -> Result<CommandOutput> {
+                if c.purpose == "send profile content" {
+                    self.reached.send(()).unwrap();
+                    self.release
+                        .recv_timeout(Duration::from_secs(20))
+                        .expect("test did not release transfer");
+                }
+                self.tar.execute_with_stdin(c, i)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let first = home.join("first");
+        let second = home.join("second");
+        for (source, byte) in [(&first, b'a'), (&second, b'b')] {
+            fs::create_dir_all(source.join("plugins")).unwrap();
+            let mut state = u64::from(byte);
+            let payload: Vec<_> = (0..100_000)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (state >> 32) as u8
+                })
+                .collect();
+            fs::write(source.join("plugins/content"), payload).unwrap();
+        }
+        let ssh = SshTarget {
+            destination: "unused".into(),
+            ssh_args: vec![],
+        };
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let first_ref = &first;
+            let ssh_ref = &ssh;
+            let owner = scope.spawn(move || {
+                let held = HeldTar {
+                    tar: SystemTar::new(home),
+                    reached: reached_tx,
+                    release: release_rx,
+                };
+                upload_profile_archive(
+                    &held,
+                    ssh_ref,
+                    first_ref,
+                    home.join("held").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+                assert!(held.tar.uploads.borrow()[0].len() > 64 * 1024);
+            });
+            reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (done_tx, done_rx) = mpsc::channel();
+            let independent = scope.spawn(move || {
+                let tar = SystemTar::new(home);
+                upload_profile_archive(
+                    &tar,
+                    ssh_ref,
+                    &second,
+                    home.join("independent").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+                done_tx.send(()).unwrap();
+            });
+            let same = scope.spawn(|| {
+                let tar = SystemTar::new(home);
+                upload_profile_archive(
+                    &tar,
+                    &ssh,
+                    &first,
+                    home.join("same").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+                let archives = tar.uploads.borrow();
+                let mut archive =
+                    tar::Archive::new(flate2::read::GzDecoder::new(archives[0].as_slice()));
+                assert!(
+                    archive.entries().unwrap().all(|entry| !entry
+                        .unwrap()
+                        .path()
+                        .unwrap()
+                        .starts_with(".mj-content")),
+                    "identical content was transferred twice"
+                );
+            });
+            let overlapped = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            release_tx.send(()).unwrap();
+            independent.join().unwrap();
+            owner.join().unwrap();
+            same.join().unwrap();
+            assert!(
+                overlapped,
+                "unrelated content queued behind a held transfer"
+            );
+        });
+        // Already cached shared content must not serialize private archives,
+        // even when both profiles have the exact same content-key set.
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let first_ref = &first;
+            let ssh_ref = &ssh;
+            let owner = scope.spawn(move || {
+                let held = HeldTar {
+                    tar: SystemTar::new(home),
+                    reached: reached_tx,
+                    release: release_rx,
+                };
+                upload_profile_archive(
+                    &held,
+                    ssh_ref,
+                    first_ref,
+                    home.join("cached-held").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+            });
+            reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (done_tx, done_rx) = mpsc::channel();
+            let cached = scope.spawn(move || {
+                let tar = SystemTar::new(home);
+                upload_profile_archive(
+                    &tar,
+                    ssh_ref,
+                    first_ref,
+                    home.join("cached-parallel").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+                done_tx.send(()).unwrap();
+            });
+            let overlapped = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            release_tx.send(()).unwrap();
+            owner.join().unwrap();
+            cached.join().unwrap();
+            assert!(
+                overlapped,
+                "cached private archives queued behind each other"
+            );
+        });
+        assert_eq!(snapshot(&home.join("same")), snapshot(&first));
     }
 
     fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u32, Vec<u8>)> {
@@ -1962,6 +2249,27 @@ mod profile_archive_tests {
         let mut archive = build_profile_archive(&source, &entries, &HashSet::new()).unwrap();
         fs::remove_file(executor.store().join(&key)).unwrap();
         let destination = temp.path().join("missing");
+        let work = temp.path().join("missing-work");
+        executor
+            .execute_with_stdin(
+                &targets::ssh_command(
+                    SshTrafficClass::Bulk,
+                    &SshTarget {
+                        destination: "unused".into(),
+                        ssh_args: vec![],
+                    },
+                    [
+                        "sh",
+                        "-c",
+                        STAGE_PROFILE_CONTENT,
+                        "mj-profile-stage",
+                        work.to_str().unwrap(),
+                    ],
+                )
+                .purpose("send profile content"),
+                &mut archive,
+            )
+            .unwrap();
         let command = targets::ssh_command(
             SshTrafficClass::Control,
             &SshTarget {
@@ -1975,10 +2283,12 @@ mod profile_archive_tests {
                 "mj-profile-archive",
                 destination.to_str().unwrap(),
                 PROFILE_CONTENT_STORE,
+                work.to_str().unwrap(),
+                "missing-test",
             ],
         )
-        .purpose("send profile content");
-        let output = executor.execute_with_stdin(&command, &mut archive).unwrap();
+        .purpose("publish profile content");
+        let output = executor.execute(&command).unwrap();
         assert_eq!(output.status, PROFILE_CONTENT_MISSING);
         assert_eq!(
             String::from_utf8(output.stdout).unwrap().trim(),

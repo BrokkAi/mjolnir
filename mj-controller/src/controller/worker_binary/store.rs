@@ -155,6 +155,10 @@ pub(super) fn lock_gate<'a>(
     session_id: &str,
     purpose: &'static str,
 ) -> Result<GateGuard<'a>> {
+    // Queuing is not work performed by this operation. Preserve its command
+    // budget while continuing to observe explicit supervisor cancellation.
+    let untimed = targets::WithoutDeadline::new(executor);
+    let executor = &untimed;
     let mut waiting = None::<(mj_core::lock_wait::LockWait, ProvisionStageGuard<'_, _>)>;
     loop {
         if let Some(guard) = gate.try_lock(session_id, purpose) {
@@ -166,13 +170,16 @@ pub(super) fn lock_gate<'a>(
         if executor.cancellation_requested() {
             executor.execute(
                 &CommandSpec::new("true", Vec::<String>::new())
-                    .purpose("wait for the shared Mjolnir worker binary"),
+                    .purpose(format!("wait to {purpose} in {}", gate.label)),
             )?;
-            bail!("worker binary store wait cancelled");
+            bail!(
+                "shared target content wait cancelled: {} ({purpose})",
+                gate.label
+            );
         }
         let (wait, _queued) = waiting.get_or_insert_with(|| {
             (
-                mj_core::lock_wait::LockWait::new("the worker binary store"),
+                mj_core::lock_wait::LockWait::new("the shared target content store"),
                 ProvisionStageGuard::new(executor, ProvisionStage::WaitingForWorkerStore),
             )
         });
