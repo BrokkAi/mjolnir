@@ -1,0 +1,248 @@
+{
+  "cutoff": "2026-11-01T00:00:00Z",
+  "repository_head": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+  "count": 30,
+  "ineligible": [],
+  "records": [
+    {
+      "id": "python-filescope-enclosing-tie",
+      "selection_position": 1,
+      "intro_commit": "8ea28a492d39d520bc5e8c41d676460147910400",
+      "git_committer_datetime": "2026-07-01T16:46:26+02:00",
+      "committer_utc": "2026-07-01T14:46:26+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "cpp-template-inherited-base-signature",
+      "selection_position": 3,
+      "intro_commit": "9c367d3f2eb0eabcbc97c36596d09052e1c3395d",
+      "git_committer_datetime": "2026-06-19T18:26:13-05:00",
+      "committer_utc": "2026-06-19T23:26:13+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "incompatible-semantic-bundle-late-gate",
+      "selection_position": 5,
+      "intro_commit": "3e51cfde577a31b83a72b8686694f3a2c0ea70ed",
+      "git_committer_datetime": "2026-08-27T19:01:46+02:00",
+      "committer_utc": "2026-08-27T17:01:46+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "retained-fill-java-memo-loses-gap",
+      "selection_position": 9,
+      "intro_commit": "38ac5b5b2b51de7742b7995669f6e335fd78afe2",
+      "git_committer_datetime": "2026-10-30T10:30:01-05:00",
+      "committer_utc": "2026-10-30T15:30:01+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "kotlin-source-constructor-steals-class-header-comment",
+      "selection_position": 17,
+      "intro_commit": "48c156c965b70729c1aa2bac2f148d530166fda0",
+      "git_committer_datetime": "2026-09-10T18:21:30-05:00",
+      "committer_utc": "2026-09-10T23:21:30+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "model-overload-unknown-competitor-discarded",
+      "selection_position": 22,
+      "intro_commit": "2dc7a9b231a028ebd9412c5241b90beea841c589",
+      "git_committer_datetime": "2026-09-12T14:37:01+02:00",
+      "committer_utc": "2026-09-12T12:37:01+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "mcp-default-advisory-reported-clean",
+      "selection_position": 26,
+      "intro_commit": "a830471d19390c947b93e047483ab4e41f49ebe5",
+      "git_committer_datetime": "2026-10-29T19:22:52+02:00",
+      "committer_utc": "2026-10-29T17:22:52+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "selection_position": 34,
+      "intro_commit": "69e3afb5d2c4a2799c14e9d5e092b8619c9f8e1f",
+      "git_committer_datetime": "2026-08-24T10:38:32-05:00",
+      "committer_utc": "2026-08-24T15:38:32+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "python-module-binding-representative-after-event",
+      "selection_position": 44,
+      "intro_commit": "776315a465bc83ad98650b4f283762ab981659ca",
+      "git_committer_datetime": "2026-08-13T11:11:23-05:00",
+      "committer_utc": "2026-08-13T16:11:23+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "rust-while-let-binder-body-field",
+      "selection_position": 49,
+      "intro_commit": "eea67f99599410a874c7c37dea4fb40b0f9c187c",
+      "git_committer_datetime": "2026-10-04T01:58:00Z",
+      "committer_utc": "2026-10-04T01:58:00+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "jvm-protected-unindexed-hierarchy-denied",
+      "selection_position": 51,
+      "intro_commit": "41f159d3e2b88a6b8444444e59ad590ca6cadba5",
+      "git_committer_datetime": "2026-10-09T06:21:27-05:00",
+      "committer_utc": "2026-10-09T11:21:27+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "javascript-object-method-indexed-as-field",
+      "selection_position": 52,
+      "intro_commit": "fe862359a21a9f7ce9b72ecf2e8dc1481d191f6f",
+      "git_committer_datetime": "2026-06-19T18:24:27-05:00",
+      "committer_utc": "2026-06-19T23:24:27+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "matching-analyzer-epoch-needs-writer-slot",
+      "selection_position": 55,
+      "intro_commit": "e21778d1d9516d5180308a4fd5dd503bbe5296c8",
+      "git_committer_datetime": "2026-07-14T23:34:52-05:00",
+      "committer_utc": "2026-07-15T04:34:52+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "python-module-mutation-repeated-scan-budget",
+      "selection_position": 62,
+      "intro_commit": "6ac4593deee3adba092ab6e72cada15f431e731e",
+      "git_committer_datetime": "2026-10-18T15:00:47Z",
+      "committer_utc": "2026-10-18T15:00:47+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "dependency-failure-drops-independent-model-evidence",
+      "selection_position": 63,
+      "intro_commit": "dc0ba96f220bf0066892f98a6757a4c96d38335f",
+      "git_committer_datetime": "2026-08-05T20:21:44+02:00",
+      "committer_utc": "2026-08-05T18:21:44+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "maintainability-file-cap-missing-truncated",
+      "selection_position": 64,
+      "intro_commit": "f5ff17edf1709fcde9f753c2cf92b143cbf5d448",
+      "git_committer_datetime": "2026-05-18T10:49:40+02:00",
+      "committer_utc": "2026-05-18T08:49:40+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "rust-enum-variant-named-fields-omitted",
+      "selection_position": 68,
+      "intro_commit": "33fba95a5b77052176035d9c7c282258a3fd0c05",
+      "git_committer_datetime": "2026-03-24T18:37:01-05:00",
+      "committer_utc": "2026-03-24T23:37:01+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "php-indexed-write-reenters-current-rhs",
+      "selection_position": 74,
+      "intro_commit": "e55ed6f4a8aa392bd5186df034d9e4eede8eb250",
+      "git_committer_datetime": "2026-08-22T08:43:10-05:00",
+      "committer_utc": "2026-08-22T13:43:10+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "rust-importer-planning-widens-to-code-mentions",
+      "selection_position": 77,
+      "intro_commit": "8f0d2a75baddda42ce1cb9a7252b71ff3ae8a7b6",
+      "git_committer_datetime": "2026-08-07T15:09:44-05:00",
+      "committer_utc": "2026-08-07T20:09:44+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "rust-item-macro-evades-plain-struct-drop-proof",
+      "selection_position": 83,
+      "intro_commit": "d5c9845b7488e63b08987de579d381e76f751b5e",
+      "git_committer_datetime": "2026-08-27T09:18:43+02:00",
+      "committer_utc": "2026-08-27T07:18:43+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "kotlin-value-class-this-loses-underlying-projection",
+      "selection_position": 89,
+      "intro_commit": "ba47ae3f428ea3e1d51d999176397a21ea71bff5",
+      "git_committer_datetime": "2026-09-12T23:54:12Z",
+      "committer_utc": "2026-09-12T23:54:12+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "go-nilness-ignores-modeled-nonreturn",
+      "selection_position": 99,
+      "intro_commit": "09b006454e308fe885b4b6b10b35aaa7e86dcb7f",
+      "git_committer_datetime": "2026-08-31T23:04:58-05:00",
+      "committer_utc": "2026-09-01T04:04:58+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "java-static-getter-drops-incomplete-route",
+      "selection_position": 106,
+      "intro_commit": "02a3329d1d54ec101e636f31a3427178edd97f58",
+      "git_committer_datetime": "2026-10-16T07:59:32Z",
+      "committer_utc": "2026-10-16T07:59:32+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "mcp-timed-out-progress-survives-response",
+      "selection_position": 111,
+      "intro_commit": "25bbd98914912722170d90ca34c72d3b4a8eed85",
+      "git_committer_datetime": "2026-10-02T16:17:11+02:00",
+      "committer_utc": "2026-10-02T14:17:11+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "csharp-single-file-namespace-prunes-usages",
+      "selection_position": 117,
+      "intro_commit": "88fa9bb729af44cc316e5b18c68ca7443cfb25c5",
+      "git_committer_datetime": "2026-05-22T16:35:20+02:00",
+      "committer_utc": "2026-05-22T14:35:20+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "rust-bare-value-admits-associated-constant",
+      "selection_position": 119,
+      "intro_commit": "db238908013acbe1691445f9470ce5f2f78fde4a",
+      "git_committer_datetime": "2026-07-20T12:54:37-05:00",
+      "committer_utc": "2026-07-20T17:54:37+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "ruby-constant-navigation-climbs-to-terminal",
+      "selection_position": 120,
+      "intro_commit": "cc45d8f092e525615117108fbecf9453aed29bc4",
+      "git_committer_datetime": "2026-06-29T13:03:12+02:00",
+      "committer_utc": "2026-06-29T11:03:12+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "unproven-override-family-certifies-empty",
+      "selection_position": 123,
+      "intro_commit": "f5cf77da184060e453f69b0c4f04e27d1ba2ae8b",
+      "git_committer_datetime": "2026-08-20T22:47:56Z",
+      "committer_utc": "2026-08-20T22:47:56+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "js-synthetic-owner-leaks-file-summary",
+      "selection_position": 124,
+      "intro_commit": "b73a383797683a2128fe176f85d9457a5f073ad0",
+      "git_committer_datetime": "2026-06-01T22:27:32-05:00",
+      "committer_utc": "2026-06-02T03:27:32+00:00",
+      "eligible_strict_utc": true
+    },
+    {
+      "id": "rust-option-return-implicitly-unwrapped",
+      "selection_position": 127,
+      "intro_commit": "309939da522fa0c3cf51ec922c15c1f5f81ff31a",
+      "git_committer_datetime": "2026-06-19T18:26:28-05:00",
+      "committer_utc": "2026-06-19T23:26:28+00:00",
+      "eligible_strict_utc": true
+    }
+  ]
+}
