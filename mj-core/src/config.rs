@@ -796,7 +796,14 @@ fn validate_subagent_choices(
     Ok(())
 }
 
+/// One model choice. Unlike the other configuration types it refuses a key it
+/// does not read, wherever it is read: API requests carry it inside tagged
+/// policies (`SubagentPolicy`, `SessionReview`) that serde reads from a
+/// buffered copy, where only the type itself can refuse a misspelled
+/// `effort` rather than run at the default. A field added here therefore
+/// needs a daemon socket protocol version, as before #1557.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentChoice {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1163,6 +1170,23 @@ fn migrate_legacy_default_image(target: &mut TargetTemplate, default_image: &str
     }
 }
 
+/// Refuse a configuration file that carries keys no setting reads, naming
+/// each one as the file spells it.
+fn refuse_unread_keys(path: &Path, unread: &[String]) -> Result<()> {
+    if unread.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{}: no Mjolnir setting is named {}; correct or remove it (see {CONFIGURATION_DOCUMENTATION_URL})",
+        path.display(),
+        unread
+            .iter()
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// A key path as the configuration file spells it, such as
 /// `profiles.codex.models`.
 fn setting_key(path: &serde_ignored::Path<'_>) -> String {
@@ -1188,22 +1212,49 @@ fn setting_key(path: &serde_ignored::Path<'_>) -> String {
     segments.join(".")
 }
 
-/// `build_cache` keys that no setting reads, under any machine or runtime.
+/// `build_cache` keys that no setting reads, under a machine or runtime whose
+/// kind reads that table.
 ///
 /// Machines and runtimes are tagged tables, which serde reads from a buffered
 /// copy out of sight of the file loader's unread-key check. Their
 /// `build_cache` tables have always refused a key they do not read, so each is
-/// read again here on its own.
+/// read again here on its own. Under a kind without the setting, such as a
+/// bare runtime or an EC2 machine, the table was never read and still loads.
 fn unread_build_cache_keys(document: &toml::Value) -> Vec<String> {
+    let reads_build_cache = |section: &str, kind: &str| match section {
+        "machines" => matches!(kind, "local" | "ssh"),
+        // Container runtimes, under their current kinds and the fused kinds
+        // of files before version 12.
+        _ => matches!(
+            kind,
+            "podman"
+                | "docker"
+                | "apple-container"
+                | "nitro"
+                | "local-podman"
+                | "local-docker"
+                | "ssh-podman"
+                | "ssh-docker"
+                | "ssh-apple-container"
+                | "ssh-nitro"
+        ),
+    };
     let mut unread = Vec::new();
     for section in ["machines", "targets"] {
         let Some(tables) = document.get(section).and_then(toml::Value::as_table) else {
             continue;
         };
         for (id, table) in tables {
+            let kind = table
+                .get("kind")
+                .and_then(toml::Value::as_str)
+                .unwrap_or_default();
             let Some(build_cache) = table.get("build_cache") else {
                 continue;
             };
+            if !reads_build_cache(section, kind) {
+                continue;
+            }
             // The whole file has already been read, this table with it, so
             // only the names this read gathers matter.
             let _ = serde_ignored::deserialize(build_cache.clone(), |key| {
@@ -2216,17 +2267,7 @@ impl Config {
         // ones such as `advanced.show_stopped_sessions`. Refusing them now
         // would stop an upgraded daemon from starting.
         unread.retain(|key| !matches!(key.split('.').next(), Some("advanced" | "notify")));
-        if !unread.is_empty() {
-            bail!(
-                "{}: no Mjolnir setting is named {}; correct or remove it (see {CONFIGURATION_DOCUMENTATION_URL})",
-                path.display(),
-                unread
-                    .iter()
-                    .map(|key| format!("`{key}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
+        refuse_unread_keys(path, &unread)?;
         config.validate()?;
         Ok(config)
     }

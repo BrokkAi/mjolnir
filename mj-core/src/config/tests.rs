@@ -2255,6 +2255,31 @@ fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
         refusal.contains("`machines.builder.build_cache.max_totl_size`"),
         "{refusal}"
     );
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[targets.cached]\nkind = \"podman\"\n\
+             [targets.cached.build_cache]\nenabeld = true\n"
+        ),
+    )
+    .unwrap();
+    let refusal = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        refusal.contains("`targets.cached.build_cache.enabeld`"),
+        "{refusal}"
+    );
+    // A kind without the setting never read the table, so it still loads.
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[machines.ec2]\nkind = \"aws-ec2\"\n\
+             region = \"us-east-1\"\nlaunch_template = \"lt\"\nssh_user = \"ubuntu\"\n\
+             [machines.ec2.build_cache]\nold_knob = 1\n\
+             [targets.plain]\nkind = \"bare\"\n[targets.plain.build_cache]\nold_knob = 1\n"
+        ),
+    )
+    .unwrap();
+    Config::load_from(&path).unwrap();
 }
 
 #[test]
