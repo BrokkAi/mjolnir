@@ -102,8 +102,9 @@ pub use provisioning::{
     CreateKind, GitIdentity, controller_git_identity, set_controller_git_identity,
 };
 pub(crate) use worker_binary::{
-    image_worker_label, prepare_recovery_worker_binary, recorded_exit_reason,
-    refresh_target_worker_binary_if_stale, run_control_command, worker_source_problem,
+    image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
+    recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
+    shared_content_ssh, worker_source_problem,
 };
 pub(crate) use worktree::path_exists_on_managed_target;
 
