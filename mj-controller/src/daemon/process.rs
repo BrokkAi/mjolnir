@@ -246,7 +246,9 @@ pub(super) async fn run_daemon_runtime(
             .iter()
             .map(|operation| operation.selection.session_id.clone())
             .collect::<BTreeSet<_>>();
-        let move_owners = state.recover_moves(move_operations, &close_operations)?;
+        let move_owners = state
+            .recover_moves(move_operations, &close_operations)
+            .await?;
         let mut lifecycle_owned = move_owners.moves;
         let restart_intents = blocking(crate::database::load_session_restarts).await?;
         let restarts = restart_intents.len();
@@ -255,10 +257,10 @@ pub(super) async fn run_daemon_runtime(
                 .iter()
                 .map(|intent| intent.session_id.clone()),
         );
-        lifecycle_owned.extend(state.recover_restarts(restart_intents)?);
+        lifecycle_owned.extend(state.recover_restarts(restart_intents).await?);
         let create_intents = blocking(crate::database::load_session_create_intents).await?;
         let creates = create_intents.len();
-        lifecycle_owned.extend(state.recover_creates(create_intents)?);
+        lifecycle_owned.extend(state.recover_creates(create_intents).await?);
         let (retained_cleanups, startup_cleanups) = {
             let owner = state.owner();
             let sessions = &owner.controller().state.sessions;
@@ -276,8 +278,8 @@ pub(super) async fn run_daemon_runtime(
                     .count(),
             )
         };
-        state.resume_retained_cleanups();
-        state.resume_startup_cleanups(true);
+        state.resume_retained_cleanups().await;
+        state.resume_startup_cleanups(true).await;
         tracing::info!(
             moves,
             restarts,
@@ -496,7 +498,7 @@ pub(super) async fn run_daemon_runtime(
         let interrupted_close_task = tokio::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {
-                result = recovery_state.suspend_session(session_id.clone()) => result,
+                result = recovery_state.recover_suspension(session_id.clone()) => result,
                 () = recovery_shutdown.cancelled() => return,
             }
             .map(|()| crate::pollers::LifecycleSuccess::Closed)
@@ -527,10 +529,7 @@ pub(super) async fn run_daemon_runtime(
         interrupted_close_tasks.push(tokio::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {
-                result = recovery_state.force_destroy_session(
-                    session_id.clone(),
-                    crate::daemon::BranchDisposition::Keep,
-                ) => result,
+                result = recovery_state.recover_destruction(session_id.clone()) => result,
                 () = recovery_shutdown.cancelled() => return,
             }
             .map(|()| crate::pollers::LifecycleSuccess::ForceDestroyed)
@@ -749,7 +748,7 @@ pub(super) async fn run_daemon_runtime(
                 _ = background_policy_tick.tick() => {
                     progress.phase(ServingPhase::BackgroundPolicy);
                     state.refresh_background_policies();
-                    state.resume_startup_cleanups(false);
+                    state.resume_startup_cleanups(false).await;
                 }
                 completed = interrupted_close_rx.recv() => {
                     progress.phase(ServingPhase::SuspensionRecovery);
@@ -760,7 +759,7 @@ pub(super) async fn run_daemon_runtime(
                         }
                         refresh_runtime_controller(&state).await;
                         if recovered && completed.deferred_cleanup
-                            && let Err(error) = state.start_deferred_cleanup(completed.session_id.clone())
+                            && let Err(error) = state.start_deferred_cleanup(completed.session_id.clone()).await
                         {
                             tracing::warn!(session_id = %completed.session_id, error = format!("{error:#}"), "could not continue cleanup after interrupted close");
                             state.push_notice(

@@ -96,7 +96,7 @@ impl RecoveryCoordinator {
                         policy.observe_wait(pending.observed_wait);
                         if checkpoint_due(policy, &observation, Utc::now())
                             && let Some(expected_target) = observation.session.target.clone()
-                            && let Some(copy_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::RecoveryCopy)
+                            && let Ok(copy_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::RecoveryCopy).inspect_err(|refusal| tracing::debug!(%session_id, holders = ?refusal.holders, "recovery copy deferred"))
                         {
                             policy.start_attempt();
                             let session_manager = session_manager.clone();
@@ -615,7 +615,7 @@ mod tests {
 
         assert!(
             gate.try_start("session-1", BackgroundWork::RecoveryCopy)
-                .is_none()
+                .is_err()
         );
 
         drop(reservation);
@@ -625,7 +625,7 @@ mod tests {
         assert!(gate.is_busy("session-1"));
         assert!(
             gate.try_start("session-1", BackgroundWork::RecoveryCopy)
-                .is_none()
+                .is_err()
         );
         drop(attempt);
         assert!(!gate.is_busy("session-1"));
@@ -791,7 +791,7 @@ mod tests {
         assert!(attempt.load(Ordering::Acquire));
         assert!(
             gate.try_start("after-drop", BackgroundWork::RecoveryCopy)
-                .is_none()
+                .is_err()
         );
         drop(attempt);
         assert!(gate.busy_sessions().is_empty());

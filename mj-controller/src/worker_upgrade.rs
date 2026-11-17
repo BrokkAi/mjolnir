@@ -129,7 +129,7 @@ impl WorkerUpgradeCoordinator {
                         if !policy.due(&observation, Utc::now()) {
                             continue;
                         }
-                        let Some(upgrade_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::WorkerReplacement)
+                        let Ok(upgrade_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::WorkerReplacement).inspect_err(|refusal| tracing::debug!(%session_id, holders = ?refusal.holders, "worker upgrade deferred"))
                         else {
                             continue;
                         };
@@ -655,13 +655,13 @@ mod tests {
 
         assert!(
             gate.try_start("session-1", BackgroundWork::WorkerReplacement)
-                .is_none()
+                .is_err()
         );
 
         drop(recovery_copy);
         assert!(
             gate.try_start("session-1", BackgroundWork::WorkerReplacement)
-                .is_some()
+                .is_ok()
         );
     }
 
@@ -747,7 +747,7 @@ mod tests {
         assert!(!settling.is_finished());
         assert!(
             gate.try_start(&session.id, BackgroundWork::WorkerReplacement)
-                .is_none()
+                .is_err()
         );
         let independent = gate
             .try_start("other-session", BackgroundWork::WorkerReplacement)

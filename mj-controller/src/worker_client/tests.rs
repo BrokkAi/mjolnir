@@ -3674,7 +3674,8 @@ async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
             gate.try_start(
                 &session,
                 crate::recovery_gate::BackgroundWork::CredentialSync,
-            ),
+            )
+            .ok(),
             Some(steps.enter(&session).await),
             None,
             None,
@@ -4573,7 +4574,8 @@ async fn a_running_credential_job_stops_when_its_admission_is_cancelled() {
             gate.try_start(
                 &session,
                 crate::recovery_gate::BackgroundWork::CredentialSync,
-            ),
+            )
+            .ok(),
             Some(steps.enter(&session).await),
             None,
             None,

@@ -53,26 +53,6 @@ impl RuntimeState {
             .read_owned()
             .await;
         let session_id = request.session_id.clone();
-        self.wait_for_deferred_cleanup(&session_id).await?;
-        // Whether it is already running is a boolean. Answering it used to
-        // load the entire projection so it could be handed back as the reply.
-        let already_running = blocking({
-            let session_id = session_id.clone();
-            move || {
-                let controller = Controller::load()?;
-                Ok(controller
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .is_some_and(|session| session.state == SessionState::Running))
-            }
-        })
-        .await?;
-        let _capacity_reservation = if already_running {
-            None
-        } else {
-            self.reserve_resume_container_capacity(&request).await?
-        };
         let profile_id = request.profile_id.clone();
         let target_template_id = request.target_template_id.clone();
         let workspace_id = request.workspace_id.clone();
@@ -80,82 +60,109 @@ impl RuntimeState {
         let operation_session_id = session_id.clone();
         let key = serde_json::to_string(&request)?;
         let (accepted, acceptance) = tokio::sync::watch::channel(None);
-        let result = self.admit_prepared_lifecycle(
-            session_id,
-            LifecycleKind::Resume,
-            super::lifecycle::LifecycleStart::request(key, Some(workspace_id), None),
-            Some(acceptance),
-            move |state, session_id, cancelled| async move {
-                let _admission = _admission;
-                let _capacity_reservation = _capacity_reservation;
-                if already_running {
-                    accepted.send_replace(Some(Ok(())));
-                    return Ok(DaemonLifecycleResult::Done);
-                }
-                let _recovery_reservation = tokio::task::spawn_blocking({
-                    let observer = state.recovery_observer.clone();
-                    let session_id = session_id.clone();
-                    let cancelled = cancelled.clone();
-                    move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-                })
-                .await
-                .context("reserve recovery for daemon resume task")??;
-                blocking({
-                    let session_id = session_id.clone();
-                    move || {
-                        crate::database::reassign_resumable_session_workspace(
-                            &session_id,
-                            &rebind_workspace_id,
-                        )
-                    }
-                })
-                .await?;
-                let mut controller = tokio::task::spawn_blocking(Controller::load)
-                    .await
-                    .context("load controller for daemon resume task")??;
-                let executor = DaemonStageReportingExecutor::new(
-                    CancellableProcessExecutor::new(cancelled),
-                    state.clone(),
-                    session_id.clone(),
-                );
-                let materialized = controller
-                    .resume_session_controlled_with_repository_preflight_and_admission(
-                        &session_id,
-                        &request.profile_id,
-                        &request.target_template_id,
-                        SessionResumeOptions {
-                            additional_mounts: request.additional_mounts,
-                            resource_allocation: request.resource_allocation,
-                            discard_queue: request.discard_queue,
-                        },
-                        request.repository_preflight,
-                        &executor,
-                        move || {
-                            accepted.send_replace(Some(Ok(())));
-                        },
-                    )
+        let result = self
+            .admit_prepared_lifecycle(
+                session_id,
+                LifecycleKind::Resume,
+                super::lifecycle::LifecycleStart::request(key, Some(workspace_id), None),
+                Some(acceptance),
+                move |state, session_id, cancelled| async move {
+                    let _admission = _admission;
+                    let session = blocking({
+                        let session_id = session_id.clone();
+                        move || crate::database::read_durable_session_record(&session_id)
+                    })
                     .await?;
-                // The projection stays where it was written. A viewer reads
-                // it from the store; shipping it back through the daemon
-                // reply put a whole transcript in one IPC frame.
-                let _ = materialized;
-                blocking(move || {
-                    if let Some(mut operation) = crate::database::load_move_operation(&session_id)?
-                        && !operation.queue_admission_started
+                    if session
+                        .as_ref()
+                        .is_some_and(|session| session.state == SessionState::Running)
                     {
-                        operation.phase = mj_core::state::MovePhase::Cancelled;
-                        operation.queue_admission_finished = true;
-                        operation.updated_at = chrono::Utc::now().to_rfc3339();
-                        operation.error =
-                            Some("Recovered through an explicit Resume operation".into());
-                        crate::database::save_move_operation(&operation)?;
+                        accepted.send_replace(Some(Ok(())));
+                        return Ok(DaemonLifecycleResult::Done);
                     }
-                    Ok(())
-                })
-                .await?;
-                Ok(DaemonLifecycleResult::Done)
-            },
-        )?;
+                    // Suspend may have produced this stopped placement while
+                    // Resume waited. The admitted owner finishes its cleanup;
+                    // a second lifecycle cannot acquire this session now.
+                    if session.as_ref().is_some_and(|session| {
+                        session.state == SessionState::Stopped && session.target.is_some()
+                    }) {
+                        blocking({
+                            let state = state.clone();
+                            let session_id = session_id.clone();
+                            let cancelled = cancelled.clone();
+                            move || {
+                                let mut controller = Controller::load()?;
+                                let executor = DaemonStageReportingExecutor::new(
+                                    CancellableProcessExecutor::new(cancelled),
+                                    state,
+                                    session_id.clone(),
+                                );
+                                controller.cleanup_stopped_target(&session_id, &executor)
+                            }
+                        })
+                        .await?;
+                        state.reload_controller().await?;
+                    }
+                    let _capacity_reservation =
+                        state.reserve_resume_container_capacity(&request).await?;
+                    blocking({
+                        let session_id = session_id.clone();
+                        move || {
+                            crate::database::reassign_resumable_session_workspace(
+                                &session_id,
+                                &rebind_workspace_id,
+                            )
+                        }
+                    })
+                    .await?;
+                    let mut controller = tokio::task::spawn_blocking(Controller::load)
+                        .await
+                        .context("load controller for daemon resume task")??;
+                    let executor = DaemonStageReportingExecutor::new(
+                        CancellableProcessExecutor::new(cancelled),
+                        state.clone(),
+                        session_id.clone(),
+                    );
+                    let materialized = controller
+                        .resume_session_controlled_with_repository_preflight_and_admission(
+                            &session_id,
+                            &request.profile_id,
+                            &request.target_template_id,
+                            SessionResumeOptions {
+                                additional_mounts: request.additional_mounts,
+                                resource_allocation: request.resource_allocation,
+                                discard_queue: request.discard_queue,
+                            },
+                            request.repository_preflight,
+                            &executor,
+                            move || {
+                                accepted.send_replace(Some(Ok(())));
+                            },
+                        )
+                        .await?;
+                    // The projection stays where it was written. A viewer reads
+                    // it from the store; shipping it back through the daemon
+                    // reply put a whole transcript in one IPC frame.
+                    let _ = materialized;
+                    blocking(move || {
+                        if let Some(mut operation) =
+                            crate::database::load_move_operation(&session_id)?
+                            && !operation.queue_admission_started
+                        {
+                            operation.phase = mj_core::state::MovePhase::Cancelled;
+                            operation.queue_admission_finished = true;
+                            operation.updated_at = chrono::Utc::now().to_rfc3339();
+                            operation.error =
+                                Some("Recovered through an explicit Resume operation".into());
+                            crate::database::save_move_operation(&operation)?;
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                    Ok(DaemonLifecycleResult::Done)
+                },
+            )
+            .await?;
         self.set_lifecycle_resume_destination(
             &operation_session_id,
             profile_id,
@@ -183,72 +190,77 @@ impl RuntimeState {
         let key = serde_json::to_string(&checkpoint)?;
         let control = LifecycleControl::default();
         let (accepted, acceptance) = tokio::sync::watch::channel(None);
-        let result = self.admit_prepared_lifecycle(
-            operation_session_id,
-            LifecycleKind::ForceStop,
-            super::lifecycle::LifecycleStart::request(key, None, Some(control.clone())),
-            Some(acceptance),
-            move |state, session_id, cancelled| async move {
-                let failure_state = state.clone();
-                let failure_session = session_id.clone();
-                let result = async {
-                    blocking({
-                        let session_id = session_id.clone();
-                        let checkpoint = checkpoint.clone();
-                        let cancelled = cancelled.clone();
-                        let state = state.clone();
-                        move || {
+        let result = self
+            .admit_prepared_lifecycle(
+                operation_session_id,
+                LifecycleKind::ForceStop,
+                super::lifecycle::LifecycleStart::request(key, None, Some(control.clone())),
+                Some(acceptance),
+                move |state, session_id, cancelled| async move {
+                    let failure_state = state.clone();
+                    let failure_session = session_id.clone();
+                    let result = async {
+                        blocking({
+                            let session_id = session_id.clone();
+                            let checkpoint = checkpoint.clone();
+                            let cancelled = cancelled.clone();
+                            let state = state.clone();
+                            move || {
+                                let mut controller = Controller::load()?;
+                                let executor = DaemonStageReportingExecutor::new(
+                                    CancellableProcessExecutor::new(cancelled),
+                                    state,
+                                    session_id.clone(),
+                                );
+                                controller.prepare_discard(
+                                    &session_id,
+                                    &checkpoint,
+                                    &executor,
+                                    || Self::commit_close(&control),
+                                )
+                            }
+                        })
+                        .await?;
+                        accepted.send_replace(Some(Ok(())));
+                        // The parent is about to go back to an older recovery
+                        // copy, and its sub-agents stop exactly as they do when
+                        // it is suspended.
+                        state.stop_subagents_for_suspend(&session_id).await?;
+                        blocking(move || {
                             let mut controller = Controller::load()?;
                             let executor = DaemonStageReportingExecutor::new(
                                 CancellableProcessExecutor::new(cancelled),
                                 state,
                                 session_id.clone(),
                             );
-                            controller.prepare_discard(&session_id, &checkpoint, &executor, || {
-                                Self::commit_close(&control)
+                            ensure!(
+                                controller
+                                    .state
+                                    .sessions
+                                    .get(&session_id)
+                                    .and_then(|s| s.checkpoint.as_deref())
+                                    == Some(&checkpoint),
+                                "the recovery copy changed; review it before discarding changes"
+                            );
+                            let deferred = controller.force_stop(&session_id, &executor)?;
+                            Ok(if deferred {
+                                DaemonLifecycleResult::DeferredCleanup
+                            } else {
+                                DaemonLifecycleResult::Done
                             })
-                        }
-                    })
-                    .await?;
-                    accepted.send_replace(Some(Ok(())));
-                    // The parent is about to go back to an older recovery
-                    // copy, and its sub-agents stop exactly as they do when
-                    // it is suspended.
-                    state.stop_subagents_for_suspend(&session_id).await?;
-                    blocking(move || {
-                        let mut controller = Controller::load()?;
-                        let executor = DaemonStageReportingExecutor::new(
-                            CancellableProcessExecutor::new(cancelled),
-                            state,
-                            session_id.clone(),
-                        );
-                        ensure!(
-                            controller
-                                .state
-                                .sessions
-                                .get(&session_id)
-                                .and_then(|s| s.checkpoint.as_deref())
-                                == Some(&checkpoint),
-                            "the recovery copy changed; review it before discarding changes"
-                        );
-                        let deferred = controller.force_stop(&session_id, &executor)?;
-                        Ok(if deferred {
-                            DaemonLifecycleResult::DeferredCleanup
-                        } else {
-                            DaemonLifecycleResult::Done
                         })
-                    })
-                    .await
-                }
-                .await;
-                if result.is_err() {
-                    failure_state
-                        .tell_live_parent_about_stopped_subagents(&failure_session)
-                        .await;
-                }
-                result
-            },
-        )?;
+                        .await
+                    }
+                    .await;
+                    if result.is_err() {
+                        failure_state
+                            .tell_live_parent_about_stopped_subagents(&failure_session)
+                            .await;
+                    }
+                    result
+                },
+            )
+            .await?;
         Ok(result)
     }
 
@@ -622,72 +634,20 @@ impl RuntimeState {
     /// than [`FORCE_DESTROY_PREEMPT_TIMEOUT`] is reported instead of destroyed
     /// under. A teardown, and an operation that has committed, is waited for
     /// rather than cancelled; one that has committed is never cancelled.
+    #[cfg(test)]
     pub(super) async fn preempt_active_lifecycle(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        let (mut result, tearing_down, restart_intent, label) = {
-            let mut lifecycle_owner = self.owner();
-            let lifecycle = &mut lifecycle_owner.lifecycle;
-            let Some(active) = lifecycle.get_mut(session_id) else {
-                return Ok(());
-            };
-            if !active.is_running() {
-                return Ok(());
-            }
-            let restart_intent = active.restart_intent.clone();
-            // A committed close is a teardown too: its checkpoint is sealed or
-            // about to be, and cancelling it only strands the target (#1218).
-            let tearing_down = active.kind.is_teardown()
-                || matches!(active.phase, LifecyclePhase::RetiringContainer)
-                || active.control.is_committed();
-            // A teardown already under way is the fact this destroy wants, so
-            // it is waited for, not cancelled half way: cancelling it is what
-            // left a sub-agent's destroy "cancelled before its parent" when
-            // the parent's destroy and the person's own destroy of the child
-            // overlapped. Only one that outlives the wait is cancelled below.
-            if !tearing_down {
-                active.request_cancel(session_id, "destroy preempted the operation");
-            }
-            (
-                active.result.clone(),
-                tearing_down,
-                restart_intent,
-                active.kind.label(),
-            )
-        };
-        let mut finished = wait_for_lifecycle_result(&mut result).await;
-        if finished.is_err() && tearing_down {
-            // The control refuses this for a committed operation, which is
-            // then reported as still running rather than waited for again.
-            let cancelled = self
-                .owner()
+        let preemption = {
+            let mut owner = self.owner();
+            owner
                 .lifecycle
                 .get_mut(session_id)
-                .is_some_and(|active| {
-                    active.request_cancel(session_id, "destroy timed out waiting for teardown")
-                });
-            if !cancelled && result.borrow().is_none() {
-                bail!(
-                    "session {session_id} is still finishing its {label}, which can no longer be cancelled; try again when it ends"
-                );
-            }
-            finished = wait_for_lifecycle_result(&mut result).await;
+                .filter(|active| active.is_running())
+                .map(|active| LifecyclePreemption::begin(active, session_id))
+        };
+        if let Some(preemption) = preemption {
+            preemption.wait(self, session_id).await?;
         }
-        match finished {
-            // The wait only returns once the watch holds a result or its
-            // sender died; distinguish those two, and the timeout separately.
-            Ok(Ok(())) => {
-                if let Some(operation_id) = restart_intent {
-                    self.release_restart_intent(session_id, &operation_id)
-                        .await?;
-                }
-                Ok(())
-            }
-            Ok(Err(())) => bail!(
-                "daemon lifecycle operation stopped without a result for session {session_id}"
-            ),
-            Err(_) => bail!(
-                "session {session_id} still has an operation that did not stop after cancellation; try again"
-            ),
-        }
+        Ok(())
     }
 
     /// Permanently destroy a session from any state, cancelling whatever
@@ -700,7 +660,27 @@ impl RuntimeState {
         branch: BranchDisposition,
     ) -> Result<()> {
         let started = self
-            .start_destroy_session(session_id, branch, LifecycleKind::ForceDestroy, true)
+            .start_destroy_session(
+                session_id,
+                branch,
+                LifecycleKind::ForceDestroy,
+                true,
+                super::lifecycle::LifecycleOrigin::Person,
+            )
+            .await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
+    }
+
+    pub(super) async fn recover_destruction(self: &Arc<Self>, session_id: String) -> Result<()> {
+        let started = self
+            .start_destroy_session(
+                session_id,
+                BranchDisposition::Keep,
+                LifecycleKind::ForceDestroy,
+                true,
+                super::lifecycle::LifecycleOrigin::Automatic,
+            )
             .await?;
         Self::wait_lifecycle_result(started.result).await?;
         Ok(())
@@ -712,10 +692,18 @@ impl RuntimeState {
         branch: BranchDisposition,
         kind: LifecycleKind,
         index: bool,
+        origin: super::lifecycle::LifecycleOrigin,
     ) -> Result<StartedLifecycle> {
         let requested_session_id = session_id.clone();
-        self.start_destroy_indexed_tree(session_id, branch, kind, requested_session_id, index)
-            .await
+        self.start_destroy_indexed_tree(
+            session_id,
+            branch,
+            kind,
+            requested_session_id,
+            index,
+            origin,
+        )
+        .await
     }
 
     /// Destroys one finished reviewer child the way a parent's suspend stops
@@ -776,7 +764,16 @@ impl RuntimeState {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
             let started = self
-                .start_destroy_indexed_tree(session_id, branch, kind, requested_session_id, false)
+                .start_destroy_indexed_tree(
+                    session_id,
+                    branch,
+                    kind,
+                    requested_session_id,
+                    false,
+                    // This teardown continues its already accepted parent
+                    // close/review; it is not a new automatic policy attempt.
+                    super::lifecycle::LifecycleOrigin::Person,
+                )
                 .await?;
             Self::wait_lifecycle_result(started.result).await?;
             Ok(())
@@ -790,6 +787,7 @@ impl RuntimeState {
         kind: LifecycleKind,
         requested_session_id: String,
         index: bool,
+        origin: super::lifecycle::LifecycleOrigin,
     ) -> Result<StartedLifecycle> {
         let key =
             serde_json::to_string(&(kind.label(), matches!(branch, BranchDisposition::Delete)))?;
@@ -797,73 +795,153 @@ impl RuntimeState {
             return Ok(started);
         }
         let _upgrade_work = crate::upgrade::destroy_activity(&requested_session_id)?;
-        self.preempt_active_lifecycle(&session_id).await?;
         let (accepted, acceptance) = tokio::sync::watch::channel(None);
-        let started = self.admit_prepared_lifecycle(
-            session_id,
-            kind,
-            super::lifecycle::LifecycleStart::request(key, None, None),
-            Some(acceptance),
-            move |state, session_id, cancelled| async move {
-                let _upgrade_work = _upgrade_work;
-                let children = blocking({
-                    let session_id = session_id.clone();
-                    move || crate::database::begin_session_destroy(&session_id)
-                })
-                .await?;
-                accepted.send_replace(Some(Ok(())));
-                if index {
-                    state.index_before_destroy(&session_id).await;
-                }
-                state
-                    .stop_subagents(children, kind, Some(&requested_session_id))
+        let started = self
+            .admit_prepared_lifecycle(
+                session_id,
+                kind,
+                super::lifecycle::LifecycleStart {
+                    origin,
+                    ..super::lifecycle::LifecycleStart::request(key, None, None)
+                },
+                Some(acceptance),
+                move |state, session_id, cancelled| async move {
+                    let _upgrade_work = _upgrade_work;
+                    let children = blocking({
+                        let session_id = session_id.clone();
+                        move || crate::database::begin_session_destroy(&session_id)
+                    })
                     .await?;
-
-                let exists = blocking({
-                    let session_id = session_id.clone();
-                    move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
-                })
-                .await?;
-                if !exists {
-                    return Ok(DaemonLifecycleResult::Done);
-                }
-
-                let _recovery_reservation = tokio::task::spawn_blocking({
-                    let observer = state.recovery_observer.clone();
-                    let session_id = session_id.clone();
-                    let cancelled = cancelled.clone();
-                    move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-                })
-                .await
-                .context("reserve recovery for daemon force-destroy task")??;
-                blocking({
-                    let session_id = session_id.clone();
-                    move || {
-                        let mut controller = Controller::load()?;
-                        let executor = DaemonStageReportingExecutor::new(
-                            CancellableProcessExecutor::new(cancelled),
-                            state.clone(),
-                            session_id.clone(),
-                        );
-                        let outcome = if kind == LifecycleKind::StopSubagent {
-                            controller.stop_subagent(&session_id, &executor)?
-                        } else {
-                            controller.force_destroy_session(&session_id, &executor, branch)?
-                        };
-                        for warning in outcome.warnings {
-                            if requested_session_id != session_id {
-                                state.push_public_notice(&requested_session_id, warning.clone());
-                            }
-                            state.push_public_notice(&session_id, warning);
-                        }
-                        crate::controller::move_session::release_move_queue_hold(&session_id);
-                        Ok(DaemonLifecycleResult::Done)
+                    accepted.send_replace(Some(Ok(())));
+                    if index {
+                        state.index_before_destroy(&session_id).await;
                     }
-                })
-                .await
-            },
-        )?;
+                    state
+                        .stop_subagents(children, kind, Some(&requested_session_id))
+                        .await?;
+
+                    let exists = blocking({
+                        let session_id = session_id.clone();
+                        move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
+                    })
+                    .await?;
+                    if !exists {
+                        return Ok(DaemonLifecycleResult::Done);
+                    }
+
+                    blocking({
+                        let session_id = session_id.clone();
+                        move || {
+                            let mut controller = Controller::load()?;
+                            let executor = DaemonStageReportingExecutor::new(
+                                CancellableProcessExecutor::new(cancelled),
+                                state.clone(),
+                                session_id.clone(),
+                            );
+                            let outcome = if kind == LifecycleKind::StopSubagent {
+                                controller.stop_subagent(&session_id, &executor)?
+                            } else {
+                                controller.force_destroy_session(&session_id, &executor, branch)?
+                            };
+                            for warning in outcome.warnings {
+                                if requested_session_id != session_id {
+                                    state
+                                        .push_public_notice(&requested_session_id, warning.clone());
+                                }
+                                state.push_public_notice(&session_id, warning);
+                            }
+                            crate::controller::move_session::release_move_queue_hold(&session_id);
+                            Ok(DaemonLifecycleResult::Done)
+                        }
+                    })
+                    .await
+                },
+            )
+            .await?;
         Ok(started)
+    }
+}
+
+/// Selected under lifecycle ownership, while the destroy's priority intent
+/// prevents queued operations from taking over during this bounded wait.
+pub(super) struct LifecyclePreemption {
+    result: LifecycleWatch,
+    tearing_down: bool,
+    restart_intent: Option<String>,
+    label: &'static str,
+    operation_id: String,
+}
+
+impl LifecyclePreemption {
+    pub(super) fn begin(active: &mut ActiveLifecycle, session_id: &str) -> Self {
+        let restart_intent = active.restart_intent.clone();
+        // A committed close is a teardown too: its checkpoint is sealed or
+        // about to be, and cancelling it only strands the target (#1218).
+        let tearing_down = active.kind.is_teardown()
+            || matches!(active.phase, LifecyclePhase::RetiringContainer)
+            || active.control.is_committed();
+        // A teardown already under way is the fact this destroy wants, so
+        // it is waited for, not cancelled half way: cancelling it is what
+        // left a sub-agent's destroy "cancelled before its parent" when
+        // the parent's destroy and the person's own destroy of the child
+        // overlapped. Only one that outlives the wait is cancelled below.
+        if !tearing_down {
+            active.request_cancel(session_id, "destroy preempted the operation");
+        }
+        Self {
+            result: active.result.clone(),
+            tearing_down,
+            restart_intent,
+            label: active.kind.label(),
+            operation_id: active.operation_id.clone(),
+        }
+    }
+
+    pub(super) async fn wait(self, state: &Arc<RuntimeState>, session_id: &str) -> Result<()> {
+        let Self {
+            mut result,
+            tearing_down,
+            restart_intent,
+            label,
+            operation_id,
+        } = self;
+        let mut finished = wait_for_lifecycle_result(&mut result).await;
+        if finished.is_err() && tearing_down {
+            // The control refuses this for a committed operation, which is
+            // then reported as still running rather than waited for again.
+            let cancelled = state
+                .owner()
+                .lifecycle
+                .get_mut(session_id)
+                .filter(|active| active.operation_id == operation_id)
+                .is_some_and(|active| {
+                    active.request_cancel(session_id, "destroy timed out waiting for teardown")
+                });
+            if !cancelled && result.borrow().is_none() {
+                bail!(
+                    "session {session_id} is still finishing its {label}, which can no longer be cancelled; try again when it ends"
+                );
+            }
+            finished = wait_for_lifecycle_result(&mut result).await;
+        }
+        match finished {
+            // The wait only returns once the watch holds a result or its
+            // sender died; distinguish those two, and the timeout separately.
+            Ok(Ok(())) => {
+                if let Some(operation_id) = restart_intent {
+                    state
+                        .release_restart_intent(session_id, &operation_id)
+                        .await?;
+                }
+                Ok(())
+            }
+            Ok(Err(())) => bail!(
+                "daemon lifecycle operation stopped without a result for session {session_id}"
+            ),
+            Err(_) => bail!(
+                "session {session_id} still has an operation that did not stop after cancellation; try again"
+            ),
+        }
     }
 }
 

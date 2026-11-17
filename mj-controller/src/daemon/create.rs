@@ -176,6 +176,7 @@ impl RuntimeState {
             CreateInputs::Subagent(Box::new(relation.clone())),
             None,
         )
+        .await
     }
 
     /// Record, through the ordinary lifecycle write, that a child registered by
@@ -560,7 +561,8 @@ impl RuntimeState {
                 remember_launch_choices,
             },
             None,
-        )?;
+        )
+        .await?;
         let publishing = crate::launch_timing::LaunchPhaseTimer::new(
             &registered.session.id,
             "publish registered session view",
@@ -581,7 +583,7 @@ impl RuntimeState {
     /// the interrupted attempt built. A sub-agent create is always admitted
     /// under its own request key, so a replayed spawn joins it instead of
     /// starting a second one.
-    pub(super) fn start_create_lifecycle(
+    pub(super) async fn start_create_lifecycle(
         self: &Arc<Self>,
         session_id: String,
         control: LifecycleControl,
@@ -596,12 +598,15 @@ impl RuntimeState {
                 recovery_operation.map(|operation| format!("recovery:{operation}"))
             }
         };
-        self.start_or_join_lifecycle_controlled(
-            session_id,
-            LifecycleKind::Create,
-            None,
-            request_key,
-            Some(control.clone()),
+        let automatic = recovering || matches!(&inputs, CreateInputs::Subagent(_));
+        let mut start =
+            super::lifecycle::LifecycleStart::request(String::new(), None, Some(control.clone()));
+        start.request_key = request_key;
+        if automatic {
+            start = start.automatic();
+        }
+        self.admit_lifecycle(
+            session_id, LifecycleKind::Create, start,
             move |state, session_id, cancelled| async move {
                 tracing::info!(%session_id, elapsed_ms = scheduled_at.elapsed().as_millis(),
                     "session launch lifecycle scheduled");
@@ -722,7 +727,7 @@ impl RuntimeState {
                 provision?;
                 Ok(DaemonLifecycleResult::Done)
             },
-        )?;
+        ).await?;
         Ok(())
     }
 
@@ -736,7 +741,7 @@ impl RuntimeState {
     /// discarded. Capacity is not admitted again: the original create passed
     /// that gate, and refusing here would strand a session the person already
     /// has.
-    pub(super) fn recover_creates(
+    pub(super) async fn recover_creates(
         self: &Arc<Self>,
         intents: Vec<crate::database::SessionCreateIntent>,
     ) -> Result<BTreeSet<String>> {
@@ -770,7 +775,8 @@ impl RuntimeState {
                 LifecycleControl::default(),
                 inputs,
                 Some(intent.operation_id),
-            )?;
+            )
+            .await?;
             owned.insert(intent.session_id);
         }
         Ok(owned)

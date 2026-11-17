@@ -283,6 +283,7 @@ struct FakeEnvironment {
     resolve_refusals: Mutex<std::collections::VecDeque<String>>,
     /// How many background holds the host took on the session.
     background_holds: std::sync::atomic::AtomicUsize,
+    background_hangs: std::sync::atomic::AtomicBool,
     /// How many of those holds are still held.
     live_holds: Arc<std::sync::atomic::AtomicUsize>,
     /// Set to make reviewer resolution wait forever, the way an Auto
@@ -365,6 +366,7 @@ impl FakeEnvironment {
             review_refusal: Mutex::new(None),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
             background_holds: std::sync::atomic::AtomicUsize::new(0),
+            background_hangs: std::sync::atomic::AtomicBool::new(false),
             live_holds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             resolve_hangs: std::sync::atomic::AtomicBool::new(false),
         })
@@ -712,7 +714,15 @@ impl ReviewEnvironment for FakeEnvironment {
         self.live_holds
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let hold: BackgroundHold = Box::new(LiveHold(self.live_holds.clone()));
-        Box::pin(async move { Some(hold) })
+        let hangs = self
+            .background_hangs
+            .load(std::sync::atomic::Ordering::Acquire);
+        Box::pin(async move {
+            if hangs {
+                std::future::pending::<()>().await;
+            }
+            Some(hold)
+        })
     }
 }
 
@@ -5711,4 +5721,52 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
     release.send(()).unwrap();
     order.drain().await.unwrap();
     assert!(environment.state().push_findings.is_some());
+}
+
+// Hard-won: 8481d8a51: review admission ignored its existing background-work deadline.
+#[tokio::test(start_paused = true)]
+async fn review_admission_deadline_reports_refusal_and_releases_its_hold() {
+    let session = session_id("admission-deadline");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .background_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let mut running = view(
+        &session,
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(43);
+    manager
+        .publisher
+        .publish(session.clone(), running)
+        .await
+        .unwrap();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let request = tokio::spawn({
+        let host = host.clone();
+        let session = session.clone();
+        async move { host.begin_push(&session, None).await }
+    });
+    while environment.background_holds() == 0 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(super::reviewer::BACKGROUND_WORK_WAIT + Duration::from_secs(1)).await;
+    let refusal = request.await.unwrap().unwrap_err().0;
+    assert!(
+        refusal.contains("waiting for background work") && refusal.contains("deadline"),
+        "{refusal}"
+    );
+    assert_eq!(environment.live_holds(), 0);
+    assert!(
+        host.view(&session).is_none(),
+        "a refused admission leaves review available to retry"
+    );
+    host.shutdown().await.unwrap();
 }

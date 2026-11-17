@@ -105,7 +105,7 @@ pub trait ReviewEnvironment: Send + Sync {
 
     /// Holds the session against background work for as long as a review
     /// needs its worker: waits until no recovery copy or worker upgrade is
-    /// running (up to `deadline`), then keeps new ones from starting until
+    /// running (bounded by the caller's review preparation deadline), then keeps new ones from starting until
     /// the returned hold is dropped.
     ///
     /// A recovery copy takes the session's lease, which cancels reviewer
@@ -449,13 +449,13 @@ impl ReviewEnvironment for ControllerEnvironment {
     fn hold_background_work<'a>(
         &'a self,
         session_id: &'a str,
-        deadline: tokio::time::Instant,
+        _deadline: tokio::time::Instant,
     ) -> mj_client::session::BoxFuture<'a, Option<BackgroundHold>> {
         Box::pin(async move {
             let gate = self.background.as_ref()?;
-            // A deadline that passes leaves the review to try anyway; the
-            // running work's own refusal then says what held the session.
-            let hold: BackgroundHold = Box::new(gate.reserve_when_idle(session_id, deadline).await);
+            // The caller bounds this wait by its preparation deadline. On
+            // expiry it drops the pending reservation and reports a refusal.
+            let hold: BackgroundHold = Box::new(gate.reserve_when_idle(session_id).await);
             Some(hold)
         })
     }
