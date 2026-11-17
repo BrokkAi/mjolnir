@@ -1,9 +1,15 @@
 [tools]
+# mise installs `cargo:` tools with cargo-binstall when it is present, which
+# downloads prebuilt release binaries instead of compiling each tool from
+# source (minutes per session otherwise). flamegraph has no prebuilt release
+# and still compiles; samply's releases are not in binstall's layout, so it
+# comes from the aqua registry.
+"aqua:cargo-bins/cargo-binstall" = "1.27.0"
 "aqua:aws-cli" = "latest"
 "cargo:cargo-nextest" = "0.9.143"
 "cargo:cargo-llvm-cov" = "0.8.7"
 "cargo:flamegraph" = "0.6.14"
-"cargo:samply" = "0.13.1"
+"aqua:mstange/samply" = "0.13.1"
 go = "1.27.3"
 java = "25"
 node = "24"
@@ -24,9 +30,10 @@ idiomatic_version_file_enable_tools = ["rust", "node", "python", "go"]
 # installed, and `--with-deps` runs apt-get. Skip it when the headless shell
 # for this Playwright version (revision 1234 for 1.62.1; update both numbers
 # together) launches, which proves the download completed and its system
-# libraries are present. `--force` reinstalls over a partial download, which
+# libraries are present. Playwright installs it under chrome-headless-shell-linux64
+# on x86_64 and under chrome-linux on arm64. `--force` reinstalls over a partial download, which
 # Playwright would otherwise skip because its completion marker exists.
-postinstall = "/opt/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell --version >/dev/null 2>&1 || npx --yes playwright@1.62.1 install --force --with-deps chromium-headless-shell"
+postinstall = "for shell in /opt/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell /opt/ms-playwright/chromium_headless_shell-1234/chrome-linux/headless_shell; do \"$shell\" --version >/dev/null 2>&1 && exit 0; done; npx --yes playwright@1.62.1 install --force --with-deps chromium-headless-shell"
 
 [bootstrap.packages]
 "apt:bash" = "*"
